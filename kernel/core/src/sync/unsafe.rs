@@ -8,7 +8,7 @@
 //! POLICY files (futex.rs, futex_pi.rs) are safe by construction; the
 //! genuinely-unsafe memory edges they need live here with INV-SY
 //! contracts. Task pointer→reference derivations reuse
-//! [`crate::sched::edges::task_shared`] (same INV-SCE-2 contract).
+//! [`crate::sched::unsafe::task_shared`] (same INV-SCE-2 contract).
 //!
 //! INV registry:
 //! - INV-SY-1 `*_via_task` — cross-task USER-memory diagnostic reads:
@@ -36,7 +36,7 @@ use crate::process::task::Task;
 /// iovec arrays, path strings, log payload heads of the wedged task).
 /// Returns how many bytes were actually read.
 pub fn read_bytes_via_task(task: *const Task, va: usize, buf: &mut [u8]) -> usize {
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     let aspace = match tk.address_space() {
         Some(a) => a,
         None => return 0,
@@ -89,7 +89,7 @@ pub fn read_cstr_via_task(task: *const Task, va: usize, max: usize) -> alloc::st
 /// Read one u32 in `task`'s user address space via its page tables
 /// (khungtaskd's get_user would read through the wrong mm).
 pub fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     let aspace = tk.address_space()?;
     let root = aspace.root_ppn();
     // SAFETY: INV-SY-1 — read-only page-table walk.

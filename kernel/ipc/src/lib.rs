@@ -4,7 +4,7 @@
 //! access_token registry — under a crate-level unsafe-deny boundary.
 //! The framework keeps ipc/binder.rs (the rung's verdict: its
 //! block-view windows, Arc adoption and diagnostic walkers are
-//! floor-shaped), ipc/ipc_hooks.rs (the 26-row seam), ipc/edges.rs
+//! floor-shaped), ipc/ipc_hooks.rs (the 26-row seam), ipc/unsafe.rs
 //! (INV-IPC-PAGEOP-1) and the SemUndoEntry type substrate.
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
@@ -15,7 +15,7 @@
 // were converted in the pre-flip commit — raw user copies ride the
 // uaccess_safe typed twins, the exit cleanups take live &Task
 // references, and the two vmemmap page-refcount touches ride the
-// framework's ipc/edges.rs (INV-IPC-PAGEOP-1).
+// framework's ipc/unsafe.rs (INV-IPC-PAGEOP-1).
 #![forbid(unsafe_code)]
 #![no_std]
 #![feature(alloc_error_handler, linkage)]
@@ -57,13 +57,14 @@ pub use rux::ipc::util::*;
 // rows, devfs, futex, the debug audits, the sibling service files'
 // `super::util` uses).
 pub use rux::ipc::binder;
-pub use rux::ipc::binder_edges;
 pub use rux::ipc::sysv_sem;
 pub use rux::ipc::util;
 // the seam zones the service files consume (the hook table's
 // KeyQuota type; the audited page-refcount edges).
 pub use rux::ipc::ipc_hooks;
-pub use rux::ipc::edges;
+// the one audited-edge zone of the subsystem (page refcounts and the
+// binder diagnostic edges, joined in rux::ipc::unsafe).
+pub use rux::ipc::r#unsafe;
 // the type substrate that stayed with Task's sem_undo field.
 pub use rux::ipc::SemUndoEntry;
 

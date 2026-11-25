@@ -71,8 +71,8 @@ impl SchedEv {
 /// and the UnsafeCell live side_edges-side; this alias binds the cell
 /// type (the dual compilations share the framework type — identity
 /// holds across the seam).
-pub(crate) type EvRing = crate::sched::side_edges::EvRing<SchedEv, EV_RING_SLOTS>;
-// The Sync proof lives in side_edges.rs (this file carries zero unsafe).
+pub(crate) type EvRing = crate::sched::r#unsafe::EvRing<SchedEv, EV_RING_SLOTS>;
+// The Sync proof lives in unsafe.rs (this file carries zero unsafe).
 
 static EV_RING: EvRing = EvRing::new([const { SchedEv::empty() }; EV_RING_SLOTS]);
 
@@ -112,7 +112,7 @@ pub fn sched_ev(tag: u32, pid: u32, a: u64, b: u64) {
     // the modulo; this call owns the slot until the publish store below
     // (unique fetch_add index). An overrun clobbers the oldest record —
     // counted, never a correctness object.
-    let ev = crate::sched::side_edges::evring_slot_mut(&EV_RING, slot);
+    let ev = crate::sched::r#unsafe::evring_slot_mut(&EV_RING, slot);
     if ev.pub_seq.load(Ordering::Relaxed) != 0 {
         EV_LOST.fetch_add(1, Ordering::Relaxed);
     }
@@ -176,7 +176,7 @@ pub fn sched_ev_drain(budget: usize) -> usize {
         let slot = (d as usize) % EV_RING_SLOTS;
         // SAFETY: read-only diagnostic access; publication is validated
         // by the pub_seq check below before any field is trusted.
-        let ev = crate::sched::side_edges::evring_slot_ref(&EV_RING, slot);
+        let ev = crate::sched::r#unsafe::evring_slot_ref(&EV_RING, slot);
         if ev.pub_seq.load(Ordering::Acquire) != d + 1 {
             break; // writer mid-fill (or clobbered) — retry next tick
         }

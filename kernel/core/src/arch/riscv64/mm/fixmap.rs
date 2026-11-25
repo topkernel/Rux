@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::{PAGE_SIZE, PAGE_SHIFT, VMEMMAP_START, PageTableEntry, PageTable, map_page, get_page_table_virt};
 use super::{ROOT_PAGE_TABLE, alloc_page_table};
 use crate::mm::PhysFrame;

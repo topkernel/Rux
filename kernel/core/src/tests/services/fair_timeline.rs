@@ -7,7 +7,7 @@
 //! kernel/core/src/tests/fair_timeline.rs; moved with the S1b flip. This
 //! crate is #![forbid(unsafe_code)], so the old raw-RbNode unsafe
 //! introspection (walk/audit/container-of) is gone: the framework's
-//! audited-unsafe zone exports SAFE debug_* helpers (sched/edges.rs:
+//! audited-unsafe zone exports SAFE debug_* helpers (sched/unsafe.rs:
 //! debug_insert/erase/erase_leftmost/leftmost_key/walk_keys/
 //! black_height) and this driver uses only those.
 //!
@@ -20,7 +20,7 @@
 // (INV-TESTHARNESS-1: the in-kernel test-harness family — the timeline
 // driver constructs adversarial shared state deliberately (the thing
 // under test); runs only under the unit-test feature.)
-use rux::sched::edges::{RbTimeline, VruntimeKey};
+use rux::sched::r#unsafe::{RbTimeline, VruntimeKey};
 use rux::sched::SchedEntity;
 use alloc::vec::Vec;
 use rux::tests::{test_fail, test_group_start, test_pass};

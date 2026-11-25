@@ -203,7 +203,7 @@ impl SlabCache {
         // we hold the cache lock so no concurrent alloc/free on this
         // cache (INV-MM-4).
         let next_free = if self.object_size >= 2 {
-            super::edges::slab_read_freelist_link(obj_ptr)
+            super::r#unsafe::slab_read_freelist_link(obj_ptr)
         } else {
             obj_idx + 1
         };
@@ -293,7 +293,7 @@ impl SlabCache {
         // ptr points within a slab page; we hold the cache lock
         // (INV-MM-4).
         if self.object_size >= 2 {
-            super::edges::slab_write_freelist_link(ptr, header.free_index);
+            super::r#unsafe::slab_write_freelist_link(ptr, header.free_index);
         }
 
         header.free_index = obj_idx;
@@ -346,14 +346,14 @@ impl SlabCache {
             // obj_ptr is within a freshly allocated slab page; no
             // concurrent access — this slab is not yet in any list
             // (INV-MM-4 fresh-slab arm).
-            super::edges::slab_write_freelist_link(obj_ptr as *mut u8, (i + 1) as u16);
+            super::r#unsafe::slab_write_freelist_link(obj_ptr as *mut u8, (i + 1) as u16);
         }
 
         // Last object's next is 0xFFFF (list end marker)
         if self.objects_per_slab > 0 {
             let last_offset = header_size + (self.objects_per_slab - 1) * self.object_size;
             let last_ptr = (page_addr + last_offset) as *mut u16;
-            super::edges::slab_write_freelist_link(last_ptr as *mut u8, 0xFFFF);
+            super::r#unsafe::slab_write_freelist_link(last_ptr as *mut u8, 0xFFFF);
         }
 
         Some(page)
@@ -473,7 +473,7 @@ impl SlabPages {
         // addr is page-aligned within the slab region; caller holds
         // the cache lock ensuring exclusive access to this slab
         // (INV-MM-4).
-        super::edges::slab_header_mut(addr)
+        super::r#unsafe::slab_header_mut(addr)
     }
 
     /// Get next slab
@@ -517,7 +517,7 @@ impl SlabPages {
 ///
 /// All fields are `Sync`:
 ///   - `caches`: per-cache `Spinlock` — only one CPU can hold a given cache lock
-///   - `pages`: `SlabPages` (Sync proof in mm::edges, atomic page counter)
+///   - `pages`: `SlabPages` (Sync proof in mm::unsafe, atomic page counter)
 ///   - `initialized`: `AtomicUsize` — lock-free read
 ///
 /// This allows `SLAB_ALLOCATOR` to be a plain `static` (no `mut`), eliminating
@@ -567,7 +567,7 @@ impl SlabAllocator {
     pub fn init(base_addr: usize, max_pages: usize) {
         // init() runs once during boot before secondary CPUs start and
         // before any kmalloc/kfree call (INV-MM-4 init arm).
-        super::edges::slab_pages_init(base_addr, max_pages);
+        super::r#unsafe::slab_pages_init(base_addr, max_pages);
         SLAB_ALLOCATOR.initialized.store(1, Ordering::Release);
     }
 
@@ -580,7 +580,7 @@ impl SlabAllocator {
     fn pages() -> &'static SlabPages {
         // Pages are only written once during init(); after init all
         // accesses are reads or atomic operations (INV-MM-4 shared arm).
-        super::edges::slab_pages()
+        super::r#unsafe::slab_pages()
     }
 
     /// Find appropriate cache index
@@ -644,7 +644,7 @@ pub fn kmalloc(size: usize) -> *mut u8 {
         let header = page_addr as *mut SlabHeader;
         // page_addr is page-aligned and within the slab region; we
         // hold the cache lock (INV-MM-4).
-        super::edges::slab_header_mut(page_addr).cache_idx = cache_idx as u8;
+        super::r#unsafe::slab_header_mut(page_addr).cache_idx = cache_idx as u8;
     }
     ptr
 }
@@ -669,7 +669,7 @@ pub fn kfree(ptr: *mut u8) {
         let header = page_addr as *const SlabHeader;
         // page_addr is within the slab region (checked above); the slab
         // header was written by kmalloc and is stable (INV-MM-4).
-        let idx = super::edges::slab_header_cache_idx(page_addr) as usize;
+        let idx = super::r#unsafe::slab_header_cache_idx(page_addr) as usize;
         if idx < NUM_CACHES {
             let mut cache = SLAB_ALLOCATOR.caches[idx].lock_irqsave();
             if cache.free(ptr, SlabAllocator::pages()) {
@@ -704,7 +704,7 @@ pub fn kzalloc(size: usize) -> *mut u8 {
     if !ptr.is_null() {
         // ptr was returned by kmalloc, size matches the allocation
         // (INV-MM-4 owned arm).
-        super::edges::slab_zero(ptr, size);
+        super::r#unsafe::slab_zero(ptr, size);
     }
     ptr
 }

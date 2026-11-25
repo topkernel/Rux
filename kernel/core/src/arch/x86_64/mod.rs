@@ -4,7 +4,7 @@
 //!
 //! x86_64 architecture support (QEMU q35, multiboot1 boot protocol)
 
-pub mod unsafe_edges;
+pub mod r#unsafe;
 pub mod boot;
 pub mod mpk;
 pub mod pt_regs;

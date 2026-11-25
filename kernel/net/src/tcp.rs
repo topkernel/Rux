@@ -3501,7 +3501,7 @@ pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
 fn tcp_socket_table_mut() -> &'static mut TcpSocketTable {
     // INV-NET-SOCKTAB-1: caller-serialized (TCP_TABLE_LOCK or the
     // documented single-threaded init paths) — net_edges formation.
-    crate::net_edges::static_table_mut(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
+    crate::r#unsafe::static_table_mut(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
 }
 
 /// Get TCP socket
@@ -3592,7 +3592,7 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
 fn tcp_socket_table_ref() -> &'static TcpSocketTable {
     // INV-NET-SOCKTAB-1: read-only view, caller-serialized against
     // mutation — net_edges formation.
-    crate::net_edges::static_table_ref(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
+    crate::r#unsafe::static_table_ref(core::ptr::addr_of_mut!(TCP_SOCKET_TABLE))
 }
 
 /// R32-N9 helper: another live (non-CLOSE) socket already bound to `port`?

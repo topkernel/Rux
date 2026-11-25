@@ -1271,7 +1271,7 @@ use crate::errno;
 /// We use a simple hash of the name as the inode number since devfs has no real inodes.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
-    let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
+    let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
 
     if !entry.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1292,7 +1292,7 @@ fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 /// Devfs iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
-    let parent_entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let parent_entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     let name_str = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
@@ -1349,7 +1349,7 @@ fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc
 /// Devfs getattr: fill stat for a devfs entry.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn devfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
-    let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+    let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
         };
@@ -1422,7 +1422,7 @@ pub static LOOP_FILE_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::build
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
-    let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+    let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return 0,
         };
@@ -1500,7 +1500,7 @@ fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
     if inode.mode.is_char_device() || inode.mode.is_block_device() {
-        let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?;
+        let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
         if crate::drivers::loop_dev::is_loop_devno(entry.devno) {
             // Loop family (loop-control + /dev/loopN): the loop driver
             // owns them — open stashes the devno on the file, sys_ioctl
@@ -1537,7 +1537,7 @@ fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> 
 fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
     use rux::fs::inode::file_type;
 
-    let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?;
+    let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
     if !entry.is_dir() {
         return None;
     }
@@ -1573,7 +1573,7 @@ fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDir
 /// private_data (INV-FS-PRIVDATA-1 through the framework edge — the
 /// Drop-time single reclaim).
 fn devfs_destroy_inode(inode: &mut Inode) {
-    rux::fs::unsafe_edges::privdata_drop_arc::<DevfsEntry>(inode);
+    rux::fs::r#unsafe::privdata_drop_arc::<DevfsEntry>(inode);
 }
 
 // ============================================================================
@@ -1612,7 +1612,7 @@ fn devfs_rel_path(target: &DevfsEntry) -> Option<String> {
 /// directories ("/dev/input" already exists when event nodes are created).
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
-    let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
+    let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
     if !entry.is_dir() {
         return Err(errno::Errno::NotADirectory);
     }
@@ -1649,7 +1649,7 @@ fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, 
 /// service ftruncates and mmaps). Device nodes still need mknod.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
-    let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
+    let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
     if !entry.is_dir() {
         return Err(errno::Errno::NotADirectory);
     }
@@ -1683,7 +1683,7 @@ fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>,
 /// db entry, no master-of-seat tag, CanGraphical never flipped.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, errno::Errno> {
-    let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
+    let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir).ok_or(errno::Errno::NotADirectory)?;
     if !entry.is_dir() {
         return Err(errno::Errno::NotADirectory);
     }
@@ -1719,7 +1719,7 @@ fn devfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, 
 /// them in `data`). Returns the byte count, no NUL (readlink(2)).
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
-    let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+    let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32() as isize,
         };
@@ -1740,7 +1740,7 @@ fn devfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 /// and falls back to symlink() on failure.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
-    let parent_entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir) {
+    let parent_entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir) {
             Some(v) => v,
             None => return errno::Errno::NotADirectory.as_neg_i32(),
         };
@@ -1761,7 +1761,7 @@ fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     };
     // The edge clones the Arc WITHOUT consuming the inode's slot
     // (INV-FS-PRIVDATA-1; the from_raw+clone+into_raw dance as an edge).
-    let target_arc = match rux::fs::unsafe_edges::privdata_arc_clone::<DevfsEntry>(target) {
+    let target_arc = match rux::fs::r#unsafe::privdata_arc_clone::<DevfsEntry>(target) {
         Some(a) => a,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     };
@@ -1793,11 +1793,11 @@ fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 /// VFS wrapper has already validated types/stickiness/cycles.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
-    let old_parent = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(old_dir) {
+    let old_parent = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(old_dir) {
         Some(v) => v,
         None => return errno::Errno::NotADirectory.as_neg_i32(),
     };
-    let new_parent = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(new_dir) {
+    let new_parent = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(new_dir) {
         Some(v) => v,
         None => return errno::Errno::NotADirectory.as_neg_i32(),
     };
@@ -1900,20 +1900,20 @@ impl SharedPageWindow {
     fn copy_in(&mut self, src: &[u8], in_page: usize) {
         // wrapping_add is the safe offset arithmetic; the in-page bound
         // is the caller's math (INV-DEVFS-SHARED).
-        rux::fs::unsafe_edges::kva_copy_to(self.kva.wrapping_add(in_page), src);
+        rux::fs::r#unsafe::kva_copy_to(self.kva.wrapping_add(in_page), src);
     }
 
     /// Copy OUT of the page at `in_page` into a caller slice
     /// (INV-DEVFS-SHARED; same chunk discipline).
     #[inline]
     fn copy_out(&self, dst: &mut [u8], in_page: usize) {
-        rux::fs::unsafe_edges::kva_copy_from((self.kva as *const u8).wrapping_add(in_page), dst);
+        rux::fs::r#unsafe::kva_copy_from((self.kva as *const u8).wrapping_add(in_page), dst);
     }
 
     /// Zero a region of the page (INV-DEVFS-SHARED).
     #[inline]
     fn zero(&mut self, in_page: usize, len: usize) {
-        rux::fs::unsafe_edges::kva_zero(self.kva.wrapping_add(in_page), len);
+        rux::fs::r#unsafe::kva_zero(self.kva.wrapping_add(in_page), len);
     }
 }
 
@@ -1939,7 +1939,7 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
                 .as_usize() as *mut u8;
                 // Freshly allocated page, exclusively owned here — the
                 // zeroing rides the INV-DEVFS-SHARED edge.
-                rux::fs::unsafe_edges::kva_zero(kva, page);
+                rux::fs::r#unsafe::kva_zero(kva, page);
                 pfns.push((pa >> 12) as usize);
             }
             None => break,
@@ -1996,13 +1996,13 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
 pub fn devfs_reg_current_size(file: &rux::fs::File) -> Option<u64> {
     // Caller passes a valid File; only stable fields are read.
     {
-        let inode = rux::fs::unsafe_edges::file_inode(file)?;
+        let inode = rux::fs::r#unsafe::file_inode(file)?;
         if inode.fs_id != rux::fs::inode::FS_ID_DEVFS
             || !inode.mode.is_regular_file()
         {
             return None;
         }
-        let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?;
+        let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
         Some(entry.size.load(Ordering::Acquire))
     }
 }
@@ -2014,7 +2014,7 @@ pub fn devfs_reg_current_size(file: &rux::fs::File) -> Option<u64> {
 pub fn shared_fault_file_page(file: &rux::fs::File, file_off: usize) -> Option<u64> {
     // Fault-path caller passes the pinned vm_file; the edges are safe
     // fns (FILEINODE-1 / PRIVDATA-1).
-    let inode = rux::fs::unsafe_edges::file_inode(file)?;
+    let inode = rux::fs::r#unsafe::file_inode(file)?;
     // Same identity gate as devfs_reg_current_size: private_data is
     // only a DevfsEntry pointer on devfs inodes (foreign filesystems
     // store table indices/pids there — see that function's comment).
@@ -2023,7 +2023,7 @@ pub fn shared_fault_file_page(file: &rux::fs::File, file_off: usize) -> Option<u
     {
         return None;
     }
-    let entry = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode)?;
+    let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
     let inode_size = inode.get_size() as usize;
     // Entry-authoritative size: the mapper's inode snapshot may predate
     // the ftruncate that sized the workspace (see devfs_reg_current_size).
@@ -2067,9 +2067,9 @@ fn shared_entry_of(file: &rux::fs::File) -> Option<(&'static DevfsEntry, usize)>
     // The entry is leaked-Arc-backed and outlives the file (the
     // privdata edge's INV-FS-PRIVDATA-1 + the leak-at-install
     // discipline of devfs_make_inode).
-    let inode = rux::fs::unsafe_edges::file_inode(file)?;
+    let inode = rux::fs::r#unsafe::file_inode(file)?;
     let entry: &'static DevfsEntry =
-        rux::fs::unsafe_edges::privdata_ref_leaked::<DevfsEntry>(inode)?;
+        rux::fs::r#unsafe::privdata_ref_leaked::<DevfsEntry>(inode)?;
     if !entry.is_regular_file() {
         return None;
     }
@@ -2148,7 +2148,7 @@ fn devfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
             Some(i) => i,
             None => return -9,
         };
-        let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+        let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return -9,
         };
@@ -2179,7 +2179,7 @@ fn devfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
             Some(i) => i,
             None => return -9,
         };
-        let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+        let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return -9,
         };
@@ -2214,7 +2214,7 @@ fn devfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
     // MAP_SHARED backing is active entry.data is stale (see devfs_getattr),
     // and a shrink-ftruncate under it leaves data long.
     let size = {
-        match file.get_inode().and_then(|i| rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(i)) {
+        match file.get_inode().and_then(|i| rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(i)) {
             Some(e) => {
                 if e.is_regular_file() {
                     e.size.load(Ordering::Acquire) as isize
@@ -2247,7 +2247,7 @@ fn devfs_file_read_at(file: &rux::fs::File, offset: u64, buf: &mut [u8]) -> isiz
             Some(i) => i,
             None => return -9,
         };
-        let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+        let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return -9,
         };
@@ -2284,7 +2284,7 @@ pub static DEVFS_REG_FILE_OPS: FileOps = FileOps::builder()
 /// mdev/udev recreates it, mdev remove events, ...).
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
-    let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir) {
+    let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir) {
             Some(v) => v,
             None => return errno::Errno::BadFileNumber.as_neg_i32(),
         };
@@ -2316,7 +2316,7 @@ fn devfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
 /// rmdir on devfs (userspace): remove an empty subdirectory.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
 fn devfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
-    let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(dir) {
+    let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(dir) {
             Some(v) => v,
             None => return errno::Errno::BadFileNumber.as_neg_i32(),
         };
@@ -2368,7 +2368,7 @@ fn devfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use rux::fs::inode::setattr_attr;
 
-    let entry = match rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+    let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return errno::Errno::InvalidArgument.as_neg_i32(),
         };
@@ -2403,7 +2403,7 @@ fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // Regular files (devtmpfs): ftruncate resizes the stored
             // contents (OH's param service sizes its workspace files with
             // ftruncate before mmap). Device nodes keep size 0 — accept.
-            if let Some(entry) = rux::fs::unsafe_edges::privdata_ref::<DevfsEntry>(inode) {
+            if let Some(entry) = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
                 if entry.is_regular_file() {
                     // b72/b73 SIGBUS hunt: name size changes on the
                     // param workspace files (a size-0 window between

@@ -21,7 +21,7 @@
 //! - Fixmap: memblock allocation (linear map live)
 //! - Late: buddy allocator + PtLedger accounting
 
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicU32, AtomicUsize, Ordering};
 
 use super::memory_layout::*;
@@ -178,7 +178,7 @@ pub fn early_tables_used() -> usize {
     EARLY_TABLE_NEXT.load(Ordering::Acquire)
 }
 
-/// INV-XE-ZP (zero-pages edge, owned by mm/unsafe_edges.rs): `phys` is a
+/// INV-XE-ZP (zero-pages edge, owned by mm/unsafe.rs): `phys` is a
 /// frame this caller just took from a page/table allocator and owns
 /// exclusively; zeroing it cannot race any other accessor. The linear-map
 /// (or early-pool VMA) address is derived by the same stage-aware
@@ -355,8 +355,8 @@ pub fn alloc_page_table() -> Option<u64> {
 }
 
 /// The phys→table conversion edge lives in the framework module now
-/// (one audited site per arch; see unsafe_edges.rs).
-pub use super::unsafe_edges::get_page_table_virt;
+/// (one audited site per arch; see unsafe.rs).
+pub use super::r#unsafe::get_page_table_virt;
 
 fn free_page_table_checked(phys_addr: u64, site: &str) {
     free_page_table_checked_rooted(phys_addr, site, 0)

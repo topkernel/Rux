@@ -30,8 +30,8 @@ pub fn report(cpu: usize, elapsed_secs: u64, timer_cnt: u64) {
     // Print the stuck CPU's current task
     let stuck_task = crate::sched::sched::cpu_state(cpu).current;
     if !stuck_task.is_null() {
-        let pid = crate::debug::forensics_edges::t_pid(stuck_task);
-        let pc = crate::debug::forensics_edges::t_preempt_count(stuck_task);
+        let pid = crate::debug::r#unsafe::t_pid(stuck_task);
+        let pc = crate::debug::r#unsafe::t_preempt_count(stuck_task);
         let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
         // oh-crash 92nd (IF=0 wedge, hp91h residual): the wedged
         // CPU cannot self-report — its tick is dead, so the

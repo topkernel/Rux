@@ -5,7 +5,7 @@
 //!
 //! What stayed in the framework (the rung's measured cut — the
 //! shelving wall was TYPES and hot-path mechanisms, not unsafe):
-//! - `process/task.rs`, `task_ref.rs`, `unsafe_edges.rs`: the Task
+//! - `process/task.rs`, `task_ref.rs`, `unsafe.rs`: the Task
 //!   type + slot mechanics (65+ external type users; inherent impls
 //!   live with the type) and the audited edges.
 //! - `process/pid_hash.rs`: `pid_hash_lookup_pinned` sits on the
@@ -97,7 +97,7 @@ pub use crate::pid::{
 
 // The framework-staying modules at the historical paths.
 pub use rux::process::{
-    task, task_ref, unsafe_edges, pid_hash, wait, ns, exec_ring, ptrace_core,
+    task, task_ref, r#unsafe, pid_hash, wait, ns, exec_ring, ptrace_core,
 };
 pub use rux::process::{
     Task, current_pid, current_ppid, current_pgid, current_task,

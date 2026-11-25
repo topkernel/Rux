@@ -82,7 +82,7 @@ impl Ext4FileSystem {
 
         // b_data is a full block-sized byte array; the typed view rides
         // the framework's alignment-checked edge (INV-EXT-EDGE-1).
-        let j_sb: &jbd2::journal_superblock_t = rux::fs::ext4_edges::typed_ref(bio::bh_data(&j_sb_bh))
+        let j_sb: &jbd2::journal_superblock_t = rux::fs::r#unsafe::typed_ref(bio::bh_data(&j_sb_bh))
             .expect("journal superblock view");
 
         // Validate magic number

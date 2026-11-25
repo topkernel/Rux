@@ -9,7 +9,7 @@
 //! keywords — checkable by grep, ready for `#![forbid(unsafe_code)]`.
 //! Every genuinely-unsafe operation they need lives HERE as a named
 //! edge with an INV contract, in the shape of
-//! `kernel/core/src/sync/edges.rs` / `kernel/core/src/syscall/edges.rs` (one
+//! `kernel/core/src/sync/unsafe.rs` / `kernel/core/src/syscall/unsafe.rs` (one
 //! audit per edge, not per call site).
 //!
 //! INV registry:

@@ -502,7 +502,7 @@ fn cgroup2_kill_sb(sb: *mut SuperBlock) {
         // The boot-created superblock is shared; only free private mounts.
         let current = GLOBAL_CGROUP2_SB.load(Ordering::Acquire);
         if current != sb {
-            rux::fs::unsafe_edges::kill_sb_reclaim_box::<SuperBlock>(sb);
+            rux::fs::r#unsafe::kill_sb_reclaim_box::<SuperBlock>(sb);
         }
     }
 }
@@ -675,7 +675,7 @@ fn leak_ino_data(node: Arc<CgroupNode>, kind: CgroupFileKind) -> *mut u8 {
 /// Read the private data back.
 // SAFETY: pointer came from leak_ino_data and is never freed.
 fn ino_data<'a>(inode: &'a Inode) -> Option<&'a CgroupInoData> {
-    rux::fs::unsafe_edges::privdata_ref::<CgroupInoData>(inode)
+    rux::fs::r#unsafe::privdata_ref::<CgroupInoData>(inode)
 }
 
 // ============================================================================
@@ -951,7 +951,7 @@ fn cgroupfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     // cgroupfs_open; it is only freed by cgroupfs_file_close
     // (INV-FS-FILEPRIV-1, resolved through the framework edge).
     {
-        let content = match rux::fs::unsafe_edges::file_privdata_ref::<CgroupFileContent>(file) {
+        let content = match rux::fs::r#unsafe::file_privdata_ref::<CgroupFileContent>(file) {
             Some(c) => c,
             None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
         };
@@ -991,7 +991,7 @@ fn cgroupfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 fn cgroupfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
     // See cgroupfs_file_read (INV-FS-FILEPRIV-1).
     {
-        let content = match rux::fs::unsafe_edges::file_privdata_ref::<CgroupFileContent>(file) {
+        let content = match rux::fs::r#unsafe::file_privdata_ref::<CgroupFileContent>(file) {
             Some(c) => c,
             None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
         };
@@ -1013,7 +1013,7 @@ fn cgroupfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isiz
 fn cgroupfs_file_close(file: &rux::fs::File) -> i32 {
     // The take empties the cell first; the Box::from_raw reclaim is the
     // framework edge's exactly-once drop (INV-FS-FILEPRIV-1).
-    if let Some(content) = rux::fs::unsafe_edges::file_privdata_take::<CgroupFileContent>(file) {
+    if let Some(content) = rux::fs::r#unsafe::file_privdata_take::<CgroupFileContent>(file) {
         drop(content);
     }
     0

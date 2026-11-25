@@ -734,7 +734,7 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     let slot_pid = if slot_task >= 0x8000_0000_0000_0000 {
         // Diagnostic scalar read of the sched slot's task (the forensics
         // stale-handle edge — it was this CPU's published pick).
-        crate::debug::forensics_edges::t_pid(slot_task as *const crate::process::Task)
+        crate::debug::r#unsafe::t_pid(slot_task as *const crate::process::Task)
     } else {
         0
     };
@@ -818,10 +818,10 @@ fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
     }
     // SAFETY: diagnostic scalar reads of stable Task fields; both tasks
     // were current on this cpu moments ago (pinned by execution).
-    let pid_e = crate::debug::forensics_edges::t_pid(enter as *const _);
-    let pid_x = crate::debug::forensics_edges::t_pid(exit as *const _);
-    let pc_e = crate::debug::forensics_edges::t_preempt_count(enter as *const _);
-    let pc_x = crate::debug::forensics_edges::t_preempt_count(exit as *const _);
+    let pid_e = crate::debug::r#unsafe::t_pid(enter as *const _);
+    let pid_x = crate::debug::r#unsafe::t_pid(exit as *const _);
+    let pc_e = crate::debug::r#unsafe::t_preempt_count(enter as *const _);
+    let pc_x = crate::debug::r#unsafe::t_preempt_count(exit as *const _);
     for &c in b"\nIRQ-PAIR-SPLIT cpu=" {
         putchar(c);
     }

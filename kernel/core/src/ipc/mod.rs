@@ -37,10 +37,9 @@
 //! #![forbid(unsafe_code)] — the sole copy.
 
 pub mod binder;
-pub mod binder_edges;
 pub mod binder_diag_hooks;
 pub mod ipc_hooks;
-pub mod edges;
+pub mod r#unsafe;
 pub mod sysv_sem;
 pub mod util;
 

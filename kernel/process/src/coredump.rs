@@ -266,7 +266,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
 
 // ==================== memory reader ====================
 // The page-table walk + linear-map copy lives in the framework module
-// (`process::unsafe_edges::dump_read_page`, INV-PROC-COREDUMP-1): the
+// (`process::unsafe::dump_read_page`, INV-PROC-COREDUMP-1): the
 // hand-rolled SV39 walk this file used to carry misread x86 PTEs on
 // x86_64 builds (LTP r21 kill11 KERNPANIC), so the edge stays on the
 // arch walker, in the audited boundary.
@@ -488,7 +488,7 @@ pub fn do_coredump(task: &Task, sig: i32) -> bool {
             let va = vaddr + written;
             let chunk = core::cmp::min(CHUNK, (*filesz - written) as usize);
             // The framework read edge (INV-PROC-COREDUMP-1): mm is pinned.
-            crate::unsafe_edges::dump_read_page(&mm, va, &mut page_buf[..chunk]);
+            crate::r#unsafe::dump_read_page(&mm, va, &mut page_buf[..chunk]);
             let n = file.write_at_slice(off + written, &page_buf[..chunk]);
             if n < 0 {
                 // I/O failure mid-dump: keep what was written (Linux-like

@@ -1309,7 +1309,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                             3,
                                             core::sync::atomic::Ordering::Relaxed,
                                         );
-                                        crate::edges::arch_map_user_page(
+                                        crate::r#unsafe::arch_map_user_page(
                                             root_ppn,
                                             crate::arch::mm::memory_layout::VirtAddr::new(
                                                 (mapped_addr.as_usize()
@@ -1332,7 +1332,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         // INV-SYSC-8 desc edge (fresh
                                         // frame, exclusively owned).
                                         if let Some(page) =
-                                            crate::edges::page_desc_of(crate::mm::phys_to_pfn(phys))
+                                            crate::r#unsafe::page_desc_of(crate::mm::phys_to_pfn(phys))
                                         {
                                             page.set_flag(
                                                 crate::mm::page_desc::PageFlag::Anonymous,
@@ -2075,7 +2075,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // The Sv39 leaf rewrite (COW/PCACHE-preserving) lives in
                 // the INV-SYSC-8 edge; the PTE lock held above covers
                 // the whole loop.
-                crate::edges::mprotect_rewrite_leaf_sv39(root_ppn, virt, new_flags);
+                crate::r#unsafe::mprotect_rewrite_leaf_sv39(root_ppn, virt, new_flags);
             }
 
             // Flush TLB after updating PTE permissions (still under the
@@ -2435,7 +2435,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                 // PCACHE leaves skipped — the cache's dirty path owns
                 // them).
                 if let Some(page_phys) =
-                    crate::edges::pt_walk_writable_phys(root_ppn, cursor as u64)
+                    crate::r#unsafe::pt_walk_writable_phys(root_ppn, cursor as u64)
                 {
                     // Clamped whole-page writeback from the kernel
                     // linear map: nothing past EOF (see i_size clamp
@@ -2446,7 +2446,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                             PAGE_SIZE as u64,
                             file_size - file_off,
                         ) as usize;
-                        let _ = crate::edges::file_write_page(
+                        let _ = crate::r#unsafe::file_write_page(
                             &file,
                             file_off,
                             page_phys,
@@ -2535,7 +2535,7 @@ fn copy_old_to_new_pages(
         let new_virt = (new_addr + offset) as u64;
 
         // Walk old page table to get the source physical page
-        if let Some((old_ppn, old_bits)) = crate::sync::edges::pt_walk(root_ppn, old_virt) {
+        if let Some((old_ppn, old_bits)) = crate::sync::r#unsafe::pt_walk(root_ppn, old_virt) {
             let old_phys = old_ppn << PAGE_SHIFT;
 
             // DESTINATION-PRESENT: the destination range was created by
@@ -2551,7 +2551,7 @@ fn copy_old_to_new_pages(
             // fresh frame OVER a live leaf without dropping its
             // refcount/rmap; the teardown below is the fix for exactly
             // that.)
-            if crate::sync::edges::pt_walk(root_ppn, new_virt).is_some() {
+            if crate::sync::r#unsafe::pt_walk(root_ppn, new_virt).is_some() {
                 static DST_HIT_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
@@ -2565,7 +2565,7 @@ fn copy_old_to_new_pages(
                 }
                 // PTE lock is held (see above) and `mm` is the current
                 // task's address space (INV-SYSC-8 unmap arm).
-                crate::edges::unmap_user_leaf_locked(mm, new_virt as usize);
+                crate::r#unsafe::unmap_user_leaf_locked(mm, new_virt as usize);
             }
 
             // Eagerly allocate + map the destination page (see comment above)
@@ -2578,7 +2578,7 @@ fn copy_old_to_new_pages(
             let perms = old_bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X);
             let pte_flags = PageTableEntry::V | PageTableEntry::U
                 | PageTableEntry::A | PageTableEntry::D | perms;
-            crate::edges::arch_map_page(
+            crate::r#unsafe::arch_map_page(
                 root_ppn,
                 VirtAddr::new(new_virt),
                 PhysAddr::new(new_phys as u64),
@@ -2588,11 +2588,11 @@ fn copy_old_to_new_pages(
             // Copy the page contents through the linear map (INV-SYSC-8
             // copy arm: old frame pinned by the walk's refcount, new
             // frame exclusively owned).
-            crate::edges::copy_page_linear(old_phys, new_phys as u64);
+            crate::r#unsafe::copy_page_linear(old_phys, new_phys as u64);
 
             // rmap/mapcount bookkeeping, same as the anonymous fault path
             // (INV-SYSC-8 desc arm: the frame is exclusively owned here).
-            if let Some(page) = crate::edges::page_desc_of(new_phys >> PAGE_SHIFT) {
+            if let Some(page) = crate::r#unsafe::page_desc_of(new_phys >> PAGE_SHIFT) {
                 page.set_flag(PageFlag::Anonymous);
                 // SwapBacked + LRU membership: keep the moved page
                 // reclaimable via swap-out (vmscan).
@@ -3424,7 +3424,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         // Read-only inspection of the task's own page tables
         // (INV-SY-1 walk edge).
         let mut page_in_memory =
-            crate::sync::edges::pt_walk(root_ppn, page_addr as u64).is_some();
+            crate::sync::r#unsafe::pt_walk(root_ppn, page_addr as u64).is_some();
 
         if !page_in_memory {
             // File-backed? consult the page cache for the (fs,ino,off).
@@ -3671,7 +3671,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                 // Read-only inspection of the task's own page tables
                 // (INV-SY-1 walk edge).
                 let present =
-                    crate::sync::edges::pt_walk(root_ppn, p as u64).is_some();
+                    crate::sync::r#unsafe::pt_walk(root_ppn, p as u64).is_some();
                 if !present {
                     // Populate fault type per mapping kind (the reference
                     // prefaults with FOLL_WRITE semantics on writable

@@ -514,7 +514,7 @@ pub fn jbd2_journal_commit_transaction(
                 journal.csum_seed(),
                 &block[..block_size.min(block.len())],
             );
-            let hdr = rux::fs::ext4_edges::typed_ref_mut::<commit_header>(block)
+            let hdr = rux::fs::r#unsafe::typed_ref_mut::<commit_header>(block)
                 .expect("commit header view");
             hdr.h_chksum[0] = csum.to_be();
         }
@@ -631,7 +631,7 @@ fn write_journal_superblock(
     // trivially satisfied).
     {
         let block = bio::bh_data_mut(&bh);
-        let sb = rux::fs::ext4_edges::typed_ref_mut::<journal_superblock_t>(block)
+        let sb = rux::fs::r#unsafe::typed_ref_mut::<journal_superblock_t>(block)
             .expect("journal superblock view");
         sb.s_start = (new_start as u32).to_be();
         sb.s_sequence = new_sequence.to_be();

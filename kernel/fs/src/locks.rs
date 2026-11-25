@@ -185,7 +185,7 @@ pub mod flock_ops {
 fn file_lock_key(file: &File) -> (u64, u64) {
     // SAFETY: inode is written once at open time and never mutated;
     // read-only access.
-    let inode_opt = rux::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = rux::fs::r#unsafe::file_inode_arc(file);
     match inode_opt.as_ref() {
         Some(inode) => (inode.fs_id, inode.ino),
         None => (u64::MAX, file.file_id),
@@ -781,7 +781,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
 
     // Only regular files can carry leases (Linux fcntl_setlease).
     // SAFETY: inode written once at open; read-only access.
-    let inode = match rux::fs::unsafe_edges::file_inode(file) {
+    let inode = match rux::fs::r#unsafe::file_inode(file) {
         Some(i) => i,
         None => return Err(crate::errno::Errno::InvalidArgument),
     };
@@ -883,7 +883,7 @@ pub fn get_lease(file: &File) -> i16 {
         return flock_types_late::F_UNLCK;
     }
     // SAFETY: inode written once at open; read-only access.
-    let key = match rux::fs::unsafe_edges::file_inode(file) {
+    let key = match rux::fs::r#unsafe::file_inode(file) {
         Some(i) => inode_lock_key(i),
         // No-inode files can never have a lease — F_UNLCK.
         None => return flock_types_late::F_UNLCK,

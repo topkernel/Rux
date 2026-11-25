@@ -4,7 +4,7 @@
 //!
 //! x86_64 framework edge module (layer-1 doctrine, unsafe-slim round 5
 //! lane L3, continuation): the saved-context frame primitive for the trap
-//! / signal / fork entry paths. Together with `mm/unsafe_edges.rs` (the
+//! / signal / fork entry paths. Together with `mm/unsafe.rs` (the
 //! page-table family) this is one of the arch's two framework files.
 //!
 //! The reference kernel (Linux x86) handles the same frames as raw

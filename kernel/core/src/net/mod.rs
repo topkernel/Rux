@@ -6,7 +6,7 @@
 
 pub mod net_hooks;
 pub mod file_arc;
-pub mod net_edges;
+pub mod r#unsafe;
 pub mod buffer;
 // pub mod ethernet; — MOVED to the net service crate (rung 2)
 // pub mod arp; — MOVED to the net service crate (rung 2)

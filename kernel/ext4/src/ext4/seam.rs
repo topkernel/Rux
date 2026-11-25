@@ -20,7 +20,7 @@ use rux::fs::ext4_hooks::{self, Ext4Hooks};
 use rux::fs::file::File;
 use rux::fs::inode::{Inode, INodeOps};
 use crate::jbd2;
-use crate::process::unsafe_edges as proc_edges;
+use crate::process::r#unsafe as proc_edges;
 
 fn mount_root_row(disk: &'static GenDisk) -> Result<(), i32> {
     super::mount_ext4(disk)
@@ -122,7 +122,7 @@ fn fallocate_row(inode: &Inode, mode: i32, offset: u64, len: u64) -> Result<(), 
         // fs_ptr2 is the ext4 instance from inode.private_data (the
         // typed view rides boxed_ref); inode.sb is the Box<Ext4Inode>
         // cached at open (the exclusive view rides boxed_mut).
-        let fs2 = crate::syscall::edges::boxed_ref(
+        let fs2 = crate::syscall::r#unsafe::boxed_ref(
             fs_ptr as *const super::Ext4FileSystem,
         );
         if let Ok(fresh) = fs2.read_inode(inode.ino as u32) {
@@ -134,7 +134,7 @@ fn fallocate_row(inode: &Inode, mode: i32, offset: u64, len: u64) -> Result<(), 
             }
             if let Some(ptr) = inode.sb {
                 let cached: &mut super::inode::Ext4Inode =
-                    crate::syscall::edges::boxed_mut(ptr as *mut super::inode::Ext4Inode);
+                    crate::syscall::r#unsafe::boxed_mut(ptr as *mut super::inode::Ext4Inode);
                 cached.block = fresh.block;
                 if !keep_size && fresh.size > cached.size {
                     cached.size = fresh.size;
@@ -186,7 +186,7 @@ fn kmsg_resolve_row() -> Option<u32> {
     // SAFETY: fs_ptr is the mount's instance word (get_ext4_fs's
     // non-null GLOBAL) — resolved through the framework edge
     // (INV-FS-GLOBALSB-1 provenance).
-    let fs = rux::fs::unsafe_edges::static_ref_unchecked(fs_ptr as *mut super::Ext4FileSystem);
+    let fs = rux::fs::r#unsafe::static_ref_unchecked(fs_ptr as *mut super::Ext4FileSystem);
     let cached = KMSG_INO.load(Ordering::Relaxed);
     if cached != 0 {
         // Still alive? A deleted file's inode read fails; reset and
@@ -217,7 +217,7 @@ fn kmsg_write_at_row(ino: u32, offset: u64, data: &[u8]) -> isize {
         return 0;
     };
     // SAFETY: same provenance as kmsg_resolve_row.
-    let fs = rux::fs::unsafe_edges::static_ref_unchecked(fs_ptr as *mut super::Ext4FileSystem);
+    let fs = rux::fs::r#unsafe::static_ref_unchecked(fs_ptr as *mut super::Ext4FileSystem);
     super::file::ext4_kernel_write_at(fs, ino, offset, data)
 }
 
@@ -226,7 +226,7 @@ fn journal_dirty_row(handle: *mut (), bh: *mut bio::BufferHead) {
     // operation; the typed view rides boxed_mut.
     if !handle.is_null() {
         let h = handle as *mut jbd2::journal::Handle;
-        let _ = jbd2::jbd2_journal_dirty_metadata(crate::syscall::edges::boxed_mut(h), bh);
+        let _ = jbd2::jbd2_journal_dirty_metadata(crate::syscall::r#unsafe::boxed_mut(h), bh);
     }
 }
 
@@ -234,7 +234,7 @@ fn journal_forget_row(handle: *mut (), bh: *mut bio::BufferHead) {
     // As journal_dirty_row.
     if !handle.is_null() {
         let h = handle as *mut jbd2::journal::Handle;
-        let _ = jbd2::jbd2_journal_forget(crate::syscall::edges::boxed_mut(h), bh);
+        let _ = jbd2::jbd2_journal_forget(crate::syscall::r#unsafe::boxed_mut(h), bh);
     }
 }
 
@@ -412,7 +412,7 @@ pub fn register_all() {
                 // plain bool whose only writers are mount setup and
                 // this remount path (views ride the framework edges).
                 let fs: &mut super::Ext4FileSystem =
-                    crate::syscall::edges::boxed_mut(p);
+                    crate::syscall::r#unsafe::boxed_mut(p);
                 let forced_ro = fs.metadata_csum;
                 fs.read_only = ro || forced_ro;
             }

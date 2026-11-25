@@ -189,7 +189,7 @@ static ROUTE_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::
 pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
     let _g = ROUTE_LOCK.lock_irqsave();
     // INV-NET-SOCKTAB-1: ROUTE_TABLE accessed under ROUTE_LOCK (net_edges).
-    crate::net_edges::static_table_ref(core::ptr::addr_of_mut!(ROUTE_TABLE)).lookup(dst)
+    crate::r#unsafe::static_table_ref(core::ptr::addr_of_mut!(ROUTE_TABLE)).lookup(dst)
 }
 
 /// Add route
@@ -224,7 +224,7 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
     };
     let _g = ROUTE_LOCK.lock_irqsave();
     // INV-NET-SOCKTAB-1: ROUTE_TABLE accessed under ROUTE_LOCK (net_edges).
-    crate::net_edges::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).add(route)
+    crate::r#unsafe::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).add(route)
 }
 
 /// Remove route
@@ -238,21 +238,21 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
 pub fn route_remove(dst: u32, mask: u32) -> bool {
     let _g = ROUTE_LOCK.lock_irqsave();
     // INV-NET-SOCKTAB-1: ROUTE_TABLE accessed under ROUTE_LOCK (net_edges).
-    crate::net_edges::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).remove(dst, mask)
+    crate::r#unsafe::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).remove(dst, mask)
 }
 
 /// Clear routing table
 pub fn route_clear() {
     let _g = ROUTE_LOCK.lock_irqsave();
     // INV-NET-SOCKTAB-1: ROUTE_TABLE accessed under ROUTE_LOCK (net_edges).
-    crate::net_edges::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).clear()
+    crate::r#unsafe::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).clear()
 }
 
 /// P0-2 (rtnetlink RTM_GETROUTE dump): snapshot of every route entry.
 pub fn route_dump() -> alloc::vec::Vec<RouteEntry> {
     let _g = ROUTE_LOCK.lock_irqsave();
     // INV-NET-SOCKTAB-1: ROUTE_TABLE accessed under ROUTE_LOCK (net_edges).
-    let t = crate::net_edges::static_table_ref(core::ptr::addr_of_mut!(ROUTE_TABLE));
+    let t = crate::r#unsafe::static_table_ref(core::ptr::addr_of_mut!(ROUTE_TABLE));
     t.entries[..t.count].iter().flatten().cloned().collect()
 }
 

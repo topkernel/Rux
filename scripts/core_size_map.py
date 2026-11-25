@@ -52,20 +52,23 @@ OUT = os.path.join(ROOT, "docs", "development", "core-size")
 HOT_FILES = re.compile(
     r"kernel/core/src/("
     r"arch/[^/]+/(trap|context|cpu|uaccess|exception|mm/mmu_ops|mm/exception|thread|smp)\.rs"
-    r"|sched/(sched|edges)\.rs"
+    r"|sched/(sched|unsafe)\.rs"
     r"|fs/(vfs|bio|page_cache|dentry|buffer|file)\.rs"
-    r"|sync/(spinlock|rwlock|percpu|seqlock|edges)\.rs"
+    r"|sync/(spinlock|rwlock|percpu|seqlock|unsafe)\.rs"
     r"|interrupt/[^/]+\.rs"
     r"|timer\.rs"
-    r"|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|edges)\.rs"
-    r"|process/(task_ref|unsafe_edges)\.rs"
+    r"|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|unsafe)\.rs"
+    r"|process/(task_ref|unsafe)\.rs"
     r"|safety/.*\.rs)$")
 
 FN = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:const[ \t]+)?(?:unsafe[ \t]+)?"
     r'(?:extern[ \t]+"C"[ \t]+)?fn[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)', re.M)
+# A path segment may be a raw identifier (`r#unsafe`: the module of
+# every unsafe.rs). The `r#` is not part of the module name, so it is
+# dropped before the written path is compared with a module path.
 CALL = re.compile(
-    r"((?:crate|super|self|rux)::(?:[a-zA-Z_][a-zA-Z0-9_]*::)*)?"
+    r"((?:crate|super|self|rux)::(?:(?:r#)?[a-zA-Z_][a-zA-Z0-9_]*::)*)?"
     r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
 # Subsystems that already have a service crate: only there does a name a
 # service crate calls force the function to stay.
@@ -159,7 +162,7 @@ def main():
             name = m.group(2)
             if name not in by_name:
                 continue
-            path = m.group(1) or ""
+            path = (m.group(1) or "").replace("r#", "")
             for (dp, dn, st, en) in by_name[name]:
                 if dp == p:
                     continue

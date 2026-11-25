@@ -13,7 +13,7 @@
 //! pfn_to_page_mut block onto the typed page_desc edge.
 
 use crate::arch::mm::memory_layout::*;
-use crate::arch::mm::unsafe_edges::PtTable;
+use crate::arch::mm::r#unsafe::PtTable;
 use crate::arch::mm::mmu_init::{map_page, map_page_noflush, get_page_table_virt, ROOT_PAGE_TABLE};
 use crate::arch::mm::mm_ops::{
     alloc_user_phys_page, check_pte_permissions, copy_page_table_cow, is_cow_page,
@@ -130,10 +130,10 @@ fn try_expand_stack(
     // (alloc_user_phys_page). The page is PAGE_SIZE bytes and exclusively owned.
     match vma_type {
         VmaType::Anonymous => {
-            rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+            rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
         }
         VmaType::FileBacked | VmaType::SharedMemory => {
-            rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+            rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
         }
         VmaType::Device => {
             // Device mapping: don't zero
@@ -429,7 +429,7 @@ pub fn handle_mm_fault(
                 return Some(live as usize);
             }
             // SAFETY: inode cell written at open time; read-only.
-            let inode_opt = crate::fs::unsafe_edges::file_inode(f);
+            let inode_opt = crate::fs::r#unsafe::file_inode(f);
             inode_opt.map(|i| i.get_size() as usize)
         })
         .unwrap_or(vma_file_size as usize);
@@ -580,7 +580,7 @@ pub fn handle_mm_fault(
                                 // is harmless I/O.
                                 if vma_flags.is_writable() {
                                     if let Some(inode) =
-                                        crate::fs::unsafe_edges::file_inode(&f)
+                                        crate::fs::r#unsafe::file_inode(&f)
                                     {
                                         crate::fs::page_cache::get_page_cache().mark_dirty(
                                             inode.fs_id,
@@ -666,12 +666,12 @@ pub fn handle_mm_fault(
         match vma_type {
             VmaType::Anonymous => {
                 // SAFETY: fresh exclusive page (INV-RE-ZP).
-                rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+                rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
             }
             VmaType::FileBacked => {
                 // Zero-fill the page first (for partial reads and beyond-EOF)
                 // SAFETY: fresh exclusive page (INV-RE-ZP).
-                rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+                rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
 
                 // Read file data if we have a valid fd
                 // (bounds use the CURRENT inode size when the pinned
@@ -717,12 +717,12 @@ pub fn handle_mm_fault(
                             // file position.
                             // SAFETY: read_at fills the fresh exclusive
                             // page (INV-RE-ZP); short tails re-zero below.
-                            let bytes_read = file.read_at_slice(file_offset as u64, &mut rux::mm::edges::page_slice_mut(page_ptr as usize)[..bytes_to_read]);
+                            let bytes_read = file.read_at_slice(file_offset as u64, &mut rux::mm::r#unsafe::page_slice_mut(page_ptr as usize)[..bytes_to_read]);
 
                             // Zero remaining bytes after file data (partial last page)
                             if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
                                 // SAFETY: same fresh page; tail zero.
-                                rux::mm::edges::page_slice_mut(page_ptr as usize)[bytes_read as usize..].fill(0);
+                                rux::mm::r#unsafe::page_slice_mut(page_ptr as usize)[bytes_read as usize..].fill(0);
                             }
                         }
                     }
@@ -734,7 +734,7 @@ pub fn handle_mm_fault(
             }
             VmaType::SharedMemory => {
                 // SAFETY: fresh exclusive page (INV-RE-ZP).
-                rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+                rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
             }
         }
     }
@@ -1071,7 +1071,7 @@ fn anon_faultaround_forward(
         };
         // SAFETY: freshly allocated page, exclusively owned here.
         let page_ptr = phys_to_virt(PhysAddr::new(phys)).bits() as *mut u8;
-        rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+        rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
 
         let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
         // R7-C3 twin: re-check under the lock — a CLONE_VM sibling may

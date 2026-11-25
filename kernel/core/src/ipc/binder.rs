@@ -51,7 +51,7 @@
 //! by binder_close — the io_uring ring lifetime model.
 
 use alloc::collections::VecDeque;
-use crate::ipc::binder_edges::{probe_leaf, probe_u32, probe_u64, entry_frame};
+use crate::ipc::r#unsafe::{probe_leaf, probe_u32, probe_u64, entry_frame};
 
 // PUBLISHED DIAGNOSTIC SURFACE (cold-four lane): the items marked `pub`
 // that the MOVED cold diagnostics consume (ipc's binder_diag.rs)
@@ -63,7 +63,7 @@ use crate::ipc::binder_edges::{probe_leaf, probe_u32, probe_u64, entry_frame};
 // bc-family consts). The txn MECHANISM remains this module's only
 // writer outside those documented counter publishes; the moved code is
 // #![forbid(unsafe_code)] and reaches the unsafe walkers only through
-// binder_edges.rs. The full object-model restructure the shelving
+// unsafe.rs. The full object-model restructure the shelving
 // record names (Send/Sync redesign) is still a lane of its own — this
 // is the cold-half carve around it.
 use alloc::sync::Arc;
@@ -4511,7 +4511,7 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
 // == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
 // == binder_diag_hooks.rs and the file's header for the split record) ==
 
-// == MOVED TO kernel/core/src/ipc/binder_edges.rs (the audited trap-regs /
+// == MOVED TO kernel/core/src/ipc/unsafe.rs (the audited trap-regs /
 // == page-table walker zone the moved diagnostics consume) ==
 
 // == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam

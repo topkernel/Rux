@@ -186,7 +186,7 @@ pub fn inode_open_register(inode: &Inode, write_access: bool) {
 /// lease (if any), waking blocked lease breakers.
 pub fn inode_open_unregister(file: &File) {
     // SAFETY: inode is written once at open time; read-only access.
-    let inode_opt = crate::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = crate::fs::r#unsafe::file_inode_arc(file);
     let inode = match inode_opt.as_ref() {
         Some(inode) => inode,
         None => return,
@@ -247,7 +247,7 @@ pub fn posix_release_for_file(file: &File) {
     }
     // SAFETY: inode is written once at open time and never mutated;
     // read-only access.
-    let inode_opt = crate::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = crate::fs::r#unsafe::file_inode_arc(file);
     if let Some(inode) = inode_opt.as_ref() {
         (super::lock_hooks::lock_rows().posix_release_slow)(inode_lock_key(inode));
     }

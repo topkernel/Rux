@@ -62,7 +62,7 @@ impl PipeBuffer {
     pub fn new(capacity: usize) -> Self {
         // Manually allocate and initialize vector to avoid vec! macro
         let ring_len = capacity + 1;
-        let data = rux::fs::unsafe_edges::vec_zeroed_sized(ring_len);
+        let data = rux::fs::r#unsafe::vec_zeroed_sized(ring_len);
 
         Self {
             data,
@@ -100,7 +100,7 @@ impl PipeBuffer {
         }
 
         let ring_len = new_capacity + 1;
-        let mut data = rux::fs::unsafe_edges::vec_zeroed_sized(ring_len);
+        let mut data = rux::fs::r#unsafe::vec_zeroed_sized(ring_len);
         for (i, b) in staged.iter().enumerate() {
             data[i] = *b;
         }
@@ -548,7 +548,7 @@ pub fn pipe_of_file(file: &File) -> Option<&'static Pipe> {
 /// at creation and the File's lifetime pins the Arc — one raw window
 /// replaces the four open-coded derefs this file carried.
 fn file_pipe_private(file: &File) -> Option<&'static Pipe> {
-    rux::fs::unsafe_edges::file_privdata_arc_static::<Pipe>(file)
+    rux::fs::r#unsafe::file_privdata_arc_static::<Pipe>(file)
 }
 
 /// True when `file` is a pipe/fifo description (PIPE_OPS) — used by the
@@ -852,7 +852,7 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
                     // (the FileOps slice).
                     // SAFETY: dst names `count` writable kernel bytes (the
                     // FileOps read slice the caller had as a raw ptr).
-                    guard.read(rux::fs::unsafe_edges::kernel_slice_mut(dst, count))
+                    guard.read(rux::fs::r#unsafe::kernel_slice_mut(dst, count))
                 }
             } else {
                 0
@@ -1012,7 +1012,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
                 } else {
                     // SAFETY: src is a kernel pointer naming `count`
                     // readable bytes (the FileOps slice the caller had).
-                    guard.write(rux::fs::unsafe_edges::kernel_slice((src + total_written) as *const u8, remaining))
+                    guard.write(rux::fs::r#unsafe::kernel_slice((src + total_written) as *const u8, remaining))
                 };
                 // can_write held but 0 bytes copied: a USER fault on the
                 // source. Retrying would livelock (space never drains) —
@@ -1333,7 +1333,7 @@ fn pipe_file_close(file: &File) -> i32 {
         // saved the raw pointer before clearing (same invariant).
         // The take consumes the slot's Arc refcount; when the last
         // close drops the last Arc, the Pipe is freed.
-        let pipe = rux::fs::unsafe_edges::file_privdata_take_arc::<Pipe>(file)
+        let pipe = rux::fs::r#unsafe::file_privdata_take_arc::<Pipe>(file)
             .expect("pipe close on pipe file");
         // The take reads but does not empty the cell: clear it so any
         // later reader sees None, matching the framework version.
@@ -1529,7 +1529,7 @@ pub fn abort_uninstalled_end(file: &mut Arc<File>) {
         // Exclusive &mut from get_mut — we are the sole owner and
         // close() runs at most this once (File::drop sees close_pending
         // == false and will not run it again).
-        rux::fs::unsafe_edges::file_close(f);
+        rux::fs::r#unsafe::file_close(f);
     }
 }
 
@@ -1570,7 +1570,7 @@ pub fn create_pipe() -> (Arc<File>, Arc<File>) {
         // read_ptr was just stored as this File's private slot; the
         // binding runs before the fd is published (no reader yet) — the
         // machine-lifetime adoption edge fits (the pair outlives Files).
-        let rd = rux::fs::unsafe_edges::static_ref_unchecked::<Pipe>(read_ptr as *mut Pipe);
+        let rd = rux::fs::r#unsafe::static_ref_unchecked::<Pipe>(read_ptr as *mut Pipe);
         rd.set_epoll_read_fid(read_file.file_id);
         rd.set_epoll_write_fid(write_file.file_id);
     }

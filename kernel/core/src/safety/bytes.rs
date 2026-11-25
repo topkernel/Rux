@@ -126,7 +126,7 @@ pub fn bytes_of_slice_mut<T: Copy>(v: &mut [T]) -> &mut [u8] {
 /// re-labeling of live, readable memory. The returned slice borrows the
 /// caller's own handle to the pointer (the `bio::bh_data(&bh)` shape), so
 /// it cannot outlive the caller's pin-holding scope. This is the
-/// byte-level twin of the GUP pinned-alias copies (`mm::edges::copy_kva*`).
+/// byte-level twin of the GUP pinned-alias copies (`mm::unsafe::copy_kva*`).
 /// SINGLE-frame arm only: a span that legitimately crosses into
 /// verified-adjacent pinned frames goes through
 /// [`pinned_frame_run_bytes`] (INV-CBYTES-6) instead.

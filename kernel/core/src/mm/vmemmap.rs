@@ -55,7 +55,7 @@ pub fn pfn_to_vmemmap(pfn: usize) -> usize {
     // VMEMMAP_STATS is initialized by init_vmemmap() before any
     // pfn_to_vmemmap() call; start_pfn is a plain usize field (no
     // mutation concurrent with vmemmap reads) — INV-MM-9.
-    let start_pfn = super::edges::vmemmap_stats_read().start_pfn;
+    let start_pfn = super::r#unsafe::vmemmap_stats_read().start_pfn;
     VMEMMAP_START + pfn.saturating_sub(start_pfn) * STRUCT_PAGE_SIZE
 }
 
@@ -68,7 +68,7 @@ pub fn pfn_to_vmemmap(pfn: usize) -> usize {
 pub fn vmemmap_to_pfn(vaddr: usize) -> usize {
     // Same as pfn_to_vmemmap — VMEMMAP_STATS is initialized before use
     // (INV-MM-9).
-    let start_pfn = super::edges::vmemmap_stats_read().start_pfn;
+    let start_pfn = super::r#unsafe::vmemmap_stats_read().start_pfn;
     let vaddr = vaddr.clamp(VMEMMAP_START, usize::MAX - STRUCT_PAGE_SIZE + 1);
     start_pfn + vaddr.saturating_sub(VMEMMAP_START) / STRUCT_PAGE_SIZE
 }
@@ -166,7 +166,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // vmemmap_virt points to the reserved physical region returned by
     // memblock_find_in_range; vmemmap_size is the exact allocation
     // size (INV-MM-9 init arm).
-    super::edges::vmemmap_zero_region(vmemmap_virt.bits() as usize, vmemmap_size);
+    super::r#unsafe::vmemmap_zero_region(vmemmap_virt.bits() as usize, vmemmap_size);
 
     // Map each vmemmap page
     let flags = PageTableEntry::V | PageTableEntry::R |
@@ -180,7 +180,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         // vaddr is within [VMEMMAP_START, VMEMMAP_END) (checked
         // above); paddr is the reserved physical page from memblock
         // (INV-MM-9 init arm).
-        super::edges::vmemmap_map_kernel_page(vaddr, paddr, flags);
+        super::r#unsafe::vmemmap_map_kernel_page(vaddr, paddr, flags);
     }
 
     // Final TLB flush after all mappings - MUST flush before accessing!
@@ -189,7 +189,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Store statistics: the VMEMMAP_INIT guard ensures single
     // initialization; no concurrent readers until init_vmemmap()
     // returns (INV-MM-9 init arm).
-    super::edges::vmemmap_stats_write(VmemmapStats {
+    super::r#unsafe::vmemmap_stats_write(VmemmapStats {
         initialized: true,
         vmemmap_base: VMEMMAP_START,
         start_pfn,
@@ -211,7 +211,7 @@ pub fn vmemmap_stats() -> VmemmapStats {
     // VMEMMAP_STATS is initialized before any call to this function;
     // VmemmapStats is Copy, so this is a plain read of a static
     // (INV-MM-9).
-    super::edges::vmemmap_stats_read()
+    super::r#unsafe::vmemmap_stats_read()
 }
 
 /// vmemmap statistics

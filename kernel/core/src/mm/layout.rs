@@ -302,7 +302,7 @@ pub fn kernel_layout_init(layout: KernelMemoryLayout) {
     if KERNEL_LAYOUT_INIT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
         // First and only write — guarded by compare_exchange above
         // (INV-MM-11 init arm).
-        super::edges::kernel_layout_write(layout);
+        super::r#unsafe::kernel_layout_write(layout);
     }
 }
 
@@ -315,7 +315,7 @@ pub fn kernel_layout() -> &'static KernelMemoryLayout {
     }
     // KERNEL_LAYOUT_INIT is true, so kernel_layout_init() has completed
     // and the value is fully initialized (INV-MM-11 shared arm).
-    super::edges::kernel_layout_ref()
+    super::r#unsafe::kernel_layout_ref()
 }
 
 /// Check if kernel layout is initialized

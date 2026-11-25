@@ -338,7 +338,7 @@ pub struct TraceFsEntryData {
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from tracefs_iget/create_root_inode.
 fn entry_of<'a>(inode: &'a Inode) -> Option<&'a TraceFsEntryData> {
-    rux::fs::unsafe_edges::privdata_ref::<TraceFsEntryData>(inode)
+    rux::fs::r#unsafe::privdata_ref::<TraceFsEntryData>(inode)
 }
 
 /// Resolve a child of `dir`.
@@ -561,7 +561,7 @@ fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps
 /// tracefs destroy_inode: reclaim the leaked Box<TraceFsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
 fn tracefs_destroy_inode(inode: &mut Inode) {
-    rux::fs::unsafe_edges::privdata_take_box::<TraceFsEntryData>(inode);
+    rux::fs::r#unsafe::privdata_take_box::<TraceFsEntryData>(inode);
 }
 
 /// tracefs inode operations table.
@@ -610,7 +610,7 @@ fn tracefs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     // The snapshot box is this description's private data
     // (INV-FS-FILEPRIV-1, the mut twin: streaming refill mutates it,
     // serialized by the description's own read sequence).
-    let content = match rux::fs::unsafe_edges::file_privdata_ref_mut::<TraceFsFileContent>(file) {
+    let content = match rux::fs::r#unsafe::file_privdata_ref_mut::<TraceFsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -668,7 +668,7 @@ fn tracefs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn tracefs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
     // See the read op above (INV-FS-FILEPRIV-1).
-    let content = match rux::fs::unsafe_edges::file_privdata_ref::<TraceFsFileContent>(file) {
+    let content = match rux::fs::r#unsafe::file_privdata_ref::<TraceFsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -690,7 +690,7 @@ fn tracefs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize
 fn tracefs_file_close(file: &rux::fs::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(rux::fs::unsafe_edges::file_privdata_take::<TraceFsFileContent>(file));
+    drop(rux::fs::r#unsafe::file_privdata_take::<TraceFsFileContent>(file));
     0
 }
 

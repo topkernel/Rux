@@ -12,7 +12,7 @@
 //! same-name wrappers dispatching the ArchDiagHooks rows.
 //!
 //! Raw reads cross through the audited framework edges:
-//! `crate::arch::x86_64::unsafe_edges::diag_*` and
+//! `crate::arch::x86_64::unsafe::diag_*` and
 //! `crate::arch::x86_64::trap::diag_tss_rsp0` — read-only diagnostic
 //! bottoms (INV-ARCHDIAG rows in the framework ledger).
 
@@ -50,11 +50,11 @@ pub fn gp_regmem_dump(regs: &PtRegs) {
             // Read-only page-table walk + frame-descriptor snapshot on a
             // live root (the audited diag edges carry the unsafe).
             if let Some((ppn, bits)) =
-                crate::arch::x86_64::unsafe_edges::diag_user_pte(root, v & !0xfff)
+                crate::arch::x86_64::r#unsafe::diag_user_pte(root, v & !0xfff)
             {
                 let frame = (ppn as usize) << 12;
                 let (rc, mc, fl, idx) =
-                    crate::arch::x86_64::unsafe_edges::diag_frame_desc(ppn);
+                    crate::arch::x86_64::r#unsafe::diag_frame_desc(ppn);
                 let inring = crate::perf::ring_frame_member(ppn as u64);
                 crate::pr_debug!(
                             "GP-PTE: {}={:#x} pte={:#x} frame={:#x} rc={} mapcount={} ring_frame={} flags={:#x} rmapidx={:#x}(va {:#x})",
@@ -68,7 +68,7 @@ pub fn gp_regmem_dump(regs: &PtRegs) {
             // user_segv_forensics' nested fore_read_u64 — the audited
             // diag edge carries the walk + volatile read).
             let read_at =
-                |va: u64| crate::arch::x86_64::unsafe_edges::diag_fore_read_u64(root, va);
+                |va: u64| crate::arch::x86_64::r#unsafe::diag_fore_read_u64(root, va);
             let w0 = read_at(v & !0x7);
             let w1 = read_at((v & !0x7) + 8);
             if w0.is_some() {
@@ -275,7 +275,7 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         crate::arch::cpu::disable_irq();
         // hlt with IF=0 never wakes — the intentional permanent park of
         // a crashed forensic context (the audited diag edge).
-        crate::arch::x86_64::unsafe_edges::diag_halt_forever();
+        crate::arch::x86_64::r#unsafe::diag_halt_forever();
     }
     segv_hist_note(fault_addr);
     let pid = crate::sched::get_current_pid();
@@ -733,7 +733,7 @@ fn dump_mm_ops(tag: &str, t: &crate::process::task::Task) {
 fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
         // Read-only page-table walk + volatile read on a live root (the
         // audited diag edge carries both).
-        crate::arch::x86_64::unsafe_edges::diag_fore_read_u64(root_ppn, va)
+        crate::arch::x86_64::r#unsafe::diag_fore_read_u64(root_ppn, va)
     }
     if let Some(aspace) = addr_space.as_ref() {
         let root = aspace.root_ppn();
@@ -951,7 +951,7 @@ pub fn scribble_foreign_entry(
     // audited diag edge adopts the borrow — broken-machine report,
     // short ops, the CPU parks after).
     let (task_ptr, task_pid, kbottom, ktop) =
-        crate::arch::x86_64::unsafe_edges::diag_task_fields(tp);
+        crate::arch::x86_64::r#unsafe::diag_task_fields(tp);
     {
         scribble_put_str(b" task=0x");
         scribble_put_hex(task_ptr);
@@ -979,7 +979,7 @@ pub fn scribble_foreign_entry(
             // read through the audited edge (the CPU parks after this
             // report).
             scribble_put_hex(
-                crate::arch::x86_64::unsafe_edges::diag_volatile_read_u64(frame + i * 8),
+                crate::arch::x86_64::r#unsafe::diag_volatile_read_u64(frame + i * 8),
             );
         }
         // Frame surroundings: the slots just above the frame belong to the
@@ -989,7 +989,7 @@ pub fn scribble_foreign_entry(
         let mut a = frame + 0xa8;
         while a < frame + 0xa8 + 0x100 {
             scribble_put_str(b" ");
-            scribble_put_hex(crate::arch::x86_64::unsafe_edges::diag_volatile_read_u64(a));
+            scribble_put_hex(crate::arch::x86_64::r#unsafe::diag_volatile_read_u64(a));
             a += 8;
         }
     }

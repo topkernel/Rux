@@ -156,7 +156,7 @@ def escape_hatch_check(failures):
     owners = [
         ROOT / "kernel" / "core" / "src" / "safety",
         ROOT / "kernel" / "core" / "src" / "process" / "task_ref.rs",
-        ROOT / "kernel" / "core" / "src" / "fs" / "unsafe_edges.rs",
+        ROOT / "kernel" / "core" / "src" / "fs" / "unsafe.rs",
     ]
     files = []
     for o in owners:

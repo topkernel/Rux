@@ -127,7 +127,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 // standard boots never produce — the DEEP_PASS counters
                 // stay zero on the Tier-1 census (drct=0 discipline).
                 let mut deep_freed = 0usize;
-                if let Some(node) = rux::mm::edges::first_node_mut() {
+                if let Some(node) = rux::mm::r#unsafe::first_node_mut() {
                     for zt in [
                         rux::mm::zone::ZoneType::ZoneNormal,
                         rux::mm::zone::ZoneType::ZoneDma32,
@@ -175,7 +175,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
 
                 // SAFETY: kswapd is the only reclaim thread; exclusive node access.
-                if let Some(node) = rux::mm::edges::first_node_mut() {
+                if let Some(node) = rux::mm::r#unsafe::first_node_mut() {
                     // Find total pages from any initialized zone
                     let mut totalpages = 0u64;
                     for zt in [rux::mm::zone::ZoneType::ZoneNormal, rux::mm::zone::ZoneType::ZoneDma32, rux::mm::zone::ZoneType::ZoneDma] {
@@ -222,7 +222,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 /// Returns true if any zone's free pages are below the high watermark.
 fn zone_below_high_watermark() -> bool {
     // SAFETY: kswapd watermark check — exclusive node access from kswapd thread.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return false,
     };

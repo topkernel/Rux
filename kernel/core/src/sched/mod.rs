@@ -18,7 +18,7 @@
 //! 4. fair_sched_class - CFS
 //! 5. idle_sched_class - Per-CPU idle task
 
-pub mod edges;
+pub mod r#unsafe;
 pub mod sched_hooks;
 pub mod entities;
 pub mod reapdrain;
@@ -33,7 +33,6 @@ pub mod class;
 // pub mod fair; — MOVED to the sched service crate (S1b)
 pub mod cgroup;
 // pub mod wakewatch; — MOVED to the sched service crate (S1b)
-pub mod side_edges;
 // pub mod stats; — MOVED to the sched service crate (S1b)
 
 pub use sched::{

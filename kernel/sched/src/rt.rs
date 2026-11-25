@@ -76,7 +76,7 @@ impl SchedClass for RtSchedClass {
 
         // SAFETY: task is a valid pointer from the scheduler; null check above.
         {
-            if crate::sched::edges::task_shared(task).policy() == SchedPolicy::Rr {
+            if crate::sched::r#unsafe::task_shared(task).policy() == SchedPolicy::Rr {
                 RR_TIMESLICE_TICKS
             } else {
                 0 // SCHED_FIFO has no time slice
@@ -148,7 +148,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                         break;
                     }
                     // SAFETY: pos is an embedded ListHead in an enqueued Task; offset_of gives the correct back-pointer.
-                    let task = crate::sched::edges::task_of_rt_list(pos);
+                    let task = crate::sched::r#unsafe::task_of_rt_list(pos);
                     if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                         crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                         break;
@@ -167,7 +167,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                         // R65-pick (probe-slow): single-qword ownership
                         // read — see the fair-class twin.
                         let ownership_ok =
-                            task == prev || crate::sched::edges::task_shared(task).ownership_pickable(cpu_id);
+                            task == prev || crate::sched::r#unsafe::task_shared(task).ownership_pickable(cpu_id);
                         // timer-gap lane: an AFFINITY-ALLOWED task refused
                         // only for ownership is mid-switch-OUT on its
                         // departing cpu (the sched_setaffinity
@@ -175,21 +175,21 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                         // lands within microseconds. Name the owner so
                         // the caller can re-arm NEED_RESCHED and retry
                         // instead of consuming the migration poke.
-                        if !ownership_ok && task != prev && crate::sched::edges::task_shared(task).cpu_allowed(cpu_id) {
+                        if !ownership_ok && task != prev && crate::sched::r#unsafe::task_shared(task).cpu_allowed(cpu_id) {
                             let claim =
-                                crate::sched::edges::task_shared(task).running_on_cpu.load(Ordering::Relaxed);
+                                crate::sched::r#unsafe::task_shared(task).running_on_cpu.load(Ordering::Relaxed);
                             if claim >= 0 {
                                 *skipped_owned_owner = claim as usize;
                             }
                         }
-                        crate::sched::edges::task_shared(task).cpu_allowed(cpu_id)
+                        crate::sched::r#unsafe::task_shared(task).cpu_allowed(cpu_id)
                             && ownership_ok
                             && !crate::sched::cgroup::task_cgroup_throttled(task)
                     };
 
                     // Save next before potential dequeue
                     // SAFETY: pos is a valid ListHead pointer from the queue; next is saved before dequeue mutates the list.
-                    let next_pos = crate::sched::edges::list_next(pos);
+                    let next_pos = crate::sched::r#unsafe::list_next(pos);
 
                     if allowed {
                         // Dequeue this task
@@ -220,14 +220,14 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                                 }
                             }
                             {
-                                let tr = crate::sched::edges::task_shared(task);
+                                let tr = crate::sched::r#unsafe::task_shared(task);
                                 let pid = tr.pid() as u64;
                                 let mask = tr.cpus_allowed() as u64;
                                 let oncpu = tr.on_cpu() as u64;
                                 let claim = tr
                                     .running_on_cpu
                                     .load(Ordering::Relaxed) as u64;
-                                let pk = crate::sched::edges::task_shared(task).pick_state() as u64;
+                                let pk = crate::sched::r#unsafe::task_shared(task).pick_state() as u64;
                                 let throt =
                                     crate::sched::cgroup::task_cgroup_throttled(task) as u64;
                                 for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }

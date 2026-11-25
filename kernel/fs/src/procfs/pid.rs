@@ -317,7 +317,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     // count — single-threaded processes report 1, CLONE_THREAD groups
     // report the leader's nr_threads).
     let threads = {
-        let leader = rux::fs::unsafe_edges::task_group_leader(task);
+        let leader = rux::fs::r#unsafe::task_group_leader(task);
         leader.nr_threads().max(1)
     };
 
@@ -489,7 +489,7 @@ fn read_target_user_mm(
         };
         let in_page_off = (va & 0xFFF) as usize;
         let copy = core::cmp::min(remaining, 4096 - in_page_off);
-        let chunk = rux::fs::unsafe_edges::user_page_slice(ppn, in_page_off, copy);
+        let chunk = rux::fs::r#unsafe::user_page_slice(ppn, in_page_off, copy);
         out.extend_from_slice(chunk);
 
         remaining -= copy;
@@ -623,7 +623,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
             let nice = t.nice();
             let prio = 120 - nice;
             let threads = {
-                let leader = rux::fs::unsafe_edges::task_group_leader(t);
+                let leader = rux::fs::r#unsafe::task_group_leader(t);
                 leader.nr_threads().max(1)
             };
             // SchedPolicy already uses Linux's SCHED_* numbering
@@ -1000,7 +1000,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
             if let Some(file) = addr_space.get_vma_file(start) {
                 // Read-only dentry access on the pinned file (the
                 // INV-FS-FILEDENTRY-1 edge).
-                if let Some(dentry) = rux::fs::unsafe_edges::file_dentry(&file) {
+                if let Some(dentry) = rux::fs::r#unsafe::file_dentry(&file) {
                     // d_path()-style: relative to the READING task's root.
                     let path = rux::fs::vfs::dentry_user_path(dentry);
                     let ino = dentry
@@ -1022,7 +1022,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                         None => None,
                     };
                     if let Some(file) = file {
-                        if let Some(dentry) = rux::fs::unsafe_edges::file_dentry(&file) {
+                        if let Some(dentry) = rux::fs::r#unsafe::file_dentry(&file) {
                             // /proc/<pid>/maps paths are d_path()-style:
                             // relative to the READING task's root.
                             let path =
@@ -1123,7 +1123,7 @@ pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
 
 /// Get the path string for a file descriptor's File object
 fn get_fd_path(file: &alloc::sync::Arc<rux::fs::File>) -> alloc::string::String {
-    match rux::fs::unsafe_edges::file_dentry(file) {
+    match rux::fs::r#unsafe::file_dentry(file) {
         // /proc/<pid>/fd/N links are d_path()-style: relative to the
         // READING task's root (Linux readlink on these uses the reader's
         // fs->root), so a chrooted reader sees jail-relative names.
@@ -1131,7 +1131,7 @@ fn get_fd_path(file: &alloc::sync::Arc<rux::fs::File>) -> alloc::string::String 
         None => {
             // No dentry (pipe, socket, epoll, etc.)
             // Try to get inode number for display
-            match rux::fs::unsafe_edges::file_inode(file) {
+            match rux::fs::r#unsafe::file_inode(file) {
                 Some(inode) => {
                     // Check if it looks like a pipe
                     let rdev = inode.rdev;

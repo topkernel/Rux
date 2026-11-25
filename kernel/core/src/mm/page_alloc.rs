@@ -246,11 +246,11 @@ pub fn reclaim_gate_census() {
             (0xFFFFFFFFu32, 0xFFFFu32)
         } else {
             // INV-PROC-BORROW-1 census arm (racy best-effort read).
-            let t = crate::process::unsafe_edges::borrow_task(t);
+            let t = crate::process::r#unsafe::borrow_task(t);
             (t.state().bits(), t.ti_cpu() as u32)
         }
     };
-    let zone_free = super::edges::first_node()
+    let zone_free = super::r#unsafe::first_node()
         .and_then(|n| n.zone(super::zone::ZoneType::ZoneNormal))
         .map(|z| z.nr_free())
         .unwrap_or(0);
@@ -343,7 +343,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
         if phys != 0 {
             let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
                 [0; crate::debug::memwatch::SITE_FRAMES];
-            super::edges::walk_fp_chain(mw_s0, &mut mw_frames);
+            super::r#unsafe::walk_fp_chain(mw_s0, &mut mw_frames);
             crate::debug::memwatch::note_page_alloc(phys, order, &mw_frames);
         }
         phys
@@ -389,7 +389,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
 
     // Try to allocate from the Zone system first
     // SAFETY: early boot or under allocator lock — exclusive node access.
-    if let Some(node) = super::edges::first_node_mut() {
+    if let Some(node) = super::r#unsafe::first_node_mut() {
         let zone_type = gfp_flags.zone_type();
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
@@ -630,7 +630,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         // pointer remains valid for the lifetime of the
                         // node (INV-SYSC-2 reachability arm).
                         let pfn =
-                            crate::syscall::edges::boxed_mut(zone_ptr).alloc_pages(order);
+                            crate::syscall::r#unsafe::boxed_mut(zone_ptr).alloc_pages(order);
                         if let Some(pfn) = pfn {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                             // Descriptors initialized under the zone lock.
@@ -769,7 +769,7 @@ pub fn oom_forensic_dump(site: &str) {
     );
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = super::edges::first_node_mut() {
+    if let Some(node) = super::r#unsafe::first_node_mut() {
         for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma, ZoneType::ZoneMovable] {
             if let Some(zone) = node.zone(zt) {
                 if !zone.is_initialized() {
@@ -839,7 +839,7 @@ pub fn oom_forensic_dump(site: &str) {
                 // SAFETY: forensic read-only flag access via the
                 // descriptor array; pfn came off an LRU link chain.
                 // INV-MM-2 chain arm.
-                let p = match super::edges::page_ref_of(pfn) {
+                let p = match super::r#unsafe::page_ref_of(pfn) {
                     Some(p) => p,
                     None => break,
                 };
@@ -911,7 +911,7 @@ pub fn oom_forensic_dump(site: &str) {
         for i in 0..nr_descs {
             // Read-only descriptor access on the diagnostic path
             // (INV-MM-2 chain arm).
-            let (rc, linked, reserved) = match super::edges::page_ref_of(MIN_PFN + i) {
+            let (rc, linked, reserved) = match super::r#unsafe::page_ref_of(MIN_PFN + i) {
                 Some(p) => (p.refcount(), p.test_flag(PageFlag::OnFreelist), p.is_reserved()),
                 None => continue,
             };
@@ -985,7 +985,7 @@ pub fn alloc_page_batch(gfp_flags: GfpFlags, n: usize, out: &mut [usize]) -> usi
         return 0;
     }
     // SAFETY: exclusive node access — same discipline as alloc_pages_inner.
-    if let Some(node) = super::edges::first_node_mut() {
+    if let Some(node) = super::r#unsafe::first_node_mut() {
         let zone_type = gfp_flags.zone_type();
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
@@ -1029,7 +1029,7 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
             crate::arch::mm::PhysAddr::new(addr as u64),
         );
         // Fresh allocation, exclusively owned (INV-MM-7 page-slice arm).
-        super::edges::page_slice_mut(virt.0 as usize).fill(0);
+        super::r#unsafe::page_slice_mut(virt.0 as usize).fill(0);
     }
     addr
 }
@@ -1184,7 +1184,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // Refuse the free (bounded leak) and name the frame; the mapping
     // keeps working, so the boot survives to reveal more.
     {
-        let pd_ref = super::edges::page_ref_of(phys_to_pfn(addr));
+        let pd_ref = super::r#unsafe::page_ref_of(phys_to_pfn(addr));
         if pd_ref.is_some_and(|p| p.is_mapped()) {
             static MAPPED_FREES: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -1225,7 +1225,7 @@ pub fn free_pages(addr: usize, order: usize) {
     if crate::trace::EVENT_MMFORENSICS.armed() {
         // Read-only descriptor access on the diagnostic path
         // (INV-MM-2).
-        if let Some(p) = super::edges::page_ref_of(phys_to_pfn(addr)) {
+        if let Some(p) = super::r#unsafe::page_ref_of(phys_to_pfn(addr)) {
             if p.page_type() == crate::mm::page_desc::PageType::PageCache
                 && !p.mapping().is_null()
             {
@@ -1276,7 +1276,7 @@ pub fn free_pages(addr: usize, order: usize) {
         // per frame.
         #[cfg(feature = "x86_64")]
         {
-            let ret: u64 = super::edges::x86_caller_return_address();
+            let ret: u64 = super::r#unsafe::x86_caller_return_address();
             report_free_refusal(&format_args!(
                 "free_pages: WILD addr={:#x} order={} caller={:#x}",
                 addr, order, ret
@@ -1403,7 +1403,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     // Try to free to the Zone system first
     // SAFETY: exclusive node access — caller must ensure no concurrent mutation.
-    if let Some(node) = super::edges::first_node_mut() {
+    if let Some(node) = super::r#unsafe::first_node_mut() {
         // Try each zone type to find which one contains this PFN.
         // ZoneMovable included (review 4.7): pages allocated with
         // __GFP_MOVABLE live there and silently leaked when their free

@@ -387,7 +387,7 @@ impl Ipv6Hdr {
         }
         // INV-NET-HDRVIEW-1: length + alignment checked net_edges-side
         // (same convention as IpHdr::from_bytes).
-        crate::net_edges::pod_view::<Ipv6Hdr>(data)
+        crate::r#unsafe::pod_view::<Ipv6Hdr>(data)
     }
 
     /// Version nibble (host order view of ver_tc_flow)
@@ -429,7 +429,7 @@ pub fn ipv6_push_header(
     // INV-NET-HDRVIEW-1 (write arm): skb_push returned a valid pointer
     // covering at least IPV6_HDR_LEN bytes; alignment is checked
     // net_edges-side (a misaligned push drops the packet, never UB).
-    let Some(hdr) = crate::net_edges::pod_view_mut::<Ipv6Hdr>(ptr) else {
+    let Some(hdr) = crate::r#unsafe::pod_view_mut::<Ipv6Hdr>(ptr) else {
         return Err(());
     };
     // Version=6, traffic class 0, flow label 0.

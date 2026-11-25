@@ -162,7 +162,7 @@ pub fn register_all() {
 /// mm_sched_pins) and the grq-10ns timeline driver. This crate is
 /// #![forbid(unsafe_code)]: the timeline driver reaches the engine's
 /// raw-node internals only through the framework's SAFE debug_* helpers
-/// (sched/edges.rs).
+/// (sched/unsafe.rs).
 #[cfg(feature = "unit-test")]
 // Service-internal tests live CENTRALLY in kernel/core/src/tests/services/
 // (the project test-location rule); compiled HERE for crate visibility

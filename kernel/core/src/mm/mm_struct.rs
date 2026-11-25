@@ -1303,7 +1303,7 @@ impl MmStruct {
     }
 }
 
-// Send/Sync proofs live in mm::edges (INV-MM-2 family) — the Arc'd mm
+// Send/Sync proofs live in mm::unsafe (INV-MM-2 family) — the Arc'd mm
 // crosses threads only through the pinned-reference discipline the
 // edges document.
 

@@ -73,12 +73,12 @@ c9e03eac38d5	kernel/core/src/arch/aarch64/mm/mmu_init.rs	map_identity	972		INV:F
 f4744052279b	kernel/core/src/arch/aarch64/mm/mmu_init.rs	<module>	985		INV:F20
 1e8feaf7f136	kernel/core/src/arch/aarch64/mm/page_fault.rs	get_user_phys	84		INV:F20
 4f1895ae1f6f	kernel/core/src/arch/aarch64/mm/pagetable.rs	get_satp	545	asm	INV:F20
-c8e9026b6491	kernel/core/src/arch/aarch64/mm/unsafe_edges.rs	<module>	43	ptr-ops,addr-arith	INV:INV-AE-PT-4
-b9b75e584056	kernel/core/src/arch/aarch64/mm/unsafe_edges.rs	get_page_table_virt	47		INV:INV-AE-PT-4
-4ecf256f5a9c	kernel/core/src/arch/aarch64/mm/unsafe_edges.rs	from_phys	83		INV:INV-AE-PT-1
-a3d53c26fdbf	kernel/core/src/arch/aarch64/mm/unsafe_edges.rs	get_raw	105		INV:INV-AE-PT-3
-711815cd70c9	kernel/core/src/arch/aarch64/mm/unsafe_edges.rs	set	120		INV:INV-AE-PT-3
-56bc47bcb367	kernel/core/src/arch/aarch64/mm/unsafe_edges.rs	copy_page	156	ptr-ops	INV:INV-AE-COPY-1
+51a5eb9757c9	kernel/core/src/arch/aarch64/mm/unsafe.rs	<module>	43	ptr-ops,addr-arith	INV:INV-AE-PT-4
+3f9e11d59b25	kernel/core/src/arch/aarch64/mm/unsafe.rs	get_page_table_virt	47		INV:INV-AE-PT-4
+ba89b746ad1e	kernel/core/src/arch/aarch64/mm/unsafe.rs	from_phys	83		INV:INV-AE-PT-1
+7801ebe8951b	kernel/core/src/arch/aarch64/mm/unsafe.rs	get_raw	105		INV:INV-AE-PT-3
+599a9fd4b680	kernel/core/src/arch/aarch64/mm/unsafe.rs	set	120		INV:INV-AE-PT-3
+d1686db69d85	kernel/core/src/arch/aarch64/mm/unsafe.rs	copy_page	156	ptr-ops	INV:INV-AE-COPY-1
 88ba14653f5b	kernel/core/src/arch/aarch64/process.rs	flush_thread	74	asm	INV:F19
 22b474e649c5	kernel/core/src/arch/aarch64/process.rs	task_pt_regs	92		INV:F19
 183a056e7ea1	kernel/core/src/arch/aarch64/smp.rs	cpu_id	85	asm	INV:F19
@@ -275,14 +275,14 @@ f5f5d904e1a8	kernel/core/src/arch/riscv64/mm/mmu_init.rs	forensics_scan_trees	24
 12eef46745e6	kernel/core/src/arch/riscv64/mm/page_fault.rs	filemap_pin_cache_page	93		INV:F20
 dcf6d60c266f	kernel/core/src/arch/riscv64/mm/page_fault.rs	write_pte_raw	170		INV:F20
 11b67e2b6927	kernel/core/src/arch/riscv64/mm/pagetable.rs	get_satp	289	asm	INV:F20
-68036cf1aa81	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	<module>	45	ptr-ops,addr-arith	INV:INV-RE-PT-4
-ecfd9ca1c25c	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	get_page_table_virt	51		INV:INV-RE-PT-4
-f4c603f16265	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	from_phys	99		INV:INV-RE-PT-1
-19472eba32b6	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	get_raw	121		INV:INV-RE-PT-3
-a31f383abf03	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	set	136		INV:INV-RE-PT-3
-0c63942d1f63	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	static_root	171		INV:INV-RE-PT-1
-530e306c2e7c	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	static_root	175		INV:INV-RE-PT-1
-3f3b7b213030	kernel/core/src/arch/riscv64/mm/unsafe_edges.rs	copy_page	191	ptr-ops	INV:INV-RE-COPY-1
+60a5cb6a638f	kernel/core/src/arch/riscv64/mm/unsafe.rs	<module>	45	ptr-ops,addr-arith	INV:INV-RE-PT-4
+e43eb91d9a5d	kernel/core/src/arch/riscv64/mm/unsafe.rs	get_page_table_virt	51		INV:INV-RE-PT-4
+f0923616910e	kernel/core/src/arch/riscv64/mm/unsafe.rs	from_phys	99		INV:INV-RE-PT-1
+fd8724af10d6	kernel/core/src/arch/riscv64/mm/unsafe.rs	get_raw	121		INV:INV-RE-PT-3
+e394b83d047a	kernel/core/src/arch/riscv64/mm/unsafe.rs	set	136		INV:INV-RE-PT-3
+f339de985ec5	kernel/core/src/arch/riscv64/mm/unsafe.rs	static_root	171		INV:INV-RE-PT-1
+00a82deb692e	kernel/core/src/arch/riscv64/mm/unsafe.rs	static_root	175		INV:INV-RE-PT-1
+ba715f5aeb51	kernel/core/src/arch/riscv64/mm/unsafe.rs	copy_page	191	ptr-ops	INV:INV-RE-COPY-1
 4a720078012e	kernel/core/src/arch/riscv64/mod.rs	init	43	asm	INV:F5
 f77cd6ffd6f0	kernel/core/src/arch/riscv64/mod.rs	init	63	asm	INV:F5
 64220a8688f0	kernel/core/src/arch/riscv64/mod.rs	enable_interrupts	84	asm	INV:F5
@@ -382,9 +382,9 @@ f0fc5b36801e	kernel/core/src/arch/riscv64/uaccess.rs	<module>	257	ptr-ops	INV:IN
 e1180216bf9f	kernel/core/src/arch/riscv64/uaccess.rs	<module>	476	ptr-ops	INV:INV-UACCESS-1
 848ba21fdf9c	kernel/core/src/arch/riscv64/uaccess.rs	<module>	504		INV:INV-UACCESS-1
 47645e71f6fc	kernel/core/src/arch/riscv64/uaccess.rs	futex_cmpxchg_u32_user	510		INV:INV-UACCESS-1
-f9deb3591ce5	kernel/core/src/arch/riscv64/unsafe_edges.rs	<module>	53		INV:INV-RE-FRAME-1
-1b69ac8b6123	kernel/core/src/arch/riscv64/unsafe_edges.rs	from_trap	57		INV:INV-RE-FRAME-1
-24c475ca0a19	kernel/core/src/arch/riscv64/unsafe_edges.rs	diag_volatile_read_u64	97	volatile,ptr-ops	INV:INV-ARCHDIAG-R1
+e32812afc425	kernel/core/src/arch/riscv64/unsafe.rs	<module>	53		INV:INV-RE-FRAME-1
+355eb8a91aa7	kernel/core/src/arch/riscv64/unsafe.rs	from_trap	57		INV:INV-RE-FRAME-1
+41444c22f289	kernel/core/src/arch/riscv64/unsafe.rs	diag_volatile_read_u64	97	volatile,ptr-ops	INV:INV-ARCHDIAG-R1
 e20740a703c9	kernel/core/src/arch/riscv64/vext.rs	prime_hart_has_v	110		INV:F5
 a614c0cd9c98	kernel/core/src/arch/riscv64/vext.rs	vlen_fits	123	asm	INV:F5
 cac6d6d08643	kernel/core/src/arch/riscv64/vext.rs	vs_disable	135	asm	INV:F5
@@ -552,12 +552,12 @@ cfb127bea8c0	kernel/core/src/arch/x86_64/mm/page_fault.rs	fill_file_page	82	ptr-
 7b63aefabb08	kernel/core/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	106		INV:INV-XE-ZP
 d82d6cd2925f	kernel/core/src/arch/x86_64/mm/page_fault.rs	filemap_pin_cache_page	139		INV:F20
 3837ffedebb3	kernel/core/src/arch/x86_64/mm/page_fault.rs	_root_table_ref	353		INV:F20
-5066f3432a76	kernel/core/src/arch/x86_64/mm/unsafe_edges.rs	<module>	45	ptr-ops,addr-arith	INV:INV-XE-PT-4
-102efff09bca	kernel/core/src/arch/x86_64/mm/unsafe_edges.rs	from_phys	95		INV:INV-XE-PT-1
-e6e551632494	kernel/core/src/arch/x86_64/mm/unsafe_edges.rs	get_raw	123		INV:INV-XE-PT-3
-54c06f19715f	kernel/core/src/arch/x86_64/mm/unsafe_edges.rs	set	142		INV:INV-XE-PT-3
-99b8ca89f189	kernel/core/src/arch/x86_64/mm/unsafe_edges.rs	static_root	181		INV:INV-XE-PT-1
-b16e64ae304a	kernel/core/src/arch/x86_64/mm/unsafe_edges.rs	copy_page	199	ptr-ops	INV:INV-XE-COPY-1
+cfdb96951cc2	kernel/core/src/arch/x86_64/mm/unsafe.rs	<module>	45	ptr-ops,addr-arith	INV:INV-XE-PT-4
+76b0ddd68f1c	kernel/core/src/arch/x86_64/mm/unsafe.rs	from_phys	95		INV:INV-XE-PT-1
+9aa33b5614ea	kernel/core/src/arch/x86_64/mm/unsafe.rs	get_raw	123		INV:INV-XE-PT-3
+25e18192f07b	kernel/core/src/arch/x86_64/mm/unsafe.rs	set	142		INV:INV-XE-PT-3
+d4e678a62a6d	kernel/core/src/arch/x86_64/mm/unsafe.rs	static_root	181		INV:INV-XE-PT-1
+87ea07c914cd	kernel/core/src/arch/x86_64/mm/unsafe.rs	copy_page	199	ptr-ops	INV:INV-XE-COPY-1
 004c7cdc77f9	kernel/core/src/arch/x86_64/mod.rs	enable_interrupts	55	asm	INV:F5
 1c3a806721bf	kernel/core/src/arch/x86_64/mpk.rs	rdpkru	66	asm	INV:F5
 5a6da93a78fa	kernel/core/src/arch/x86_64/mpk.rs	wrpkru	91	asm	INV:F5
@@ -681,14 +681,14 @@ aa8e40c2cee8	kernel/core/src/arch/x86_64/uaccess.rs	<module>	441	ptr-ops	INV:INV
 b86316fe8a16	kernel/core/src/arch/x86_64/uaccess.rs	strncpy_from_user	522	ptr-ops	INV:INV-UACCESS-1
 2edcf5be69ec	kernel/core/src/arch/x86_64/uaccess.rs	<module>	548		INV:INV-UACCESS-1
 9e5f3dd93581	kernel/core/src/arch/x86_64/uaccess.rs	strnlen_user	559		INV:INV-UACCESS-1
-326e325140a6	kernel/core/src/arch/x86_64/unsafe_edges.rs	<module>	53		INV:INV-XE-FRAME-1
-a2d7fa0da9fc	kernel/core/src/arch/x86_64/unsafe_edges.rs	from_trap	57		INV:INV-XE-FRAME-1
-028c9336392b	kernel/core/src/arch/x86_64/unsafe_edges.rs	diag_task_fields	98		INV:INV-ARCHDIAG-1
-271125f406cd	kernel/core/src/arch/x86_64/unsafe_edges.rs	diag_task_pid_comm	118		INV:INV-ARCHDIAG-2
-71898c12df79	kernel/core/src/arch/x86_64/unsafe_edges.rs	diag_volatile_read_u64	127	volatile,ptr-ops	INV:INV-ARCHDIAG-3
-6335037b348f	kernel/core/src/arch/x86_64/unsafe_edges.rs	diag_fore_read_u64	142	volatile,ptr-ops	INV:INV-ARCHDIAG-4
-1fa794ad9cbc	kernel/core/src/arch/x86_64/unsafe_edges.rs	diag_frame_desc	162		INV:INV-ARCHDIAG-5
-ee123e6c63c8	kernel/core/src/arch/x86_64/unsafe_edges.rs	diag_halt_forever	179	asm	INV:INV-ARCHDIAG-6
+706f266821c7	kernel/core/src/arch/x86_64/unsafe.rs	<module>	53		INV:INV-XE-FRAME-1
+7fc82423356e	kernel/core/src/arch/x86_64/unsafe.rs	from_trap	57		INV:INV-XE-FRAME-1
+a29942be3290	kernel/core/src/arch/x86_64/unsafe.rs	diag_task_fields	98		INV:INV-ARCHDIAG-1
+896762df7f1c	kernel/core/src/arch/x86_64/unsafe.rs	diag_task_pid_comm	118		INV:INV-ARCHDIAG-2
+f257f918d63f	kernel/core/src/arch/x86_64/unsafe.rs	diag_volatile_read_u64	127	volatile,ptr-ops	INV:INV-ARCHDIAG-3
+d95e70d5696e	kernel/core/src/arch/x86_64/unsafe.rs	diag_fore_read_u64	142	volatile,ptr-ops	INV:INV-ARCHDIAG-4
+acde609a3b2d	kernel/core/src/arch/x86_64/unsafe.rs	diag_frame_desc	162		INV:INV-ARCHDIAG-5
+e626cd185611	kernel/core/src/arch/x86_64/unsafe.rs	diag_halt_forever	179	asm	INV:INV-ARCHDIAG-6
 ef6151c33e6f	kernel/core/src/boot_edges.rs	image_end_va	26		INV:INV-BOOT-SYM-1
 442aa269abde	kernel/core/src/boot_edges.rs	set_va_pa_offset	35		INV:INV-BOOT-SETUP-1
 000ff99b9468	kernel/core/src/boot_edges.rs	zeropage_initrd_hint	49	volatile,ptr-ops	INV:INV-BOOT-ZEROPAGE-1
@@ -725,14 +725,6 @@ f1a37294a9ae	kernel/core/src/debug/backtrace.rs	caller_return_address	143	asm	IN
 9a842fdd2725	kernel/core/src/debug/backtrace.rs	save_regs	375	asm	INV:F2
 fe275eb46406	kernel/core/src/debug/backtrace.rs	dump_csrs	427	asm	INV:F2
 a007e1ef04a9	kernel/core/src/debug/backtrace.rs	dump_csrs	458	asm	INV:F2
-19e677f9d43f	kernel/core/src/debug/forensics_edges.rs	adopt_task	53		INV:INV-FOR-1
-b4077cc8381c	kernel/core/src/debug/forensics_edges.rs	t_pid	60		INV:INV-FOR-1
-33175989ed56	kernel/core/src/debug/forensics_edges.rs	t_comm	67		INV:INV-FOR-1
-06d8d4c177f6	kernel/core/src/debug/forensics_edges.rs	t_preempt_count	73	no-preempt	INV:INV-FOR-1
-f088c426a722	kernel/core/src/debug/forensics_edges.rs	raw_qword	89	volatile,ptr-ops	INV:INV-FOR-2
-d8b3ae031ab0	kernel/core/src/debug/forensics_edges.rs	raw_u32	100	volatile,ptr-ops	INV:INV-FOR-2
-5e5eae1d16e6	kernel/core/src/debug/forensics_edges.rs	location	112	ptr-ops	INV:INV-FOR-3
-6cc5e9bb35e4	kernel/core/src/debug/forensics_edges.rs	location_ref	120		INV:INV-FOR-3
 9ee365b174db	kernel/core/src/debug/hung_task.rs	report_hung_task	221	ptr-ops	INV:F18
 92d54b841df7	kernel/core/src/debug/leakorigin.rs	note_acquire	191	volatile,ptr-ops	INV:F1
 08fb244c363f	kernel/core/src/debug/leakorigin.rs	note_acquire	236		INV:F1
@@ -812,6 +804,14 @@ a6839db2f4f3	kernel/core/src/debug/taskdump.rs	dump_all_tasks	508		INV:F18
 c4722b16b27b	kernel/core/src/debug/taskdump.rs	frozen_ipi_probe	960	asm	INV:F18
 dbb8f0f956ed	kernel/core/src/debug/taskdump.rs	frozen_ipi_probe	982		INV:F18
 551d6cbbddd2	kernel/core/src/debug/taskdump.rs	dump_frozen_cpu_truth	1082		INV:F18
+c6e56b2404de	kernel/core/src/debug/unsafe.rs	adopt_task	53		INV:INV-FOR-1
+a4cea2feb42b	kernel/core/src/debug/unsafe.rs	t_pid	60		INV:INV-FOR-1
+c0781bed3fa2	kernel/core/src/debug/unsafe.rs	t_comm	67		INV:INV-FOR-1
+cab105a63fdb	kernel/core/src/debug/unsafe.rs	t_preempt_count	73	no-preempt	INV:INV-FOR-1
+a969a89e1d2f	kernel/core/src/debug/unsafe.rs	raw_qword	89	volatile,ptr-ops	INV:INV-FOR-2
+5c5c3a6c8b15	kernel/core/src/debug/unsafe.rs	raw_u32	100	volatile,ptr-ops	INV:INV-FOR-2
+b1cad1f0c0ea	kernel/core/src/debug/unsafe.rs	location	112	ptr-ops	INV:INV-FOR-3
+d32cfa7674b0	kernel/core/src/debug/unsafe.rs	location_ref	120		INV:INV-FOR-3
 dbe024246f36	kernel/core/src/debug/wildwatch.rs	arm	112		INV:F1
 56741b898256	kernel/core/src/debug/wildwatch.rs	arm	170	volatile	INV:F1
 2a68a271af92	kernel/core/src/debug/wildwatch.rs	enable_write_protect	188		INV:F1
@@ -1029,13 +1029,6 @@ f954ce75088f	kernel/core/src/fs/event_notify.rs	boxed_drop	114		INV:INV-SYSC-2
 c48bca762eff	kernel/core/src/fs/event_notify.rs	boxed_ref	155		INV:INV-SYSC-2
 e183529b2589	kernel/core/src/fs/event_notify.rs	<module>	634		INV:INV-SYSC-2
 fcc6bf15b70a	kernel/core/src/fs/event_notify.rs	<module>	635		INV:INV-SYSC-2
-26996be6f0c1	kernel/core/src/fs/ext4_edges.rs	typed_ref	29	ptr-ops	GAP
-b725d397c78c	kernel/core/src/fs/ext4_edges.rs	typed_ref_mut	40	ptr-ops	GAP
-f2ffa5565dde	kernel/core/src/fs/ext4_edges.rs	typed_slice	62	raw-construct,ptr-ops	GAP
-f39233a0c261	kernel/core/src/fs/ext4_edges.rs	typed_slice_mut	83	ptr-ops	GAP
-3b1d46044bb2	kernel/core/src/fs/ext4_edges.rs	u32_array_ref	96	ptr-ops	GAP
-6b9483a2dcc3	kernel/core/src/fs/ext4_edges.rs	u32_array_ref_mut	107	ptr-ops	GAP
-0e99d783e6bd	kernel/core/src/fs/ext4_edges.rs	zeroed_on_disk	120		GAP
 a82227c4b37d	kernel/core/src/fs/file.rs	<module>	305	ptr-ops	INV:INV-FILE-CELL-1
 1b5664c77f84	kernel/core/src/fs/file.rs	file_arc_try_clone	313		INV:INV-FILE-ARC-1
 2cafacd4b1d2	kernel/core/src/fs/file.rs	file_arc_try_clone	318		INV:INV-FILE-ARC-1
@@ -1163,45 +1156,52 @@ e2b33d00b39f	kernel/core/src/fs/stat.rs	copy_stat_to_user	289	ptr-ops	INV:INV-UA
 38e0b0788a27	kernel/core/src/fs/superblock.rs	<module>	85		INV:INV-SBTYPE-1
 cf242b096c16	kernel/core/src/fs/superblock.rs	<module>	219		INV:INV-SBTYPE-1
 ae1fd0567aa4	kernel/core/src/fs/superblock.rs	<module>	220		INV:INV-SBTYPE-1
-0d19c4e890f6	kernel/core/src/fs/unsafe_edges.rs	privdata_ref	39	ptr-ops	INV:INV-FS-FILEPRIV-1
-416e35ec1460	kernel/core/src/fs/unsafe_edges.rs	file_privdata_ref	55		INV:INV-FS-FILEPRIV-1
-26f674cc62b8	kernel/core/src/fs/unsafe_edges.rs	file_privdata_ref	57	ptr-ops	INV:INV-FS-FILEPRIV-1
-a87f108ce7b1	kernel/core/src/fs/unsafe_edges.rs	file_privdata_take	68		INV:INV-FS-FILEPRIV-1
-5d79d33d2607	kernel/core/src/fs/unsafe_edges.rs	file_privdata_take	73	ptr-ops	INV:INV-FS-GLOBALSB-1
-11286a8f483d	kernel/core/src/fs/unsafe_edges.rs	static_ref	89		INV:INV-FS-GLOBALSB-1
-3e282eaedc5e	kernel/core/src/fs/unsafe_edges.rs	static_ref_unchecked	98		INV:INV-FS-FILEPRIV-1
-0fc1ca235fe9	kernel/core/src/fs/unsafe_edges.rs	file_privdata_arc_ref	108		INV:INV-FS-FILEPRIV-2
-d4f91596442e	kernel/core/src/fs/unsafe_edges.rs	file_privdata_arc_ref	113	ptr-ops	INV:INV-FS-FILEPRIV-1
-c24e854d2e38	kernel/core/src/fs/unsafe_edges.rs	file_privdata_arc_take	123		INV:INV-FS-FILEPRIV-1
-aafeaf543ef4	kernel/core/src/fs/unsafe_edges.rs	file_privdata_arc_take	126	ptr-ops	INV:INV-FS-FILEPRIV-1
-3c9a20561420	kernel/core/src/fs/unsafe_edges.rs	file_privdata_ref_mut	140		INV:INV-FS-FILEPRIV-2
-ce1dd672ad4d	kernel/core/src/fs/unsafe_edges.rs	file_privdata_ref_mut	146	ptr-ops	INV:INV-FS-FILEPRIV-1
-ad77337df1a3	kernel/core/src/fs/unsafe_edges.rs	file_inode	163		INV:INV-FS-FILEINODE-2
-ab98e057124f	kernel/core/src/fs/unsafe_edges.rs	file_inode_install	172		INV:INV-FS-FILEPRIV-2
-8de795f5010c	kernel/core/src/fs/unsafe_edges.rs	file_privdata_take_arc	184		INV:INV-FS-FILEPRIV-2
-8cf73723416a	kernel/core/src/fs/unsafe_edges.rs	file_privdata_take_arc	190	ptr-ops	INV:INV-FS-FILEPRIV-2
-ee7e379cf3b0	kernel/core/src/fs/unsafe_edges.rs	privdata_ref_leaked	202	ptr-ops	INV:INV-FS-FILEINODE-1
-c858209be171	kernel/core/src/fs/unsafe_edges.rs	file_inode_arc	210		INV:INV-FS-FILEINODE-1
-2c3ab76463db	kernel/core/src/fs/unsafe_edges.rs	file_ra_state_mut	224		GAP
-8eb30da8b1d4	kernel/core/src/fs/unsafe_edges.rs	privdata_take_box	247	ptr-ops	GAP
-9dbacf0be8e7	kernel/core/src/fs/unsafe_edges.rs	privdata_drop_arc	260	ptr-ops	GAP
-78af90262c7b	kernel/core/src/fs/unsafe_edges.rs	kill_sb_reclaim_box	270	ptr-ops	GAP
-52e51afe9f97	kernel/core/src/fs/unsafe_edges.rs	file_privdata_arc_clone	285		GAP
-399e79df66cb	kernel/core/src/fs/unsafe_edges.rs	vec_zeroed_sized	298	ptr-ops	GAP
-0fce434530aa	kernel/core/src/fs/unsafe_edges.rs	kernel_slice	309	raw-construct	GAP
-da361f6ce3d4	kernel/core/src/fs/unsafe_edges.rs	kernel_slice_mut	315		GAP
-6926986fb72e	kernel/core/src/fs/unsafe_edges.rs	file_dentry	326		INV:INV-FS-FILEDENTRY-1
-90a201a1453b	kernel/core/src/fs/unsafe_edges.rs	task_group_leader	337		INV:INV-PROC-TGL-1
-f65b2bcbb81c	kernel/core/src/fs/unsafe_edges.rs	user_page_slice	350	raw-construct	INV:INV-PROC-USERPAGE-1
-eae3006e96b7	kernel/core/src/fs/unsafe_edges.rs	diag_read_u64	359	volatile	INV:INV-PROC-DIAG-1
-cbc61d288e70	kernel/core/src/fs/unsafe_edges.rs	diag_task_ref	369		INV:INV-PROC-DIAG-1
-a6d05368aed1	kernel/core/src/fs/unsafe_edges.rs	privdata_arc_clone	384		INV:INV-FS-PRIVDATA-1
-174824082a03	kernel/core/src/fs/unsafe_edges.rs	kva_copy_to	397	ptr-ops	INV:INV-DEVFS-SHARED-1
-d83e1b5639d7	kernel/core/src/fs/unsafe_edges.rs	kva_copy_from	403	ptr-ops	INV:INV-DEVFS-SHARED-1
-0534c72dfeaf	kernel/core/src/fs/unsafe_edges.rs	kva_zero	410	ptr-ops	INV:INV-DEVFS-SHARED-1
-08e42ddd45cb	kernel/core/src/fs/unsafe_edges.rs	kernel_slice_at	419	raw-construct	INV:INV-FS-KSLICE-1
-e5567a98e78e	kernel/core/src/fs/unsafe_edges.rs	file_close	427		GAP
-dfd4a72c652d	kernel/core/src/fs/unsafe_edges.rs	file_privdata_arc_static	441		GAP
+1dbbbd4c38dd	kernel/core/src/fs/unsafe.rs	privdata_ref	39	ptr-ops	INV:INV-FS-FILEPRIV-1
+10e41594216f	kernel/core/src/fs/unsafe.rs	file_privdata_ref	55		INV:INV-FS-FILEPRIV-1
+b45cd3ea4b81	kernel/core/src/fs/unsafe.rs	file_privdata_ref	57	ptr-ops	INV:INV-FS-FILEPRIV-1
+c3b5fa408ce4	kernel/core/src/fs/unsafe.rs	file_privdata_take	68		INV:INV-FS-FILEPRIV-1
+3d4f490e3c5b	kernel/core/src/fs/unsafe.rs	file_privdata_take	73	ptr-ops	INV:INV-FS-GLOBALSB-1
+06f56c22c078	kernel/core/src/fs/unsafe.rs	static_ref	89		INV:INV-FS-GLOBALSB-1
+f6f40f81fa5b	kernel/core/src/fs/unsafe.rs	static_ref_unchecked	98		INV:INV-FS-FILEPRIV-1
+628741d1b96f	kernel/core/src/fs/unsafe.rs	file_privdata_arc_ref	108		INV:INV-FS-FILEPRIV-2
+2038e796cd2c	kernel/core/src/fs/unsafe.rs	file_privdata_arc_ref	113	ptr-ops	INV:INV-FS-FILEPRIV-1
+d9ae0b0d7f6e	kernel/core/src/fs/unsafe.rs	file_privdata_arc_take	123		INV:INV-FS-FILEPRIV-1
+c0c91769b2a5	kernel/core/src/fs/unsafe.rs	file_privdata_arc_take	126	ptr-ops	INV:INV-FS-FILEPRIV-1
+74a2c03c37b4	kernel/core/src/fs/unsafe.rs	file_privdata_ref_mut	140		INV:INV-FS-FILEPRIV-2
+91efee2a4212	kernel/core/src/fs/unsafe.rs	file_privdata_ref_mut	146	ptr-ops	INV:INV-FS-FILEPRIV-1
+8f0ffd65ba3f	kernel/core/src/fs/unsafe.rs	file_inode	163		INV:INV-FS-FILEINODE-2
+25558ecebf44	kernel/core/src/fs/unsafe.rs	file_inode_install	172		INV:INV-FS-FILEPRIV-2
+73853ddacbac	kernel/core/src/fs/unsafe.rs	file_privdata_take_arc	184		INV:INV-FS-FILEPRIV-2
+d5a868f66bcb	kernel/core/src/fs/unsafe.rs	file_privdata_take_arc	190	ptr-ops	INV:INV-FS-FILEPRIV-2
+bc79b58fc6e7	kernel/core/src/fs/unsafe.rs	privdata_ref_leaked	202	ptr-ops	INV:INV-FS-FILEINODE-1
+0148d58a3411	kernel/core/src/fs/unsafe.rs	file_inode_arc	210		INV:INV-FS-FILEINODE-1
+e6c2b5aeee27	kernel/core/src/fs/unsafe.rs	file_ra_state_mut	224		GAP
+2840328a0579	kernel/core/src/fs/unsafe.rs	privdata_take_box	247	ptr-ops	GAP
+e710796bd184	kernel/core/src/fs/unsafe.rs	privdata_drop_arc	260	ptr-ops	GAP
+86c3a6b2537a	kernel/core/src/fs/unsafe.rs	kill_sb_reclaim_box	270	ptr-ops	GAP
+96c980ad5a83	kernel/core/src/fs/unsafe.rs	file_privdata_arc_clone	285		GAP
+28ca938c864f	kernel/core/src/fs/unsafe.rs	vec_zeroed_sized	298	ptr-ops	GAP
+254465871c04	kernel/core/src/fs/unsafe.rs	kernel_slice	309	raw-construct	GAP
+dc6ed57c2fba	kernel/core/src/fs/unsafe.rs	kernel_slice_mut	315		GAP
+e414daede092	kernel/core/src/fs/unsafe.rs	file_dentry	326		INV:INV-FS-FILEDENTRY-1
+28208a738a07	kernel/core/src/fs/unsafe.rs	task_group_leader	337		INV:INV-PROC-TGL-1
+824400b75806	kernel/core/src/fs/unsafe.rs	user_page_slice	350	raw-construct	INV:INV-PROC-USERPAGE-1
+32ff31cdb328	kernel/core/src/fs/unsafe.rs	diag_read_u64	359	volatile	INV:INV-PROC-DIAG-1
+38a50047d9e1	kernel/core/src/fs/unsafe.rs	diag_task_ref	369		INV:INV-PROC-DIAG-1
+7d354fd9aa86	kernel/core/src/fs/unsafe.rs	privdata_arc_clone	384		INV:INV-FS-PRIVDATA-1
+ad62a2f0cd89	kernel/core/src/fs/unsafe.rs	kva_copy_to	397	ptr-ops	INV:INV-DEVFS-SHARED-1
+9695692faaad	kernel/core/src/fs/unsafe.rs	kva_copy_from	403	ptr-ops	INV:INV-DEVFS-SHARED-1
+65ed3320bbca	kernel/core/src/fs/unsafe.rs	kva_zero	410	ptr-ops	INV:INV-DEVFS-SHARED-1
+3fb7c95c57db	kernel/core/src/fs/unsafe.rs	kernel_slice_at	419	raw-construct	INV:INV-FS-KSLICE-1
+2e54aaa7e48a	kernel/core/src/fs/unsafe.rs	file_close	427		GAP
+9596dbc597a2	kernel/core/src/fs/unsafe.rs	file_privdata_arc_static	441		GAP
+b57b7b6053ea	kernel/core/src/fs/unsafe.rs	typed_ref	478	ptr-ops	GAP
+b463ab0e72e6	kernel/core/src/fs/unsafe.rs	typed_ref_mut	489	ptr-ops	GAP
+81d9d40b04fb	kernel/core/src/fs/unsafe.rs	typed_slice	511	raw-construct,ptr-ops	GAP
+c0847f57450a	kernel/core/src/fs/unsafe.rs	typed_slice_mut	532	ptr-ops	GAP
+ed14947737ce	kernel/core/src/fs/unsafe.rs	u32_array_ref	545	ptr-ops	GAP
+c69b2ab55728	kernel/core/src/fs/unsafe.rs	u32_array_ref_mut	556	ptr-ops	GAP
+90d6a45e738b	kernel/core/src/fs/unsafe.rs	zeroed_on_disk	569		GAP
 2bc35d5ccaf9	kernel/core/src/fs/vfs.rs	get_vfs_root	220	ptr-ops	INV:INV-VFS-WALK-1
 0be8f6f0d8b6	kernel/core/src/fs/vfs.rs	mount_is_busy	736		INV:INV-VFS-WALK-1
 4b5de49c68c2	kernel/core/src/fs/vfs.rs	path_lookup	2893		INV:INV-VFS-WALK-1
@@ -1319,21 +1319,21 @@ ea4b19858089	kernel/core/src/ipc/binder.rs	binder_mmap_handler	3940	ptr-ops	INV:
 b4313b2ac691	kernel/core/src/ipc/binder.rs	binder_poll_unwait	4472		INV:INV-KTASK-1
 507fb4845a38	kernel/core/src/ipc/binder.rs	bc_corruption_snapshot	5347	raw-construct	INV:INV-BINDER-PROBE
 3300c4b802f2	kernel/core/src/ipc/binder.rs	get	8962		INV:INV-BINDER-PINTASK
-b6085dc6d7a7	kernel/core/src/ipc/binder_edges.rs	entry_frame	37		INV:INV-SAFECALL-1
-bdc1ed5ffd1a	kernel/core/src/ipc/binder_edges.rs	entry_frame	44		INV:INV-SAFECALL-1
-f014ddcdaaf4	kernel/core/src/ipc/binder_edges.rs	entry_frame	51		INV:INV-SAFECALL-1
-fba22b4cad83	kernel/core/src/ipc/binder_edges.rs	entry_frame_sp	69		INV:INV-SAFECALL-1
-b8a79a9000a7	kernel/core/src/ipc/binder_edges.rs	entry_frame_sp	76		INV:INV-SAFECALL-1
-f9a254002e58	kernel/core/src/ipc/binder_edges.rs	entry_frame_sp	83		INV:INV-SAFECALL-1
-14960fabd0e2	kernel/core/src/ipc/binder_edges.rs	probe_leaf	95		INV:INV-SAFECALL-1
-13f1aadeae2e	kernel/core/src/ipc/binder_edges.rs	probe_u32	111	volatile,ptr-ops	INV:INV-SAFECALL-1
-a8aa38fd55e3	kernel/core/src/ipc/binder_edges.rs	probe_u64	124	volatile,ptr-ops	INV:INV-SAFECALL-1
-abb515cff494	kernel/core/src/ipc/binder_edges.rs	entry_frame_futex_x86	140		INV:INV-SAFECALL-1
-e0259cbfb715	kernel/core/src/ipc/binder_edges.rs	stack_word	157	volatile,ptr-ops	INV:INV-SAFECALL-1
-7c7964fca8f1	kernel/core/src/ipc/binder_edges.rs	diag_task_comm	169		GAP
-1aaef2371bcb	kernel/core/src/ipc/binder_edges.rs	diag_task	181		GAP
-305203aabdc2	kernel/core/src/ipc/edges.rs	shm_page_get	24		GAP
-9bb8f7e5e8e5	kernel/core/src/ipc/edges.rs	shm_page_put	39		GAP
+54fc5e5416f4	kernel/core/src/ipc/unsafe.rs	shm_page_get	24		GAP
+bab1edcf8b66	kernel/core/src/ipc/unsafe.rs	shm_page_put	39		GAP
+bde10459150a	kernel/core/src/ipc/unsafe.rs	entry_frame	84		INV:INV-SAFECALL-1
+62b2fac6ca65	kernel/core/src/ipc/unsafe.rs	entry_frame	91		INV:INV-SAFECALL-1
+2ab131cbed81	kernel/core/src/ipc/unsafe.rs	entry_frame	98		INV:INV-SAFECALL-1
+7d23c8d06ccc	kernel/core/src/ipc/unsafe.rs	entry_frame_sp	116		INV:INV-SAFECALL-1
+154fdb7bf73b	kernel/core/src/ipc/unsafe.rs	entry_frame_sp	123		INV:INV-SAFECALL-1
+957713ccee38	kernel/core/src/ipc/unsafe.rs	entry_frame_sp	130		INV:INV-SAFECALL-1
+66accfd2c8e3	kernel/core/src/ipc/unsafe.rs	probe_leaf	142		INV:INV-SAFECALL-1
+b45bd39e0565	kernel/core/src/ipc/unsafe.rs	probe_u32	158	volatile,ptr-ops	INV:INV-SAFECALL-1
+ec7859c45968	kernel/core/src/ipc/unsafe.rs	probe_u64	171	volatile,ptr-ops	INV:INV-SAFECALL-1
+fc65a47e1a1b	kernel/core/src/ipc/unsafe.rs	entry_frame_futex_x86	187		INV:INV-SAFECALL-1
+99c2baf34255	kernel/core/src/ipc/unsafe.rs	stack_word	204	volatile,ptr-ops	INV:INV-SAFECALL-1
+ca2446bacf2e	kernel/core/src/ipc/unsafe.rs	diag_task_comm	216		GAP
+0d1d2c277bde	kernel/core/src/ipc/unsafe.rs	diag_task	228		GAP
 290d48558d13	kernel/core/src/lib.rs	rust_main_impl	1818	asm	INV:INV-BOOT-ZEROPAGE-1
 52f833da8c48	kernel/core/src/list.rs	<module>	73		INV:INV-LIST-1
 0601e4fcc5a9	kernel/core/src/list.rs	<module>	92		INV:INV-LIST-1
@@ -1365,51 +1365,6 @@ f8cd32b7e902	kernel/core/src/mm/buddy_allocator.rs	<module>	1655		INV:INV-HEAP-3
 c8e4acebfed0	kernel/core/src/mm/buddy_allocator.rs	<module>	1682		INV:INV-HEAP-3
 afcb1ef2e1c5	kernel/core/src/mm/buddy_allocator.rs	<module>	1683		INV:INV-HEAP-3
 a228efac6aaa	kernel/core/src/mm/buddy_allocator.rs	<module>	1712		INV:INV-HEAP-3
-796d7c12c50a	kernel/core/src/mm/edges.rs	first_node_mut	40		INV:INV-MM-1
-579e0b16e35e	kernel/core/src/mm/edges.rs	page_of	61		INV:INV-MM-2
-a40d4c7b0e68	kernel/core/src/mm/edges.rs	page_ref_of	74		INV:INV-MM-2
-35a84e56c02a	kernel/core/src/mm/edges.rs	memblock_ref	92		INV:INV-MM-3
-76a786166e79	kernel/core/src/mm/edges.rs	memblock_mut	101		INV:INV-MM-2
-15f8d9959400	kernel/core/src/mm/edges.rs	walk_fp_chain	111		INV:INV-MM-2
-5c6a949859f3	kernel/core/src/mm/edges.rs	slab_read_freelist_link	127	ptr-ops	INV:INV-MM-4
-77bebfbb4118	kernel/core/src/mm/edges.rs	slab_write_freelist_link	135	ptr-ops	INV:INV-MM-4
-086cceb5ffcf	kernel/core/src/mm/edges.rs	slab_header_mut	144	ptr-ops	INV:INV-MM-4
-86c06832d5c5	kernel/core/src/mm/edges.rs	slab_header_cache_idx	152	ptr-ops	INV:INV-MM-4
-f8cd66e4c95b	kernel/core/src/mm/edges.rs	slab_pages_init	161		INV:INV-MM-4
-fd69494761b3	kernel/core/src/mm/edges.rs	slab_pages	171		INV:INV-MM-4
-7acd1bbdfb61	kernel/core/src/mm/edges.rs	slab_zero	179	ptr-ops	INV:INV-MM-4
-c1c1a83ad493	kernel/core/src/mm/edges.rs	<module>	187		INV:INV-MM-4
-0dd5e4d9ec9d	kernel/core/src/mm/edges.rs	<module>	191		INV:INV-MM-5
-eac8ed5218ff	kernel/core/src/mm/edges.rs	<module>	203		INV:INV-MM-5
-b2df6c87cd3b	kernel/core/src/mm/edges.rs	pcp_row_exclusive	215		INV:INV-MM-5
-aa0d381e4b0a	kernel/core/src/mm/edges.rs	pcp_row_exclusive	216		INV:INV-MM-5
-e6aec11f9a74	kernel/core/src/mm/edges.rs	pcp_row_count_peek	224		INV:INV-MM-5
-20e7d06b51e0	kernel/core/src/mm/edges.rs	pcp_row_count_peek	225		INV:INV-MM-5
-af5ed22ad924	kernel/core/src/mm/edges.rs	pcp_row_ref_peek	234		INV:INV-MM-5
-5641863f5eb0	kernel/core/src/mm/edges.rs	pcp_row_ref_peek	235		INV:INV-MM-5
-8d359ba13c25	kernel/core/src/mm/edges.rs	copy_kva	246	ptr-ops	INV:INV-MM-6
-b1b9636eb5d5	kernel/core/src/mm/edges.rs	copy_kva_from	255	ptr-ops	INV:INV-MM-6
-3539d149273c	kernel/core/src/mm/edges.rs	page_slice_mut	269	ptr-ops,addr-arith	INV:INV-MM-7
-693c0f104a08	kernel/core/src/mm/edges.rs	page_slice	276	raw-construct,ptr-ops,addr-arith	INV:INV-MM-7
-bf80442818e4	kernel/core/src/mm/edges.rs	defer_pool_mut	291		INV:INV-MM-8
-8fc8bf600b0a	kernel/core/src/mm/edges.rs	vmemmap_stats_read	321		INV:INV-MM-9
-0d32cb5a6b58	kernel/core/src/mm/edges.rs	vmemmap_stats_write	330		INV:INV-MM-9
-be06c2805efa	kernel/core/src/mm/edges.rs	vmemmap_zero_region	340	ptr-ops	INV:INV-MM-9
-40731e9f74cf	kernel/core/src/mm/edges.rs	switch_address_space	365		INV:INV-MM-10
-f99f716a7a82	kernel/core/src/mm/edges.rs	<module>	380		INV:INV-MM-10
-92b1f9101fa4	kernel/core/src/mm/edges.rs	<module>	381		INV:INV-MM-2
-b3f19c2bb0dd	kernel/core/src/mm/edges.rs	compact_copy_page	390		INV:INV-MM-2
-5ceae009925d	kernel/core/src/mm/edges.rs	kernel_layout_write	403		INV:INV-MM-11
-eb7949141bd2	kernel/core/src/mm/edges.rs	kernel_layout_ref	411		INV:INV-MM-11
-c5407ca89825	kernel/core/src/mm/edges.rs	node_data_init	426		INV:INV-MM-12
-57830c3667e8	kernel/core/src/mm/edges.rs	<module>	431		INV:INV-MM-12
-019028158ab1	kernel/core/src/mm/edges.rs	<module>	432		INV:INV-MM-2
-6b304b9e47d4	kernel/core/src/mm/edges.rs	x86_caller_return_address	443	asm	INV:INV-MM-2
-a66a1b92b342	kernel/core/src/mm/edges.rs	sa_hdr_mut	461	ptr-ops	INV:INV-MM-13
-5ce841e493b6	kernel/core/src/mm/edges.rs	sa_hdr_ref	471	ptr-ops	INV:INV-MM-13
-3869f1996136	kernel/core/src/mm/edges.rs	sa_read_u16	479	volatile,ptr-ops	INV:INV-MM-13
-ab3f8c143c11	kernel/core/src/mm/edges.rs	sa_write_u16	487	volatile,ptr-ops	INV:INV-MM-13
-2b2a5fba9248	kernel/core/src/mm/edges.rs	sa_read_u64	494	volatile,ptr-ops	INV:INV-MM-13
 9061c084d27f	kernel/core/src/mm/page_desc.rs	<module>	889	ptr-ops,addr-arith	INV:INV-PAGEDESC-1
 fd90a39dfc93	kernel/core/src/mm/page_desc.rs	mark_non_ram_pages	1054		INV:INV-PAGEDESC-1
 4306edd337ef	kernel/core/src/mm/page_desc.rs	init_mem_map	1101		INV:INV-PAGEDESC-1
@@ -1421,6 +1376,51 @@ decabe773795	kernel/core/src/mm/page_desc.rs	<module>	1338	static-mut,addr-arith
 adeee08fb5d5	kernel/core/src/mm/pglist.rs	node_data	271		INV:INV-MM-12
 5d6f325cfcc2	kernel/core/src/mm/pglist.rs	node_data_mut	284		INV:INV-MM-12
 959426818c4a	kernel/core/src/mm/pglist.rs	<module>	300	static-mut	INV:INV-MM-12
+c4f1d3e802e9	kernel/core/src/mm/unsafe.rs	first_node_mut	40		INV:INV-MM-1
+10ee10bbade0	kernel/core/src/mm/unsafe.rs	page_of	61		INV:INV-MM-2
+ac1a9c0c1c58	kernel/core/src/mm/unsafe.rs	page_ref_of	74		INV:INV-MM-2
+bb89756ce6b4	kernel/core/src/mm/unsafe.rs	memblock_ref	92		INV:INV-MM-3
+1d88f8933497	kernel/core/src/mm/unsafe.rs	memblock_mut	101		INV:INV-MM-2
+2dbd5886037d	kernel/core/src/mm/unsafe.rs	walk_fp_chain	111		INV:INV-MM-2
+53817e10ad17	kernel/core/src/mm/unsafe.rs	slab_read_freelist_link	127	ptr-ops	INV:INV-MM-4
+309659b58aba	kernel/core/src/mm/unsafe.rs	slab_write_freelist_link	135	ptr-ops	INV:INV-MM-4
+ac4891f4d31d	kernel/core/src/mm/unsafe.rs	slab_header_mut	144	ptr-ops	INV:INV-MM-4
+2a3adde6a482	kernel/core/src/mm/unsafe.rs	slab_header_cache_idx	152	ptr-ops	INV:INV-MM-4
+b94694aff7fe	kernel/core/src/mm/unsafe.rs	slab_pages_init	161		INV:INV-MM-4
+e0aeb6d10dfc	kernel/core/src/mm/unsafe.rs	slab_pages	171		INV:INV-MM-4
+f053bea0b3cb	kernel/core/src/mm/unsafe.rs	slab_zero	179	ptr-ops	INV:INV-MM-4
+846db107d0f2	kernel/core/src/mm/unsafe.rs	<module>	187		INV:INV-MM-4
+1e0a5acc5009	kernel/core/src/mm/unsafe.rs	<module>	191		INV:INV-MM-5
+efe88516a4df	kernel/core/src/mm/unsafe.rs	<module>	203		INV:INV-MM-5
+c324c0e97750	kernel/core/src/mm/unsafe.rs	pcp_row_exclusive	215		INV:INV-MM-5
+c17bf23fcaa0	kernel/core/src/mm/unsafe.rs	pcp_row_exclusive	216		INV:INV-MM-5
+cc80c47752cd	kernel/core/src/mm/unsafe.rs	pcp_row_count_peek	224		INV:INV-MM-5
+2101ca588f24	kernel/core/src/mm/unsafe.rs	pcp_row_count_peek	225		INV:INV-MM-5
+b22c6fb07737	kernel/core/src/mm/unsafe.rs	pcp_row_ref_peek	234		INV:INV-MM-5
+cf2425eeca0d	kernel/core/src/mm/unsafe.rs	pcp_row_ref_peek	235		INV:INV-MM-5
+2514ab4aa82f	kernel/core/src/mm/unsafe.rs	copy_kva	246	ptr-ops	INV:INV-MM-6
+38f62907e30c	kernel/core/src/mm/unsafe.rs	copy_kva_from	255	ptr-ops	INV:INV-MM-6
+badac82c44f7	kernel/core/src/mm/unsafe.rs	page_slice_mut	269	ptr-ops,addr-arith	INV:INV-MM-7
+a83b41640b1c	kernel/core/src/mm/unsafe.rs	page_slice	276	raw-construct,ptr-ops,addr-arith	INV:INV-MM-7
+a7ed187bf041	kernel/core/src/mm/unsafe.rs	defer_pool_mut	291		INV:INV-MM-8
+f57a93850507	kernel/core/src/mm/unsafe.rs	vmemmap_stats_read	321		INV:INV-MM-9
+582c73e85c7d	kernel/core/src/mm/unsafe.rs	vmemmap_stats_write	330		INV:INV-MM-9
+6f60a404cae8	kernel/core/src/mm/unsafe.rs	vmemmap_zero_region	340	ptr-ops	INV:INV-MM-9
+ed4e586a26e2	kernel/core/src/mm/unsafe.rs	switch_address_space	365		INV:INV-MM-10
+987e85bc2886	kernel/core/src/mm/unsafe.rs	<module>	380		INV:INV-MM-10
+6becbedafe42	kernel/core/src/mm/unsafe.rs	<module>	381		INV:INV-MM-2
+6535dad0ad3c	kernel/core/src/mm/unsafe.rs	compact_copy_page	390		INV:INV-MM-2
+b342166348f4	kernel/core/src/mm/unsafe.rs	kernel_layout_write	403		INV:INV-MM-11
+b2d17fbacb13	kernel/core/src/mm/unsafe.rs	kernel_layout_ref	411		INV:INV-MM-11
+767c3aff245c	kernel/core/src/mm/unsafe.rs	node_data_init	426		INV:INV-MM-12
+785dd73ec475	kernel/core/src/mm/unsafe.rs	<module>	431		INV:INV-MM-12
+d5abc8c1e71f	kernel/core/src/mm/unsafe.rs	<module>	432		INV:INV-MM-2
+83a3a07674b9	kernel/core/src/mm/unsafe.rs	x86_caller_return_address	443	asm	INV:INV-MM-2
+5912cd72b5bb	kernel/core/src/mm/unsafe.rs	sa_hdr_mut	461	ptr-ops	INV:INV-MM-13
+d5c7547d6570	kernel/core/src/mm/unsafe.rs	sa_hdr_ref	471	ptr-ops	INV:INV-MM-13
+c44c757fe4b1	kernel/core/src/mm/unsafe.rs	sa_read_u16	479	volatile,ptr-ops	INV:INV-MM-13
+75826a4f0f26	kernel/core/src/mm/unsafe.rs	sa_write_u16	487	volatile,ptr-ops	INV:INV-MM-13
+c38a578072c8	kernel/core/src/mm/unsafe.rs	sa_read_u64	494	volatile,ptr-ops	INV:INV-MM-13
 24dd6e7aaaa7	kernel/core/src/mm/vdso.rs	<module>	108	ptr-ops	INV:INV-VDSO-DATA-1
 d8c70d09addf	kernel/core/src/mm/vdso.rs	vdso_seq	109	ptr-ops	INV:INV-VDSO-DATA-1
 af902ee55104	kernel/core/src/mm/vdso.rs	vdso_data_tick	124	volatile,ptr-ops	INV:INV-VDSO-DATA-1
@@ -1473,13 +1473,13 @@ a0ae1ad40c2b	kernel/core/src/net/file_arc.rs	take_file_arc	27	ptr-ops	INV:INV-NE
 cb43467c0288	kernel/core/src/net/mod.rs	file_arc	50		INV:INV-NETARC-1
 b15e325d0e19	kernel/core/src/net/mod.rs	reclaim_file_arc	66		INV:INV-NETARC-1
 c06c0cce37c1	kernel/core/src/net/mod.rs	take_file_arc	76		INV:INV-NETARC-1
-8ccf6d14833f	kernel/core/src/net/net_edges.rs	static_table_ref	24		INV:INV-NET-SOCKTAB-1
-3b91c977a467	kernel/core/src/net/net_edges.rs	static_table_mut	31		INV:INV-NET-SOCKTAB-1
-f6560bb381e6	kernel/core/src/net/net_edges.rs	arc_refcount_probe	43	volatile,ptr-ops	INV:INV-NET-ARCREF-1
-5d969bd87e25	kernel/core/src/net/net_edges.rs	audited_deref	56		INV:INV-NET-ARCREF-1
-41564ba2bd64	kernel/core/src/net/net_edges.rs	container_of	66	ptr-ops	INV:INV-NET-CONTAINEROF-1
-08bdcba01933	kernel/core/src/net/net_edges.rs	pod_view	83	ptr-ops	INV:INV-NET-HDRVIEW-1
-987d0029b512	kernel/core/src/net/net_edges.rs	pod_view_mut	97	ptr-ops	INV:INV-NET-HDRVIEW-1
+a46c2cbbce14	kernel/core/src/net/unsafe.rs	static_table_ref	24		INV:INV-NET-SOCKTAB-1
+b5f2d3ec2015	kernel/core/src/net/unsafe.rs	static_table_mut	31		INV:INV-NET-SOCKTAB-1
+00af9763df47	kernel/core/src/net/unsafe.rs	arc_refcount_probe	43	volatile,ptr-ops	INV:INV-NET-ARCREF-1
+4b11b2bb8fdf	kernel/core/src/net/unsafe.rs	audited_deref	56		INV:INV-NET-ARCREF-1
+787413fd22dd	kernel/core/src/net/unsafe.rs	container_of	66	ptr-ops	INV:INV-NET-CONTAINEROF-1
+2b0364adb962	kernel/core/src/net/unsafe.rs	pod_view	83	ptr-ops	INV:INV-NET-HDRVIEW-1
+81558ac80871	kernel/core/src/net/unsafe.rs	pod_view_mut	97	ptr-ops	INV:INV-NET-HDRVIEW-1
 42c28d551f9a	kernel/core/src/perf/mod.rs	refresh_wanted_bits	317	ptr-ops	INV:INV-PERF-EV-1
 ae6c75064c64	kernel/core/src/perf/mod.rs	ring_covers	434	ptr-ops	INV:INV-PERF-EV-1
 6904ce513deb	kernel/core/src/perf/mod.rs	register	485		INV:INV-PERF-EV-1
@@ -1531,77 +1531,77 @@ d53bb720317b	kernel/core/src/process/task_ref.rs	deref	91		INV:INV-TASKREF-1
 0229e27cf230	kernel/core/src/process/task_ref.rs	deref_mut	101		INV:INV-TASKREF-1
 b02ce7cc8fd1	kernel/core/src/process/task_ref.rs	deref	158		INV:INV-TASKREF-1
 0fe0bb79f474	kernel/core/src/process/task_ref.rs	deref_mut	166		INV:INV-TASKREF-1
-19f6a190778d	kernel/core/src/process/unsafe_edges.rs	borrow_task	55		INV:INV-PROC-BORROW-1
-f2e79d4820ff	kernel/core/src/process/unsafe_edges.rs	borrow_task_mut	72		INV:INV-PROC-BORROW-1
-2f291a02bc03	kernel/core/src/process/unsafe_edges.rs	place_task	107		INV:INV-PROC-PLACE-2
-ff1d3cc9e8c1	kernel/core/src/process/unsafe_edges.rs	dump_read_page	148		INV:INV-PROC-COREDUMP-1
-d5a3e84e2801	kernel/core/src/process/unsafe_edges.rs	dump_read_page	159	ptr-ops	INV:INV-PROC-COREDUMP-1
-5e700570f96c	kernel/core/src/process/unsafe_edges.rs	file_private_data_ref	174		INV:INV-PROC-NSFILE-1
-16b68bb168dd	kernel/core/src/process/unsafe_edges.rs	file_private_data_ref	175	ptr-ops	INV:INV-PROC-NSFILE-1
-4b8539b78eb8	kernel/core/src/process/unsafe_edges.rs	file_private_data_take_boxed	189		INV:INV-PROC-NSFILE-2
-c72874a14cee	kernel/core/src/process/unsafe_edges.rs	file_private_data_take_boxed	190	ptr-ops	INV:INV-PROC-NSFILE-2
-6c14cd6c5771	kernel/core/src/process/unsafe_edges.rs	file_private_data_mut	205		INV:INV-PROC-NSFILE-1
-2b83d5eb57fe	kernel/core/src/process/unsafe_edges.rs	file_private_data_mut	206	ptr-ops	INV:INV-PROC-NSFILE-1
-0dbc2bc089b5	kernel/core/src/process/unsafe_edges.rs	read_volatile_u64	220	volatile	INV:INV-PROC-DIAG-1
-a2840e12b627	kernel/core/src/process/unsafe_edges.rs	journal_handle	261		INV:INV-PROC-JOURNAL-1
-7ea934cc9f9d	kernel/core/src/process/unsafe_edges.rs	free_fork_pt_regs	294	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
-06791231509b	kernel/core/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	308		INV:INV-PROC-ROOTSWITCH-1
-aa7e5ae7b0f8	kernel/core/src/process/unsafe_edges.rs	switch_to_kernel_root_on_exit	313		INV:INV-PROC-ROOTSWITCH-1
-c8bd80556b5a	kernel/core/src/process/unsafe_edges.rs	apppark_rets	327		INV:INV-PROC-APPPARK-1
-b22c12cd70f9	kernel/core/src/process/unsafe_edges.rs	freelist_next	343	ptr-ops	INV:INV-PROC-KSTACK-1
-007a3ba734b4	kernel/core/src/process/unsafe_edges.rs	freelist_link	353	ptr-ops	INV:INV-PROC-KSTACK-1
-60fec9eb4eb4	kernel/core/src/process/unsafe_edges.rs	heap_alloc	366		INV:INV-PROC-KSTACK-2
-4db1dce4a41e	kernel/core/src/process/unsafe_edges.rs	heap_dealloc	376		INV:INV-PROC-KSTACK-2
-48eab4f47343	kernel/core/src/process/unsafe_edges.rs	slot_ptr	386		INV:INV-PROC-KSTACK-3
-ff8eafa077fb	kernel/core/src/process/unsafe_edges.rs	zero_bytes	397	ptr-ops	INV:INV-PROC-KSTACK-3
-172da82a3309	kernel/core/src/process/unsafe_edges.rs	write_volatile_u64	407	volatile	INV:INV-PROC-DIAG-1
-58b6144ce79c	kernel/core/src/process/unsafe_edges.rs	<module>	415		INV:INV-PROC-DIAG-1
-d789c2880d56	kernel/core/src/process/unsafe_edges.rs	<module>	419		INV:INV-PROC-DIAG-1
-1e3e2b61c602	kernel/core/src/process/unsafe_edges.rs	read_volatile_u32	428	volatile	INV:INV-PROC-DIAG-1
-53207a78fb37	kernel/core/src/process/unsafe_edges.rs	borrow_active_mm	443		INV:INV-PROC-ACTIVEMM-1
-b6d503cd0ea6	kernel/core/src/process/unsafe_edges.rs	list_add_tail	462		INV:INV-PROC-LIST-1
-9662bfd795d8	kernel/core/src/process/unsafe_edges.rs	list_del	472		INV:INV-PROC-LIST-1
-946bc6298509	kernel/core/src/process/unsafe_edges.rs	list_for_each	486		INV:INV-PROC-LIST-1
-7a47e344c5a3	kernel/core/src/process/unsafe_edges.rs	store_pick_qword	506	ptr-ops	INV:INV-PROC-PICKQWORD-1
-67987bbd2612	kernel/core/src/process/unsafe_edges.rs	paint_bytes	519	ptr-ops	INV:INV-PROC-KSTACK-3
-72fca5ee835f	kernel/core/src/process/unsafe_edges.rs	frame_mut	539		INV:INV-PROC-FRAME-1
-79b3fefef086	kernel/core/src/process/unsafe_edges.rs	frame_ref	551		INV:INV-PROC-FRAME-1
-b276aca632b6	kernel/core/src/process/unsafe_edges.rs	exec_copy_user_image	577		INV:INV-PROC-EXEC-COPY-1
-57593f3edebb	kernel/core/src/process/unsafe_edges.rs	exec_copy_user_image	588	ptr-ops	INV:INV-PROC-EXEC-COPY-1
-df4b3fd545f7	kernel/core/src/process/unsafe_edges.rs	exec_phdr_at	609		INV:INV-PROC-EXEC-ELF-1
-d8f5952a071f	kernel/core/src/process/unsafe_edges.rs	exec_ehdr_from	619		INV:INV-PROC-EXEC-ELF-1
-bbd5fbb88a0a	kernel/core/src/process/unsafe_edges.rs	exec_map_user_range	631		INV:INV-PROC-EXEC-MAP-1
-fdab6b3a4836	kernel/core/src/process/unsafe_edges.rs	exec_map_user_region_static	650		INV:INV-PROC-EXEC-VDSO-1
-17ccd2de2373	kernel/core/src/process/unsafe_edges.rs	exec_probe_read_u64	661		INV:INV-PROC-EXEC-PROBE-1
-321e50a10b47	kernel/core/src/process/unsafe_edges.rs	exec_probe_read_u64	666	volatile,ptr-ops	INV:INV-PROC-EXEC-PROBE-1
-538bd27ec446	kernel/core/src/process/unsafe_edges.rs	exec_free_user_page_trees	680		INV:INV-PROC-EXEC-FREETREE-1
-1f4a12191596	kernel/core/src/process/unsafe_edges.rs	exec_write_sigtramp	698	volatile,ptr-ops	INV:INV-PROC-EXEC-TRAMP-1
-d14b6d8bfa07	kernel/core/src/process/unsafe_edges.rs	exec_mm_new_user	712		INV:INV-PROC-EXEC-MMNEW-1
-652a45d83cb5	kernel/core/src/process/unsafe_edges.rs	exec_switch_address_space	725		INV:INV-PROC-EXEC-SWITCH-1
-d84c4dab6549	kernel/core/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	760		INV:INV-LOCK-7
-be64c1ac30df	kernel/core/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	807		INV:INV-LOCK-7
-e79034b25be3	kernel/core/src/process/unsafe_edges.rs	exec_set_leaf_flags_range	866		INV:INV-LOCK-7
-76bde9c526b0	kernel/core/src/process/unsafe_edges.rs	fork_save_parent_fpu	886		INV:INV-PROC-FORK-FPU-1
-b786e95aa3c5	kernel/core/src/process/unsafe_edges.rs	fork_save_parent_vstate	897		INV:INV-PROC-FORK-FPU-1
-a725542f9abe	kernel/core/src/process/unsafe_edges.rs	fork_save_parent_fpu	908		INV:INV-PROC-FORK-FPU-1
-9a8ab8a0998b	kernel/core/src/process/unsafe_edges.rs	fork_fpu_save_for_switch	917		INV:INV-PROC-FORK-FPU-1
-17ddb873dfdb	kernel/core/src/process/unsafe_edges.rs	fork_pt_walk	928		INV:INV-PROC-FORK-WALK-1
-6e27eda10347	kernel/core/src/process/unsafe_edges.rs	fork_handle_cow_fault	941		INV:INV-PROC-FORK-COW-1
-7b19f526c828	kernel/core/src/process/unsafe_edges.rs	fork_write_child_tid	961	volatile,ptr-ops	INV:INV-PROC-FORK-TIDWRITE-1
-62ed75d59796	kernel/core/src/process/unsafe_edges.rs	read_user_tp_register	974	asm	INV:INV-PROC-DIAG-1
-94ac0da2dc64	kernel/core/src/process/unsafe_edges.rs	page_refcount	994		INV:INV-PROC-DIAG-1
-7993e1930c4f	kernel/core/src/process/unsafe_edges.rs	<module>	1004		INV:INV-PROC-DIAG-1
-222b5f63bf1c	kernel/core/src/process/unsafe_edges.rs	<module>	1006		INV:INV-PROC-DIAG-1
-baa68fcf35c6	kernel/core/src/process/unsafe_edges.rs	pid_hash_unlink_store	1025		INV:INV-PROC-PIDHASH-1
-59254f686f8b	kernel/core/src/process/unsafe_edges.rs	ptrace_translate	1045		INV:INV-PROC-PTRACE-WALK-1
-b44fde590c3b	kernel/core/src/process/unsafe_edges.rs	ptrace_read_word	1056	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
-2062be944501	kernel/core/src/process/unsafe_edges.rs	ptrace_write_word	1067	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
-1381f69439fa	kernel/core/src/process/unsafe_edges.rs	ptrace_copy_chunk	1080	ptr-ops	INV:INV-PROC-PTRACE-MEM-1
-7cc20a628261	kernel/core/src/process/unsafe_edges.rs	ptrace_flush_icache	1098	asm	INV:INV-PROC-PTRACE-ICOH-1
-c03edba7ad3b	kernel/core/src/process/unsafe_edges.rs	ptrace_flush_icache	1114	asm	INV:INV-PROC-PTRACE-ICOH-1
-d5e975cdc23d	kernel/core/src/process/unsafe_edges.rs	ptrace_read_gregset	1139	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
-225b0bc7ac74	kernel/core/src/process/unsafe_edges.rs	ptrace_write_gregset	1157	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
-f494b7920409	kernel/core/src/process/unsafe_edges.rs	zeroed_siginfo	1172		INV:INV-PROC-DIAG-1
+67b192449e59	kernel/core/src/process/unsafe.rs	borrow_task	55		INV:INV-PROC-BORROW-1
+bd71ad6de7a5	kernel/core/src/process/unsafe.rs	borrow_task_mut	72		INV:INV-PROC-BORROW-1
+d5603ebc5b03	kernel/core/src/process/unsafe.rs	place_task	107		INV:INV-PROC-PLACE-2
+98b67ace5d00	kernel/core/src/process/unsafe.rs	dump_read_page	148		INV:INV-PROC-COREDUMP-1
+886d528d3282	kernel/core/src/process/unsafe.rs	dump_read_page	159	ptr-ops	INV:INV-PROC-COREDUMP-1
+7a12d86b34a8	kernel/core/src/process/unsafe.rs	file_private_data_ref	174		INV:INV-PROC-NSFILE-1
+e58b41fa75c1	kernel/core/src/process/unsafe.rs	file_private_data_ref	175	ptr-ops	INV:INV-PROC-NSFILE-1
+01eb6ee04b35	kernel/core/src/process/unsafe.rs	file_private_data_take_boxed	189		INV:INV-PROC-NSFILE-2
+a2dca8951246	kernel/core/src/process/unsafe.rs	file_private_data_take_boxed	190	ptr-ops	INV:INV-PROC-NSFILE-2
+c16b52d6c0d0	kernel/core/src/process/unsafe.rs	file_private_data_mut	205		INV:INV-PROC-NSFILE-1
+788e70111c5b	kernel/core/src/process/unsafe.rs	file_private_data_mut	206	ptr-ops	INV:INV-PROC-NSFILE-1
+2c0ff4d96c27	kernel/core/src/process/unsafe.rs	read_volatile_u64	220	volatile	INV:INV-PROC-DIAG-1
+b852026b8f76	kernel/core/src/process/unsafe.rs	journal_handle	261		INV:INV-PROC-JOURNAL-1
+c8d205051f55	kernel/core/src/process/unsafe.rs	free_fork_pt_regs	294	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
+08a6d396020d	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	308		INV:INV-PROC-ROOTSWITCH-1
+afd4a78bb3a7	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	313		INV:INV-PROC-ROOTSWITCH-1
+3e88f5f81d98	kernel/core/src/process/unsafe.rs	apppark_rets	327		INV:INV-PROC-APPPARK-1
+0539dfe572ab	kernel/core/src/process/unsafe.rs	freelist_next	343	ptr-ops	INV:INV-PROC-KSTACK-1
+cd465ed00d2b	kernel/core/src/process/unsafe.rs	freelist_link	353	ptr-ops	INV:INV-PROC-KSTACK-1
+a1a98cb4767b	kernel/core/src/process/unsafe.rs	heap_alloc	366		INV:INV-PROC-KSTACK-2
+a43f848d2da4	kernel/core/src/process/unsafe.rs	heap_dealloc	376		INV:INV-PROC-KSTACK-2
+3d6dc1f3dff6	kernel/core/src/process/unsafe.rs	slot_ptr	386		INV:INV-PROC-KSTACK-3
+fe2df6a3c95f	kernel/core/src/process/unsafe.rs	zero_bytes	397	ptr-ops	INV:INV-PROC-KSTACK-3
+6175e81baf23	kernel/core/src/process/unsafe.rs	write_volatile_u64	407	volatile	INV:INV-PROC-DIAG-1
+223c808647d4	kernel/core/src/process/unsafe.rs	<module>	415		INV:INV-PROC-DIAG-1
+7c63f91fbcfa	kernel/core/src/process/unsafe.rs	<module>	419		INV:INV-PROC-DIAG-1
+5995cb9bca11	kernel/core/src/process/unsafe.rs	read_volatile_u32	428	volatile	INV:INV-PROC-DIAG-1
+57585b69f447	kernel/core/src/process/unsafe.rs	borrow_active_mm	443		INV:INV-PROC-ACTIVEMM-1
+7d4ddbb8f9db	kernel/core/src/process/unsafe.rs	list_add_tail	462		INV:INV-PROC-LIST-1
+dc1c99a6282f	kernel/core/src/process/unsafe.rs	list_del	472		INV:INV-PROC-LIST-1
+651b0269dabb	kernel/core/src/process/unsafe.rs	list_for_each	486		INV:INV-PROC-LIST-1
+702136a9cbf4	kernel/core/src/process/unsafe.rs	store_pick_qword	506	ptr-ops	INV:INV-PROC-PICKQWORD-1
+ce96a76b6888	kernel/core/src/process/unsafe.rs	paint_bytes	519	ptr-ops	INV:INV-PROC-KSTACK-3
+d224c887ec1e	kernel/core/src/process/unsafe.rs	frame_mut	539		INV:INV-PROC-FRAME-1
+c904ee5472b1	kernel/core/src/process/unsafe.rs	frame_ref	551		INV:INV-PROC-FRAME-1
+280b0eff250f	kernel/core/src/process/unsafe.rs	exec_copy_user_image	577		INV:INV-PROC-EXEC-COPY-1
+7b93271d03b0	kernel/core/src/process/unsafe.rs	exec_copy_user_image	588	ptr-ops	INV:INV-PROC-EXEC-COPY-1
+dfe061b528c1	kernel/core/src/process/unsafe.rs	exec_phdr_at	609		INV:INV-PROC-EXEC-ELF-1
+17ca6f06592b	kernel/core/src/process/unsafe.rs	exec_ehdr_from	619		INV:INV-PROC-EXEC-ELF-1
+482c9f397004	kernel/core/src/process/unsafe.rs	exec_map_user_range	631		INV:INV-PROC-EXEC-MAP-1
+3d70a9ef0432	kernel/core/src/process/unsafe.rs	exec_map_user_region_static	650		INV:INV-PROC-EXEC-VDSO-1
+71bca7da2c26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	661		INV:INV-PROC-EXEC-PROBE-1
+7a9b10befe26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	666	volatile,ptr-ops	INV:INV-PROC-EXEC-PROBE-1
+0932c8233145	kernel/core/src/process/unsafe.rs	exec_free_user_page_trees	680		INV:INV-PROC-EXEC-FREETREE-1
+7101dbc4f9e1	kernel/core/src/process/unsafe.rs	exec_write_sigtramp	698	volatile,ptr-ops	INV:INV-PROC-EXEC-TRAMP-1
+9ce2928eb85c	kernel/core/src/process/unsafe.rs	exec_mm_new_user	712		INV:INV-PROC-EXEC-MMNEW-1
+1d765531f51f	kernel/core/src/process/unsafe.rs	exec_switch_address_space	725		INV:INV-PROC-EXEC-SWITCH-1
+a64d8daa9c81	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	760		INV:INV-LOCK-7
+ef936ecf5fdb	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	807		INV:INV-LOCK-7
+41eb9bd53d45	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	866		INV:INV-LOCK-7
+84c1d0de38ef	kernel/core/src/process/unsafe.rs	fork_save_parent_fpu	886		INV:INV-PROC-FORK-FPU-1
+9c4972a1db8d	kernel/core/src/process/unsafe.rs	fork_save_parent_vstate	897		INV:INV-PROC-FORK-FPU-1
+96d969eaedc4	kernel/core/src/process/unsafe.rs	fork_save_parent_fpu	908		INV:INV-PROC-FORK-FPU-1
+8b3965e31bd6	kernel/core/src/process/unsafe.rs	fork_fpu_save_for_switch	917		INV:INV-PROC-FORK-FPU-1
+310bdebc72d6	kernel/core/src/process/unsafe.rs	fork_pt_walk	928		INV:INV-PROC-FORK-WALK-1
+d0861acb3385	kernel/core/src/process/unsafe.rs	fork_handle_cow_fault	941		INV:INV-PROC-FORK-COW-1
+1215985369c6	kernel/core/src/process/unsafe.rs	fork_write_child_tid	961	volatile,ptr-ops	INV:INV-PROC-FORK-TIDWRITE-1
+66defd8834bc	kernel/core/src/process/unsafe.rs	read_user_tp_register	974	asm	INV:INV-PROC-DIAG-1
+c4f1c64aa0a3	kernel/core/src/process/unsafe.rs	page_refcount	994		INV:INV-PROC-DIAG-1
+d667048c71b9	kernel/core/src/process/unsafe.rs	<module>	1004		INV:INV-PROC-DIAG-1
+81ff25c0d2c7	kernel/core/src/process/unsafe.rs	<module>	1006		INV:INV-PROC-DIAG-1
+1dab6431ea79	kernel/core/src/process/unsafe.rs	pid_hash_unlink_store	1025		INV:INV-PROC-PIDHASH-1
+ac909a56256b	kernel/core/src/process/unsafe.rs	ptrace_translate	1045		INV:INV-PROC-PTRACE-WALK-1
+bf496ea05d15	kernel/core/src/process/unsafe.rs	ptrace_read_word	1056	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+5fab594e7758	kernel/core/src/process/unsafe.rs	ptrace_write_word	1067	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+19a5515fe351	kernel/core/src/process/unsafe.rs	ptrace_copy_chunk	1080	ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+3ab6182dc4f6	kernel/core/src/process/unsafe.rs	ptrace_flush_icache	1098	asm	INV:INV-PROC-PTRACE-ICOH-1
+0f1920fa471f	kernel/core/src/process/unsafe.rs	ptrace_flush_icache	1114	asm	INV:INV-PROC-PTRACE-ICOH-1
+7a2ffd2e5118	kernel/core/src/process/unsafe.rs	ptrace_read_gregset	1139	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
+25047740f485	kernel/core/src/process/unsafe.rs	ptrace_write_gregset	1157	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
+cad0967e9cd2	kernel/core/src/process/unsafe.rs	zeroed_siginfo	1172		INV:INV-PROC-DIAG-1
 d0a027a52e5d	kernel/core/src/safety/bytes.rs	bytes_of	43	raw-construct,ptr-ops	INV:INV-CBYTES-1
 5e23ee24100c	kernel/core/src/safety/bytes.rs	bytes_of_mut	52	ptr-ops	INV:INV-CBYTES-1
 721b9284dd79	kernel/core/src/safety/bytes.rs	from_bytes	65	ptr-ops	INV:INV-CBYTES-2
@@ -1659,92 +1659,6 @@ d24f73957def	kernel/core/src/safety/slot.rs	get	93		INV:INV-SLOT-1
 1a2f60f52721	kernel/core/src/safety/slot.rs	get_mut_locked	108		INV:INV-SLOT-1
 13bd250ef78b	kernel/core/src/sbi.rs	sbi_system_reset	62	asm	INV:F16
 c330d3bb7877	kernel/core/src/sbi.rs	send_ipi	98	asm	INV:F16
-6466ddda70fe	kernel/core/src/sched/edges.rs	idle_task_ptr	53		INV:INV-SCE-4
-c8c3b28ae842	kernel/core/src/sched/edges.rs	idle_task_storage_base	62		INV:INV-SCE-4
-754b08baba49	kernel/core/src/sched/edges.rs	task_mut	92		INV:INV-SCE-1
-66ef44037efb	kernel/core/src/sched/edges.rs	task_shared	108		INV:INV-SCE-2
-79dc58f88bac	kernel/core/src/sched/edges.rs	grq_stage	151		INV:INV-SCE-3
-d622f10dd66d	kernel/core/src/sched/edges.rs	grq_ref	169		INV:INV-SCE-3
-5dbfed1400ba	kernel/core/src/sched/edges.rs	grq_mut	182		INV:INV-SCE-3
-fa957a72a8a9	kernel/core/src/sched/edges.rs	task_poison_pair_volatile	194	volatile,ptr-ops	INV:INV-TL-2
-72ebfb8734b9	kernel/core/src/sched/edges.rs	task_pid_volatile	215	volatile,ptr-ops	INV:INV-SCE-2
-5028c720d2f7	kernel/core/src/sched/edges.rs	task_ownership_qword	232	volatile,ptr-ops	INV:INV-SCE-2
-1cce9aabfde8	kernel/core/src/sched/edges.rs	current_trap_ip	253		INV:INV-SCE-11
-32c1a5cd4b84	kernel/core/src/sched/edges.rs	current_task_mut	270		INV:INV-SCE-11
-1cd0580b7e13	kernel/core/src/sched/edges.rs	arch_context_switch	293		INV:INV-SCE-5
-4afd2dea14df	kernel/core/src/sched/edges.rs	task_borrow	303		INV:INV-SCE-2
-85d3bdde5830	kernel/core/src/sched/edges.rs	cgroup_node_ref	318		INV:INV-SCE-8
-16c3386ea28a	kernel/core/src/sched/edges.rs	pt_regs_at_top	333	ptr-ops	INV:INV-SCE-9
-54738de6a960	kernel/core/src/sched/edges.rs	list_next	350		INV:INV-SCE-7
-a8a5b1077356	kernel/core/src/sched/edges.rs	task_of_rt_list	359	ptr-ops	INV:INV-SCE-7
-20eb33122a92	kernel/core/src/sched/edges.rs	rt_list_add	368		INV:INV-SCE-7
-08653b968a69	kernel/core/src/sched/edges.rs	rt_list_add_tail	376		INV:INV-SCE-7
-c81fa4e1a73e	kernel/core/src/sched/edges.rs	rt_list_del	384		INV:INV-SCE-7
-282045dd568a	kernel/core/src/sched/edges.rs	rt_list_linked	394	ptr-ops	INV:INV-SCE-7
-ee791a618b0d	kernel/core/src/sched/edges.rs	linked_at	493		INV:INV-SCE-6
-86ee8e81ec99	kernel/core/src/sched/edges.rs	detach_at	504		INV:INV-SCE-6
-5a18f7ad3b10	kernel/core/src/sched/edges.rs	rb_nil	537		INV:INV-SCE-6
-095acd2c6564	kernel/core/src/sched/edges.rs	node_of_task	547	ptr-ops	INV:INV-SCE-6
-208f41bfd6cf	kernel/core/src/sched/edges.rs	task_of_node	555	ptr-ops	INV:INV-SCE-6
-5d8fd94c6b50	kernel/core/src/sched/edges.rs	node_key	564	ptr-ops	INV:INV-SCE-6
-056f5a1819e6	kernel/core/src/sched/edges.rs	node_key	565		INV:INV-SCE-6
-2b8c2687a421	kernel/core/src/sched/edges.rs	subtree_min	616		INV:INV-SCE-6
-2a0457d4ee37	kernel/core/src/sched/edges.rs	next	631		INV:INV-SCE-6
-cca0f52143e8	kernel/core/src/sched/edges.rs	next	633		INV:INV-SCE-6
-3175c7fec65b	kernel/core/src/sched/edges.rs	next	636		INV:INV-SCE-6
-c8d194446f00	kernel/core/src/sched/edges.rs	next	637		INV:INV-SCE-6
-e1274f815fb2	kernel/core/src/sched/edges.rs	next	639		INV:INV-SCE-6
-9a130f2707a9	kernel/core/src/sched/edges.rs	rotate_left	651		INV:INV-SCE-6
-3ea03b28598a	kernel/core/src/sched/edges.rs	rotate_left	652		INV:INV-SCE-6
-48240a24a630	kernel/core/src/sched/edges.rs	rotate_left	653		INV:INV-SCE-6
-a3c7966dd807	kernel/core/src/sched/edges.rs	rotate_left	654		INV:INV-SCE-6
-e20834ae0d00	kernel/core/src/sched/edges.rs	rotate_left	656		INV:INV-SCE-6
-b60fe22f28be	kernel/core/src/sched/edges.rs	rotate_left	657		INV:INV-SCE-6
-befdabc0cb88	kernel/core/src/sched/edges.rs	rotate_left	660		INV:INV-SCE-6
-4514d8f87485	kernel/core/src/sched/edges.rs	rotate_left	661		INV:INV-SCE-6
-882e3883e4f7	kernel/core/src/sched/edges.rs	rotate_left	663		INV:INV-SCE-6
-695f337c6433	kernel/core/src/sched/edges.rs	rotate_left	665		INV:INV-SCE-6
-208294bf12e7	kernel/core/src/sched/edges.rs	rotate_left	666		INV:INV-SCE-6
-79096745ba05	kernel/core/src/sched/edges.rs	rotate_right	672		INV:INV-SCE-6
-39b0b68cdd08	kernel/core/src/sched/edges.rs	rotate_right	673		INV:INV-SCE-6
-723a2f0d1358	kernel/core/src/sched/edges.rs	rotate_right	674		INV:INV-SCE-6
-46032bc00ef5	kernel/core/src/sched/edges.rs	rotate_right	675		INV:INV-SCE-6
-7eb05e1b7727	kernel/core/src/sched/edges.rs	rotate_right	677		INV:INV-SCE-6
-5fda3c5d5809	kernel/core/src/sched/edges.rs	rotate_right	678		INV:INV-SCE-6
-10b1bd33c907	kernel/core/src/sched/edges.rs	rotate_right	681		INV:INV-SCE-6
-b48e602b4c54	kernel/core/src/sched/edges.rs	rotate_right	682		INV:INV-SCE-6
-1d6a3d931284	kernel/core/src/sched/edges.rs	rotate_right	684		INV:INV-SCE-6
-4ad5d3db5193	kernel/core/src/sched/edges.rs	rotate_right	686		INV:INV-SCE-6
-b1494ce8b2df	kernel/core/src/sched/edges.rs	rotate_right	687		INV:INV-SCE-6
-dcf94b0a892b	kernel/core/src/sched/edges.rs	insert	700		INV:INV-SCE-6
-df7b81e6cf73	kernel/core/src/sched/edges.rs	insert	707		INV:INV-SCE-6
-7de6dcea947f	kernel/core/src/sched/edges.rs	insert	708		INV:INV-SCE-6
-6d358466f302	kernel/core/src/sched/edges.rs	insert	710		INV:INV-SCE-6
-f5e41082fc93	kernel/core/src/sched/edges.rs	insert	720		INV:INV-SCE-6
-2f5675d44b85	kernel/core/src/sched/edges.rs	insert	721		INV:INV-SCE-6
-b0dac2013c68	kernel/core/src/sched/edges.rs	insert	723		INV:INV-SCE-6
-3fe65f79b976	kernel/core/src/sched/edges.rs	insert	726		INV:INV-SCE-6
-3180f6156638	kernel/core/src/sched/edges.rs	insert	727		INV:INV-SCE-6
-42a1de9264fa	kernel/core/src/sched/edges.rs	insert	728		INV:INV-SCE-6
-da9a4303f353	kernel/core/src/sched/edges.rs	insert	730		INV:INV-SCE-6
-407a3201857f	kernel/core/src/sched/edges.rs	insert	732		INV:INV-SCE-6
-97a41057199c	kernel/core/src/sched/edges.rs	insert	733		INV:INV-SCE-6
-7b49f5c700aa	kernel/core/src/sched/edges.rs	insert_fixup	745		INV:INV-SCE-6
-0753e9cc7dfe	kernel/core/src/sched/edges.rs	erase	793		INV:INV-SCE-6
-23086779927d	kernel/core/src/sched/edges.rs	erase	796		INV:INV-SCE-6
-c5bb4c91a641	kernel/core/src/sched/edges.rs	erase	811		INV:INV-SCE-1
-c9297d30838d	kernel/core/src/sched/edges.rs	kid	921		INV:INV-SCE-1
-1f872cee4be7	kernel/core/src/sched/edges.rs	erase_fixup	928		INV:INV-SCE-1
-8307ef125604	kernel/core/src/sched/edges.rs	bh	1098		GAP
-f31a28871e78	kernel/core/src/sched/edges.rs	bh	1103		GAP
-f961df85cf3b	kernel/core/src/sched/edges.rs	debug_black_height	1121		GAP
-9e490d184579	kernel/core/src/sched/edges.rs	grq_ptr_shared	1135		INV:INV-SCE-3
-0145524daf90	kernel/core/src/sched/edges.rs	grq_ptr_mut	1143	ptr-ops	INV:INV-SCE-3
-8f65d1144b2d	kernel/core/src/sched/edges.rs	per_cpu_shared	1163		INV:INV-SCE-10
-eaf63c6abb1a	kernel/core/src/sched/edges.rs	per_cpu_mut	1173		INV:INV-SCE-10
-929814b715c8	kernel/core/src/sched/edges.rs	secondary_idle_publish	1190		INV:INV-SCE-4
-11f3a282c16a	kernel/core/src/sched/edges.rs	secondary_idle_table_base	1197		INV:INV-SCE-4
-1b67c13bfbf2	kernel/core/src/sched/edges.rs	secondary_idle_task	1203		INV:INV-SCE-4
 56a152b32910	kernel/core/src/sched/reapdrain.rs	task	152		INV:INV-SCE-2
 94dcf6f8e44d	kernel/core/src/sched/reapdrain.rs	<module>	211		INV:INV-RD-CLAIM
 1e769f0192d1	kernel/core/src/sched/sched.rs	<module>	2135		INV:INV-SENDSYNC-1
@@ -1752,21 +1666,107 @@ b7e55c8238d8	kernel/core/src/sched/sched.rs	grq_current_fp	2647	asm	INV:INV-SCE-
 2369dab99593	kernel/core/src/sched/sched.rs	grq_current_fp	2652	asm	INV:INV-SCE-3
 660fb9c7fcd1	kernel/core/src/sched/sched.rs	grq_current_fp	2657	asm	INV:INV-SCE-3
 8ade5260f3e0	kernel/core/src/sched/sched.rs	clear_trap_scratch	3967	asm	INV:INV-SCE-10
-6a4a3689912b	kernel/core/src/sched/sched.rs	init	4000		INV:INV-SCE-4
+38f7c039868a	kernel/core/src/sched/sched.rs	init	4000		INV:INV-SCE-4
 b717386984cd	kernel/core/src/sched/sched.rs	alloc_task_slot	4155	ptr-ops	INV:INV-TL-1
 f1b6c33e09bb	kernel/core/src/sched/sched.rs	alloc_task_slot	4165	ptr-ops	INV:INV-TL-1
 e3556ee47f83	kernel/core/src/sched/sched.rs	alloc_task_slot	4172		INV:INV-TL-1
 47ece0eaa764	kernel/core/src/sched/sched.rs	free_task_slot	4584		INV:INV-TL-2
 631cc192226e	kernel/core/src/sched/sched.rs	free_task_slot	4597	volatile,ptr-ops	GAP
-25e10f7c4469	kernel/core/src/sched/sched.rs	scheduler_tick	7499	volatile,ptr-ops	INV:INV-SCE-1
+faf9a423bd9f	kernel/core/src/sched/sched.rs	scheduler_tick	7499	volatile,ptr-ops	INV:INV-SCE-1
 c6407362f24a	kernel/core/src/sched/sched.rs	idle_guard_sp	9115	asm	INV:INV-SCE-1
 f49e5332f417	kernel/core/src/sched/sched.rs	idle_guard_sp	9122	asm	INV:INV-SCE-1
 3ebd4a0ae3db	kernel/core/src/sched/sched.rs	idle_guard_sp	9129	asm	INV:INV-SCE-1
-62a7486b91b7	kernel/core/src/sched/side_edges.rs	<module>	19		GAP
-269f146d3973	kernel/core/src/sched/side_edges.rs	<module>	21		GAP
-0decb643a803	kernel/core/src/sched/side_edges.rs	evring_slot_mut	39		INV:INV-SCHED-EVRING-1
-08309c605481	kernel/core/src/sched/side_edges.rs	evring_slot_ref	54		INV:INV-SCHED-EVRING-1
-f49120a82413	kernel/core/src/sched/side_edges.rs	<module>	72		GAP
+32b7c5cbc3b4	kernel/core/src/sched/unsafe.rs	idle_task_ptr	53		INV:INV-SCE-4
+e60b37709add	kernel/core/src/sched/unsafe.rs	idle_task_storage_base	62		INV:INV-SCE-4
+e0cbddd56e69	kernel/core/src/sched/unsafe.rs	task_mut	92		INV:INV-SCE-1
+768bf35e4c65	kernel/core/src/sched/unsafe.rs	task_shared	108		INV:INV-SCE-2
+3eedb1acca63	kernel/core/src/sched/unsafe.rs	grq_stage	151		INV:INV-SCE-3
+6d0ab7beb473	kernel/core/src/sched/unsafe.rs	grq_ref	169		INV:INV-SCE-3
+a3a931e7357e	kernel/core/src/sched/unsafe.rs	grq_mut	182		INV:INV-SCE-3
+e95764a7967e	kernel/core/src/sched/unsafe.rs	task_poison_pair_volatile	194	volatile,ptr-ops	INV:INV-TL-2
+1897c09b729c	kernel/core/src/sched/unsafe.rs	task_pid_volatile	215	volatile,ptr-ops	INV:INV-SCE-2
+527333002c93	kernel/core/src/sched/unsafe.rs	task_ownership_qword	232	volatile,ptr-ops	INV:INV-SCE-2
+b2157372db54	kernel/core/src/sched/unsafe.rs	current_trap_ip	253		INV:INV-SCE-11
+6a422c10ec97	kernel/core/src/sched/unsafe.rs	current_task_mut	270		INV:INV-SCE-11
+0df4c46ba34b	kernel/core/src/sched/unsafe.rs	arch_context_switch	293		INV:INV-SCE-5
+aa8cec0fff2f	kernel/core/src/sched/unsafe.rs	task_borrow	303		INV:INV-SCE-2
+b70b3b1a9973	kernel/core/src/sched/unsafe.rs	cgroup_node_ref	318		INV:INV-SCE-8
+a84179e6f556	kernel/core/src/sched/unsafe.rs	pt_regs_at_top	333	ptr-ops	INV:INV-SCE-9
+7f4e26bd3fc3	kernel/core/src/sched/unsafe.rs	list_next	350		INV:INV-SCE-7
+61cdb27f9505	kernel/core/src/sched/unsafe.rs	task_of_rt_list	359	ptr-ops	INV:INV-SCE-7
+520092129602	kernel/core/src/sched/unsafe.rs	rt_list_add	368		INV:INV-SCE-7
+f54c8d4fe1f3	kernel/core/src/sched/unsafe.rs	rt_list_add_tail	376		INV:INV-SCE-7
+8124dcd909ea	kernel/core/src/sched/unsafe.rs	rt_list_del	384		INV:INV-SCE-7
+65f82e8a8ef7	kernel/core/src/sched/unsafe.rs	rt_list_linked	394	ptr-ops	INV:INV-SCE-7
+694f66163ab5	kernel/core/src/sched/unsafe.rs	linked_at	493		INV:INV-SCE-6
+ccaf18d9863a	kernel/core/src/sched/unsafe.rs	detach_at	504		INV:INV-SCE-6
+9b99ea531eb5	kernel/core/src/sched/unsafe.rs	rb_nil	537		INV:INV-SCE-6
+fbdd9a87f386	kernel/core/src/sched/unsafe.rs	node_of_task	547	ptr-ops	INV:INV-SCE-6
+e369c3714add	kernel/core/src/sched/unsafe.rs	task_of_node	555	ptr-ops	INV:INV-SCE-6
+be1a810bd955	kernel/core/src/sched/unsafe.rs	node_key	564	ptr-ops	INV:INV-SCE-6
+50356c866f11	kernel/core/src/sched/unsafe.rs	node_key	565		INV:INV-SCE-6
+2f412a1fe807	kernel/core/src/sched/unsafe.rs	subtree_min	616		INV:INV-SCE-6
+c1c34e12fb42	kernel/core/src/sched/unsafe.rs	next	631		INV:INV-SCE-6
+f09bc34e7157	kernel/core/src/sched/unsafe.rs	next	633		INV:INV-SCE-6
+fdad9b29ccc9	kernel/core/src/sched/unsafe.rs	next	636		INV:INV-SCE-6
+146dc044f9de	kernel/core/src/sched/unsafe.rs	next	637		INV:INV-SCE-6
+f2df938dfe21	kernel/core/src/sched/unsafe.rs	next	639		INV:INV-SCE-6
+97663e56716e	kernel/core/src/sched/unsafe.rs	rotate_left	651		INV:INV-SCE-6
+e1fda550f66a	kernel/core/src/sched/unsafe.rs	rotate_left	652		INV:INV-SCE-6
+bb95114cd292	kernel/core/src/sched/unsafe.rs	rotate_left	653		INV:INV-SCE-6
+bd5e4fe599ab	kernel/core/src/sched/unsafe.rs	rotate_left	654		INV:INV-SCE-6
+e128b9333661	kernel/core/src/sched/unsafe.rs	rotate_left	656		INV:INV-SCE-6
+2bba9426fc20	kernel/core/src/sched/unsafe.rs	rotate_left	657		INV:INV-SCE-6
+6b308954ed29	kernel/core/src/sched/unsafe.rs	rotate_left	660		INV:INV-SCE-6
+697e6838bfe9	kernel/core/src/sched/unsafe.rs	rotate_left	661		INV:INV-SCE-6
+7b1eace2af71	kernel/core/src/sched/unsafe.rs	rotate_left	663		INV:INV-SCE-6
+6942d86ab289	kernel/core/src/sched/unsafe.rs	rotate_left	665		INV:INV-SCE-6
+daafc6d92b84	kernel/core/src/sched/unsafe.rs	rotate_left	666		INV:INV-SCE-6
+12ebbe263c74	kernel/core/src/sched/unsafe.rs	rotate_right	672		INV:INV-SCE-6
+be847fb9be38	kernel/core/src/sched/unsafe.rs	rotate_right	673		INV:INV-SCE-6
+1cd4808464dd	kernel/core/src/sched/unsafe.rs	rotate_right	674		INV:INV-SCE-6
+5acfd649be58	kernel/core/src/sched/unsafe.rs	rotate_right	675		INV:INV-SCE-6
+52180ff1adea	kernel/core/src/sched/unsafe.rs	rotate_right	677		INV:INV-SCE-6
+8aadd6d65be3	kernel/core/src/sched/unsafe.rs	rotate_right	678		INV:INV-SCE-6
+54f0d58648a5	kernel/core/src/sched/unsafe.rs	rotate_right	681		INV:INV-SCE-6
+d9f8c6357914	kernel/core/src/sched/unsafe.rs	rotate_right	682		INV:INV-SCE-6
+f51b365b6ece	kernel/core/src/sched/unsafe.rs	rotate_right	684		INV:INV-SCE-6
+5c2b42e5b27b	kernel/core/src/sched/unsafe.rs	rotate_right	686		INV:INV-SCE-6
+7e8c7ed5104c	kernel/core/src/sched/unsafe.rs	rotate_right	687		INV:INV-SCE-6
+84f874092151	kernel/core/src/sched/unsafe.rs	insert	700		INV:INV-SCE-6
+0633ccf73118	kernel/core/src/sched/unsafe.rs	insert	707		INV:INV-SCE-6
+eeee5bac2da9	kernel/core/src/sched/unsafe.rs	insert	708		INV:INV-SCE-6
+9725b83fadf6	kernel/core/src/sched/unsafe.rs	insert	710		INV:INV-SCE-6
+566ca1b98b61	kernel/core/src/sched/unsafe.rs	insert	720		INV:INV-SCE-6
+4e3f356e6be1	kernel/core/src/sched/unsafe.rs	insert	721		INV:INV-SCE-6
+435b28fa5be8	kernel/core/src/sched/unsafe.rs	insert	723		INV:INV-SCE-6
+c6b32b0661a7	kernel/core/src/sched/unsafe.rs	insert	726		INV:INV-SCE-6
+e1924fd7dcad	kernel/core/src/sched/unsafe.rs	insert	727		INV:INV-SCE-6
+b5e36d29e41c	kernel/core/src/sched/unsafe.rs	insert	728		INV:INV-SCE-6
+740a292f8a8d	kernel/core/src/sched/unsafe.rs	insert	730		INV:INV-SCE-6
+4dea4a9e8721	kernel/core/src/sched/unsafe.rs	insert	732		INV:INV-SCE-6
+4f472e47acea	kernel/core/src/sched/unsafe.rs	insert	733		INV:INV-SCE-6
+196cec56f286	kernel/core/src/sched/unsafe.rs	insert_fixup	745		INV:INV-SCE-6
+51a38950871f	kernel/core/src/sched/unsafe.rs	erase	793		INV:INV-SCE-6
+84beefb4bbf1	kernel/core/src/sched/unsafe.rs	erase	796		INV:INV-SCE-6
+e9cef0ebdda4	kernel/core/src/sched/unsafe.rs	erase	811		INV:INV-SCE-1
+e4711c2e71f9	kernel/core/src/sched/unsafe.rs	kid	921		INV:INV-SCE-1
+a2b13b46940f	kernel/core/src/sched/unsafe.rs	erase_fixup	928		INV:INV-SCE-1
+101a5acd10fb	kernel/core/src/sched/unsafe.rs	bh	1098		GAP
+53f9cd8d3f66	kernel/core/src/sched/unsafe.rs	bh	1103		GAP
+efde6d1d4857	kernel/core/src/sched/unsafe.rs	debug_black_height	1121		GAP
+397ffd151e2d	kernel/core/src/sched/unsafe.rs	grq_ptr_shared	1135		INV:INV-SCE-3
+5efa030b04fc	kernel/core/src/sched/unsafe.rs	grq_ptr_mut	1143	ptr-ops	INV:INV-SCE-3
+24408285af00	kernel/core/src/sched/unsafe.rs	per_cpu_shared	1163		INV:INV-SCE-10
+c8ee81d524b2	kernel/core/src/sched/unsafe.rs	per_cpu_mut	1173		INV:INV-SCE-10
+3c7ba3cdf4cf	kernel/core/src/sched/unsafe.rs	secondary_idle_publish	1190		INV:INV-SCE-4
+716cc69baac7	kernel/core/src/sched/unsafe.rs	secondary_idle_table_base	1197		INV:INV-SCE-4
+454df1c16a83	kernel/core/src/sched/unsafe.rs	secondary_idle_task	1203		INV:INV-SCE-4
+268a38228591	kernel/core/src/sched/unsafe.rs	<module>	1230		GAP
+a5e8f2be8eba	kernel/core/src/sched/unsafe.rs	<module>	1232		GAP
+d1096a2a47c2	kernel/core/src/sched/unsafe.rs	evring_slot_mut	1250		INV:INV-SCHED-EVRING-1
+5ec0131706a1	kernel/core/src/sched/unsafe.rs	evring_slot_ref	1265		INV:INV-SCHED-EVRING-1
+794fb5e978ec	kernel/core/src/sched/unsafe.rs	<module>	1283		GAP
 d8e30375e0d8	kernel/core/src/security/cap_lsm.rs	call	33		INV:INV-STATIC-CELL-1
 aa5b56591a15	kernel/core/src/security/cap_lsm.rs	call	45		INV:INV-STATIC-CELL-1
 9be73f07473d	kernel/core/src/security/lsm.rs	register_lsm	116		INV:INV-STATIC-CELL-1
@@ -1787,19 +1787,8 @@ d5e3fe0e10d0	kernel/core/src/signal.rs	handle_default_signal	2772	ptr-ops	INV:IN
 cd113f65a236	kernel/core/src/signal.rs	handle_default_signal	2816	ptr-ops	INV:INV-TASKREF-1
 1ff41a0300d7	kernel/core/src/signal.rs	park_stopped_task	3112		INV:INV-TASKREF-1
 3e8ec5bf7dfd	kernel/core/src/signal.rs	signal_wake_up_state	3314		INV:INV-TASKREF-1
-b4371e327bdf	kernel/core/src/signal_edges.rs	abort_reason_dump	49		INV:INV-TASKREF-1
-c02af8263fcf	kernel/core/src/signal_edges.rs	abort_reason_dump	82		INV:INV-TASKREF-1
-73a7d07c0fd9	kernel/core/src/sync/edges.rs	read_bytes_via_task	49		INV:INV-SY-1
-98e544e86b14	kernel/core/src/sync/edges.rs	read_bytes_via_task	63	volatile,ptr-ops	INV:INV-SY-1
-5194d6f0bf2e	kernel/core/src/sync/edges.rs	read_u32_via_task	96		INV:INV-SY-1
-debd404da9a9	kernel/core/src/sync/edges.rs	read_u32_via_task	102	volatile,ptr-ops	INV:INV-SY-1
-d4a527befd32	kernel/core/src/sync/edges.rs	word_read	115	ptr-ops	INV:INV-SY-3
-075a7028787e	kernel/core/src/sync/edges.rs	word_cas	125	ptr-ops	INV:INV-SY-3
-948216938e2e	kernel/core/src/sync/edges.rs	pt_walk	135		INV:INV-SY-1
-8e57382e44ba	kernel/core/src/sync/edges.rs	read_volatile_u64	145	volatile,ptr-ops	INV:INV-SY-1
-8c8aa6b1a990	kernel/core/src/sync/edges.rs	read_volatile_u32	152	volatile,ptr-ops	INV:INV-SY-1
-0598e6f1bcda	kernel/core/src/sync/edges.rs	copy_from_user_bytes	161	ptr-ops	INV:INV-SY-3
-dfbbfef5a013	kernel/core/src/sync/edges.rs	word_write	168	ptr-ops	INV:INV-SY-3
+f365a345a9f1	kernel/core/src/signal_unsafe.rs	abort_reason_dump	49		INV:INV-TASKREF-1
+8468f0b3dff5	kernel/core/src/signal_unsafe.rs	abort_reason_dump	82		INV:INV-TASKREF-1
 456a08794e59	kernel/core/src/sync/futex.rs	<module>	607		INV:INV-SCE-2
 e29db84d5944	kernel/core/src/sync/futex.rs	<module>	608		INV:INV-SCE-2
 7cf488c65f26	kernel/core/src/sync/futex_pi.rs	<module>	184		INV:INV-SENDSYNC-1
@@ -1895,27 +1884,38 @@ bb838d65c878	kernel/core/src/sync/spinlock.rs	deref_mut	1130		INV:INV-SPIN-1
 3d3abfd9cc5a	kernel/core/src/sync/spinlock.rs	<module>	1182		INV:INV-SPIN-1
 23dc876e3228	kernel/core/src/sync/spinlock.rs	deref	1189		INV:INV-SPIN-1
 6442a20779f5	kernel/core/src/sync/spinlock.rs	deref_mut	1197		INV:INV-SPIN-1
-0d049535ddd7	kernel/core/src/syscall/edges.rs	list_first	59		INV:INV-SYSC-1
-ca4dea069c20	kernel/core/src/syscall/edges.rs	list_next	68		INV:INV-SYSC-1
-5f014d57314b	kernel/core/src/syscall/edges.rs	list_entry	80	ptr-ops	INV:INV-SYSC-1
-7eea334c8caf	kernel/core/src/syscall/edges.rs	list_entry_mut	92	ptr-ops	INV:INV-SYSC-1
-614b4f7e1a43	kernel/core/src/syscall/edges.rs	list_link_tail	103		INV:INV-SYSC-1
-a469268aff7c	kernel/core/src/syscall/edges.rs	list_unlink	111		INV:INV-SYSC-1
-cb327f8c4c43	kernel/core/src/syscall/edges.rs	boxed_ref	148		INV:INV-SYSC-2
-137d15994484	kernel/core/src/syscall/edges.rs	boxed_mut	160		INV:INV-SYSC-2
-dcbb94ba5a1d	kernel/core/src/syscall/edges.rs	boxed_drop	172		INV:INV-SYSC-2
-e010329ecb5b	kernel/core/src/syscall/edges.rs	pidfd_data_of	221		INV:INV-SYSC-5
-3e6340f8e92f	kernel/core/src/syscall/edges.rs	file_inode_set_pre_publish	241		INV:INV-SYSC-7
-a82ccb0d87fd	kernel/core/src/syscall/edges.rs	arch_map_page	269		INV:INV-SYSC-8
-5be29c842d88	kernel/core/src/syscall/edges.rs	unmap_user_leaf_locked	289		INV:INV-SYSC-8
-2255bae2e3b8	kernel/core/src/syscall/edges.rs	copy_page_linear	315	ptr-ops	INV:INV-SYSC-8
-bcd2406783d1	kernel/core/src/syscall/edges.rs	page_desc_of	338		INV:INV-SYSC-8
-13041ccae0e2	kernel/core/src/syscall/edges.rs	pt_walk_writable_phys	454	ptr-ops	INV:INV-SYSC-8
-840a6026bb65	kernel/core/src/syscall/edges.rs	pt_walk_writable_phys	461		INV:INV-SYSC-8
-056fd2661b3f	kernel/core/src/syscall/edges.rs	pt_walk_writable_phys	481	ptr-ops	INV:INV-SYSC-8
-8fd514608c3d	kernel/core/src/syscall/edges.rs	file_write_page	508	ptr-ops	INV:INV-SYSC-8
-fa56c758f071	kernel/core/src/syscall/edges.rs	arch_map_user_page	527		INV:INV-SYSC-8
-231476a8b40b	kernel/core/src/syscall/edges.rs	slice_of_kernel_bytes	543	raw-construct	GAP
+33dacb332203	kernel/core/src/sync/unsafe.rs	read_bytes_via_task	49		INV:INV-SY-1
+cbdf42b73402	kernel/core/src/sync/unsafe.rs	read_bytes_via_task	63	volatile,ptr-ops	INV:INV-SY-1
+73644758e966	kernel/core/src/sync/unsafe.rs	read_u32_via_task	96		INV:INV-SY-1
+96271edd7faf	kernel/core/src/sync/unsafe.rs	read_u32_via_task	102	volatile,ptr-ops	INV:INV-SY-1
+71cea875ebb0	kernel/core/src/sync/unsafe.rs	word_read	115	ptr-ops	INV:INV-SY-3
+de069d7010d6	kernel/core/src/sync/unsafe.rs	word_cas	125	ptr-ops	INV:INV-SY-3
+2d21c3a33b61	kernel/core/src/sync/unsafe.rs	pt_walk	135		INV:INV-SY-1
+480ab7c8b94f	kernel/core/src/sync/unsafe.rs	read_volatile_u64	145	volatile,ptr-ops	INV:INV-SY-1
+0a19cb6c136d	kernel/core/src/sync/unsafe.rs	read_volatile_u32	152	volatile,ptr-ops	INV:INV-SY-1
+2f30389211de	kernel/core/src/sync/unsafe.rs	copy_from_user_bytes	161	ptr-ops	INV:INV-SY-3
+9721722f86b3	kernel/core/src/sync/unsafe.rs	word_write	168	ptr-ops	INV:INV-SY-3
+4b69e1f3a052	kernel/core/src/syscall/unsafe.rs	list_first	59		INV:INV-SYSC-1
+230d2680e54f	kernel/core/src/syscall/unsafe.rs	list_next	68		INV:INV-SYSC-1
+6aab4a470c5c	kernel/core/src/syscall/unsafe.rs	list_entry	80	ptr-ops	INV:INV-SYSC-1
+e4d7927d8896	kernel/core/src/syscall/unsafe.rs	list_entry_mut	92	ptr-ops	INV:INV-SYSC-1
+7f2e28318770	kernel/core/src/syscall/unsafe.rs	list_link_tail	103		INV:INV-SYSC-1
+16e0ce26bd8e	kernel/core/src/syscall/unsafe.rs	list_unlink	111		INV:INV-SYSC-1
+3ec545cb84e2	kernel/core/src/syscall/unsafe.rs	boxed_ref	148		INV:INV-SYSC-2
+cce4a383f3dc	kernel/core/src/syscall/unsafe.rs	boxed_mut	160		INV:INV-SYSC-2
+e5d1a4766322	kernel/core/src/syscall/unsafe.rs	boxed_drop	172		INV:INV-SYSC-2
+45c764d8a745	kernel/core/src/syscall/unsafe.rs	pidfd_data_of	221		INV:INV-SYSC-5
+72b64a01f336	kernel/core/src/syscall/unsafe.rs	file_inode_set_pre_publish	241		INV:INV-SYSC-7
+c706f361b757	kernel/core/src/syscall/unsafe.rs	arch_map_page	269		INV:INV-SYSC-8
+58ce3ddd6031	kernel/core/src/syscall/unsafe.rs	unmap_user_leaf_locked	289		INV:INV-SYSC-8
+19addd1e218a	kernel/core/src/syscall/unsafe.rs	copy_page_linear	315	ptr-ops	INV:INV-SYSC-8
+84727f2d11a3	kernel/core/src/syscall/unsafe.rs	page_desc_of	338		INV:INV-SYSC-8
+5b141eff0444	kernel/core/src/syscall/unsafe.rs	pt_walk_writable_phys	454	ptr-ops	INV:INV-SYSC-8
+f2fde6b973d3	kernel/core/src/syscall/unsafe.rs	pt_walk_writable_phys	461		INV:INV-SYSC-8
+1fb7df5faa08	kernel/core/src/syscall/unsafe.rs	pt_walk_writable_phys	481	ptr-ops	INV:INV-SYSC-8
+6a47b8802ee0	kernel/core/src/syscall/unsafe.rs	file_write_page	508	ptr-ops	INV:INV-SYSC-8
+0d7515a09599	kernel/core/src/syscall/unsafe.rs	arch_map_user_page	527		INV:INV-SYSC-8
+a163c4aefe67	kernel/core/src/syscall/unsafe.rs	slice_of_kernel_bytes	543	raw-construct	GAP
 bd032fdcbd7b	kernel/core/src/tests/fdtable.rs	test_fdtable	43		INV:INV-TESTHARNESS-1
 0338e515df3d	kernel/core/src/tests/fdtable.rs	test_fdtable	57		INV:INV-TESTHARNESS-1
 79ce22f48958	kernel/core/src/tests/framebuffer.rs	put_pixel	27	volatile,ptr-ops	INV:INV-TESTHARNESS-1

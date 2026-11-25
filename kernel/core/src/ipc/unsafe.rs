@@ -1,27 +1,74 @@
-//! MIT License
+//! Framework-side IPC audited-edge zone (crate-flip rung: ipc).
+//! The raw-page refcount touches the sysv shared-memory policy needs
+//! against the vmemmap descriptors stay HERE (the net_edges pattern):
+//! the service crate's shm policy calls these as SAFE functions; each
+//! holds exactly one audited unsafe with its contract.
 //!
-//! Copyright (c) 2026 Fei Wang
-//!
+//! INV-IPC-PAGEOP-1 (provenance): `phys` is a frame number that came
+//! from the segment's own page set (get_zeroed_page allocations or
+//! demand-filled PTE targets observed under the segment lock), so
+//! `pfn_to_page_mut` yields the descriptor of an in-RAM page or null
+//! (the null arm is the torn-teardown window and is skipped, matching
+//! the historical behavior).
 
-//! BINDER EDGES — the audited unsafe zone the MOVED binder diagnostics
-//! consume (cold-four lane): the trap-regs readers, the user page-table
-//! probe walkers and the kernel-stack word reader moved here verbatim
-//! from binder.rs when the cold diagnostic halves flipped to the
-//! ipc crate, plus the two typed task edges those halves' raw
-//! derefs converted to. Everything here is diagnostic-path only — no
-//! txn-path site calls into this file.
-//!
-//! INV rows:
-//! - INV-BINDER-ENTRYFRAME (carried): the entry_frame* readers walk a
-//!   task's kernel stack top for a pt_regs-shaped frame; provenance is
-//!   a live task observed under the pid-hash walk or WORLD.
-//! - INV-BINDER-PROBE (carried): probe_leaf/u32/u64 translate a USER
-//!   virtual address through the target's root pgd — read-only.
-//! - INV-BINDER-DIAG-COMM (carried): the ONE audited raw-task comm
-//!   read per audit pass.
-//! - INV-BINDER-DIAG-TASKREF (new): the diagnostic &Task borrow of a
-//!   raw task pointer from the binder object model; the caller's
-//!   context (WORLD held / pid-hash bucket) pins the task.
+use crate::mm::{phys_to_pfn, pfn_to_page_mut};
+
+/// Take one reference on the segment page backing `phys` (the
+/// per-attachment pin installed by the shmat map loop, review 2R.6:
+/// shmdt/exit's put_page must not free a page the segment still owns).
+pub fn shm_page_get(phys: usize) {
+    let page = pfn_to_page_mut(phys_to_pfn(phys));
+    if !page.is_null() {
+        // SAFETY: INV-IPC-PAGEOP-1 — pfn_to_page_mut returned the
+        // vmemmap descriptor of an in-RAM frame (non-null arm).
+        unsafe { (*page).get_page() };
+    }
+}
+
+/// Drop the owner-side reference on the segment page backing `phys`.
+/// Returns true when the decrement hit zero — the caller then returns
+/// the frame to the buddy allocator.
+pub fn shm_page_put(phys: usize) -> bool {
+    let page = pfn_to_page_mut(phys_to_pfn(phys));
+    if page.is_null() {
+        // No descriptor: treat as "we own the free decision" (the
+        // historical Drop arm).
+        return true;
+    }
+    // SAFETY: INV-IPC-PAGEOP-1 — non-null vmemmap descriptor.
+    unsafe { (*page).put_page() == 0 }
+}
+
+// ---------------------------------------------------------------------------
+// Joined into this file from ipc/binder_edges.rs (pass 1b, seed-core-design 2c.3:
+// one unsafe.rs per subsystem). Everything below is that file as it
+// was; its header was a module doc comment and is kept as plain
+// comments, because an inner doc comment is only valid at the top of a file.
+// ---------------------------------------------------------------------------
+// MIT License
+//
+// Copyright (c) 2026 Fei Wang
+//
+
+// BINDER EDGES — the audited unsafe zone the MOVED binder diagnostics
+// consume (cold-four lane): the trap-regs readers, the user page-table
+// probe walkers and the kernel-stack word reader moved here verbatim
+// from binder.rs when the cold diagnostic halves flipped to the
+// ipc crate, plus the two typed task edges those halves' raw
+// derefs converted to. Everything here is diagnostic-path only — no
+// txn-path site calls into this file.
+//
+// INV rows:
+// - INV-BINDER-ENTRYFRAME (carried): the entry_frame* readers walk a
+//   task's kernel stack top for a pt_regs-shaped frame; provenance is
+//   a live task observed under the pid-hash walk or WORLD.
+// - INV-BINDER-PROBE (carried): probe_leaf/u32/u64 translate a USER
+//   virtual address through the target's root pgd — read-only.
+// - INV-BINDER-DIAG-COMM (carried): the ONE audited raw-task comm
+//   read per audit pass.
+// - INV-BINDER-DIAG-TASKREF (new): the diagnostic &Task borrow of a
+//   raw task pointer from the binder object model; the caller's
+//   context (WORLD held / pid-hash bucket) pins the task.
 
 pub fn entry_frame(top: usize) -> (u64, u64, u64, u64, u64) {
     if top == 0 {

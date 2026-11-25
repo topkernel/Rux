@@ -7,7 +7,7 @@
 //! crate-level unsafe-deny boundary. The two trees contain ZERO unsafe
 //! (the conversion rounds finished before the flip: 86 regions -> 0);
 //! every raw view/copy they need is a framework edge
-//! (fs/ext4_edges.rs, bio's with_block/bh_data pin family,
+//! (fs/unsafe.rs, bio's with_block/bh_data pin family,
 //! safety::bytes, syscall/process boxed-ref edges).
 
 #![forbid(unsafe_code)]

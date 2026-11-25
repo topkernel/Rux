@@ -200,7 +200,7 @@ impl Default for Ext4SuperBlockOnDisk {
     fn default() -> Self {
         // #[repr(C)] all-integer fields; zeros are valid (the audited
         // zeroed lives at the framework edge, INV-EXT-EDGE-3).
-        rux::fs::ext4_edges::zeroed_on_disk()
+        rux::fs::r#unsafe::zeroed_on_disk()
     }
 }
 
@@ -285,7 +285,7 @@ impl Default for Ext4GroupDesc {
     fn default() -> Self {
         // #[repr(C)] all-integer fields; zeros are valid (the audited
         // zeroed lives at the framework edge, INV-EXT-EDGE-3).
-        rux::fs::ext4_edges::zeroed_on_disk()
+        rux::fs::r#unsafe::zeroed_on_disk()
     }
 }
 

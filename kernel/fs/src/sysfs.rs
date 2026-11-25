@@ -1907,12 +1907,12 @@ fn sysfs_mount_cb(
 
 // SAFETY: sb came from sysfs_mount_cb's Box::into_raw.
 fn sysfs_kill_sb(sb: *mut SuperBlock) {
-    rux::fs::unsafe_edges::kill_sb_reclaim_box::<SysfsSuperBlock>(sb);
+    rux::fs::r#unsafe::kill_sb_reclaim_box::<SysfsSuperBlock>(sb);
 }
 
 /// Get the sysfs superblock (if initialized).
 pub fn get_sysfs_sb() -> Option<&'static SysfsSuperBlock> {
-    rux::fs::unsafe_edges::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
+    rux::fs::r#unsafe::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
 }
 
 /// Initialize sysfs: register the filesystem type and build the KObject
@@ -2024,7 +2024,7 @@ pub struct SysfsEntryData {
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from sysfs_iget/create_root_inode.
 fn entry_of<'a>(inode: &'a Inode) -> Option<&'a SysfsEntryData> {
-    rux::fs::unsafe_edges::privdata_ref::<SysfsEntryData>(inode)
+    rux::fs::r#unsafe::privdata_ref::<SysfsEntryData>(inode)
 }
 
 /// Resolve a child of `dir` to (kobj, attr, link) for lookup/iget.
@@ -2277,7 +2277,7 @@ fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> 
 /// sysfs destroy_inode: reclaim the leaked Box<SysfsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
 fn sysfs_destroy_inode(inode: &mut Inode) {
-    rux::fs::unsafe_edges::privdata_take_box::<SysfsEntryData>(inode);
+    rux::fs::r#unsafe::privdata_take_box::<SysfsEntryData>(inode);
 }
 
 /// SysFS inode operations table.
@@ -2342,7 +2342,7 @@ pub struct SysfsFileContent {
 /// read: serve from the open-time snapshot at the file position.
 fn sysfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by sysfs_open under this File.
-    let content = match rux::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+    let content = match rux::fs::r#unsafe::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2361,7 +2361,7 @@ fn sysfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 /// write: dispatch to the attribute store handler.
 fn sysfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
-    let inode = match rux::fs::unsafe_edges::file_inode_arc(file) {
+    let inode = match rux::fs::r#unsafe::file_inode_arc(file) {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2390,7 +2390,7 @@ fn sysfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn sysfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see sysfs_file_read.
-    let content = match rux::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+    let content = match rux::fs::r#unsafe::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2412,7 +2412,7 @@ fn sysfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
 fn sysfs_file_close(file: &rux::fs::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(rux::fs::unsafe_edges::file_privdata_take::<SysfsFileContent>(file));
+    drop(rux::fs::r#unsafe::file_privdata_take::<SysfsFileContent>(file));
     0
 }
 

@@ -11,7 +11,7 @@
 //! walk depth are x86-specific.
 
 use super::memory_layout::*;
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::mm_ops::{alloc_user_phys_page, check_pte_permissions, is_cow_page, PageTableWalker};
 use super::mmu_init::{get_page_table_virt, map_page, map_page_noflush, ROOT_PAGE_TABLE};
 use super::pagetable::*;

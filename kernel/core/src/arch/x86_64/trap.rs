@@ -30,7 +30,7 @@
 //! the untouched fast path (trap.S trap_exit_syscall; rcx/r11 mirror
 //! checks) and IRETQ everywhere else — the Linux discipline.
 
-use super::unsafe_edges::SavedFrame;
+use super::r#unsafe::SavedFrame;
 use super::cpu::{inb, outb, rdmsr, wrmsr};
 use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
 use crate::sync::spinlock::Spinlock;
@@ -1143,7 +1143,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         }
     }
     // The frame edge: ONE audited reference formation per entry
-    // (INV-XE-FRAME-1/2 in unsafe_edges.rs). Everything below is safe
+    // (INV-XE-FRAME-1/2 in unsafe.rs). Everything below is safe
     // Rust over the typed handle.
     let mut frame = unsafe { SavedFrame::<'static>::from_trap(regs) };
 
@@ -2816,7 +2816,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 core::sync::atomic::AtomicU32::new(0);
             // Defect-C: the FIRST refusal per task (the static gets
             // overwritten by successive faults; later prints mislead).
-            let first_for_task = crate::debug::forensics_edges::mark_first_refusal(
+            let first_for_task = crate::debug::r#unsafe::mark_first_refusal(
                 crate::sched::get_current_pid() as u64,
             );
             // HOTPATH-PRINT: budget-gated — 8 total (SEGV_N) + the first

@@ -6,7 +6,7 @@
 //! Virtual File System (VFS)
 
 pub mod file;
-pub mod unsafe_edges;
+pub mod r#unsafe;
 pub mod event_notify;
 pub mod fdreap;
 pub mod inode;
@@ -61,7 +61,6 @@ pub mod fsctx;
 // service crate registers at boot; the ext4/jbd2 module lines above
 // stay until the ext4 flip deletes them).
 pub mod ext4_hooks;
-pub mod ext4_edges;
 pub mod journal_seam;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, close_file_fd_report, set_cloexec_fd};

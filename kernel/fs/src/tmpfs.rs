@@ -327,7 +327,7 @@ impl TmpfsNode {
                 // total by construction (F-TMPFS-CACHE: the single
                 // audited frame-face copy through the framework edge;
                 // reference shmem_read_mapping_page).
-                let src = rux::fs::unsafe_edges::kernel_slice_at(frame, page_off, chunk);
+                let src = rux::fs::r#unsafe::kernel_slice_at(frame, page_off, chunk);
                 buf[done..done + chunk].copy_from_slice(src);
                 cache.put(self.fs_id, self.ino, page_idx as u64);
                 done += chunk;
@@ -925,7 +925,7 @@ pub fn ensure_registered() {
 // SAFETY: private_data was installed by tmpfs_make_inode / tmpfs_iget as an
 // Arc::into_raw reference; it stays alive at least as long as the inode.
 fn node_of<'a>(inode: &'a Inode) -> Result<&'a TmpfsNode, i32> {
-    match rux::fs::unsafe_edges::privdata_ref::<TmpfsNode>(inode) {
+    match rux::fs::r#unsafe::privdata_ref::<TmpfsNode>(inode) {
         Some(node) => Ok(node),
         None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
     }
@@ -1414,7 +1414,7 @@ fn tmpfs_destroy_inode(inode: &mut Inode) {
         .invalidate_inode(inode.fs_id, inode.ino as u64);
     // Reclaim the leaked Arc reference (idempotent; INV-FS-PRIVDATA-1
     // through the framework edge — the Drop-time single reclaim).
-    rux::fs::unsafe_edges::privdata_drop_arc::<TmpfsNode>(inode);
+    rux::fs::r#unsafe::privdata_drop_arc::<TmpfsNode>(inode);
 }
 
 // ============================================================================
@@ -1427,7 +1427,7 @@ fn tmpfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     // holds an Arc<Inode> keeping the node reference alive.
     {
 
-    let inode = match rux::fs::unsafe_edges::file_inode(file) {
+    let inode = match rux::fs::r#unsafe::file_inode(file) {
         Some(i) => i,
         None => return -9,
         };
@@ -1480,7 +1480,7 @@ fn tmpfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
     // SAFETY: see tmpfs_file_read.
     {
 
-    let inode = match rux::fs::unsafe_edges::file_inode(file) {
+    let inode = match rux::fs::r#unsafe::file_inode(file) {
         Some(i) => i,
         None => return -9,
         };
@@ -1528,7 +1528,7 @@ fn tmpfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 }
 
 fn tmpfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
-    let file_size = match rux::fs::unsafe_edges::file_inode(file) {
+    let file_size = match rux::fs::r#unsafe::file_inode(file) {
         Some(inode) => match node_of(inode) {
             Ok(node) => node.file_size() as isize,
             Err(_) => return -9,
@@ -1584,7 +1584,7 @@ pub fn is_tmpfs_file(file: &rux::fs::File) -> bool {
 fn tmpfs_file_read_at(file: &rux::fs::File, offset: u64, buf: &mut [u8]) -> isize {
     {
 
-    let inode = match rux::fs::unsafe_edges::file_inode(file) {
+    let inode = match rux::fs::r#unsafe::file_inode(file) {
         Some(i) => i,
         None => return -9,
         };
@@ -1898,7 +1898,7 @@ pub fn fallocate(inode: &Inode, mode: i32, offset: u64, len: u64) -> Option<Resu
     }
     // private_data holds an Arc<TmpfsNode> placed by tmpfs_make_inode;
     // the edge hands the shared view (INV-FS-PRIVDATA-1).
-    let node = rux::fs::unsafe_edges::privdata_ref::<TmpfsNode>(inode)?;
+    let node = rux::fs::r#unsafe::privdata_ref::<TmpfsNode>(inode)?;
     if mode & PUNCH_HOLE != 0 {
         if mode & KEEP_SIZE == 0 {
             // Linux: PUNCH_HOLE without KEEP_SIZE is EINVAL.

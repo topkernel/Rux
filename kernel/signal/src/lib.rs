@@ -28,7 +28,7 @@ pub use rux::{
     arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, ipc,
     mm, process, safety, sched, security, sync, syscall, timer, trace,
 };
-pub use rux::{signal_hooks, signal_edges};
+pub use rux::{signal_hooks, signal_unsafe};
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 

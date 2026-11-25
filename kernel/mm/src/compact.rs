@@ -82,7 +82,7 @@ pub fn migration_in_progress() -> bool {
 /// Contract: `zone` is a valid pointer to an initialized zone (the
 /// compaction caller's zone-table reference).
 pub fn compact_zone(zone: *mut Zone, order: usize) -> CompactResult {
-    let zone_ref: &mut Zone = crate::syscall::edges::boxed_mut(zone);
+    let zone_ref: &mut Zone = crate::syscall::r#unsafe::boxed_mut(zone);
     let start = zone_ref.start_pfn();
     let end = zone_ref.end_pfn();
 
@@ -154,7 +154,7 @@ fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
         }
 
         // Phase 4: Check if we already have a suitable free block
-        if crate::syscall::edges::boxed_ref(cc.zone).has_free_block(cc.order) {
+        if crate::syscall::r#unsafe::boxed_ref(cc.zone).has_free_block(cc.order) {
             return CompactResult::Success;
         }
     }
@@ -172,7 +172,7 @@ fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
 /// Contract: cc.zone is a valid zone pointer; the scanner PFNs stay
 /// within the zone's range by the loop bounds.
 fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
-    let zone = crate::syscall::edges::boxed_ref(cc.zone);
+    let zone = crate::syscall::r#unsafe::boxed_ref(cc.zone);
 
     // Fast path: try buddy allocator
     if let Some(pfn) = zone.alloc_single_page() {
@@ -186,7 +186,7 @@ fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
         cc.nr_scanned += 1;
 
         // INV-MM-2 chain arm (descriptor probe inside the zone range).
-        let p = match rux::mm::edges::page_ref_of(cc.free_pfn) {
+        let p = match rux::mm::r#unsafe::page_ref_of(cc.free_pfn) {
             Some(p) => p,
             None => continue,
         };
@@ -213,7 +213,7 @@ fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
 /// Contract: cc.zone is a valid zone pointer; the scanner stays in
 /// range by the loop bound.
 fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
-    let zone = crate::syscall::edges::boxed_ref(cc.zone);
+    let zone = crate::syscall::r#unsafe::boxed_ref(cc.zone);
     let end = zone.end_pfn();
 
     while cc.migrate_pfn < cc.free_pfn && cc.migrate_pfn < end {
@@ -222,7 +222,7 @@ fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
         cc.nr_scanned += 1;
 
         // INV-MM-2 chain arm.
-        let p = match rux::mm::edges::page_ref_of(pfn) {
+        let p = match rux::mm::r#unsafe::page_ref_of(pfn) {
             Some(p) => p,
             None => continue,
         };
@@ -296,11 +296,11 @@ fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
 /// Contract: both PFNs are valid descriptors; the source is
 /// exclusively owned (refcount == 1), the destination free.
 fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
-    let src = match rux::mm::edges::page_ref_of(src_pfn) {
+    let src = match rux::mm::r#unsafe::page_ref_of(src_pfn) {
         Some(p) => p,
         None => return false,
     };
-    let dst = match rux::mm::edges::page_of(dst_pfn) {
+    let dst = match rux::mm::r#unsafe::page_of(dst_pfn) {
         Some(p) => p,
         None => return false,
     };
@@ -394,7 +394,7 @@ fn migrate_page_window(
     }
 
     // Step 3: Copy page contents
-    rux::mm::edges::compact_copy_page(src_pfn, page_to_pfn(dst as *const Page));
+    rux::mm::r#unsafe::compact_copy_page(src_pfn, page_to_pfn(dst as *const Page));
 
     // Step 4: Install new PTEs pointing to dst_pfn
     remap_page(dst, old_vaddr, saved_pte_flags);

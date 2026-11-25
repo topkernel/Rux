@@ -932,7 +932,7 @@ pub enum VmaError {
     Invalid,
 }
 
-// Send/Sync proofs live in mm::edges (same contracts the inline impls
+// Send/Sync proofs live in mm::unsafe (same contracts the inline impls
 // documented).
 
 

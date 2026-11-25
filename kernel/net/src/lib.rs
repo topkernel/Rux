@@ -10,7 +10,7 @@
 
 // FORBID since the substrate extraction: the socket-table reference
 // formation, Arc-refcount probes, validated derefs and POD header
-// views moved to the framework's net/net_edges.rs (INV-NET-SOCKTAB-1,
+// views moved to the framework's net/unsafe.rs (INV-NET-SOCKTAB-1,
 // INV-NET-ARCREF-1, INV-NET-HDRVIEW-1); the file→Arc adoption lives in
 // net/file_arc.rs and skb slicing in net/buffer.rs. The three
 // historical `unsafe impl Sync` markers were VESTIGIAL (the structs
@@ -39,13 +39,13 @@ extern crate alloc;
 pub mod arp;
 // buffer.rs (the raw-memory substrate: allocator calls, pointer
 // arithmetic, slice construction — 22 unsafe constructs) stays
-// FRAMEWORK-side (the edges.rs pattern); the crate consumes it
+// FRAMEWORK-side (the unsafe.rs pattern); the crate consumes it
 // via the re-export below.
 pub use rux::net::buffer;
 pub use rux::net::file_arc::file_arc;
 pub use rux::net::file_arc::take_file_arc as reclaim_file_arc;
 pub use rux::net::file_arc::take_file_arc;
-pub use rux::net::net_edges;
+pub use rux::net::r#unsafe;
 pub use rux::net::net_hooks;
 pub mod ethernet;
 pub mod icmp;

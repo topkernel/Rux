@@ -46,7 +46,7 @@ fn unlink_locked(
     let next = page.lru_next();
 
     if prev != LRU_NONE {
-        if let Some(prev_page) = rux::mm::edges::page_of(prev) {
+        if let Some(prev_page) = rux::mm::r#unsafe::page_of(prev) {
             prev_page.set_lru_next(next);
         }
     } else {
@@ -55,7 +55,7 @@ fn unlink_locked(
     }
 
     if next != LRU_NONE {
-        if let Some(next_page) = rux::mm::edges::page_of(next) {
+        if let Some(next_page) = rux::mm::r#unsafe::page_of(next) {
             next_page.set_lru_prev(prev);
         }
     } else {
@@ -111,7 +111,7 @@ fn link_tail_locked(
 
     if tail != LRU_NONE {
         // Link old tail → new page
-        if let Some(tail_page) = rux::mm::edges::page_of(tail) {
+        if let Some(tail_page) = rux::mm::r#unsafe::page_of(tail) {
             tail_page.set_lru_next(pfn);
         }
         page.set_lru_prev(tail);
@@ -150,7 +150,7 @@ fn link_head_locked(
 
     if head != LRU_NONE {
         // Link old head → new page
-        if let Some(head_page) = rux::mm::edges::page_of(head) {
+        if let Some(head_page) = rux::mm::r#unsafe::page_of(head) {
             head_page.set_lru_prev(pfn);
         }
         page.set_lru_next(head);
@@ -176,7 +176,7 @@ fn page_clear_lru_bits(page: &Page) {
 /// The tail is the least-recently-used end; kswapd scans from here.
 pub fn lru_add_page(page: &Page, lru_type: usize) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -194,7 +194,7 @@ pub fn lru_add_page(page: &Page, lru_type: usize) {
 /// Remove a page from its LRU list — O(1) via lru_prev (review 4.11).
 pub fn lru_del_page(page: &Page) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -223,7 +223,7 @@ pub fn lru_del_page(page: &Page) {
 /// Acquires the LRU lock once for both the unlink and the relink.
 pub fn lru_move_to_tail(page: &Page, new_lru: usize) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -249,7 +249,7 @@ pub fn lru_move_to_tail(page: &Page, new_lru: usize) {
 /// Acquires the LRU lock once for both the unlink and the relink.
 pub fn lru_move_to_head(page: &Page, new_lru: usize) {
     // SAFETY: called with lru_lock held — exclusive node access.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -331,7 +331,7 @@ pub fn page_evictable(page: &Page) -> bool {
 /// Get the total number of pages across all LRU lists.
 pub fn lru_page_total() -> usize {
     // SAFETY: read-only LRU statistics — no concurrent mutation concern.
-    match rux::mm::edges::first_node_mut() {
+    match rux::mm::r#unsafe::first_node_mut() {
         Some(node) => {
             let mut total = 0usize;
             for lru in 0..NR_LRU_LISTS {
@@ -359,7 +359,7 @@ pub fn lru_page_total() -> usize {
 /// link_head_locked, whose doc spells out head-young/tail-old).
 pub fn page_add_anon_lru(page: &Page) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -381,7 +381,7 @@ pub fn page_add_file_lru(page: &Page) {
 /// where per-page lock/unlock dominated the insert cost under TCG).
 pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -394,7 +394,7 @@ pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
         // held for the whole batch, and the Lru-flag check keeps double
         // links impossible — same contract as lru_add_page
         // (INV-MM-2 owned-frame arm).
-        if let Some(page) = rux::mm::edges::page_ref_of(
+        if let Some(page) = rux::mm::r#unsafe::page_ref_of(
             rux::mm::page_desc::page_to_pfn(*page_ptr)
         ) {
             if !page.test_flag(PageFlag::Lru) {
@@ -422,7 +422,7 @@ pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
 /// Link `page` at the HEAD (young end) of LRU_INACTIVE_FILE.
 pub fn page_add_file_lru_young(page: &Page) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -440,7 +440,7 @@ pub fn page_add_file_lru_young(page: &Page) {
 /// the head (youngest) and the first element is the oldest of the batch.
 pub fn page_add_file_lru_young_batch(pages: &[*mut Page]) {
     // SAFETY: same node-access discipline as lru_add_page.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };
@@ -452,7 +452,7 @@ pub fn page_add_file_lru_young_batch(pages: &[*mut Page]) {
         // Caller owns these frames (fresh allocations); the Lru flag
         // check keeps double links impossible — same contract as
         // page_add_file_lru_batch (INV-MM-2 owned-frame arm).
-        if let Some(page) = rux::mm::edges::page_ref_of(
+        if let Some(page) = rux::mm::r#unsafe::page_ref_of(
             rux::mm::page_desc::page_to_pfn(*page_ptr)
         ) {
             if !page.test_flag(PageFlag::Lru) {
@@ -490,7 +490,7 @@ pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
         return 0;
     }
     // SAFETY: same node-access discipline as lru_collect_cold.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return 0,
     };
@@ -500,7 +500,7 @@ pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
         .load(core::sync::atomic::Ordering::Relaxed);
     while cur != LRU_NONE && demoted < nr {
         // cur comes from the (locked) list chain (INV-MM-2 chain arm).
-        let p = match rux::mm::edges::page_ref_of(cur) {
+        let p = match rux::mm::r#unsafe::page_ref_of(cur) {
             Some(p) => p,
             None => break,
         };
@@ -537,7 +537,7 @@ pub fn page_remove_lru(page: &Page) {
 /// Returns 0 if the list is empty.
 pub fn lru_tail(lru_type: usize) -> usize {
     // SAFETY: read-only LRU access — no concurrent mutation concern.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return 0,
     };
@@ -557,7 +557,7 @@ pub fn lru_collect_cold(lru_type: usize, nr: usize) -> Vec<usize> {
     let mut out = Vec::new();
 
     // SAFETY: node access is for reading; the lock guards the walk.
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return out,
     };
@@ -569,7 +569,7 @@ pub fn lru_collect_cold(lru_type: usize, nr: usize) -> Vec<usize> {
         out.push(cur);
         // cur comes from the (locked) list chain; read-only access
         // (INV-MM-2 chain arm).
-        match rux::mm::edges::page_ref_of(cur) {
+        match rux::mm::r#unsafe::page_ref_of(cur) {
             Some(p) => cur = p.lru_prev(),
             None => break,
         }

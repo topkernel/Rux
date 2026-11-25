@@ -851,7 +851,7 @@ impl ReadDst {
                 // INV-EXT4-DIO-1 — dst+off+bytes is in bounds (the
                 // staging buffer's caller-checked span); the copy rides
                 // the framework's audited kernel-slice edge.
-                rux::fs::unsafe_edges::kernel_slice_mut(dst.wrapping_add(off), bytes)
+                rux::fs::r#unsafe::kernel_slice_mut(dst.wrapping_add(off), bytes)
                     .copy_from_slice(src);
                 Ok(bytes)
             }
@@ -932,7 +932,7 @@ impl WriteSrc {
             // INV-EXT4-WRITESRC-K — a real slice backs the span; the
             // view rides the framework's audited kernel-slice edge.
             WriteSrc::Kernel(p, _) => {
-                Some(rux::fs::unsafe_edges::kernel_slice(p.wrapping_add(off), n))
+                Some(rux::fs::r#unsafe::kernel_slice(p.wrapping_add(off), n))
             }
             WriteSrc::User(..) => None,
         }
@@ -1640,7 +1640,7 @@ impl<'a> DioWriteSrc<'a> {
                 pins.for_each_piece(off, dst.len(), |p, l| {
                     // The pin keeps the frame alive; the alias is l
                     // readable bytes (INV-MM-6 pinned-alias arm).
-                    crate::mm::edges::copy_kva_from(&mut dst[d..][..l], p);
+                    crate::mm::r#unsafe::copy_kva_from(&mut dst[d..][..l], p);
                     d += l;
                     true
                 });
@@ -3584,8 +3584,8 @@ fn file_ext4(
     // The inode cell rides INV-FS-FILEINODE-1; private_data rides
     // INV-FS-PRIVDATA-1 (the ext4 instance installed at create_vfs_inode);
     // the sb box rides INV-EXT4-SBRES-1 (INV-EXT4-FILERES above).
-    let inode = rux::fs::unsafe_edges::file_inode(file)?;
-    let fs = rux::fs::unsafe_edges::privdata_ref::<crate::ext4::Ext4FileSystem>(inode)?;
+    let inode = rux::fs::r#unsafe::file_inode(file)?;
+    let fs = rux::fs::r#unsafe::privdata_ref::<crate::ext4::Ext4FileSystem>(inode)?;
     let ext4_ino = super::sb_inode_of(inode).ok()?;
     Some((inode, fs, ext4_ino))
 }
@@ -3594,7 +3594,7 @@ fn file_ext4(
 /// VFS inode slot empty at all?
 fn file_inode_missing(file: &File) -> bool {
     // Same slot contract as file_ext4 (INV-FS-FILEINODE-1).
-    rux::fs::unsafe_edges::file_inode(file).is_none()
+    rux::fs::r#unsafe::file_inode(file).is_none()
 }
 
 /// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
@@ -3879,7 +3879,7 @@ pub fn ext4_file_pread_dio_user_vfs(
         // is exclusively ours while io_lock is held. Volatile by the
         // same discipline as stamp_atime_relatime.
         {
-            let i = crate::syscall::edges::boxed_mut(
+            let i = crate::syscall::r#unsafe::boxed_mut(
                 ext4_inode as *const super::inode::Ext4Inode
                     as *mut super::inode::Ext4Inode,
             );
@@ -4064,7 +4064,7 @@ pub fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, count: u
     };
     // The fn's own contract — `buf` holds `count` readable bytes (the
     // caller's raw-pointer write_at boundary); INV-EXT4-WAVFS.
-    let data = crate::syscall::edges::slice_of_kernel_bytes(buf, count);
+    let data = crate::syscall::r#unsafe::slice_of_kernel_bytes(buf, count);
     // Same routing as write(2): plain buffered writes take the
     // delayed-allocation page-cache path (pwrite/mmap-writeback flushes
     // still come through ext4_write_at_core directly).
@@ -5476,7 +5476,7 @@ pub fn ext4_flush_dirty_inode(
         return 0;
     }
     // INV-FS-PRIVDATA-1: the ext4 instance this inode was created on.
-    let fs_ref = match rux::fs::unsafe_edges::privdata_ref::<crate::ext4::Ext4FileSystem>(inode) {
+    let fs_ref = match rux::fs::r#unsafe::privdata_ref::<crate::ext4::Ext4FileSystem>(inode) {
         Some(f) => f,
         None => return 0,
     };
@@ -6115,7 +6115,7 @@ fn stamp_write_tail(ino: *mut super::inode::Ext4Inode, pub_end: u64, now: u32) {
     // The caller pins the Box (INV-EXT4-SBRES-1); the fields below are
     // advisory u32/u64 stores, volatile to keep the same torn-tolerant
     // discipline the direct store had.
-    let i = crate::syscall::edges::boxed_mut(ino);
+    let i = crate::syscall::r#unsafe::boxed_mut(ino);
     // INV-EXT4-ATIME: advisory volatile stores into the pinned box;
     // readers tolerate torn values.
     if pub_end > i.size {
@@ -6129,7 +6129,7 @@ fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
     // INV-EXT4-ATIME: the caller pins the Box (io_lock-held read paths;
     // the sb box lives for the inode); the time fields are u32s
     // read-only here and written once below.
-    let i = crate::syscall::edges::boxed_mut(ino);
+    let i = crate::syscall::r#unsafe::boxed_mut(ino);
     let now = {
         let cached = crate::drivers::rtc::cached_wall_secs();
         if cached != 0 {
@@ -6149,7 +6149,7 @@ fn get_or_create_ra_state(file: &File, block_size: u64) -> &mut ReadAheadState {
     // SAFETY: file.ra is written only at File::new (None) and here
     // under io_lock by the description's reader; readers of the state
     // hold the same lock.
-    rux::fs::unsafe_edges::file_ra_state_mut(file)
+    rux::fs::r#unsafe::file_ra_state_mut(file)
         .get_or_insert_with(|| ReadAheadState::new(block_size))
 }
 
@@ -6217,9 +6217,9 @@ fn fault_tsc_now() -> u64 {
 
 /// Block size of `file`'s filesystem (attribution helper above).
 fn fs_block_size_of(file: &File) -> u64 {
-    if let Some(fs) = rux::fs::unsafe_edges::file_inode(file)
+    if let Some(fs) = rux::fs::r#unsafe::file_inode(file)
         .and_then(|inode| {
-            rux::fs::unsafe_edges::privdata_ref::<crate::ext4::Ext4FileSystem>(inode)
+            rux::fs::r#unsafe::privdata_ref::<crate::ext4::Ext4FileSystem>(inode)
         })
     {
         return fs.block_size as u64;
@@ -6276,7 +6276,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
         // VFS inode; advisory field (INV-EXT4-ATIME, same discipline
         // as ext4_file_read_vfs).
         {
-            let i = crate::syscall::edges::boxed_mut(
+            let i = crate::syscall::r#unsafe::boxed_mut(
                 inode.sb.unwrap() as *mut super::inode::Ext4Inode,
             );
             // INV-EXT4-ATIME — one volatile store of the advisory u32;
@@ -6289,7 +6289,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
 
 /// Default regular file lseek implementation
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
-    let inode = match rux::fs::unsafe_edges::file_inode(file) {
+    let inode = match rux::fs::r#unsafe::file_inode(file) {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };

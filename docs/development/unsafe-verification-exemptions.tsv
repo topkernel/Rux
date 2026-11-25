@@ -17,7 +17,7 @@ kernel/core/src/fs/pty.rs	4	0	regions moved to kernel/rux-fs/src/fs/ (crate forb
 kernel/core/src/fs/rootfs.rs	8	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
 kernel/core/src/fs/tmpfs.rs	17	0	regions moved to kernel/rux-fs/src/fs/ (crate forbids unsafe; the annotations' regions no longer exist in kernel/src)
 kernel/core/src/fs/vfs.rs	26	20	regions shifted/deleted by the tranche edits; artifacts carried by id, unmatched remainder GAP
-kernel/core/src/signal.rs	15	13	rux-signal flip: abort_reason_dump's two regions moved to kernel/core/src/signal_edges.rs (moved-item provenance in the census remap; same INV:INV-TASKREF-1)
+kernel/core/src/signal.rs	15	13	rux-signal flip: abort_reason_dump's two regions moved to kernel/core/src/signal_unsafe.rs (moved-item provenance in the census remap; same INV:INV-TASKREF-1)
 kernel/core/src/tests/file_open.rs	6	0	test file moved to kernel/core/src/tests/services/ or rewritten for the forbid crate
 kernel/core/src/tests/mkdir_unlink.rs	6	0	test file moved to kernel/core/src/tests/services/ or rewritten for the forbid crate
 kernel/core/src/tests/signal.rs	1	0	rux-signal flip: the test moved to tests/services/signal_test.rs under the crate's forbid; its unsafe extern "C" fn definition region was replaced by a literal SigAction construction
@@ -34,7 +34,7 @@ kernel/core/src/arch/riscv64/trap.rs	54	49	regions shifted by the process carve 
 kernel/core/src/signal.rs	15	12	regions shifted by the carve edits; carried by id, remainder recoverable from history
 kernel/core/src/process/mod.rs	2	0	lines shifted by the kthread re-export edit; carried by id
 kernel/core/src/io_uring/mod.rs	19	11	cold-four lane: 8 regions left kernel/src with the policy flip to the rux-io-uring forbid crate (error-path Box::from_raw pairs converted to the ring_release_on_install_error edge; private_data reads to pin_verified_ring; read_volatile pair to cq_completed)
-kernel/core/src/ipc/binder.rs	55	41	cold-four lane: 11 walker regions moved to kernel/core/src/ipc/binder_edges.rs with annotations carried; 3 raw-task/comm reads converted to the diag_task_comm/diag_task edges in the moved forbid-crate diagnostics
+kernel/core/src/ipc/binder.rs	55	41	cold-four lane: 11 walker regions moved to kernel/core/src/ipc/unsafe.rs with annotations carried; 3 raw-task/comm reads converted to the diag_task_comm/diag_task edges in the moved forbid-crate diagnostics
 kernel/core/src/timer.rs	3	2	cold-four lane: the WW heartbeat's ti_on_cpu volatile read moved into the ww_task_on_cpu framework edge (the report body flipped to the rux-timer forbid crate)
 kernel/core/src/lib.rs	1	0	cold-four lane: region shifted out by the timer_hooks module insertion renumbering; annotation carried by id to the new position
 kernel/core/src/cmdline.rs	5	4	region ELIMINATED by the root-cold move: parse_memory_regions walker moved to kernel/rux-drivers/src/of_fdt.rs under forbid, its core::mem::zeroed() replaced by a plain all-zero repeat expression; the 4 surviving regions kept their INV:INV-FDT-1 artifacts
@@ -45,3 +45,5 @@ kernel/core/src/arch/x86_64/ipi.rs	15	12	regions sole-copied to the forbid crate
 kernel/core/src/arch/x86_64/trap.rs	63	59	vs the arch-cold merge parent (63): four regions shifted by the F1 port edits; recoverable from history
 kernel/core/src/arch/x86_64/trap.rs	80	59	forensic walker regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the mm_ops printer consolidated per F1 hoists; remainder recoverable
 kernel/core/src/arch/x86_64/trap.rs	86	59	vs the sync-upper parent (which predates the arch-cold extraction): 27 regions moved to rux-arch/trap_diag.rs (forbid, zero by construction); the merged-tree count (59) is already exempted at its own baselines
+kernel/core/src/sched/side_edges.rs	2	0	pass 1b (seed-core-design 2c.3): the file was joined into sched/unsafe.rs behind sched/edges.rs; git keeps one rename record for a 2-to-1 join (edges.rs -> unsafe.rs), so this file shows as vanished. Both annotated regions (evring_slot_mut, evring_slot_ref; INV:INV-SCHED-EVRING-1) were recovered into sched/unsafe.rs by the census's moved-item pairing: 85 = 83 + 2 there
+kernel/src/sched/side_edges.rs	2	0	pass 1b (seed-core-design 2c.3): the file was joined into sched/unsafe.rs behind sched/edges.rs; git keeps one rename record for a 2-to-1 join (edges.rs -> unsafe.rs), so this file shows as vanished. Both annotated regions (evring_slot_mut, evring_slot_ref; INV:INV-SCHED-EVRING-1) were recovered into sched/unsafe.rs by the census's moved-item pairing: 85 = 83 + 2 there Same drop seen from a baseline that predates the kernel/src -> kernel/core/src move (the path the census reported there)

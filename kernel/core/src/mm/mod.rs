@@ -6,7 +6,7 @@
 //! Memory Management Module
 
 pub mod buddy_allocator;
-pub mod edges;
+pub mod r#unsafe;
 pub mod allocator;
 pub mod layout;
 /// M1a FLIP SEAM: the mm-policy hook table (the NetHooks pattern) —
@@ -166,7 +166,7 @@ pub fn alloc_and_map_user_memory(
 /// arch-switch primitives live behind `edges::switch_address_space`.
 #[inline]
 pub fn switch_address_space(root_ppn: u64, asid: u16) {
-    edges::switch_address_space(root_ppn, asid);
+    r#unsafe::switch_address_space(root_ppn, asid);
 }
 
 /// Invalidate one user page mapping in the local TLB (no cross-CPU

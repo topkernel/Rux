@@ -61,7 +61,7 @@ pub fn remote_backtrace(target: usize, why: &str) -> bool {
             format_args!("REMOTE-BT[{}] cpu={}: (no current task) rip={:#x} rsp={:#x}\n", why, target, rip, rsp),
         );
     } else {
-        let (pid, comm) = crate::arch::x86_64::unsafe_edges::diag_task_pid_comm(cur);
+        let (pid, comm) = crate::arch::x86_64::r#unsafe::diag_task_pid_comm(cur);
         let mut cbuf = [0u8; 17];
         let mut cl = 0;
         for &b in comm.iter() {

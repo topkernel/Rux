@@ -195,7 +195,7 @@ pub fn wait4_park_audit() {
                 }
                 if let Some(pp) = t.parent_ptr() {
                     if Task::is_plausible_task_ptr(pp)
-                        && crate::unsafe_edges::borrow_task(pp as *mut Task).pid()
+                        && crate::r#unsafe::borrow_task(pp as *mut Task).pid()
                             == waiters[w].0
                     {
                         nch[w] += 1;
@@ -366,7 +366,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             cur.for_each_group_child(|child_ptr| {
                 // SAFETY: the walker hands out children linked under the
                 // tree lock (valid for the closure body).
-                let child = crate::unsafe_edges::borrow_task(child_ptr);
+                let child = crate::r#unsafe::borrow_task(child_ptr);
 
                 if !wait_pid_matches(child, pid, caller_pgid) {
                     return;
@@ -408,7 +408,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             if let Some(child_ptr) = zombie_child {
                 // SAFETY: claimed under the tree lock (claim_child_locked)
                 // — this caller owns the reap.
-                let child = crate::unsafe_edges::borrow_task(child_ptr);
+                let child = crate::r#unsafe::borrow_task(child_ptr);
                 let child_pid = child.pid();
                 let raw_exit = child.exit_code();
 
@@ -450,7 +450,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             // If found stopped child (WUNTRACED), report it
             if let Some(child_ptr) = stopped_child {
                 // SAFETY: selected under the tree lock; still linked.
-                let child = crate::unsafe_edges::borrow_task(child_ptr);
+                let child = crate::r#unsafe::borrow_task(child_ptr);
                 let child_pid = child.pid();
                 let stop_sig = child.stop_signal();
 
@@ -500,7 +500,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     // SAFETY: `t` was found by the pid-hash walk under the
                     // same scan discipline (a tracee of ours, pinned by
                     // the hash's RCU section).
-                    let ts = crate::unsafe_edges::borrow_task(t);
+                    let ts = crate::r#unsafe::borrow_task(t);
                     let child_pid = ts.pid();
                     let stop_sig = ts.stop_signal();
                     let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
@@ -538,7 +538,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                             return;
                         }
                         // SAFETY: tree-locked child from the walker.
-                        let c = crate::unsafe_edges::borrow_task(child_ptr);
+                        let c = crate::r#unsafe::borrow_task(child_ptr);
                         if !wait_pid_matches(c, pid, caller_pgid) {
                             return;
                         }
@@ -684,7 +684,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         // waitpid(WNOHANG) for children the main thread spawned.)
         cur.for_each_group_child(|child_ptr| {
             // SAFETY: selected/claimed under the tree lock; still linked.
-            let child = crate::unsafe_edges::borrow_task(child_ptr);
+            let child = crate::r#unsafe::borrow_task(child_ptr);
 
             if !wait_pid_matches(child, pid, caller_pgid) {
                 return;
@@ -717,7 +717,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
 
         if let Some(child_ptr) = zombie_ptr {
             // SAFETY: selected/claimed under the tree lock; still linked.
-            let child = crate::unsafe_edges::borrow_task(child_ptr);
+            let child = crate::r#unsafe::borrow_task(child_ptr);
             let child_pid = child.pid();
             // W4SPIN (69th, rux:pid1spin (retired debug=pid1spin)): init's SIGCHLD handler loops
             // `while (waitpid(-1, &st, WNOHANG) > 0);` — a positive return
@@ -751,7 +751,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
                     // function just ran under the same lock).
                     {
                         cur.for_each_group_child(|cp| {
-                            let c = crate::unsafe_edges::borrow_task(cp);
+                            let c = crate::r#unsafe::borrow_task(cp);
                             let st = c.state().bits();
                             if line.len() < 700 {
                                 line.push_str(&alloc::format!(
@@ -799,7 +799,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
 
         if let Some(child_ptr) = stopped_ptr {
             // SAFETY: selected/claimed under the tree lock; still linked.
-            let child = crate::unsafe_edges::borrow_task(child_ptr);
+            let child = crate::r#unsafe::borrow_task(child_ptr);
             let child_pid = child.pid();
             let stop_sig = child.stop_signal();
             let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
@@ -915,7 +915,7 @@ pub fn do_waitid(
             // process may waitid for any member's child.
             cur.for_each_group_child(|child_ptr| {
                 // SAFETY: the walker hands out tree-locked children.
-                let child = crate::unsafe_edges::borrow_task(child_ptr);
+                let child = crate::r#unsafe::borrow_task(child_ptr);
 
                 // idtype filter
                 if idtype == P_PID && child.pid() != id as u32 {
@@ -996,7 +996,7 @@ pub fn do_waitid(
             if let Some(child_ptr) = result_child {
                 // SAFETY: selected (and zombie cases claimed) under the
                 // tree lock; this caller owns the report.
-                let child = crate::unsafe_edges::borrow_task(child_ptr);
+                let child = crate::r#unsafe::borrow_task(child_ptr);
                 let child_pid = child.pid();
                 let child_uid = child.cred().uid;
 
@@ -1064,7 +1064,7 @@ pub fn do_waitid(
                     let mut found_zombie = false;
                     cur.for_each_group_child(|child_ptr| {
                         // SAFETY: tree-locked child from the walker.
-                        let c = crate::unsafe_edges::borrow_task(child_ptr);
+                        let c = crate::r#unsafe::borrow_task(child_ptr);
                         if idtype == P_PID && c.pid() != id as u32 {
                             return;
                         }

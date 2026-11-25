@@ -12,7 +12,7 @@ use rux::fs::file::File;
 fn pipe_of(file: &File) -> &Pipe {
     let ptr = file.private_data_ptr()
         .expect("pipe end File must have private_data");
-    rux::fs::unsafe_edges::file_privdata_arc_ref::<Pipe>(file).unwrap()
+    rux::fs::r#unsafe::file_privdata_arc_ref::<Pipe>(file).unwrap()
 }
 
 pub fn test_pipe2() {

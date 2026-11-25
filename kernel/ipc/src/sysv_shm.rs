@@ -90,10 +90,10 @@ impl Drop for ShmPages {
         // hand buddy pages that were still mapped).
         for p in &self.pages {
             // The audited descriptor touch lives in the framework edge
-            // (ipc::edges::shm_page_put, INV-IPC-PAGEOP-1); the null
+            // (ipc::unsafe::shm_page_put, INV-IPC-PAGEOP-1); the null
             // (torn-teardown) arm reports "we own the free decision",
             // exactly the historical Drop behavior.
-            if crate::edges::shm_page_put(*p) {
+            if crate::r#unsafe::shm_page_put(*p) {
                 free_pages(*p, 0);
             }
         }
@@ -1045,7 +1045,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         // R7-A5: map+refcount under the PTE lock (same discipline as
         // the demand-fault paths). The one raw operation (the vmemmap
         // descriptor get_page) rides the framework edge
-        // ipc::edges::shm_page_get (INV-IPC-PAGEOP-1); everything else
+        // ipc::unsafe::shm_page_get (INV-IPC-PAGEOP-1); everything else
         // here is a safe primitive call (MM_CTX store, PTE lock,
         // map_user_page).
         {
@@ -1064,7 +1064,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             // per-attachment reference so shmdt/exit's put_page cannot free
             // a page the segment still owns (review 2R.6). Segments free
             // their pages only when every attachment is gone.
-            crate::edges::shm_page_get(phys);
+            crate::r#unsafe::shm_page_get(phys);
             drop(_pte_guard);
         }
     }

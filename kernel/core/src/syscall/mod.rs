@@ -26,7 +26,7 @@ pub fn seam_register_default() {}
 
 // The audited-edge escape: declared at the crate root (outside this
 // forbid tree) and re-exported under the historical path.
-pub use crate::syscall_edges as edges;
+pub use crate::syscall_unsafe as r#unsafe;
 pub mod dispatch;
 // pub mod io; — MOVED to the syscall service crate (State B final)
 // pub mod process; — MOVED to the syscall service crate (State B final)

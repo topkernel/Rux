@@ -328,7 +328,7 @@ pub fn dump() {
             let key = REST_SITES[i].loc.load(Ordering::Relaxed);
             let n = REST_SITES[i].n.load(Ordering::Relaxed).max(1);
             // INV-FOR-3 edge.
-            let l = crate::debug::forensics_edges::location(key as usize);
+            let l = crate::debug::r#unsafe::location(key as usize);
             let (file, line) = (l.file(), l.line());
             crate::pr_warn!(
                 "SYSCOST t={}s rest-site {:2}: {}:{} n={} tot={}ms avg={}ns max={}us",

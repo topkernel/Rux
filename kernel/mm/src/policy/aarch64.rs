@@ -12,7 +12,7 @@
 //! edge.
 
 use crate::arch::mm::memory_layout::*;
-use crate::arch::mm::unsafe_edges::PtTable;
+use crate::arch::mm::r#unsafe::PtTable;
 use crate::arch::mm::mm_ops::{
     alloc_user_phys_page, check_pte_permissions, copy_page_table_cow, is_cow_page,
     is_protnone_marker, pte_lock_for, PageTableWalker, perm_to_flags, map_user_page,
@@ -112,7 +112,7 @@ fn try_expand_stack(
         VmaType::Anonymous
         | VmaType::FileBacked
         | VmaType::SharedMemory => {
-            rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+            rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
         }
         VmaType::Device => {
             // Device mapping: don't zero
@@ -387,7 +387,7 @@ pub fn handle_mm_fault(
                 return Some(live as usize);
             }
             // SAFETY: inode cell written at open time; read-only.
-            let inode_opt = crate::fs::unsafe_edges::file_inode(f);
+            let inode_opt = crate::fs::r#unsafe::file_inode(f);
             inode_opt.map(|i| i.get_size() as usize)
         })
         .unwrap_or(vma_file_size as usize);
@@ -437,7 +437,7 @@ pub fn handle_mm_fault(
         match vma_type {
             VmaType::Anonymous | VmaType::SharedMemory => {
                 // SAFETY: fresh exclusive page (INV-AE-ZP).
-                rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+                rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
             }
             VmaType::FileBacked => {
                 // Zero-fill first (partial reads / tail holes), then read
@@ -446,7 +446,7 @@ pub fn handle_mm_fault(
                 // pages — twin mmapstress04 note); positional read_at so
                 // the shared file position is never touched (twin R71).
                 // SAFETY: fresh exclusive page (INV-AE-ZP).
-                rux::mm::edges::page_slice_mut(page_ptr as usize).fill(0);
+                rux::mm::r#unsafe::page_slice_mut(page_ptr as usize).fill(0);
                 if vma_file_fd >= 0 && file_offset < effective_size {
                     // Prefer the VMA's pinned vm_file (the mapping fd may
                     // already be closed — twin ld.so note).
@@ -465,10 +465,10 @@ pub fn handle_mm_fault(
                         );
                         // SAFETY: page_ptr covers PAGE_SIZE bytes; the
                         // file was resolved from the fd table.
-                        let bytes_read = file.read_at_slice(file_offset as u64, &mut rux::mm::edges::page_slice_mut(page_ptr as usize)[..bytes_to_read]);
+                        let bytes_read = file.read_at_slice(file_offset as u64, &mut rux::mm::r#unsafe::page_slice_mut(page_ptr as usize)[..bytes_to_read]);
                         if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
                             // SAFETY: same fresh page; tail zero.
-                            rux::mm::edges::page_slice_mut(page_ptr as usize)[bytes_read as usize..].fill(0);
+                            rux::mm::r#unsafe::page_slice_mut(page_ptr as usize)[bytes_read as usize..].fill(0);
                         }
                     }
                 }

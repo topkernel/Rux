@@ -10,7 +10,7 @@
 //! the fixmap PUD/PMD is pre-linked by mmu_init::init().
 
 #![forbid(unsafe_code)]
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::memory_layout::*;
 
 pub const FIXADDR_SIZE: usize = 16 * 1024 * 1024;

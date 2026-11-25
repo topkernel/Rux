@@ -36,7 +36,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::memory_layout::*;
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::mmu_init::*;
 use super::pagetable::*;
 use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
@@ -1671,7 +1671,7 @@ pub fn handle_cow_fault(
     let new_ppn = new_phys >> PAGE_SHIFT;
 
     // Copy while old page is still pinned (refcount >= 2)
-    super::unsafe_edges::copy_page(old_ppn << PAGE_SHIFT, new_phys);
+    super::r#unsafe::copy_page(old_ppn << PAGE_SHIFT, new_phys);
 
     // R7-A3: W requires R (reserved-encoding livelock otherwise — see the
     // exclusive branch above).

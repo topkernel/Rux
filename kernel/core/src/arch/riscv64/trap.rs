@@ -8,7 +8,7 @@
 //! Handle various exceptions and interrupts
 
 use core::arch::asm;
-use super::unsafe_edges::SavedFrame;
+use super::r#unsafe::SavedFrame;
 use crate::process::task::TaskState;
 use riscv::register::sie;
 
@@ -226,7 +226,7 @@ fn putb(b: u8) {
 #[no_mangle]
 pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
     // The frame edge: ONE audited reference formation per entry
-    // (INV-RE-FRAME-1/2 in unsafe_edges.rs). Everything below is safe
+    // (INV-RE-FRAME-1/2 in unsafe.rs). Everything below is safe
     // Rust over the typed handle.
     let mut frame = unsafe { SavedFrame::<'static>::from_trap(regs) };
 

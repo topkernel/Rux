@@ -351,7 +351,7 @@ pub struct DebugFsEntryData {
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from debugfs_iget/create_root_inode.
 fn entry_of<'a>(inode: &'a Inode) -> Option<&'a DebugFsEntryData> {
-    rux::fs::unsafe_edges::privdata_ref::<DebugFsEntryData>(inode)
+    rux::fs::r#unsafe::privdata_ref::<DebugFsEntryData>(inode)
 }
 
 /// Resolve a child of `dir`.
@@ -496,7 +496,7 @@ fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps
 /// (INV-FS-PRIVDATA-1 through the framework edge — the Drop-time
 /// single reclaim).
 fn debugfs_destroy_inode(inode: &mut Inode) {
-    rux::fs::unsafe_edges::privdata_take_box::<DebugFsEntryData>(inode);
+    rux::fs::r#unsafe::privdata_take_box::<DebugFsEntryData>(inode);
 }
 
 /// debugfs inode operations table.
@@ -537,7 +537,7 @@ pub struct DebugFsFileContent {
 fn debugfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     // The snapshot box is this description's private data
     // (INV-FS-FILEPRIV-1, the framework edge).
-    let content = match rux::fs::unsafe_edges::file_privdata_ref::<DebugFsFileContent>(file) {
+    let content = match rux::fs::r#unsafe::file_privdata_ref::<DebugFsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -581,7 +581,7 @@ fn debugfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn debugfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
     // See the read op above (INV-FS-FILEPRIV-1).
-    let content = match rux::fs::unsafe_edges::file_privdata_ref::<DebugFsFileContent>(file) {
+    let content = match rux::fs::r#unsafe::file_privdata_ref::<DebugFsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -603,7 +603,7 @@ fn debugfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize
 fn debugfs_file_close(file: &rux::fs::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(rux::fs::unsafe_edges::file_privdata_take::<DebugFsFileContent>(file));
+    drop(rux::fs::r#unsafe::file_privdata_take::<DebugFsFileContent>(file));
     0
 }
 

@@ -197,7 +197,7 @@ fn inode_seals(inode: &Inode) -> u32 {
     // creation (before the inode was published through the fd table) and
     // only freed by destroy_inode when the last Arc drops — while we hold
     // one, the pointer is valid (INV-FS-PRIVDATA-1, the framework edge).
-    match rux::fs::unsafe_edges::privdata_ref::<MemfdState>(inode) {
+    match rux::fs::r#unsafe::privdata_ref::<MemfdState>(inode) {
         Some(state) => state.seals.load(core::sync::atomic::Ordering::Acquire),
         None => 0,
     }
@@ -207,7 +207,7 @@ fn inode_seals(inode: &Inode) -> u32 {
 fn memfd_destroy_inode(inode: &mut Inode) {
     // The Box was created by memfd_create and is exclusively owned by
     // this inode; the edge takes and reclaims it (INV-FS-PRIVDATA-1).
-    rux::fs::unsafe_edges::privdata_take_box::<MemfdState>(inode);
+    rux::fs::r#unsafe::privdata_take_box::<MemfdState>(inode);
 }
 
 static MEMFD_INODE_OPS: INodeOps = INodeOps {
@@ -430,7 +430,7 @@ pub fn add_seals(file: &File, seals: u32) -> Result<(), i32> {
 
     // private_data is the MemfdState Box owned by this memfd inode
     // (INV-FS-PRIVDATA-1, the framework edge; see inode_seals).
-    let state = match rux::fs::unsafe_edges::privdata_ref::<MemfdState>(&inode) {
+    let state = match rux::fs::r#unsafe::privdata_ref::<MemfdState>(&inode) {
         Some(state) => state,
         None => return Err(-(errno::constants::EINVAL as i32)),
     };

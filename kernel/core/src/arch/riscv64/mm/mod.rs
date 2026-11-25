@@ -26,8 +26,8 @@ pub use pagetable::*;
 pub mod mmu_init;
 pub use mmu_init::*;
 
-pub mod unsafe_edges;
-pub use unsafe_edges::*;
+pub mod r#unsafe;
+pub use r#unsafe::*;
 
 // Memory management operations (MmStruct extensions, COW)
 pub mod mm_ops;

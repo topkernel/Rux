@@ -17,7 +17,7 @@ pub fn sigill_mapping_forensics(pid: usize, epc: usize) {
     // One volatile-u64 diagnostic read through the framework's audited
     // riscv64 diag edge (kernel-half page-table/code addresses only).
     fn read_pte(addr: u64) -> u64 {
-        crate::arch::riscv64::unsafe_edges::diag_volatile_read_u64(addr as usize)
+        crate::arch::riscv64::r#unsafe::diag_volatile_read_u64(addr as usize)
     }
 
     let task = match crate::sched::current() {

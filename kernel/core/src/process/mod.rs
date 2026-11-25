@@ -35,7 +35,7 @@ pub use process_hooks::{kthread_run, kthread_run_on_cpu, kthread_should_stop};
 pub mod ptrace_core;
 // pub mod coredump; — moved to the process service crate.
 pub mod ns;
-pub mod unsafe_edges;
+pub mod r#unsafe;
 // The flip seam: the framework's cold door into the process service
 // crate (three tables — lifecycle, kthread, pid; see the file header).
 pub mod process_hooks;

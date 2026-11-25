@@ -15,7 +15,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use super::memory_layout::*;
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::pagetable::*;
 use crate::mm::{MmStruct, alloc_pages, free_pages, GfpFlags};
 use crate::mm::page_desc::MAX_PAGES;
@@ -286,7 +286,7 @@ pub fn alloc_page_table() -> Option<u64> {
 }
 
 /// The phys→table conversion edge lives in the framework module now.
-pub use super::unsafe_edges::get_page_table_virt;
+pub use super::r#unsafe::get_page_table_virt;
 
 fn free_page_table_checked(phys_addr: u64, site: &str) {
     if get_alloc_stage() == AllocStage::Late {

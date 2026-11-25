@@ -81,7 +81,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     // The superblock is at the start of the block (the typed view
     // rides the framework's ext4_edges).
     let (start_block, start_seq) = {
-        let sb = rux::fs::ext4_edges::typed_ref::<journal_superblock_t>(bio::bh_data(&sb_bh))
+        let sb = rux::fs::r#unsafe::typed_ref::<journal_superblock_t>(bio::bh_data(&sb_bh))
             .expect("journal superblock view");
         let start = u32::from_be(sb.s_start);
         let seq = u32::from_be(sb.s_sequence);
@@ -132,7 +132,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         // the framework's ext4_edges); the magic check below validates
         // the contents before use.
         let (magic, blocktype, sequence) = {
-            let hdr = rux::fs::ext4_edges::typed_ref::<journal_header_t>(bio::bh_data(&bh))
+            let hdr = rux::fs::r#unsafe::typed_ref::<journal_header_t>(bio::bh_data(&bh))
                 .expect("journal header view");
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
         };
@@ -208,7 +208,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         // b_data starts with journal_header_t (typed view via the
         // framework's ext4_edges); magic check validates.
         let (magic, blocktype, sequence) = {
-            let hdr = rux::fs::ext4_edges::typed_ref::<journal_header_t>(bio::bh_data(&bh))
+            let hdr = rux::fs::r#unsafe::typed_ref::<journal_header_t>(bio::bh_data(&bh))
                 .expect("journal header view");
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
         };
@@ -280,7 +280,7 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
     // framework's ext4_edges).
     {
         let block = bio::bh_data_mut(&sb_bh);
-        let sb = rux::fs::ext4_edges::typed_ref_mut::<journal_superblock_t>(block)
+        let sb = rux::fs::r#unsafe::typed_ref_mut::<journal_superblock_t>(block)
             .expect("journal superblock view");
         sb.s_start = 0u32.to_be();
         sb.s_sequence = next_seq.to_be();
@@ -402,12 +402,12 @@ fn commit_block_csum_verify(journal: &Arc<Journal>, data: &[u8]) -> bool {
     if !journal.has_csum_v2or3() {
         return true;
     }
-    let h = rux::fs::ext4_edges::typed_ref::<commit_header>(data)
+    let h = rux::fs::r#unsafe::typed_ref::<commit_header>(data)
         .expect("commit header view");
     let provided = u32::from_be(h.h_chksum[0]);
     let mut tmp = alloc::vec![0u8; data.len()];
     tmp.copy_from_slice(data);
-    let th = rux::fs::ext4_edges::typed_ref_mut::<commit_header>(tmp.as_mut_slice())
+    let th = rux::fs::r#unsafe::typed_ref_mut::<commit_header>(tmp.as_mut_slice())
         .expect("commit header view");
     th.h_chksum_type = 0;
     th.h_chksum_size = 0;

@@ -2891,7 +2891,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     crate::signal_hooks::send_from_user(pid, sig)
 }
 
-// abort_reason_dump MOVED to kernel/core/src/signal_edges.rs (the
+// abort_reason_dump MOVED to kernel/core/src/signal_unsafe.rs (the
 // signal crate flip: unsafe moves with its function, policy
 // moves without; this diagnostics fn holds two audited edges).
 

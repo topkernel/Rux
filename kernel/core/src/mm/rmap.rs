@@ -86,7 +86,7 @@ impl AnonVma {
         } else {
             // ptr was stored by set_vma() and the VMA outlives the page
             // (INV-MM-2 reachability arm).
-            Some(crate::syscall::edges::boxed_ref(ptr))
+            Some(crate::syscall::r#unsafe::boxed_ref(ptr))
         }
     }
 }
@@ -426,7 +426,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                 // the walker only reads page-table pages.
                 // INV-SY-1 walk edge (Arc-pinned mm's live root).
                 let walk_result =
-                    crate::sync::edges::pt_walk(root_ppn, target_vaddr as u64);
+                    crate::sync::r#unsafe::pt_walk(root_ppn, target_vaddr as u64);
 
                 if let Some((ppn, _pte_bits)) = walk_result {
                     if ppn as usize == target_pfn {

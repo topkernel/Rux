@@ -1385,7 +1385,7 @@ fn external_node_cap(fs: &crate::ext4::Ext4FileSystem) -> usize {
 // The typed views ride the framework's audited ext4_edges (rung 5):
 // bounds + ALIGNMENT checked at the edge (the old casts assumed the
 // block allocator's de-facto alignment; the edge is sound on its own).
-use rux::fs::ext4_edges as views;
+use rux::fs::r#unsafe as views;
 
 fn node_header(data: &[u8]) -> &Ext4ExtentHeader {
     views::typed_ref(data)

@@ -284,7 +284,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             let leader_comm: &[u8; 16] = if leader.is_null() {
                 my_comm
             } else {
-                crate::process::unsafe_edges::borrow_task(leader).comm()
+                crate::process::r#unsafe::borrow_task(leader).comm()
             };
             let my_named = comm_matches(my_comm);
             if my_named || comm_matches(leader_comm) {
@@ -320,7 +320,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     // already-freed parent pointer.
                     let (ppid, pcomm) = match cur.parent_ptr() {
                         Some(pp) if Task::is_plausible_task_ptr(pp) => {
-                            let pp_ref = crate::process::unsafe_edges::borrow_task(pp as *mut Task);
+                            let pp_ref = crate::process::r#unsafe::borrow_task(pp as *mut Task);
                             (
                                 pp_ref.pid(),
                                 alloc::string::String::from(
@@ -362,7 +362,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     // The exit caller's user return address (see the
                     // RWFRZ-THREADEXIT precedent above for the cfg split).
                     let exrip = match cur.pt_regs_ref() {
-                        Some(pr) => crate::process::unsafe_edges::pt_user_pc(pr),
+                        Some(pr) => crate::process::r#unsafe::pt_user_pc(pr),
                         None => 0u64,
                     };
                     let (owing_n, owing_txn, owing_stid) =
@@ -465,7 +465,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     .trim_end_matches('\0');
                 let lastsys = cur.ext.last_syscall_nr.load(Relaxed);
                 let urip = match cur.pt_regs_ref() {
-                    Some(pr) => crate::process::unsafe_edges::pt_user_pc(pr),
+                    Some(pr) => crate::process::r#unsafe::pt_user_pc(pr),
                     None => 0u64,
                 };
                 // HOTPATH-PRINT: thread exits of the watched tgid.
@@ -487,7 +487,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     // SAFETY: current is the calling task; read-only walk
                     // of its own user stack (the frames are intact at
                     // do_exit time).
-                    crate::process::unsafe_edges::apppark_rets(cur);
+                    crate::process::r#unsafe::apppark_rets(cur);
                 }
             }
         }
@@ -640,7 +640,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 // SAFETY: the leader is a live ring member (group not
                 // yet torn down at this point of do_exit).
                 let lc = core::str::from_utf8(
-                    crate::process::unsafe_edges::borrow_task(cur.group_leader_ptr()).comm(),
+                    crate::process::r#unsafe::borrow_task(cur.group_leader_ptr()).comm(),
                 )
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -672,7 +672,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         } else {
             // Threads share the leader's real parent; the leader was
             // resolved from the ring above and is still live.
-            crate::process::unsafe_edges::borrow_task(leader).ppid()
+            crate::process::r#unsafe::borrow_task(leader).ppid()
         };
 
         // ===== Journal handle unwind =====
@@ -852,7 +852,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             } else {
                 // The leader is alive (we are its member; the ring
                 // decrement happens below).
-                let leader_ref = crate::process::unsafe_edges::borrow_task(leader);
+                let leader_ref = crate::process::r#unsafe::borrow_task(leader);
                 leader_ref.utime_ticks.fetch_add(u, Relaxed);
                 leader_ref.stime_ticks.fetch_add(s, Relaxed);
             }
@@ -898,7 +898,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         //   inside MmStruct::drop — exactly once per mm, which subsumes
         //   the old strong_count==1 pre-check here (LTP shmat01 family).
         if cur.address_space_arc().is_some() {
-            crate::process::unsafe_edges::switch_to_kernel_root_on_exit();
+            crate::process::r#unsafe::switch_to_kernel_root_on_exit();
         }
         let fp_t_mmdrop = if fp { crate::debug::forkprof::now() } else { 0 };
         cur.set_address_space(None);
@@ -987,7 +987,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             // release_task waits for ring members to be DEAD first).
             if !leader.is_null() {
                 // SAFETY: the leader is alive; the list is lock-guarded.
-                crate::process::unsafe_edges::borrow_task(leader).dead_threads.lock().push(cur as *mut Task);
+                crate::process::r#unsafe::borrow_task(leader).dead_threads.lock().push(cur as *mut Task);
             }
 
             // Leave the ring (decrements the leader's nr_threads) — AFTER
@@ -1189,7 +1189,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // identity case).
         let notify_parent: u32 = match cur.parent_ptr() {
             Some(pp) if Task::is_plausible_task_ptr(pp) => {
-                crate::process::unsafe_edges::borrow_task(pp as *mut Task).pid()
+                crate::process::r#unsafe::borrow_task(pp as *mut Task).pid()
             }
             _ => 0,
         };
@@ -1310,10 +1310,10 @@ pub fn wake_group_chldexit(task: &Task) {
     let mut member = task as *const Task;
     let mut guard = 0u32;
     loop {
-        let _ = crate::process::unsafe_edges::borrow_task(member as *mut Task)
+        let _ = crate::process::r#unsafe::borrow_task(member as *mut Task)
             .wait_chldexit
             .wake_up_all();
-        member = crate::process::unsafe_edges::borrow_task(member as *mut Task)
+        member = crate::process::r#unsafe::borrow_task(member as *mut Task)
             .next_thread_ptr() as *const Task;
         if member == start || member.is_null() {
             break;

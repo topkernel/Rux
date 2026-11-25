@@ -78,7 +78,7 @@ impl Default for Ext4InodeOnDisk {
         // INV-EXT4-INODE-ZP: #[repr(C)] all-integer on-disk struct —
         // the zero bit pattern is a valid value for every field (the
         // audited zeroed lives at the framework edge, INV-EXT-EDGE-3).
-        rux::fs::ext4_edges::zeroed_on_disk()
+        rux::fs::r#unsafe::zeroed_on_disk()
     }
 }
 
@@ -621,7 +621,7 @@ pub fn write_inode(
     // typed handle view rides the framework's boxed_mut edge).
     if let Some(handle) = crate::ext4::namei::get_current_handle() {
         let _ = crate::jbd2::jbd2_journal_dirty_metadata(
-            crate::syscall::edges::boxed_mut(handle),
+            crate::syscall::r#unsafe::boxed_mut(handle),
             bh,
         );
     }
@@ -835,7 +835,7 @@ pub fn write_inode_disk(
     // typed handle view rides the framework's boxed_mut edge).
     if let Some(handle) = crate::ext4::namei::get_current_handle() {
         let _ = crate::jbd2::jbd2_journal_dirty_metadata(
-            crate::syscall::edges::boxed_mut(handle),
+            crate::syscall::r#unsafe::boxed_mut(handle),
             bh,
         );
     }
@@ -912,7 +912,7 @@ pub fn persist_ioc_flags(vfs_inode: &rux::fs::inode::Inode, merged: u32) {
         // private_data holds the Ext4FileSystem for EXT4_INODE_OPS
         // inodes (installed at mount/iget time) — the typed view rides
         // the framework's boxed_ref edge.
-        let fs = crate::syscall::edges::boxed_ref(
+        let fs = crate::syscall::r#unsafe::boxed_ref(
             fs_ptr as *const crate::ext4::Ext4FileSystem,
         );
         if let Ok(mut on_disk) = read_inode(fs, vfs_inode.ino as u32) {
@@ -924,7 +924,7 @@ pub fn persist_ioc_flags(vfs_inode: &rux::fs::inode::Inode, merged: u32) {
                 // under EXT4_BIG_LOCK here, INV-EXT4-SBRES-1).
                 if let Some(sb) = vfs_inode.sb {
                     let cached: &mut Ext4Inode =
-                        crate::syscall::edges::boxed_mut(sb as *mut Ext4Inode);
+                        crate::syscall::r#unsafe::boxed_mut(sb as *mut Ext4Inode);
                     cached.flags = on_disk.i_flags;
                 }
             }

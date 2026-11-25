@@ -136,7 +136,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             // the family's arm switch). a=the dying tid, b=the raiser.
             let raiser = crate::sched::current().map(|t| t.pid() as u64).unwrap_or(0);
             crate::trace::trace_ohhunt(3, tid, raiser, 0);
-            crate::signal_edges::abort_reason_dump(tid);
+            crate::signal_unsafe::abort_reason_dump(tid);
         }
     }
     if sig < 1 || sig > 64 {

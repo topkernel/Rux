@@ -202,4 +202,4 @@ pub fn is_user_address(addr: u64) -> bool {
 }
 
 // (copy_from_user/copy_to_user delegation wrappers DELETED, round 6:
-// zero callers — users go through super::uaccess or sync::edges)
+// zero callers — users go through super::uaccess or sync::unsafe)

@@ -176,7 +176,7 @@ pub fn char_dev_file_stat(file: &rux::fs::File, stat: &mut rux::fs::Stat) -> Opt
     let ptr = file.private_data_ptr()?;
     // The &'static CharDev init_std_fds stored (file-lifetime) — the
     // shared-slot edge (INV-FS-FILEPRIV-1).
-    let dev = rux::fs::unsafe_edges::file_privdata_ref::<CharDev>(file)?;
+    let dev = rux::fs::r#unsafe::file_privdata_ref::<CharDev>(file)?;
     stat.st_dev = CHAR_DEV_STAT_DEV;
     stat.st_ino = ptr as usize as u64;
     stat.st_nlink = 1;
@@ -202,14 +202,14 @@ fn uart_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
         }
     }
 
-    match rux::fs::unsafe_edges::file_privdata_ref::<CharDev>(file) {
+    match rux::fs::r#unsafe::file_privdata_ref::<CharDev>(file) {
         Some(char_dev) => char_dev.read(buf),
         None => -9,  // EBADF
     }
 }
 
 fn uart_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
-    match rux::fs::unsafe_edges::file_privdata_ref::<CharDev>(file) {
+    match rux::fs::r#unsafe::file_privdata_ref::<CharDev>(file) {
         Some(char_dev) => char_dev.write(buf),
         None => -9,  // EBADF
     }

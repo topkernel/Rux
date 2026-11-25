@@ -42,7 +42,7 @@ pub(crate) struct FreeStackEntry {
     pub(crate) next: *mut FreeStackEntry,
 }
 
-/// Stack cache structure (the Send impl lives in unsafe_edges.rs)
+/// Stack cache structure (the Send impl lives in unsafe.rs)
 pub(crate) struct StackCache {
     /// Number of cached stacks
     count: usize,
@@ -70,7 +70,7 @@ impl StackCache {
         // head is non-null (checked above) and was pushed by push() under
         // the STACK_CACHE lock (INV-PROC-KSTACK-1).
         let entry = self.head;
-        self.head = crate::process::unsafe_edges::freelist_next(entry as *mut u8) as *mut FreeStackEntry;
+        self.head = crate::process::r#unsafe::freelist_next(entry as *mut u8) as *mut FreeStackEntry;
         self.count -= 1;
         Some(entry as *mut u8)
     }
@@ -101,13 +101,13 @@ impl StackCache {
             // same layout under STACK_CACHE_LOCK (INV-PROC-KSTACK-2).
             let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
                 .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-            crate::process::unsafe_edges::heap_dealloc(stack_bottom, layout);
+            crate::process::r#unsafe::heap_dealloc(stack_bottom, layout);
             return;
         }
         // stack_bottom was returned by alloc(); the unused bottom region
         // carries the free-list linkage (INV-PROC-KSTACK-1).
         let entry = stack_bottom as *mut FreeStackEntry;
-        crate::process::unsafe_edges::freelist_link(
+        crate::process::r#unsafe::freelist_link(
             entry as *mut u8,
             self.head as *mut u8,
         );
@@ -116,7 +116,7 @@ impl StackCache {
     }
 }
 
-// Send impl lives in unsafe_edges.rs (task.rs carries zero unsafe).
+// Send impl lives in unsafe.rs (task.rs carries zero unsafe).
 
 /// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
 static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
@@ -165,7 +165,7 @@ pub(crate) struct KstackBlocks {
     maps: alloc::vec::Vec<u8>,
 }
 
-// Send impl lives in unsafe_edges.rs (task.rs carries zero unsafe).
+// Send impl lives in unsafe.rs (task.rs carries zero unsafe).
 
 #[cfg(target_arch = "x86_64")]
 static KSTACK_BLOCKS: Spinlock<KstackBlocks> = Spinlock::new(KstackBlocks {
@@ -206,14 +206,14 @@ fn kstack_slab_alloc() -> *mut u8 {
                     g.maps[bi] |= 1 << s;
                     // Block base is a live allocation of KSTACK_BLOCK
                     // bytes; slot s fits (const assert above).
-                    return crate::process::unsafe_edges::slot_ptr(g.bases[bi], s * KERNEL_STACK_SIZE);
+                    return crate::process::r#unsafe::slot_ptr(g.bases[bi], s * KERNEL_STACK_SIZE);
                 }
             }
         }
     }
     // Slow path: new order-6 block from the buddy (OUTSIDE the slab
     // lock — no lock nesting with BUDDY).
-    let block = crate::process::unsafe_edges::heap_alloc(
+    let block = crate::process::r#unsafe::heap_alloc(
         Layout::from_size_align(KSTACK_BLOCK, 4096)
             .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
     );
@@ -270,7 +270,7 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
     if !free_block.is_null() {
         // Buddy free OUTSIDE the slab lock; the block was allocated by
         // kstack_slab_alloc with this layout and is now fully empty.
-        crate::process::unsafe_edges::heap_dealloc(
+        crate::process::r#unsafe::heap_dealloc(
             free_block,
             Layout::from_size_align(KSTACK_BLOCK, 4096)
                 .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
@@ -322,7 +322,7 @@ pub fn kstack_anat() -> (u64, u64) {
 fn plain_kstack_alloc() -> *mut u8 {
     let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
         .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-    crate::process::unsafe_edges::heap_alloc(layout)
+    crate::process::r#unsafe::heap_alloc(layout)
 }
 
 /// Allocate a kernel stack (with caching)
@@ -386,7 +386,7 @@ fn stack_cache_alloc() -> *mut u8 {
             {
                 let words = KERNEL_STACK_SIZE / 8;
                 for i in 1..words {
-                    let v = crate::process::unsafe_edges::read_volatile_u64((base + i * 8) as *const u64);
+                    let v = crate::process::r#unsafe::read_volatile_u64((base + i * 8) as *const u64);
                     if v != 0xA5A5_A5A5_A5A5_A5A5 {
                         if hits == 0 {
                             first_off = i * 8;
@@ -421,11 +421,11 @@ fn stack_cache_alloc() -> *mut u8 {
             // free-side scan can measure the true high-water, and count it.
             // ~3 spawns/s x 128KB of memset across the OH boot — negligible
             // next to the fork itself.
-            crate::process::unsafe_edges::zero_bytes(bottom, KERNEL_STACK_SIZE);
+            crate::process::r#unsafe::zero_bytes(bottom, KERNEL_STACK_SIZE);
             KSTACK_LIVE.fetch_add(1, Ordering::Relaxed);
         }
         // fresh alloc also gets a canary
-        crate::process::unsafe_edges::write_volatile_u64(
+        crate::process::r#unsafe::write_volatile_u64(
             bottom as *mut u64,
             StackCache::STACK_CANARY,
         );
@@ -480,7 +480,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
     // the adjacent heap page (stack_bottom is a valid stack base from
     // alloc; the first 8 bytes are in bounds).
     {
-        let v = crate::process::unsafe_edges::read_volatile_u64(stack_bottom as *const u64);
+        let v = crate::process::r#unsafe::read_volatile_u64(stack_bottom as *const u64);
         if v != StackCache::STACK_CANARY {
             use crate::console::putchar;
             const MSG: &[u8] = b"STACK-OVERFLOW canary=0x";
@@ -521,7 +521,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 for &b in M3 { putchar(b); }
                 let base = stack_bottom as usize;
                 for off in (8..256).step_by(8) {
-                    let ra = crate::process::unsafe_edges::read_volatile_u64((base + off) as *const u64);
+                    let ra = crate::process::r#unsafe::read_volatile_u64((base + off) as *const u64);
                     if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
                         putchar(b' ');
                         let mut sh2 = 64;
@@ -1925,7 +1925,7 @@ impl Task {
     ///
     /// The Task value is built by the safe struct-literal constructor
     /// ([`Task::new`]) and placed into the slot with ONE framework edge
-    /// ([`crate::process::unsafe_edges::place_task`], INV-PROC-PLACE-1).
+    /// ([`crate::process::unsafe::place_task`], INV-PROC-PLACE-1).
     /// The compiler checks the value's field completeness, retiring the
     /// hand-maintained `offset_of` write ladder and its drift history
     /// (sc130/R9-1/R68a: a field silently missing from the hand list
@@ -1954,7 +1954,7 @@ impl Task {
             0, // set when the kernel stack is allocated
         );
         Self::register_slot_deferred_sizes();
-        crate::process::unsafe_edges::place_task(ptr, task);
+        crate::process::r#unsafe::place_task(ptr, task);
         // INV-PROC-PLACE-2: the self-referential list heads are
         // re-anchored inside place_task (the single placement choke
         // point) — nothing constructor-side needed here.
@@ -2014,7 +2014,7 @@ impl Task {
         task.sid = 0;
         task.time_slice = HZ;
         Self::register_slot_deferred_sizes();
-        crate::process::unsafe_edges::place_task(ptr, task);
+        crate::process::r#unsafe::place_task(ptr, task);
         // INV-PROC-PLACE-2 (the beeb17524 lesson, enforced at the edge):
         // Task::new's ListHead::init() self-points children/sibling/
         // rt_run_list at the CONSTRUCTOR TEMPORARY's stack address, and
@@ -2029,7 +2029,7 @@ impl Task {
         // own correct anchor.
 
         // Allocate kernel stack
-        let t = crate::process::unsafe_edges::borrow_task_mut(ptr);
+        let t = crate::process::r#unsafe::borrow_task_mut(ptr);
         if t.alloc_kernel_stack().is_none() {
             // R10-9: do NOT continue — the task would context-switch to
             // sp=0 and kernel_stack_bottom stays uninitialized. Propagate
@@ -2176,12 +2176,12 @@ impl Task {
         // Reads at compile-time Task offsets; the range screen above
         // already proved the address is inside the kernel linear map, so
         // the loads cannot take a user-range page fault.
-        let state = crate::process::unsafe_edges::read_volatile_u32(
-            crate::process::unsafe_edges::slot_ptr(slot as *mut u8, task_offsets::TASK_STATE)
+        let state = crate::process::r#unsafe::read_volatile_u32(
+            crate::process::r#unsafe::slot_ptr(slot as *mut u8, task_offsets::TASK_STATE)
                 as *const u32,
         );
-        let pid = crate::process::unsafe_edges::read_volatile_u32(
-            crate::process::unsafe_edges::slot_ptr(slot as *mut u8, task_offsets::TASK_PID)
+        let pid = crate::process::r#unsafe::read_volatile_u32(
+            crate::process::r#unsafe::slot_ptr(slot as *mut u8, task_offsets::TASK_PID)
                 as *const u32,
         );
         state != crate::sched::sched::TASK_POISON && pid != crate::sched::sched::TASK_POISON
@@ -2288,7 +2288,7 @@ impl Task {
         // linear-map illegal-instruction signature). See also the guard in
         // enqueue_task_locked.
         {
-            let pid = crate::process::unsafe_edges::borrow_task(task).pid();
+            let pid = crate::process::r#unsafe::borrow_task(task).pid();
             if pid == crate::sched::sched::TASK_POISON {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
@@ -2309,7 +2309,7 @@ impl Task {
         // The caller guarantees task points to a valid Task that is not
         // currently running on another CPU (or the scheduler lock prevents
         // concurrent access) — INV-PROC-BORROW-1's wake-path arm.
-        let t = crate::process::unsafe_edges::borrow_task(task);
+        let t = crate::process::r#unsafe::borrow_task(task);
         {
             let old_state = t.state();
             let pid = t.pid();
@@ -2950,7 +2950,7 @@ impl Task {
                 // parent_ptr passed the plausibility screen; for
                 // leaders it was set by add_child() and remains valid
                 // while the child is alive (INV-PROC-BORROW-1).
-                crate::process::unsafe_edges::borrow_task(parent_ptr as *mut Task).pid
+                crate::process::r#unsafe::borrow_task(parent_ptr as *mut Task).pid
             }
             None => 0, // No parent process, return 0
         }
@@ -3062,7 +3062,7 @@ impl Task {
         let leader = self as *mut Task;
         // Caller contract above — member is a fully-constructed task;
         // the tree/ring lock is held for the whole link.
-        let m = crate::process::unsafe_edges::borrow_task_mut(member);
+        let m = crate::process::r#unsafe::borrow_task_mut(member);
         m.set_group_leader(leader);
         m.set_tgid(self.tgid);
         // member.parent mirrors the leader's parent (threads share the real
@@ -3083,7 +3083,7 @@ impl Task {
     /// Contract: `member` is a live ring member of a well-formed ring.
     pub fn thread_group_leave(member: *mut Task) -> *mut Task {
         // Caller contract above — member is a live ring member.
-        let m = crate::process::unsafe_edges::borrow_task_mut(member);
+        let m = crate::process::r#unsafe::borrow_task_mut(member);
         let leader = m.group_leader;
         if leader.is_null() || leader as *const Task == member as *const Task {
             return ptr::null_mut();
@@ -3095,22 +3095,22 @@ impl Task {
         let mut guard = 0u32;
         {
             while guard < 65536 {
-                let next = crate::process::unsafe_edges::borrow_task(prev).next_thread;
+                let next = crate::process::r#unsafe::borrow_task(prev).next_thread;
                 if next == member || next == leader {
                     break;
                 }
                 prev = next;
                 guard += 1;
             }
-            if crate::process::unsafe_edges::borrow_task(prev).next_thread == member {
-                crate::process::unsafe_edges::borrow_task_mut(prev).next_thread = m.next_thread;
+            if crate::process::r#unsafe::borrow_task(prev).next_thread == member {
+                crate::process::r#unsafe::borrow_task_mut(prev).next_thread = m.next_thread;
             }
         }
         // Re-init to a self-ring so later accidental walks stay bounded.
         m.next_thread = member;
         m.group_leader = member;
         // Leader is a live ring member (validated above).
-        crate::process::unsafe_edges::borrow_task(leader)
+        crate::process::r#unsafe::borrow_task(leader)
             .nr_threads
             .fetch_sub(1, Ordering::Release);
         // timer-gap lane: the leader may be PARKED in
@@ -3144,12 +3144,12 @@ impl Task {
         // Leader is self (valid by contract); ring members stay linked
         // while PROCESS_TREE_LOCK is held (INV-PROC-BORROW-1).
         {
-            f(crate::process::unsafe_edges::borrow_task(leader));
-            let mut t = crate::process::unsafe_edges::borrow_task(leader).next_thread;
+            f(crate::process::r#unsafe::borrow_task(leader));
+            let mut t = crate::process::r#unsafe::borrow_task(leader).next_thread;
             let mut guard = 0u32;
             while !t.is_null() && t != leader && guard < 65536 {
-                f(crate::process::unsafe_edges::borrow_task(t));
-                t = crate::process::unsafe_edges::borrow_task(t).next_thread;
+                f(crate::process::r#unsafe::borrow_task(t));
+                t = crate::process::r#unsafe::borrow_task(t).next_thread;
                 guard += 1;
             }
         }
@@ -3273,7 +3273,7 @@ impl Task {
             // active_mm points to a borrowed AddressSpace that outlives
             // this task (the lazy-mm/active-mm discipline: the owner's
             // mm_slot keeps it referenced — INV-PROC-ACTIVEMM-1).
-            Some(crate::process::unsafe_edges::borrow_active_mm(mm_ptr))
+            Some(crate::process::r#unsafe::borrow_active_mm(mm_ptr))
         } else {
             None
         }
@@ -3313,7 +3313,7 @@ impl Task {
 /// are read and cleared).
 pub fn vfork_wake_parent(task: *mut Task) {
     // SAFETY: caller contract above.
-    let t = crate::process::unsafe_edges::borrow_task_mut(task);
+    let t = crate::process::r#unsafe::borrow_task_mut(task);
     if let Some(parent) = t.vfork_parent_ptr() {
         t.clear_vfork_parent();
         crate::sched::wake_up_process(parent);
@@ -3589,7 +3589,7 @@ impl Task {
         // SAFETY: the pointer came from the current task at irq_enter;
         // the read is a single u32 load and the value is only a
         // diagnostic label.
-        crate::process::unsafe_edges::borrow_task(task).pid()
+        crate::process::r#unsafe::borrow_task(task).pid()
     }
 
     /// Release a hardirq base booked on `task` from a context where the
@@ -3607,7 +3607,7 @@ impl Task {
         }
         // The pointer was a live task at irq_enter; the refcount check
         // inside the method rejects a freed page (INV-PROC-BORROW-1).
-        crate::process::unsafe_edges::borrow_task_mut(task).release_hardirq_base_remote(val, loc)
+        crate::process::r#unsafe::borrow_task_mut(task).release_hardirq_base_remote(val, loc)
     }
 
     /// Release a HARDIRQ base that was booked on THIS task by
@@ -3909,7 +3909,7 @@ impl Task {
         // The putter's pin discipline (R12-5): the caller's reference
         // keeps the page alive through this decrement
         // (INV-PROC-BORROW-1).
-        let prev = crate::process::unsafe_edges::borrow_task(task)
+        let prev = crate::process::r#unsafe::borrow_task(task)
             .task_refcnt
             .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
         if prev == 1 {
@@ -3938,14 +3938,14 @@ impl Task {
             return false;
         }
         {
-            let prev = crate::process::unsafe_edges::borrow_task(task)
+            let prev = crate::process::r#unsafe::borrow_task(task)
                 .task_refcnt
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
             if prev == 0 {
                 // Freed (or hash-contract-broken) page: undo our own
                 // increment so a recycled owner is not left with a
                 // permanent extra reference, and refuse the pin.
-                crate::process::unsafe_edges::borrow_task(task)
+                crate::process::r#unsafe::borrow_task(task)
                     .task_refcnt
                     .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
                 return false;
@@ -3989,7 +3989,7 @@ impl Task {
         // +4 inside the same qword (asserted above); the overlaying
         // AtomicU64 store keeps the pair consistent for the non-atomic
         // pick-side readers.
-        crate::process::unsafe_edges::store_pick_qword(
+        crate::process::r#unsafe::store_pick_qword(
             &self.ti_on_cpu as *const _ as usize,
             ((cpu as u32 as u64) << 32) | 1,
         );
@@ -4004,7 +4004,7 @@ impl Task {
     /// Healer-side twin of publish_pick_ownership.
     #[inline]
     pub fn release_pick_ownership(&self) {
-        crate::process::unsafe_edges::store_pick_qword(
+        crate::process::r#unsafe::store_pick_qword(
             &self.ti_on_cpu as *const _ as usize,
             0xFFFF_FFFF_0000_0000,
         );
@@ -4101,7 +4101,7 @@ impl Task {
         #[cfg(not(target_endian = "little"))]
         compile_error!("ownership_pickable assumes little-endian qword decode");
 
-        let word = crate::process::unsafe_edges::read_volatile_u64(
+        let word = crate::process::r#unsafe::read_volatile_u64(
             core::ptr::addr_of!(self.ti_on_cpu) as *const u64,
         );
         let oncpu = (word & 0xFF) != 0;
@@ -4146,7 +4146,7 @@ impl Task {
             // Set stack top address (stack grows downward): stack_ptr
             // was returned by stack_cache_alloc() with exactly
             // KERNEL_STACK_SIZE bytes allocated.
-            let stack_top = crate::process::unsafe_edges::slot_ptr(stack_ptr, KERNEL_STACK_SIZE);
+            let stack_top = crate::process::r#unsafe::slot_ptr(stack_ptr, KERNEL_STACK_SIZE);
             self.kernel_stack = Some(stack_top);
 
             // Save stack bottom for overflow detection
@@ -4212,7 +4212,7 @@ impl Task {
                 let mut off = 8usize; // skip the canary slot
                 while off < KERNEL_STACK_SIZE {
                     // Bounds validated above (base..base+SIZE).
-                    let v = crate::process::unsafe_edges::read_volatile_u64((base + off) as *const u64);
+                    let v = crate::process::r#unsafe::read_volatile_u64((base + off) as *const u64);
                     if v != 0 {
                         let hw = (KERNEL_STACK_SIZE - off) as u64;
                         let old = KSTACK_HW.load(Ordering::Relaxed);
@@ -4253,7 +4253,7 @@ impl Task {
                                 let o_end = off + 4096;
                                 while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
                                     // In-bounds per loop guard.
-                                    let ra = crate::process::unsafe_edges::read_volatile_u64((base + o2) as *const u64);
+                                    let ra = crate::process::r#unsafe::read_volatile_u64((base + o2) as *const u64);
                                     if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
                                         putchar(b' ');
                                         let mut sh2 = 64;
@@ -4386,7 +4386,7 @@ impl Task {
             // is never recycled — no paint, no cache return.
             if recycle_ok {
                 if crate::trace::EVENT_SCRIBBLE.armed() {
-                    crate::process::unsafe_edges::paint_bytes(
+                    crate::process::r#unsafe::paint_bytes(
                         stack_bottom,
                         8,
                         0xA5,
@@ -4539,7 +4539,7 @@ impl Task {
             // points into this task's own kernel-stack window; the slot
             // discipline (boxed once, freed only via free_task_slot)
             // keeps the frame alive for the slot's 'static lifetime.
-            Some(crate::process::unsafe_edges::frame_mut(p))
+            Some(crate::process::r#unsafe::frame_mut(p))
         } else {
             None
         }
@@ -4561,7 +4561,7 @@ impl Task {
             // SAFETY: kernel_stack is Some, so pt_regs() is non-null and
             // points into this task's own kernel-stack window (same
             // argument as pt_regs_mut); shared reads only.
-            Some(crate::process::unsafe_edges::frame_ref(p))
+            Some(crate::process::r#unsafe::frame_ref(p))
         } else {
             None
         }
@@ -4970,7 +4970,7 @@ impl Task {
         let _lock = PROCESS_TREE_LOCK.lock();
         // Caller contract above — child is a valid task pointer;
         // PROCESS_TREE_LOCK is held for the whole link operation.
-        let c = crate::process::unsafe_edges::borrow_task_mut(child);
+        let c = crate::process::r#unsafe::borrow_task_mut(child);
 
         // R9 tripwire: linking an ALREADY-LINKED child double-links it —
         // one unlink leaves the other parent's list dangling, and the
@@ -5005,7 +5005,7 @@ impl Task {
 
         // Link child's sibling to parent's children list
         // (add_tail; tree lock held — INV-PROC-LIST-1).
-        crate::process::unsafe_edges::list_add_tail(
+        crate::process::r#unsafe::list_add_tail(
             &mut c.sibling,
             &self.children as *const _ as *mut ListHead,
         );
@@ -5022,11 +5022,11 @@ impl Task {
         let _lock = PROCESS_TREE_LOCK.lock();
         // Caller contract above — child is valid and linked here;
         // PROCESS_TREE_LOCK is held for the whole unlink.
-        let c = crate::process::unsafe_edges::borrow_task_mut(child);
+        let c = crate::process::r#unsafe::borrow_task_mut(child);
 
         // Remove child's sibling from parent's children list
         // (the node is linked per contract; tree lock held).
-        crate::process::unsafe_edges::list_del(&mut c.sibling);
+        crate::process::r#unsafe::list_del(&mut c.sibling);
 
         // Reinitialize sibling list (prevent dangling pointer)
         c.sibling.init();
@@ -5063,12 +5063,12 @@ impl Task {
         // head is self's live children list; the walk holds
         // PROCESS_TREE_LOCK, so every node stays linked for the walk
         // (INV-PROC-LIST-1).
-        crate::process::unsafe_edges::list_for_each(head, |node| {
+        crate::process::r#unsafe::list_for_each(head, |node| {
             let task_ptr = Task::from_sibling_node(node);
             // task_ptr owns this sibling node, which the tree lock keeps
             // linked — the task page cannot be freed mid-walk
             // (INV-PROC-BORROW-1).
-            crate::process::unsafe_edges::borrow_task(task_ptr)
+            crate::process::r#unsafe::borrow_task(task_ptr)
                 .task_refcnt
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
             out.push(task_ptr);
@@ -5100,8 +5100,8 @@ impl Task {
         let _lock = PROCESS_TREE_LOCK.lock();
         // Caller contract above — child and dest are valid, pinned
         // tasks; PROCESS_TREE_LOCK is held for the whole move.
-        let c = crate::process::unsafe_edges::borrow_task_mut(child);
-        let d = crate::process::unsafe_edges::borrow_task_mut(dest);
+        let c = crate::process::r#unsafe::borrow_task_mut(child);
+        let d = crate::process::r#unsafe::borrow_task_mut(dest);
         let still_ours = c.parent == Some(self as *const Task)
             && c.parent_children_head == &self.children as *const _ as *mut ListHead;
         if !still_ours {
@@ -5109,14 +5109,14 @@ impl Task {
         }
         // Unlink — the same mutations remove_child performs (the node
         // is linked here per the validation above; tree lock held).
-        crate::process::unsafe_edges::list_del(&mut c.sibling);
+        crate::process::r#unsafe::list_del(&mut c.sibling);
         c.sibling.init();
         // Relink — the same mutations add_child performs.
         c.parent = Some(dest as *const Task);
         c.parent_children_head = &d.children as *const _ as *mut ListHead;
         // c.sibling was just re-initialized; d's children head is live
         // (dest pinned); tree lock held.
-        crate::process::unsafe_edges::list_add_tail(
+        crate::process::r#unsafe::list_add_tail(
             &mut c.sibling,
             &d.children as *const _ as *mut ListHead,
         );
@@ -5143,7 +5143,7 @@ impl Task {
             // Ring members stay linked while PROCESS_TREE_LOCK is held
             // (join/leave both take it); the walk is bounded.
             {
-                let m_ref = crate::process::unsafe_edges::borrow_task_mut(m);
+                let m_ref = crate::process::r#unsafe::borrow_task_mut(m);
                 if m_ref.group_leader == child {
                     m_ref.parent = Some(dest as *const Task);
                     m_ref.parent_children_head = ptr::null_mut();
@@ -5175,7 +5175,7 @@ impl Task {
     /// pinned-or-otherwise-still-linked Task.
     pub fn claim_child_locked(child: *mut Task) -> bool {
         // Caller holds PROCESS_TREE_LOCK and vouches for `child`.
-        let c = crate::process::unsafe_edges::borrow_task_mut(child);
+        let c = crate::process::r#unsafe::borrow_task_mut(child);
         if c.parent.is_none() {
             return false; // already claimed / never linked
         }
@@ -5183,7 +5183,7 @@ impl Task {
         // are the ground truth for which list the node is on, so del()
         // heals the owner's list without naming it (node is linked:
         // parent was Some; tree lock held).
-        crate::process::unsafe_edges::list_del(&mut c.sibling);
+        crate::process::r#unsafe::list_del(&mut c.sibling);
         c.sibling.init();
         c.parent = None;
         c.parent_children_head = ptr::null_mut();
@@ -5207,11 +5207,11 @@ impl Task {
         // head is self's live children list; the tree lock is held, so
         // every node stays linked for the whole walk
         // (INV-PROC-LIST-1).
-        crate::process::unsafe_edges::list_for_each(head, |node| {
+        crate::process::r#unsafe::list_for_each(head, |node| {
             let task_ptr = Task::from_sibling_node(node);
             // The node owns this Task and the tree lock keeps it linked
             // (its parent cannot release it mid-walk).
-            f(crate::process::unsafe_edges::borrow_task(task_ptr));
+            f(crate::process::r#unsafe::borrow_task(task_ptr));
         });
     }
 
@@ -5242,17 +5242,17 @@ impl Task {
         let mut guard = 0u32;
         loop {
             // Ring members stay linked under PROCESS_TREE_LOCK.
-            let head = &crate::process::unsafe_edges::borrow_task(member).children
+            let head = &crate::process::r#unsafe::borrow_task(member).children
                 as *const _ as *mut ListHead;
             // head is that member's live children list; tree lock held
             // for the whole walk (INV-PROC-LIST-1).
-            crate::process::unsafe_edges::list_for_each(head, |node| {
+            crate::process::r#unsafe::list_for_each(head, |node| {
                 f(Task::from_sibling_node(node));
             });
             // Ring walk (next_thread_ptr heals a NULL to self — a
             // single-threaded task terminates on the first step; same
             // ring-liveness contract as above).
-            member = crate::process::unsafe_edges::borrow_task(member).next_thread_ptr();
+            member = crate::process::r#unsafe::borrow_task(member).next_thread_ptr();
             if member == start || member.is_null() {
                 break;
             }
@@ -5280,10 +5280,10 @@ impl Task {
         let mut result = None;
         // head is self's live children list; tree lock held
         // (INV-PROC-LIST-1).
-        crate::process::unsafe_edges::list_for_each(head, |node| {
+        crate::process::r#unsafe::list_for_each(head, |node| {
             let task_ptr = Task::from_sibling_node(node);
             // node owns this Task; tree lock keeps it linked.
-            if crate::process::unsafe_edges::borrow_task(task_ptr).pid == pid {
+            if crate::process::r#unsafe::borrow_task(task_ptr).pid == pid {
                 result = Some(task_ptr);
             }
         });
@@ -5299,7 +5299,7 @@ impl Task {
         let head = &self.children as *const _ as *mut ListHead;
         let mut count = 0;
         // head is self's live children list; tree lock held.
-        crate::process::unsafe_edges::list_for_each(head, |_| {
+        crate::process::r#unsafe::list_for_each(head, |_| {
             count += 1;
         });
         count
@@ -5473,7 +5473,7 @@ impl Task {
         // plain-field write goes through the same aliasing edge other
         // &self helpers use (the Task is never const —
         // INV-PROC-BORROW-1's current-task arm).
-        crate::process::unsafe_edges::borrow_task_mut(self as *const Task as *mut Task)
+        crate::process::r#unsafe::borrow_task_mut(self as *const Task as *mut Task)
             .sigmask &= !(1u64 << (SIGSYS - 1));
         if let Some(sig_struct) = self.signal.as_ref() {
             let _ = sig_struct.set_action(SIGSYS, crate::signal::SigAction::new());

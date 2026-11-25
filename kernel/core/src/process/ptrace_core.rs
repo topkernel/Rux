@@ -17,7 +17,7 @@ pub fn ptrace_stop(task: *mut Task, sig: i32, info: SigInfo) {
 
     // task is current (INV-PROC-BORROW-1's current-task arm).
     {
-        let t = crate::process::unsafe_edges::borrow_task_mut(task);
+        let t = crate::process::r#unsafe::borrow_task_mut(task);
         t.set_ptrace_siginfo(info);
         t.set_stop_signal(sig);
         t.stop_reported().store(false, core::sync::atomic::Ordering::Release);
@@ -57,12 +57,12 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
 
     // task is pinned by the caller (sys_ptrace) for the call.
     {
-        let mm = match crate::process::unsafe_edges::borrow_task(task).address_space_arc() {
+        let mm = match crate::process::r#unsafe::borrow_task(task).address_space_arc() {
             Some(m) => m,
             None => return false,
         };
 
-        if crate::process::unsafe_edges::ptrace_translate(&mm, page_fault_addr).is_none() {
+        if crate::process::r#unsafe::ptrace_translate(&mm, page_fault_addr).is_none() {
             let r = crate::mm::mm_hooks::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page_fault_addr),
@@ -73,7 +73,7 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
             }
         }
 
-        let (phys, page_len) = match crate::process::unsafe_edges::ptrace_translate(&mm, addr) {
+        let (phys, page_len) = match crate::process::r#unsafe::ptrace_translate(&mm, addr) {
             Some(v) => v,
             None => return false,
         };
@@ -83,13 +83,13 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
         }
         // Kernel linear map of a user page of the target
         // (INV-PROC-PTRACE-MEM-1).
-        crate::process::unsafe_edges::ptrace_write_word(
+        crate::process::r#unsafe::ptrace_write_word(
             phys_to_virt(PhysAddr::new(phys + off as u64)).0 as usize,
             value,
         );
         // Coherent ordering: make the store visible before any fetch on
         // any hart (text writes — POKETEXT breakpoints).
-        crate::process::unsafe_edges::ptrace_flush_icache(addr);
+        crate::process::r#unsafe::ptrace_flush_icache(addr);
         true
     }
 }

@@ -9,13 +9,13 @@
 //!
 //! unsafe-slim L7: this service file is safe by construction — every
 //! genuinely-unsafe edge it needs (intrusive lists, unshared-box
-//! borrows/reclaims, park-unwind) lives in `crate::edges` with an
+//! borrows/reclaims, park-unwind) lives in `crate::unsafe` with an
 //! INV-SYSC contract, and user-memory copies go through
 //! `crate::arch::uaccess_safe`.
 
 
 use super::*;
-use crate::edges;
+use crate::r#unsafe;
 
 /// The registry trampoline for EpollFile (crate-plan step 2): performs
 /// the pinned EPOLLET re-arm + wake. Register side of the type-erased
@@ -25,15 +25,15 @@ fn epoll_wake_trampoline(ep: *mut u8, file_id: u64) {
     // The binding existed under the shard lock when this trampoline was
     // collected, and the pin below keeps the box alive through the pass
     // (INV-SYSC-2; the registry's collect-inside/unlock-outside shape).
-    let epoll = edges::boxed_ref(ep as *mut EpollFile);
+    let epoll = r#unsafe::boxed_ref(ep as *mut EpollFile);
     epoll.notify_pins.fetch_add(1, core::sync::atomic::Ordering::Acquire);
     {
         let mut entries = epoll.entries.lock();
         let head = entries.init_once();
-        let mut cur = edges::list_first(head);
+        let mut cur = r#unsafe::list_first(head);
         while cur != head {
-            let entry: &mut EpollEntry = edges::list_entry_mut(cur);
-            cur = edges::list_next(cur);
+            let entry: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
+            cur = r#unsafe::list_next(cur);
             if entry.file_id == file_id && entry.events & epoll_events::EPOLLET != 0 {
                 entry.last_reported = 0;
             }
@@ -240,12 +240,12 @@ pub fn epoll_dump_for_file(file_id: u64) {
     {
         let mut registry = event_notify::epoll_wake_shard(file_id).lock_irqsave();
         // Read-only walk of linked nodes under the shard lock
-        // (INV-SYSC-1 via edges::list_*).
+        // (INV-SYSC-1 via unsafe::list_*).
         let head = registry.init_once();
-        let mut cur = edges::list_first(head);
+        let mut cur = r#unsafe::list_first(head);
         while cur != head {
             let node: &EpollWakeNode = event_notify::list_entry_pub(cur);
-            cur = edges::list_next(cur);
+            cur = r#unsafe::list_next(cur);
             if node.file_id != file_id {
                 continue;
             }
@@ -256,7 +256,7 @@ pub fn epoll_dump_for_file(file_id: u64) {
             }
             // `ep` is alive while we hold the registry lock (see
             // epoll_interest_snapshot) — INV-SYSC-2.
-            let epoll = edges::boxed_ref(ep as *mut EpollFile);
+            let epoll = r#unsafe::boxed_ref(ep as *mut EpollFile);
             let owner = epoll.owner_pid;
             let waits = epoll.wait_count;
             let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> =
@@ -266,10 +266,10 @@ pub fn epoll_dump_for_file(file_id: u64) {
                 // Intrusive-list walk (117th): read-only pass, no
                 // allocation under the entries lock (row is pre-sized).
                 let head = entries.init_once();
-                let mut cur = edges::list_first(head);
+                let mut cur = r#unsafe::list_first(head);
                 while cur != head {
-                    let entry: &EpollEntry = edges::list_entry(cur);
-                    cur = edges::list_next(cur);
+                    let entry: &EpollEntry = r#unsafe::list_entry(cur);
+                    cur = r#unsafe::list_next(cur);
                     if row.len() < 24 {
                         row.push((
                             entry.fd,
@@ -332,12 +332,12 @@ pub fn epoll_interest_snapshot() {
         for shard in crate::fs::event_notify::EPOLL_WAKE_SHARDED.iter() {
             let mut registry = shard.lock_irqsave();
             // Read-only walk of linked nodes under the shard lock
-            // (INV-SYSC-1 via edges::list_*).
+            // (INV-SYSC-1 via unsafe::list_*).
             let head = registry.init_once();
-            let mut cur = edges::list_first(head);
+            let mut cur = r#unsafe::list_first(head);
             while cur != head {
                 let node: &EpollWakeNode = event_notify::list_entry_pub(cur);
-                cur = edges::list_next(cur);
+                cur = r#unsafe::list_next(cur);
                 let ep = node.ep;
                 let ep_usize = ep as usize;
                 if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
@@ -346,7 +346,7 @@ pub fn epoll_interest_snapshot() {
                 // `ep` came from Box::into_raw in sys_epoll_create and its
                 // close op unregisters the binding before freeing, so it is
                 // alive while we hold the registry lock (INV-SYSC-2).
-                let epoll = edges::boxed_ref(ep as *mut EpollFile);
+                let epoll = r#unsafe::boxed_ref(ep as *mut EpollFile);
                 let owner = epoll.owner_pid;
                 let waits = epoll.wait_count;
                 let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> =
@@ -358,10 +358,10 @@ pub fn epoll_interest_snapshot() {
                     // allocation under the entries lock (row is pre-sized;
                     // `total` counts every entry, past the 24-row cap).
                     let head = entries.init_once();
-                    let mut cur = edges::list_first(head);
+                    let mut cur = r#unsafe::list_first(head);
                     while cur != head {
-                        let entry: &EpollEntry = edges::list_entry(cur);
-                        cur = edges::list_next(cur);
+                        let entry: &EpollEntry = r#unsafe::list_entry(cur);
+                        cur = r#unsafe::list_next(cur);
                         total += 1;
                         if row.len() < 24 {
                             row.push((
@@ -418,7 +418,7 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
         // ptr came from Box::into_raw in sys_epoll_create and is
         // uniquely owned by this File (INV-SYSC-2 exclusive arm).
         {
-            let epoll = edges::boxed_mut(ptr as *mut EpollFile);
+            let epoll = r#unsafe::boxed_mut(ptr as *mut EpollFile);
             epoll_wake_unregister_all(ptr as *mut u8);
             // UAF drain (114th audit): a concurrent epoll_notify_file may
             // have collected this pointer under a shard lock just before
@@ -455,17 +455,17 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
                         // before the unlink, and an unlinked node is
                         // unreachable to every other CPU once the unlink
                         // lands under this lock (INV-SYSC-1).
-                        let mut cur = edges::list_first(head);
+                        let mut cur = r#unsafe::list_first(head);
                         hit_end = true;
                         while cur != head {
-                            let next = edges::list_next(cur);
+                            let next = r#unsafe::list_next(cur);
                             // cur is a linked EpollEntry's `list` (first
                             // field); the node was Box::into_raw'd in
                             // sys_epoll_ctl and is reachable only through
                             // this list.
-                            let node: &mut EpollEntry = edges::list_entry_mut(cur);
+                            let node: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
                             if n_batch < CLOSE_BATCH {
-                                edges::list_unlink(&mut node.list);
+                                r#unsafe::list_unlink(&mut node.list);
                                 batch[n_batch] = node as *mut EpollEntry;
                                 n_batch += 1;
                             } else {
@@ -479,7 +479,7 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
                     // was unlinked under the lock above; interest nodes
                     // are never shared (INV-SYSC-2 reclaim).
                     for i in 0..n_batch {
-                        edges::boxed_drop(batch[i]);
+                        r#unsafe::boxed_drop(batch[i]);
                         batch[i] = core::ptr::null_mut();
                     }
                     if hit_end {
@@ -488,7 +488,7 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
                 }
             }
         }
-        edges::boxed_drop(ptr as *mut EpollFile);
+        r#unsafe::boxed_drop(ptr as *mut EpollFile);
         file.clear_private_data();
     }
     0
@@ -512,10 +512,10 @@ fn epoll_has_ready_events(epoll: &EpollFile) -> bool {
     let mut entries = epoll.entries.lock();
     let head = entries.init_once();
     // Read-only walk of nodes linked under this lock (INV-SYSC-1).
-    let mut cur = edges::list_first(head);
+    let mut cur = r#unsafe::list_first(head);
     while cur != head {
-        let entry: &EpollEntry = edges::list_entry(cur);
-        cur = edges::list_next(cur);
+        let entry: &EpollEntry = r#unsafe::list_entry(cur);
+        cur = r#unsafe::list_next(cur);
         if entry.events & EPOLLONESHOT != 0 && entry.oneshot_fired {
             continue;
         }
@@ -590,7 +590,7 @@ fn epoll_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
     // Ops identity (EPOLL_OPS) was verified by the dispatch that selected
     // this fn; private_data holds the EpollFile installed by
     // sys_epoll_create (INV-PROC-NSFILE-1). Read-only probe below.
-    let epoll = match ::process::unsafe_edges::file_private_data_ref::<EpollFile>(file) {
+    let epoll = match ::process::r#unsafe::file_private_data_ref::<EpollFile>(file) {
         Some(e) => e,
         None => return 0,
     };
@@ -626,7 +626,7 @@ pub fn oh67_fd_ready(file: &crate::fs::File) -> Option<alloc::string::String> {
     if core::ptr::eq(ops as *const _, &EVENTFD_OPS as *const _) {
         // Dispatcher identity-checked against EVENTFD_OPS; private_data
         // came from Box::into_raw in sys_eventfd2 (INV-PROC-NSFILE-1).
-        let efd = ::process::unsafe_edges::file_private_data_ref::<EventFd>(file)?;
+        let efd = ::process::r#unsafe::file_private_data_ref::<EventFd>(file)?;
         return Some(alloc::format!(
             "eventfd cnt={}",
             efd.counter.load(Relaxed)
@@ -635,7 +635,7 @@ pub fn oh67_fd_ready(file: &crate::fs::File) -> Option<alloc::string::String> {
     if core::ptr::eq(ops as *const _, &TIMERFD_OPS as *const _) {
         // Dispatcher identity-checked against TIMERFD_OPS; private_data
         // came from Box::into_raw in sys_timerfd_create.
-        let tfd = ::process::unsafe_edges::file_private_data_ref::<TimerFd>(file)?;
+        let tfd = ::process::r#unsafe::file_private_data_ref::<TimerFd>(file)?;
         return Some(alloc::format!(
             "timerfd exp={} interval_j={} tmr={}",
             tfd.expiration_count.load(Relaxed),
@@ -1329,7 +1329,7 @@ fn poll_event_wait_round(
     //    returns without sleeping (dequeue_task undoes the racing enqueue).
     // task is the current task (INV-PROC-BORROW-1 CPU-ownership arm).
     {
-        let t = ::process::unsafe_edges::borrow_task(task);
+        let t = ::process::r#unsafe::borrow_task(task);
         t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
 
@@ -1346,7 +1346,7 @@ fn poll_event_wait_round(
                     }
                     // Restore RUNNING before returning (we never slept; a
                     // racing wake may have enqueued us — undo).
-                    edges::task_park_unwind(task);
+                    r#unsafe::task_park_unwind(task);
                     return PollEventWait::NotWired;
                 }
                 regs.push(unreg);
@@ -1356,7 +1356,7 @@ fn poll_event_wait_round(
                     r(&files[i], task);
                 }
                 // See above.
-                edges::task_park_unwind(task);
+                r#unsafe::task_park_unwind(task);
                 return PollEventWait::NotWired;
             }
         }
@@ -1375,14 +1375,14 @@ fn poll_event_wait_round(
         unwait_all(task);
         // A racing wake may have enqueued us while still executing — take
         // ourselves back off (NEW-C2 discipline).
-        edges::task_park_unwind(task);
+        r#unsafe::task_park_unwind(task);
         return PollEventWait::Woken;
     }
 
     if rux::signal::signal_pending() {
         unwait_all(task);
         // See above.
-        edges::task_park_unwind(task);
+        r#unsafe::task_park_unwind(task);
         return PollEventWait::Interrupted;
     }
 
@@ -1396,7 +1396,7 @@ fn poll_event_wait_round(
                 jiffies_covering_deadline(dl),
                 deadline_ns_to_hres_ticks(dl),
                 // task is the current task; pid() is a read.
-                ::process::unsafe_edges::task_pid_of(task),
+                ::process::r#unsafe::task_pid_of(task),
             );
             // We are on the CPU that is about to sleep: re-arm the local
             // timer so the precise deadline is not delayed to the next
@@ -1411,7 +1411,7 @@ fn poll_event_wait_round(
         unwait_all(task);
         // See above.
         {
-            let t = ::process::unsafe_edges::borrow_task(task);
+            let t = ::process::r#unsafe::borrow_task(task);
             t.set_state(TaskState::new(TaskState::RUNNING));
         }
         return PollEventWait::NotWired;
@@ -1431,7 +1431,7 @@ fn poll_event_wait_round(
     unwait_all(task);
     // task is the current task (INV-PROC-BORROW-1).
     {
-        let t = ::process::unsafe_edges::borrow_task(task);
+        let t = ::process::r#unsafe::borrow_task(task);
         if t.state().is_sleeping() {
             t.set_state(TaskState::new(TaskState::RUNNING));
         }
@@ -2027,7 +2027,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
         None => {
             // epoll_ptr was created via Box::into_raw above; reclaim to
             // free (INV-SYSC-2: never linked/registered on this path).
-            edges::boxed_drop(epoll_ptr as *mut EpollFile);
+            r#unsafe::boxed_drop(epoll_ptr as *mut EpollFile);
             return -(errno::EMFILE as i64);
         }
     };
@@ -2040,7 +2040,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
         Err(()) => {
             // epoll_ptr was created via Box::into_raw above; reclaim to
             // free (INV-SYSC-2: install failed, nothing else saw it).
-            edges::boxed_drop(epoll_ptr as *mut EpollFile);
+            r#unsafe::boxed_drop(epoll_ptr as *mut EpollFile);
             -(errno::ENOMEM as i64)
         }
     }
@@ -2088,7 +2088,7 @@ fn epoll_watches_epoll(
     // EpollFile pointers, alive while their Files exist — the fdtable Arc
     // pins every member we resolve below for the duration of the walk;
     // INV-SYSC-2).
-    let root_ref = edges::boxed_ref(root);
+    let root_ref = r#unsafe::boxed_ref(root);
     // Cold path (nested-epoll ADD only, LTP epoll_ctl04/05 — never in OH
     // boots): collect the member list under the entries lock into a
     // BOUNDED stack array, release, then walk — the fdtable lookups and
@@ -2107,10 +2107,10 @@ fn epoll_watches_epoll(
         let mut entries = root_ref.entries.lock();
         let head = entries.init_once();
         // Read-only walk of nodes linked under this lock (INV-SYSC-1).
-        let mut cur = edges::list_first(head);
+        let mut cur = r#unsafe::list_first(head);
         while cur != head {
-            let e: &EpollEntry = edges::list_entry(cur);
-            cur = edges::list_next(cur);
+            let e: &EpollEntry = r#unsafe::list_entry(cur);
+            cur = r#unsafe::list_next(cur);
             if n_members < MAX_NEST_MEMBERS {
                 members[n_members] = (e.fd, e.file_id);
                 n_members += 1;
@@ -2152,7 +2152,7 @@ fn epoll_chain_depth(
         return 1;
     }
     // Same ops-identity discipline as epoll_watches_epoll (INV-SYSC-2).
-    let root_ref = edges::boxed_ref(root);
+    let root_ref = r#unsafe::boxed_ref(root);
     // Cold path — same bounded collect-then-walk shape as
     // epoll_watches_epoll (no allocation under the entries lock). Overflow
     // answers the nesting bound (6) — the conservative side: the ADD is
@@ -2166,10 +2166,10 @@ fn epoll_chain_depth(
         let mut entries = root_ref.entries.lock();
         let head = entries.init_once();
         // Read-only walk of nodes linked under this lock (INV-SYSC-1).
-        let mut cur = edges::list_first(head);
+        let mut cur = r#unsafe::list_first(head);
         while cur != head {
-            let e: &EpollEntry = edges::list_entry(cur);
-            cur = edges::list_next(cur);
+            let e: &EpollEntry = r#unsafe::list_entry(cur);
+            cur = r#unsafe::list_next(cur);
             if n_members < MAX_NEST_MEMBERS {
                 members[n_members] = (e.fd, e.file_id);
                 n_members += 1;
@@ -2330,7 +2330,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     // epoll_ptr came from Box::into_raw in sys_epoll_create; valid and
     // unique (INV-SYSC-2 exclusive arm; every mutable touch of the
     // entries list below holds `entries`).
-    let epoll = edges::boxed_mut(epoll_ptr);
+    let epoll = r#unsafe::boxed_mut(epoll_ptr);
 
     match op {
         EPOLL_CTL_ADD => {
@@ -2433,28 +2433,28 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 let mut entries = epoll.entries.lock();
                 let head = entries.init_once();
                 // Nodes are linked and unlinked only under this entries
-                // lock (INV-SYSC-1 via edges::list_*).
-                let mut cur = edges::list_first(head);
+                // lock (INV-SYSC-1 via unsafe::list_*).
+                let mut cur = r#unsafe::list_first(head);
                 let mut existing: *mut EpollEntry = core::ptr::null_mut();
                 while cur != head {
-                    let e: &mut EpollEntry = edges::list_entry_mut(cur);
+                    let e: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
                     if e.fd == fd {
                         existing = e;
                         break;
                     }
-                    cur = edges::list_next(cur);
+                    cur = r#unsafe::list_next(cur);
                 }
                 if existing.is_null() {
                     // The link itself is two pointer writes under the lock
                     // (node's list is initialized (fresh) and unlinked;
                     // head is this epoll's sentinel — INV-SYSC-1).
-                    edges::list_link_tail(&mut edges::boxed_mut(node).list, head);
+                    r#unsafe::list_link_tail(&mut r#unsafe::boxed_mut(node).list, head);
                     linked = true;
                     Reg::Add(file_id)
                 } else {
                     // existing was derived from a linked node under this
                     // lock (INV-SYSC-1 exclusive arm).
-                    let existing = edges::boxed_mut(existing);
+                    let existing = r#unsafe::boxed_mut(existing);
                     if existing.file_id == file_id {
                         Reg::Exists
                     } else {
@@ -2499,7 +2499,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             // path, which must never run under the entries lock). Never
             // linked; still uniquely owned (INV-SYSC-2).
             if !linked {
-                edges::boxed_drop(node);
+                r#unsafe::boxed_drop(node);
             }
             if matches!(reg, Reg::Exists) {
                 return -(errno::EEXIST as i64);
@@ -2537,14 +2537,14 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 let head = entries.init_once();
                 // Nodes are linked and unlinked only under this entries
                 // lock (INV-SYSC-1).
-                let mut cur = edges::list_first(head);
+                let mut cur = r#unsafe::list_first(head);
                 while cur != head {
-                    let next = edges::list_next(cur);
-                    let e: &mut EpollEntry = edges::list_entry_mut(cur);
+                    let next = r#unsafe::list_next(cur);
+                    let e: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
                     if e.fd == fd {
                         // e.list is linked in this epoll's list
                         // (INV-SYSC-1 unlink arm).
-                        edges::list_unlink(&mut e.list);
+                        r#unsafe::list_unlink(&mut e.list);
                         removed_id = e.file_id;
                         dead = Some(e as *mut EpollEntry);
                         break;
@@ -2593,7 +2593,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 // allocation discipline). Unlinked above under the lock;
                 // nodes are reachable only through the epoll's entries
                 // list, and interest nodes are never shared (INV-SYSC-2).
-                edges::boxed_drop(node);
+                r#unsafe::boxed_drop(node);
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -2610,10 +2610,10 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 let head = entries.init_once();
                 // Nodes are linked and unlinked only under this entries
                 // lock (INV-SYSC-1).
-                let mut cur = edges::list_first(head);
+                let mut cur = r#unsafe::list_first(head);
                 while cur != head {
-                    let entry: &mut EpollEntry = edges::list_entry_mut(cur);
-                    cur = edges::list_next(cur);
+                    let entry: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
+                    cur = r#unsafe::list_next(cur);
                     if entry.fd == fd {
                         entry.events = event.events;
                         entry.data = event.data;
@@ -2768,7 +2768,7 @@ pub fn param_stall_dump() {
                 continue;
             }
             // SAFETY: read-only diagnostic fd walk of the found leader.
-            let tk = ::process::unsafe_edges::borrow_task(leader);
+            let tk = ::process::r#unsafe::borrow_task(leader);
             // Collect rows under the walk (diag takes recv_queue inside
             // the fdtable walk's callback context; printing there also
             // nests console locks) — print AFTER, from a plain Vec.
@@ -2804,7 +2804,7 @@ pub fn param_stall_dump() {
     // behavior at the stall (needs rux:sysforensic (retired debug=sysforensic) to be recording).
     crate::debug::taskdump::dump_syscall_ring_for(1);
     // SAFETY: read-only diagnostic walk of pid 1's fdtable.
-    let tk = ::process::unsafe_edges::borrow_task(task);
+    let tk = ::process::r#unsafe::borrow_task(task);
     let fdtable = match tk.try_fdtable_mut() {
         Some(f) => f,
         None => return,
@@ -2873,7 +2873,7 @@ pub fn param_stall_dump() {
             // pinned by ww_watch_add and tasks on the watch list are
             // never freed past a note_task_freed barrier (sched.rs) —
             // INV-PROC-BORROW-1 watch-pin arm.
-            let watched = ::process::unsafe_edges::borrow_task(t as *mut ::process::task::Task);
+            let watched = ::process::r#unsafe::borrow_task(t as *mut ::process::task::Task);
             let (pid, comm) = (watched.pid(), watched.comm());
             let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
             let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
@@ -2905,7 +2905,7 @@ pub fn param_stall_dump() {
         ::process::pid_hash::pid_hash_for_each_task_try(|t| {
             let t = t as *const ::process::task::Task
                 as *mut ::process::task::Task;
-            let tk = ::process::unsafe_edges::borrow_task(t);
+            let tk = ::process::r#unsafe::borrow_task(t);
             if tk.tgid() != 1 {
                 return;
             }
@@ -2958,7 +2958,7 @@ pub fn param_sender_dump() {
         return;
     }
     let mut init_socks: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-    if let Some(ft) = ::process::unsafe_edges::borrow_task(init_task).try_fdtable() {
+    if let Some(ft) = ::process::r#unsafe::borrow_task(init_task).try_fdtable() {
         ft.for_each_file(|_fd, f| {
             if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
                 init_socks.push(alloc::sync::Arc::into_raw(s) as usize);
@@ -3052,7 +3052,7 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
         return;
     }
     // SAFETY: task is a live task pointer from the scheduler registry.
-    let tk = ::process::unsafe_edges::borrow_task(task);
+    let tk = ::process::r#unsafe::borrow_task(task);
     let fdtable = match tk.try_fdtable_mut() {
         Some(f) => f,
         None => return,
@@ -3079,7 +3079,7 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
         };
         // epoll_ptr came from Box::into_raw in sys_epoll_create; valid
         // while the fdtable holds this Arc (cloned above) (INV-SYSC-2).
-        let epoll = edges::boxed_ref(_epoll_ptr);
+        let epoll = r#unsafe::boxed_ref(_epoll_ptr);
         let mut entries = epoll.entries.lock();
         // Intrusive-list walk (117th): count first for the header, then
         // the per-entry rows (diagnostic path, rux:pid1spin (retired debug=pid1spin)-gated).
@@ -3088,10 +3088,10 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
         // (INV-SYSC-1).
         let mut total: usize = 0;
         {
-            let mut cur = edges::list_first(head);
+            let mut cur = r#unsafe::list_first(head);
             while cur != head {
                 total += 1;
-                cur = edges::list_next(cur);
+                cur = r#unsafe::list_next(cur);
             }
         }
         crate::pr_warn!(
@@ -3106,10 +3106,10 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
         // Read-only walk of linked EpollEntry nodes; nodes are unlinked
         // only under this same lock (the loop body only reads) —
         // INV-SYSC-1.
-        let mut cur = edges::list_first(head);
+        let mut cur = r#unsafe::list_first(head);
         while cur != head {
-            let entry: &EpollEntry = edges::list_entry(cur);
-            cur = edges::list_next(cur);
+            let entry: &EpollEntry = r#unsafe::list_entry(cur);
+            cur = r#unsafe::list_next(cur);
             watched_fds.push(entry.fd as usize);
             let target = fdtable.get_file(entry.fd as usize);
             let (fid_ok, unix_line, ops_id, ops_tag) = match &target {
@@ -3179,7 +3179,7 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
                 // which registered fd never saw a connection arrive.
                 {
                     let t1 = rux::sched::find_task_by_pid(1);
-                    let tk1 = if t1.is_null() { None } else { Some(::process::unsafe_edges::borrow_task(t1)) };
+                    let tk1 = if t1.is_null() { None } else { Some(::process::r#unsafe::borrow_task(t1)) };
                     let p = tk1
                         .and_then(|tk| {
                             tk.try_fdtable().and_then(|fdt| {
@@ -3299,11 +3299,11 @@ fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
     let head = entries.init_once();
     // Read-only walk of nodes linked under this lock (same shape as the
     // wait path's P3 wiring walk) — INV-SYSC-1.
-    let mut cur = edges::list_first(head);
+    let mut cur = r#unsafe::list_first(head);
     let mut shown = 0;
     while cur != head {
-        let entry: &EpollEntry = edges::list_entry(cur);
-        cur = edges::list_next(cur);
+        let entry: &EpollEntry = r#unsafe::list_entry(cur);
+        cur = r#unsafe::list_next(cur);
         let Some(f) = fdtable.get_file(entry.fd as usize) else {
             continue;
         };
@@ -3395,7 +3395,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
     // epoll_ptr came from Box::into_raw in sys_epoll_create; valid and
     // unique (INV-SYSC-2 exclusive arm; every mutable touch of the
     // entries list below holds `entries`).
-    let epoll = edges::boxed_mut(epoll_ptr);
+    let epoll = r#unsafe::boxed_mut(epoll_ptr);
 
     // High-resolution expiry gate (see poll_deadline_ns); jiffies only
     // schedule the intermediate re-check sleeps.
@@ -3473,12 +3473,12 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // so the dead-interest arm can unlink in place. Nodes are linked
         // and unlinked only under this entries lock — every node
         // reachable from the sentinel is linked under this lock
-        // (INV-SYSC-1 via edges::list_*).
+        // (INV-SYSC-1 via unsafe::list_*).
         let head = entries.init_once();
-        let mut cur = edges::list_first(head);
+        let mut cur = r#unsafe::list_first(head);
         while cur != head {
-            let next = edges::list_next(cur);
-            let entry: &mut EpollEntry = edges::list_entry_mut(cur);
+            let next = r#unsafe::list_next(cur);
+            let entry: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
             cur = next;
             nent += 1;
             // Linux epoll_wait never consumes readiness it does not deliver:
@@ -3588,7 +3588,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     if dead_nodes.len() < dead_nodes.capacity() {
                         // entry.list is linked in this epoll's list
                         // (walked under this lock) — INV-SYSC-1 unlink.
-                        edges::list_unlink(&mut entry.list);
+                        r#unsafe::list_unlink(&mut entry.list);
                         dead_nodes.push(entry as *mut EpollEntry);
                     }
                     continue;
@@ -3711,7 +3711,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // nodes are never shared (INV-SYSC-2 reclaim).
         if !dead_nodes.is_empty() {
             for node in dead_nodes.drain(..) {
-                edges::boxed_drop(node);
+                r#unsafe::boxed_drop(node);
             }
         }
 
@@ -3894,10 +3894,10 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 let head = entries.init_once();
                 // Read-only walk of nodes linked under this lock
                 // (INV-SYSC-1).
-                let mut cur = edges::list_first(head);
+                let mut cur = r#unsafe::list_first(head);
                 while cur != head {
-                    let entry: &EpollEntry = edges::list_entry(cur);
-                    cur = edges::list_next(cur);
+                    let entry: &EpollEntry = r#unsafe::list_entry(cur);
+                    cur = r#unsafe::list_next(cur);
                     match fdtable.get_file(entry.fd as usize) {
                         Some(f) if f.file_id == entry.file_id => {
                             let mut poll_mask: u16 = 0;
@@ -4205,7 +4205,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // Ops identity was checked by the dispatcher; private_data
     // holds the Box::into_raw EventFd from the create path
     // (INV-PROC-NSFILE-1).
-    let efd = match ::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4272,7 +4272,7 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // Ops identity was checked by the dispatcher; private_data
     // holds the Box::into_raw EventFd from the create path
     // (INV-PROC-NSFILE-1).
-    let efd = match ::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4331,7 +4331,7 @@ fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     let mut ready = 0u16;
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let efd = match ::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return POLLERR,
     };
@@ -4355,7 +4355,7 @@ fn eventfd_close(file: &crate::fs::File) -> i32 {
     // last Arc reference, so no read/write/poll can be using it.
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference.
-    if let Some(efd) = ::process::unsafe_edges::file_private_data_take_boxed::<EventFd>(file) {
+    if let Some(efd) = ::process::r#unsafe::file_private_data_take_boxed::<EventFd>(file) {
         // Reclaimed: the constructor's Box::into_raw, consumed exactly
         // once on this last-reference close (INV-PROC-NSFILE-2); the box
         // drops at the end of this scope.
@@ -4410,7 +4410,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         return -errno::EINVAL as isize;
     }
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match ::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4461,7 +4461,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 fn timerfd_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match ::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return 0,
     };
@@ -4482,7 +4482,7 @@ fn timerfd_close(file: &crate::fs::File) -> i32 {
     // worse.
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference, so no timerfd_read/settime/gettime can be using it.
-    if let Some(tfd) = ::process::unsafe_edges::file_private_data_take_boxed::<TimerFd>(file) {
+    if let Some(tfd) = ::process::r#unsafe::file_private_data_take_boxed::<TimerFd>(file) {
         // Reclaimed exactly once on this last-reference close
         // (INV-PROC-NSFILE-2); the box drops at the end of this scope.
         let _ = tfd;
@@ -4495,7 +4495,7 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     let mut ready = 0u16;
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match ::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return POLLERR,
     };
@@ -4588,7 +4588,7 @@ fn timerfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
     // SAFETY: the dispatcher identity-checked the File against TIMERFD_OPS;
     // private_data was installed by sys_timerfd_create as Box::into_raw and
     // stays valid while the File exists.
-    let tfd = match ::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return false,
     };
@@ -4600,7 +4600,7 @@ fn timerfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
 /// Remove a registration added by timerfd_poll_wait.
 fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
     // SAFETY: same contract as timerfd_poll_wait.
-    if let Some(tfd) = ::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    if let Some(tfd) = ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         tfd.wait_queue.remove(task);
     }
 }
@@ -4617,7 +4617,7 @@ fn eventfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
     // SAFETY: the dispatcher identity-checked the File against EVENTFD_OPS;
     // private_data was installed by sys_eventfd2 as Box::into_raw and stays
     // valid while the File exists.
-    let efd = match ::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return false,
     };
@@ -4629,7 +4629,7 @@ fn eventfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
 /// Remove a registration added by eventfd_poll_wait.
 fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
     // SAFETY: same contract as eventfd_poll_wait.
-    if let Some(efd) = ::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    if let Some(efd) = ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         efd.wait_queue.remove(task);
     }
 }
@@ -4640,7 +4640,7 @@ fn signalfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) 
     // SAFETY: the dispatcher identity-checked the File against SIGNALFD_OPS;
     // private_data was installed by sys_signalfd4_impl as Box::into_raw and
     // stays valid while the File exists.
-    let sfd = match ::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    let sfd = match ::process::r#unsafe::file_private_data_ref::<SignalFd>(file) {
         Some(v) => v,
         None => return false,
     };
@@ -4652,7 +4652,7 @@ fn signalfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) 
 /// Remove a registration added by signalfd_poll_wait.
 fn signalfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
     // SAFETY: same contract as signalfd_poll_wait.
-    if let Some(sfd) = ::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    if let Some(sfd) = ::process::r#unsafe::file_private_data_ref::<SignalFd>(file) {
         sfd.wait_queue.remove(task);
     }
 }
@@ -4696,7 +4696,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
     // mutable access.
-    let sfd = match ::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    let sfd = match ::process::r#unsafe::file_private_data_ref::<SignalFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4785,7 +4785,7 @@ fn signalfd_poll(file: &crate::fs::File, events: u16) -> u16 {
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
     // mutable access.
-    let sfd = match ::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    let sfd = match ::process::r#unsafe::file_private_data_ref::<SignalFd>(file) {
         Some(v) => v,
         None => return POLLERR,
     };
@@ -4809,7 +4809,7 @@ fn signalfd_close(file: &crate::fs::File) -> i32 {
     // the queue address).
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference.
-    if let Some(sfd) = ::process::unsafe_edges::file_private_data_take_boxed::<SignalFd>(file) {
+    if let Some(sfd) = ::process::r#unsafe::file_private_data_take_boxed::<SignalFd>(file) {
         // Reclaimed exactly once on this last-reference close
         // (INV-PROC-NSFILE-2): purge the registry entry keyed on the
         // queue address BEFORE the box drops at the end of this scope.
@@ -4878,7 +4878,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
         }
         // SAFETY: private_data is an UnsafeCell; we hold &File so no
         // concurrent mutable access.
-        let sfd = match ::process::unsafe_edges::file_private_data_ref::<SignalFd>(&file) {
+        let sfd = match ::process::r#unsafe::file_private_data_ref::<SignalFd>(&file) {
         Some(v) => v,
         None => return -(errno::EBADF as i64),
     };
@@ -4919,7 +4919,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
     // yet shared: no fd installed).
     signalfd_register(
         current,
-        &edges::boxed_ref(sfd_ptr as *const SignalFd).wait_queue as *const _,
+        &r#unsafe::boxed_ref(sfd_ptr as *const SignalFd).wait_queue as *const _,
     );
 
     let new_fd = match fdtable.alloc_fd() {
@@ -4928,9 +4928,9 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
             // sfd_ptr was created via Box::into_raw above; reclaim
             // (INV-SYSC-2: no fd was installed, nothing else saw it).
             signalfd_unregister(
-                &edges::boxed_ref(sfd_ptr as *const SignalFd).wait_queue as *const _,
+                &r#unsafe::boxed_ref(sfd_ptr as *const SignalFd).wait_queue as *const _,
             );
-            edges::boxed_drop(sfd_ptr as *mut SignalFd);
+            r#unsafe::boxed_drop(sfd_ptr as *mut SignalFd);
             return -(errno::EMFILE as i64);
         }
     };
@@ -4950,9 +4950,9 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
             // (INV-SYSC-2: the failed install dropped the File, the
             // registry entry is purged before the box drops).
             signalfd_unregister(
-                &edges::boxed_ref(sfd_ptr as *const SignalFd).wait_queue as *const _,
+                &r#unsafe::boxed_ref(sfd_ptr as *const SignalFd).wait_queue as *const _,
             );
-            edges::boxed_drop(sfd_ptr as *mut SignalFd);
+            r#unsafe::boxed_drop(sfd_ptr as *mut SignalFd);
             -(errno::ENOMEM as i64)
         }
     }
@@ -5007,7 +5007,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
         None => {
             // Reclaim EventFd: efd_ptr was created via Box::into_raw
             // above; reclaim to free (INV-SYSC-2 — no fd installed).
-            edges::boxed_drop(efd_ptr as *mut EventFd);
+            r#unsafe::boxed_drop(efd_ptr as *mut EventFd);
             return -(errno::EMFILE as i64);
         }
     };
@@ -5027,7 +5027,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
         Err(_) => {
             // efd_ptr was created via Box::into_raw above; reclaim to
             // free (INV-SYSC-2 — install failed).
-            edges::boxed_drop(efd_ptr as *mut EventFd);
+            r#unsafe::boxed_drop(efd_ptr as *mut EventFd);
             -(errno::EMFILE as i64)
         }
     }
@@ -5235,14 +5235,14 @@ fn sys_timerfd_create_inner(args: SyscallArgs) -> i64 {
     // tfd_ptr is the Box::into_raw TimerFd created above; the File is
     // not yet shared (no fd installed), so no concurrent access
     // (INV-SYSC-2 exclusive arm).
-    edges::boxed_mut(tfd_ptr as *mut TimerFd).file_id = file.file_id;
+    r#unsafe::boxed_mut(tfd_ptr as *mut TimerFd).file_id = file.file_id;
 
     let fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
             // tfd_ptr was created via Box::into_raw above; reclaim to
             // free (INV-SYSC-2 — no fd installed).
-            edges::boxed_drop(tfd_ptr as *mut TimerFd);
+            r#unsafe::boxed_drop(tfd_ptr as *mut TimerFd);
             return -(errno::EMFILE as i64);
         }
     };
@@ -5260,7 +5260,7 @@ fn sys_timerfd_create_inner(args: SyscallArgs) -> i64 {
         Err(_) => {
             // tfd_ptr was created via Box::into_raw above; reclaim to
             // free (INV-SYSC-2 — install failed).
-            edges::boxed_drop(tfd_ptr as *mut TimerFd);
+            r#unsafe::boxed_drop(tfd_ptr as *mut TimerFd);
             -(errno::EMFILE as i64)
         }
     }
@@ -5324,7 +5324,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // Ops identity verified above; private_data holds the Box::into_raw
     // TimerFd from sys_timerfd_create (INV-PROC-NSFILE-1 mutable arm —
     // settime is the only mutator and the File's Arc pins the box).
-    let tfd = match ::process::unsafe_edges::file_private_data_mut::<TimerFd>(&file) {
+    let tfd = match ::process::r#unsafe::file_private_data_mut::<TimerFd>(&file) {
         Some(t) => t,
         None => return -(errno::EBADF as i64),
     };
@@ -5495,7 +5495,7 @@ pub fn timerfd_expire_notify(tfd_addr: u64) {
     // address arm: the armed timer action detaches before the close
     // frees the box, bounding this to one in-flight pass).
     {
-        let tfd = edges::boxed_ref(tfd_addr as *const TimerFd);
+        let tfd = r#unsafe::boxed_ref(tfd_addr as *const TimerFd);
         tfd.expiration_count.fetch_add(1, core::sync::atomic::Ordering::Release);
         tfd.wait_queue.wake_up_all();
         // EPOLLET lost-edge fix (2026-11-06): the wait_queue wake above
@@ -5548,7 +5548,7 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match ::process::unsafe_edges::file_private_data_ref::<TimerFd>(&file) {
+    let tfd = match ::process::r#unsafe::file_private_data_ref::<TimerFd>(&file) {
         Some(v) => v,
         None => return -(errno::EBADF as i64),
     };
@@ -5861,7 +5861,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
         // The instance is alive (its owning File holds an Arc in the fd
         // table we just scanned; the box is freed only in its close op,
         // which cannot run while that Arc exists) — INV-SYSC-2.
-        let epoll = edges::boxed_ref(ep as *mut EpollFile);
+        let epoll = r#unsafe::boxed_ref(ep as *mut EpollFile);
         // At most ONE entry can match (fd, dying_file_id): entries are
         // unique per fd number (ADD dedups) and file_id is never reused —
         // so a node pointer + its id replace the old removed_ids Vec.
@@ -5876,10 +5876,10 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
             let head = entries.init_once();
             // Nodes are linked and unlinked only under this lock
             // (INV-SYSC-1).
-            let mut cur = edges::list_first(head);
+            let mut cur = r#unsafe::list_first(head);
             while cur != head {
-                let next = edges::list_next(cur);
-                let e: &mut EpollEntry = edges::list_entry_mut(cur);
+                let next = r#unsafe::list_next(cur);
+                let e: &mut EpollEntry = r#unsafe::list_entry_mut(cur);
                 cur = next;
                 // 79th: remove ONLY the dying description's entries. A
                 // same-numbered entry for a DIFFERENT description (the
@@ -5897,7 +5897,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
                     .map_or(false, |f| f.file_id == e.file_id);
                 if !live {
                     // e.list is linked in this epoll's list (INV-SYSC-1).
-                    edges::list_unlink(&mut e.list);
+                    r#unsafe::list_unlink(&mut e.list);
                     removed_id = e.file_id;
                     dead = Some(e as *mut EpollEntry);
                 }
@@ -5911,7 +5911,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
             // Unlinked above under the lock; interest nodes are
             // reachable only through the epoll's entries list
             // (INV-SYSC-2 reclaim).
-            edges::boxed_drop(node);
+            r#unsafe::boxed_drop(node);
             // Registry lock only after the entries lock is released (the
             // documented nesting rule — registry helpers never nest
             // entries).
@@ -5988,7 +5988,7 @@ pub fn timerfd_wheel_audit() {
         // paths — settime/cancel — detach it first); read-only diagnostic
         // access to the count atom and the wait queue (INV-SYSC-2
         // softirq-pinned address arm).
-        let tfd = edges::boxed_ref(t.tfd_addr as *const TimerFd);
+        let tfd = r#unsafe::boxed_ref(t.tfd_addr as *const TimerFd);
         let cnt = tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire);
         let (wq_total, wq_woken) = tfd.wait_queue.vw_queue_census();
         let overdue_ms = if t.expires > now {

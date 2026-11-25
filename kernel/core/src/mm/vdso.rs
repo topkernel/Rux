@@ -5,13 +5,13 @@
 //! vDSO (virtual dynamic shared object) — P2.
 //!
 //! FRAMEKERNEL CLASSIFICATION (unsafe-slim L7, 2026-11-21): this file is
-//! mm's SECOND edge file (with mm/edges.rs — the doctrine's ≤2 per
+//! mm's SECOND edge file (with mm/unsafe.rs — the doctrine's ≤2 per
 //! subsystem), NOT a service file to de-sign. It is one self-contained
 //! timekeeping primitive — the data-page seqlock, the volatile word
 //! pairs, and the rdtsc/rdcycle counter asm — whose unsafe is the
 //! audited core itself (the LTP clock_gettime04 protocol: base_tsc/
 //! base_mono_ns must pair under the seq word or the vDSO clock runs
-//! ahead of the syscall clock). Relocating these blocks into edges.rs
+//! ahead of the syscall clock). Relocating these blocks into unsafe.rs
 //! would move the same audited bytes without shrinking anything.
 //!
 //! INV-MM-VDSO (the invariants this primitive owns):

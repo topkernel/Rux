@@ -162,7 +162,7 @@ fn dump_all_cpu_stacks() {
         }
         // Per-CPU current task pointer, read-only diagnostics (the
         // diag-adoption edge).
-        let t: &crate::process::task::Task = rux::fs::unsafe_edges::diag_task_ref(*task);
+        let t: &crate::process::task::Task = rux::fs::r#unsafe::diag_task_ref(*task);
         crate::println!(
             "CPU{}: pid={} state={:#x} on_cpu={} idle={}",
             cpu,
@@ -207,7 +207,7 @@ fn print_task_stack_words(task: &crate::process::task::Task) {
     for k in 0..80 {
         // Diagnostic read within the task's own kernel stack (the
         // INV-PROC-DIAG-1 edge; the offset math is wrapping-safe).
-        let v = rux::fs::unsafe_edges::diag_read_u64(base.wrapping_add(k));
+        let v = rux::fs::r#unsafe::diag_read_u64(base.wrapping_add(k));
         if v >= lo && v < hi && (v & 1) == 0 {
             crate::println!("    {:#x}", v);
             shown += 1;

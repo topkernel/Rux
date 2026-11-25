@@ -470,7 +470,7 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
 fn shrink_node(sc: &mut ScanControl) {
     // Called from kswapd/balance_pgdat — exclusive reclaim context
     // (INV-MM-1 via the edge).
-    let node = match rux::mm::edges::first_node_mut() {
+    let node = match rux::mm::r#unsafe::first_node_mut() {
         Some(n) => n,
         None => return,
     };

@@ -86,7 +86,7 @@ pub(super) struct PageHdr {
 fn hdr_of(page: usize) -> &'static mut PageHdr {
     // Callers hold the class lock (or are initializing a page no other
     // CPU can reach yet — still under the class lock) — INV-MM-13.
-    super::edges::sa_hdr_mut(page)
+    super::r#unsafe::sa_hdr_mut(page)
 }
 
 /// Class index for a layout already known to fit (size,align <= 1024).
@@ -169,7 +169,7 @@ pub fn object_span(addr: usize) -> Option<(usize, usize)> {
     // page lies inside the kernel heap direct map (bitmap bit set) so
     // the mapping is valid. Fields are plain u8/u16 loads — worst case
     // a torn value, filtered by the magic check below.
-    let hdr = super::edges::sa_hdr_ref(page);
+    let hdr = super::r#unsafe::sa_hdr_ref(page);
     if hdr.magic != HDR_MAGIC {
         return None;
     }
@@ -494,7 +494,7 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
             continue;
         }
         let ptr = page_addr + fo + obj * s;
-        let next_free = super::edges::sa_read_u16(ptr) as usize;
+        let next_free = super::r#unsafe::sa_read_u16(ptr) as usize;
         hdr.free_head = if next_free >= objs_per_page as usize { 0xFFFF } else { next_free as u16 };
         hdr.free_count -= 1;
         if hdr.free_count == 0 {
@@ -530,13 +530,13 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     let mut i = 0usize;
     while i < objs_per_page as usize {
         let val: u16 = if i + 1 >= objs_per_page as usize { 0xFFFF } else { (i + 1) as u16 };
-        super::edges::sa_write_u16(page + fo + i * s, val);
+        super::r#unsafe::sa_write_u16(page + fo + i * s, val);
         i += 1;
     }
     // Serve object 0.
     let ptr = page + fo;
     let hdr = hdr_of(page);
-    let next_free = super::edges::sa_read_u16(ptr) as usize;
+    let next_free = super::r#unsafe::sa_read_u16(ptr) as usize;
     hdr.free_head = if next_free >= objs_per_page as usize { 0xFFFF } else { next_free as u16 };
     hdr.free_count -= 1;
     if hdr.free_count == 0 {
@@ -748,7 +748,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             continue;
         }
-        super::edges::sa_write_u16(addr, hdr.free_head);
+        super::r#unsafe::sa_write_u16(addr, hdr.free_head);
         hdr.free_head = (off / s) as u16;
         hdr.free_count += 1;
         cache.obj_frees.fetch_add(1, Ordering::Relaxed);
@@ -915,7 +915,7 @@ pub fn census_peek(ci: usize, per_page: usize) {
         while i < objs && i < per_page.max(16) {
             // SAFETY: live slab page of this class; slot in bounds.
             let p = page_addr + fo + i * s;
-            let a0 = super::edges::sa_read_u64(p);
+            let a0 = super::r#unsafe::sa_read_u64(p);
             if a0 != 0 {
                 let mut k = 0usize;
                 while k < nvals {
@@ -1017,16 +1017,16 @@ pub fn census_peek3(ci: usize) {
         while i < objs {
             // SAFETY: live slab page of this class; slot in bounds.
             let p = page_addr + fo + i * s;
-            let a0 = super::edges::sa_read_u64(p);
-            let a1 = super::edges::sa_read_u64(p + 8);
-            let a2 = super::edges::sa_read_u64(p + 16);
+            let a0 = super::r#unsafe::sa_read_u64(p);
+            let a1 = super::r#unsafe::sa_read_u64(p + 8);
+            let a2 = super::r#unsafe::sa_read_u64(p + 16);
             if a0 == 0 && a1 == 0 && a2 == 0 {
                 i += 1;
                 continue;
             }
             total += 1;
             // BTree node length: u16 at +10 (parent 8B, parent_idx u16).
-            let blen = super::edges::sa_read_u16(p + 10) as u64;
+            let blen = super::r#unsafe::sa_read_u16(p + 10) as u64;
             if a0 <= 4096 && a1 <= 4096 && a2 != 0 && a2 < (1 << 24) {
                 n_arc += 1;
             } else if (a0 == 0 || is_kheap(a0)) && (1..=11).contains(&blen) && is_userva(a2) {

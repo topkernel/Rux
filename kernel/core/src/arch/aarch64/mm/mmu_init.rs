@@ -20,7 +20,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::fixmap;
 use super::memory_layout::*;
 use super::pagetable::{PageTable, PageTableEntry, Satp};
@@ -285,7 +285,7 @@ fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
 /// # Safety
 /// The frame must be a page-table allocated by this module.
 /// The phys→table conversion edge lives in the framework module now.
-pub use super::unsafe_edges::get_page_table_virt;
+pub use super::r#unsafe::get_page_table_virt;
 
 // ==================== PT ledger (debug instrumentation) ====================
 //
@@ -459,8 +459,8 @@ pub fn set_user_leaf_flags(root_ppn: u64, va: u64, sw_flags: u64) {
 
 /// Descend to the L3 table for `va` WITHOUT allocating (present tables
 /// only); None when any intermediate is missing or non-table.
-pub fn user_l3_table_for(root_ppn: u64, va: u64) -> Option<super::unsafe_edges::PtTable> {
-    let mut table = super::unsafe_edges::PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
+pub fn user_l3_table_for(root_ppn: u64, va: u64) -> Option<super::r#unsafe::PtTable> {
+    let mut table = super::r#unsafe::PtTable::from_phys(root_ppn << PAGE_SHIFT)?;
     for cur in 0..3u32 {
         let shift = PAGE_SHIFT + 9 * (3 - cur) as u64;
         let idx = ((va >> shift) & 0x1FF) as usize;
@@ -468,7 +468,7 @@ pub fn user_l3_table_for(root_ppn: u64, va: u64) -> Option<super::unsafe_edges::
         if !entry.is_valid() || !entry.is_table() {
             return None;
         }
-        table = super::unsafe_edges::PtTable::from_phys(entry.ppn() << PAGE_SHIFT)?;
+        table = super::r#unsafe::PtTable::from_phys(entry.ppn() << PAGE_SHIFT)?;
     }
     Some(table)
 }

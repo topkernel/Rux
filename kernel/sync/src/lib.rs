@@ -29,7 +29,7 @@
 // carried zero unsafe blocks of their own (futex.rs's only unsafe is
 // the Waiter Send/Sync pair, which stayed with the waiter pool); the
 // raw task/page-table reads ride the framework's audited
-// rux::sync::edges walkers.
+// rux::sync::unsafe walkers.
 #![forbid(unsafe_code)]
 #![no_std]
 #![feature(alloc_error_handler, linkage)]

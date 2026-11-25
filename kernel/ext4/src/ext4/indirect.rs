@@ -172,7 +172,7 @@ pub fn read_indirect_block(
     // buffer — the corrupt-disk class, never UB).
     bio::with_block_ro(fs.device, indirect_block, |data| {
         let block_numbers =
-            rux::fs::ext4_edges::typed_slice::<u32>(data, 0, data.len() / 4);
+            rux::fs::r#unsafe::typed_slice::<u32>(data, 0, data.len() / 4);
         if index >= block_numbers.len() {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
@@ -246,7 +246,7 @@ pub fn write_indirect_block(
     // the framework's alignment-checked view.
     bio::with_block_mut(fs.device, indirect_block, |data, _bh| {
         let block_numbers =
-            rux::fs::ext4_edges::typed_slice_mut::<u32>(data, 0, data.len() / 4);
+            rux::fs::r#unsafe::typed_slice_mut::<u32>(data, 0, data.len() / 4);
         if index >= block_numbers.len() {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }

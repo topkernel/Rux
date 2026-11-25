@@ -961,7 +961,7 @@ fn unix_wait_round(
             let sock_of_queue = (queue as *const _ as usize)
                 .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
             // INV-NET-CONTAINEROF-1: wait_queue field ptr -> socket.
-            let q = crate::net_edges::container_of::<UnixSocket>(
+            let q = crate::r#unsafe::container_of::<UnixSocket>(
                 queue as *const _ as usize,
                 core::mem::offset_of!(UnixSocket, wait_queue),
             );
@@ -3319,7 +3319,7 @@ pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize
         .map(|p| {
             // INV-NET-ARCREF-1b: ops-identity-checked private_data
             // deref (net_edges audited_deref).
-            crate::net_edges::audited_deref(p as *const UnixSocket)
+            crate::r#unsafe::audited_deref(p as *const UnixSocket)
         })?;
     let name = sk
         .bound_name
@@ -4204,11 +4204,11 @@ pub fn unix_park_audit() {
         if top == 0 {
             return;
         }
-        // Framework edge (sched::edges::pt_regs_at_top, INV-SCE-9): the
+        // Framework edge (sched::unsafe::pt_regs_at_top, INV-SCE-9): the
         // task's entry frame at the top of its kernel stack; the unified
         // accessors replace the per-arch field reads (x86 orig_rax/rdi,
         // riscv a7/a0 — same values, aarch64 now covered too).
-        let regs = crate::sched::edges::pt_regs_at_top(top);
+        let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
         let sys = regs.syscall_nr() as u64;
         let a0 = regs.syscall_args()[0];
         // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.

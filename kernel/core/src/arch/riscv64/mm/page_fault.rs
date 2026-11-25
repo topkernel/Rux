@@ -13,7 +13,7 @@
 use core::arch::asm;
 
 use super::memory_layout::*;
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::mmu_init::{map_page, get_page_table_virt, ROOT_PAGE_TABLE};
 use super::mm_ops::{alloc_user_phys_page, is_cow_page, check_pte_permissions, PageTableWalker};
 use super::pagetable::*;

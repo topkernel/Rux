@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 use crate::sched::entities::{CfsRunQueue, SchedEntity, LoadWeight, NICE_0_LOAD, StrandWallRow};
-use crate::sched::edges::{node_key, node_of_task, task_of_node};
+use crate::sched::r#unsafe::{node_key, node_of_task, task_of_node};
 use crate::sched::sched_hooks::{CLASS_CFS_BIT, WW_EV_LINK, WW_EV_UNLINK_POISON};
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::{MAX_CPUS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
@@ -191,9 +191,9 @@ pub const WEIGHT_IDLEPRIO: u64 = 3;
 /// This ensures uniqueness
 // The timeline engine (VruntimeKey, RbNode, RB_NIL, node_of_task/
 // task_of_node, node_key, RbTimeline and its ops) moved into
-// crate::sched::edges (INV-SCE-6) — the framework zone owns the
+// crate::sched::unsafe (INV-SCE-6) — the framework zone owns the
 // raw-pointer tree surgery; this file keeps the CFS policy.
-pub(crate) use crate::sched::edges::{RbNode, RbTimeline, VruntimeKey};
+pub(crate) use crate::sched::r#unsafe::{RbNode, RbTimeline, VruntimeKey};
 
 // R76 (fast-pace starvation hunt): per-pid pick-skip counters, direct-mapped
 // by pid into 64 slots. Only read/written from inside pick_next_cpu's report
@@ -309,7 +309,7 @@ impl SchedClass for FairSchedClass {
         // Just return the preferred CPU from the task's affinity.
         // SAFETY: task is a valid pointer from the caller; null check above.
         {
-            let task_ref = crate::sched::edges::task_shared(task);
+            let task_ref = crate::sched::r#unsafe::task_shared(task);
             let cpus_allowed = task_ref.cpus_allowed();
             let wake_cpu = task_ref.wake_cpu();
 
@@ -499,7 +499,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                 // the heal resets (see the comment above).
                 let ownership_ok = if task == prev {
                     true
-                } else if crate::sched::edges::task_shared(task).ownership_pickable(cpu_id) {
+                } else if crate::sched::r#unsafe::task_shared(task).ownership_pickable(cpu_id) {
                     true
                 } else {
                     // WAKE-FASTREPRO (orphan-mark root cause, protocol
@@ -520,7 +520,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                     // a mid-switch-out task reads {true,X} and lands on
                     // the why=1 leg; only an ATOMIC {false, X-foreign}
                     // reaches the stale-claim heal.
-                    let whole_qword = crate::sched::edges::task_ownership_qword(task);
+                    let whole_qword = crate::sched::r#unsafe::task_ownership_qword(task);
                     let split_oncpu = (whole_qword & 0xFF) != 0;
                     let claim = (whole_qword >> 32) as i32;
                     // R85 (tail-phase PICK-SKIP wedge): adjudicate every
@@ -579,7 +579,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                             // motion means the state was a transient, not
                             // an orphan — refuse (the release already
                             // healed it).
-                            let whole = crate::sched::edges::task_ownership_qword(task);
+                            let whole = crate::sched::r#unsafe::task_ownership_qword(task);
                             let w_oncpu = (whole & 0xFF) != 0;
                             let w_claim = (whole >> 32) as i32;
                             if w_oncpu || w_claim != claim {
@@ -601,7 +601,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     }
                                     const M: &[u8] = b"\nSTALE-CLAIM-TORN pid=";
                                     for &b in M { putchar(b); }
-                                    ph6(crate::sched::edges::task_shared(task).pid() as u64);
+                                    ph6(crate::sched::r#unsafe::task_shared(task).pid() as u64);
                                     const M2: &[u8] = b" split_claim=";
                                     for &b in M2 { putchar(b); }
                                     ph6(claim.unsigned_abs() as u64);
@@ -612,8 +612,8 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                 }
                                 skip_reason = 2; // treat as foreign-live: refuse
                             } else {
-                                crate::sched::edges::task_shared(task).running_on_cpu.store(-1, Ordering::Release);
-                                stale_claim_healed(cpu_id, crate::sched::edges::task_shared(task).pid(), claim, task);
+                                crate::sched::r#unsafe::task_shared(task).running_on_cpu.store(-1, Ordering::Release);
+                                stale_claim_healed(cpu_id, crate::sched::r#unsafe::task_shared(task).pid(), claim, task);
                                 skip_reason = 5;
                             }
                         } else {
@@ -634,7 +634,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         if !owner_live
                             && crate::sched::sched::stale_mark_confirm(
                                 task,
-                                crate::sched::edges::task_shared(task).pid(),
+                                crate::sched::r#unsafe::task_shared(task).pid(),
                                 50,
                             )
                         {
@@ -654,7 +654,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                             // refuse (a real release already healed it; a
                             // fresh publish means a live owner exists and
                             // the next pass re-adjudicates).
-                            let whole = crate::sched::edges::task_ownership_qword(task);
+                            let whole = crate::sched::r#unsafe::task_ownership_qword(task);
                             let w_oncpu = (whole & 0xFF) != 0;
                             let w_claim = (whole >> 32) as i32;
                             if w_oncpu != split_oncpu || w_claim != claim {
@@ -676,7 +676,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     }
                                     const M: &[u8] = b"\nSTALE-ONCPU-TORN pid=";
                                     for &b in M { putchar(b); }
-                                    ph6(crate::sched::edges::task_shared(task).pid() as u64);
+                                    ph6(crate::sched::r#unsafe::task_shared(task).pid() as u64);
                                     const M2: &[u8] = b" split_oncpu=";
                                     for &b in M2 { putchar(b); }
                                     ph6(split_oncpu as u64);
@@ -690,8 +690,8 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                 }
                                 skip_reason = 1; // treat as owned/transient: refuse
                             } else {
-                                let was_pk = crate::sched::edges::task_shared(task).pick_state();
-                                crate::sched::edges::task_shared(task).release_pick_ownership();
+                                let was_pk = crate::sched::r#unsafe::task_shared(task).pick_state();
+                                crate::sched::r#unsafe::task_shared(task).release_pick_ownership();
                                 stale_oncpu_healed(b"STALE-ONCPU-RESET", cpu_id, task, claim, was_pk);
                                 skip_reason = 5;
                             }
@@ -729,7 +729,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     for &b in b"\nWHY1-OWNER-REFUSED pid=" {
                                         putchar(b);
                                     }
-                                    let mut v = crate::sched::edges::task_shared(task).pid() as u64;
+                                    let mut v = crate::sched::r#unsafe::task_shared(task).pid() as u64;
                                     for _ in 0..8 {
                                         let n = (v >> 28) as u8;
                                         putchar(if n < 10 {
@@ -754,7 +754,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     for &b in b" pk=" {
                                         putchar(b);
                                     }
-                                    let mut p9 = crate::sched::edges::task_shared(task).pick_state() as u64;
+                                    let mut p9 = crate::sched::r#unsafe::task_shared(task).pick_state() as u64;
                                     for _ in 0..4 {
                                         let n = (p9 >> 28) as u8;
                                         putchar(b'0' + n);
@@ -834,7 +834,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         false
                     }
                 };
-                let affinity_ok = crate::sched::edges::task_shared(task).cpu_allowed(cpu_id);
+                let affinity_ok = crate::sched::r#unsafe::task_shared(task).cpu_allowed(cpu_id);
                 if !affinity_ok {
                     skip_reason = 3;
                 }
@@ -852,7 +852,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
 
                 // SAFETY: task was just removed from the queue; no aliasing references exist.
                 {
-                    let task_ref = crate::sched::edges::task_mut(task);
+                    let task_ref = crate::sched::r#unsafe::task_mut(task);
                     let se = task_ref.sched_entity();
                     se.set_on_rq(false);
 
@@ -989,7 +989,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                     // that is linked on this queue (pinned by the GRQ lock we
                     // hold).
                     {
-                        let tr = crate::sched::edges::task_shared(task);
+                        let tr = crate::sched::r#unsafe::task_shared(task);
                         let claim = tr.running_on_cpu.load(Ordering::Relaxed);
                         ps(b"  pid=");
                         pd(tr.pid() as u64);
@@ -1001,7 +1001,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         ps(b" why=");
                         pd(reason as u64);
                         ps(b" oncpu=");
-                        putchar(b'0' + crate::sched::edges::task_shared(task).on_cpu() as u8);
+                        putchar(b'0' + crate::sched::r#unsafe::task_shared(task).on_cpu() as u8);
                         ps(b" claim=");
                         if (claim as i64) < 0 {
                             putchar(b'-');
@@ -1011,7 +1011,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         // with oncpu/claim it names the exact protocol leg
                         // that refused the candidate.
                         ps(b" pk=");
-                        pd(crate::sched::edges::task_shared(task).pick_state() as u64);
+                        pd(crate::sched::r#unsafe::task_shared(task).pick_state() as u64);
                         // R85 (tail-phase wedge hunt): the ownership
                         // ADJUDICATION fields — st= the state word (the
                         // harvester only heals RUNNING orphans; a wedged
@@ -1022,7 +1022,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         // un-owned stale mark the R85 pick-side heal
                         // releases (STALE-ONCPU-RESET).
                         ps(b" st=0x");
-                        let st = crate::sched::edges::task_shared(task).state().bits();
+                        let st = crate::sched::r#unsafe::task_shared(task).state().bits();
                         let mut v = st as u64;
                         for sh in (0..8u32).rev() {
                             let nb = ((v >> (sh * 4)) & 0xF) as u8;
@@ -1033,7 +1033,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         ps(b" swout=");
                         pd(crate::sched::sched::switching_out_mask(task) as u64);
                         ps(b" aff=0x");
-                        let mut v = crate::sched::edges::task_shared(task).cpus_allowed() as u64;
+                        let mut v = crate::sched::r#unsafe::task_shared(task).cpus_allowed() as u64;
                         for sh in (0..8u32).rev() {
                             let nb = ((v >> (sh * 4)) & 0xF) as u8;
                             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
@@ -1055,7 +1055,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         // ever touched under the GRQ lock this pick holds.
                         {
                             use core::sync::atomic::Ordering as Rel;
-                            let pid = crate::sched::edges::task_shared(task).pid();
+                            let pid = crate::sched::r#unsafe::task_shared(task).pid();
                             let slot = (pid as usize) & (SKIP_TRACK.len() - 1);
                             let entry = &SKIP_TRACK[slot];
                             if entry.pid.load(Rel::Relaxed) != pid {
@@ -1076,33 +1076,33 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                 ps(b" n=");
                                 pd(count as u64);
                                 ps(b" state=");
-                                let st = crate::sched::edges::task_shared(task).state().bits();
+                                let st = crate::sched::r#unsafe::task_shared(task).state().bits();
                                 let mut v = st as u64;
                                 for sh in (0..8u32).rev() {
                                     let nb = ((v >> (sh * 4)) & 0xF) as u8;
                                     putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                                 }
                                 ps(b" onrq=");
-                                putchar(b'0' + crate::sched::edges::task_shared(task).sched_entity().is_on_rq() as u8);
+                                putchar(b'0' + crate::sched::r#unsafe::task_shared(task).sched_entity().is_on_rq() as u8);
                                 ps(b" ti_cpu=");
-                                if (crate::sched::edges::task_shared(task).ti_cpu() as i64) < 0 {
+                                if (crate::sched::r#unsafe::task_shared(task).ti_cpu() as i64) < 0 {
                                     putchar(b'-');
                                 }
-                                pd((crate::sched::edges::task_shared(task).ti_cpu() as i64).unsigned_abs() as u64);
+                                pd((crate::sched::r#unsafe::task_shared(task).ti_cpu() as i64).unsigned_abs() as u64);
                                 ps(b" ksp=0x");
-                                let mut v = crate::sched::edges::task_shared(task).ti_kernel_sp() as u64;
+                                let mut v = crate::sched::r#unsafe::task_shared(task).ti_kernel_sp() as u64;
                                 for sh in (0..16u32).rev() {
                                     let nb = ((v >> (sh * 4)) & 0xF) as u8;
                                     putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                                 }
                                 ps(b" thsp=0x");
-                                let mut v = crate::sched::edges::task_shared(task).thread().sp;
+                                let mut v = crate::sched::r#unsafe::task_shared(task).thread().sp;
                                 for sh in (0..16u32).rev() {
                                     let nb = ((v >> (sh * 4)) & 0xF) as u8;
                                     putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                                 }
                                 ps(b" vrun=");
-                                pd(crate::sched::edges::task_shared(task).sched_entity().get_vruntime());
+                                pd(crate::sched::r#unsafe::task_shared(task).sched_entity().get_vruntime());
                                 putchar(b'\n');
                             }
                         }
@@ -1133,7 +1133,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         // appear in the victim's history).
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched_hooks::sched_hist_ring(
-                crate::sched::edges::task_shared(task),
+                crate::sched::r#unsafe::task_shared(task),
                 5,
                 1,
                 (cpu_id as u64 & 0xF) | (((claim as u64) & 0xF) << 4) | (((pk as u64) & 0xF) << 8),
@@ -1145,7 +1145,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         // SAFETY: diagnostic reads of stable Task fields; the task is
         // linked on this queue (pinned by the GRQ lock the caller holds).
         {
-            let tr = crate::sched::edges::task_shared(task);
+            let tr = crate::sched::r#unsafe::task_shared(task);
             let pid = tr.pid();
             let st = tr.state().bits();
             let tcpu = tr.ti_cpu() as i64;
@@ -1196,7 +1196,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         crate::sched::entities::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched_hooks::sched_hist_ring(
-                crate::sched::edges::task_shared(task),
+                crate::sched::r#unsafe::task_shared(task),
                 4,
                 2,
                 (cpu_id as u64 & 0xF) | (((was as u64) & 0xF) << 4),
@@ -1232,8 +1232,8 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             for &b in M {
                 putchar(b);
             }
-            pdec5(crate::sched::edges::task_shared(task).utime_ticks.load(Ordering::Relaxed)
-                + crate::sched::edges::task_shared(task).stime_ticks.load(Ordering::Relaxed));
+            pdec5(crate::sched::r#unsafe::task_shared(task).utime_ticks.load(Ordering::Relaxed)
+                + crate::sched::r#unsafe::task_shared(task).stime_ticks.load(Ordering::Relaxed));
             const M2: &[u8] = b" jif=";
             for &b in M2 {
                 putchar(b);
@@ -1349,7 +1349,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         if !task.is_null() {
             // SAFETY: diagnostic read of a Task the caller holds under the
             // GRQ (linked on this queue, or being placed by enqueue).
-            let t = crate::sched::edges::task_shared(task);
+            let t = crate::sched::r#unsafe::task_shared(task);
             ps(b" tid=");
             pd(t.pid() as u64);
             let comm = t.comm();
@@ -1380,7 +1380,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         // kind:4 | why:8 | jiffies:30 | aux:22).
         if !task.is_null() {
             // SAFETY: as above.
-            let t = crate::sched::edges::task_shared(task);
+            let t = crate::sched::r#unsafe::task_shared(task);
             let seq = t.pick_ring_seq.load(Ordering::Relaxed);
             ps(b" ring=");
             for k in 1..=3u64 {

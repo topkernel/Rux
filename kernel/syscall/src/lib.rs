@@ -2,7 +2,7 @@
 //! files, compiled here under a CRATE-LEVEL `#![forbid(unsafe_code)]`
 //! — the compiler-enforced service boundary of the crate plan. The
 //! framework lib (the `rux` crate) keeps the audited edges zone
-//! (syscall/edges.rs) and the dispatch seam; this crate owns the
+//! (syscall/unsafe.rs) and the dispatch seam; this crate owns the
 //! per-call implementations and registers them into the framework's
 //! dispatch tables at boot (register_all, called by the BIN's
 //! rust_main before the framework impl).
@@ -147,7 +147,7 @@ pub mod errno {
 // at the crate root, where the service files' `super::` paths and the
 // sibling crates find it.
 pub use rux::syscall::dispatch::{SyscallArgs, syscall_handler};
-pub use rux::syscall::edges;
+pub use rux::syscall::r#unsafe;
 pub use rux::syscall::seccomp;
 pub use rux::syscall::support;
 pub use rux::syscall::dispatch;
@@ -159,7 +159,7 @@ pub mod syscall_dispatch_shim {
     pub use rux::syscall::dispatch;
 }
 pub mod syscall_seam {
-    pub use rux::syscall::edges;
+    pub use rux::syscall::r#unsafe;
     pub use rux::syscall::seccomp;
     pub use rux::syscall::support;
     pub use rux::syscall::dispatch;

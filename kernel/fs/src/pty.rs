@@ -205,7 +205,7 @@ fn pty_output(ctx: usize, bytes: &[u8]) {
     // ctx is the Arc::as_ptr of the owning PtyPair, set once at alloc
     // time; the pair outlives every File referencing it (the
     // machine-lifetime adoption edge).
-    let pair = rux::fs::unsafe_edges::static_ref_unchecked::<PtyPair>(ctx as *mut PtyPair);
+    let pair = rux::fs::r#unsafe::static_ref_unchecked::<PtyPair>(ctx as *mut PtyPair);
     let _ = pair.master_rx_write_exact(bytes);
 }
 
@@ -360,7 +360,7 @@ fn pair_of<'a>(file: &'a File) -> Option<&'a PtyPair> {
     // private_data is either null or an Arc::into_raw(PtyPair) installed
     // by ptmx_open/slave_open; the Arc ref held by the File keeps it
     // alive (INV-FS-FILEPRIV-1, the framework edge).
-    rux::fs::unsafe_edges::file_privdata_arc_ref::<PtyPair>(file)
+    rux::fs::r#unsafe::file_privdata_arc_ref::<PtyPair>(file)
 }
 
 /// Clone the File's PtyPair Arc without consuming the slot's reference
@@ -370,7 +370,7 @@ fn pair_arc(file: &File) -> Option<Arc<PtyPair>> {
     if ptr.is_null() {
         return None;
     }
-    rux::fs::unsafe_edges::file_privdata_arc_clone::<PtyPair>(file)
+    rux::fs::r#unsafe::file_privdata_arc_clone::<PtyPair>(file)
 }
 
 /// Take the File's PtyPair Arc out of the slot (close paths — the last
@@ -381,7 +381,7 @@ fn take_pair_arc(file: &File) -> Option<()> {
         return None;
     }
     // Consuming the slot's sole Arc reference (the take edge drops it).
-    drop(rux::fs::unsafe_edges::file_privdata_take_arc::<PtyPair>(file));
+    drop(rux::fs::r#unsafe::file_privdata_take_arc::<PtyPair>(file));
     Some(())
 }
 
@@ -502,7 +502,7 @@ fn ptmx_poll(file: &File, events: u16) -> u16 {
 fn ptmx_close(file: &File) -> i32 {
     // Reclaim the Arc installed by ptmx_open (INV-FS-FILEPRIV-1),
     // dropping one ref.
-    if let Some(pair) = rux::fs::unsafe_edges::file_privdata_arc_take::<PtyPair>(file) {
+    if let Some(pair) = rux::fs::r#unsafe::file_privdata_arc_take::<PtyPair>(file) {
 
         if pair.master_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last master description closed.
@@ -666,7 +666,7 @@ fn pty_slave_poll(file: &File, events: u16) -> u16 {
 fn pty_slave_close(file: &File) -> i32 {
     // Reclaim the Arc installed by slave_open (INV-FS-FILEPRIV-1),
     // dropping one ref.
-    if let Some(pair) = rux::fs::unsafe_edges::file_privdata_arc_take::<PtyPair>(file) {
+    if let Some(pair) = rux::fs::r#unsafe::file_privdata_arc_take::<PtyPair>(file) {
 
         if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last slave description closed.
@@ -957,7 +957,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     // The framework edge reads the cell BEFORE clearing
                     // (INV-FS-FILEPRIV-1 close-path take — read-then-clear
                     // order preserved by construction inside the edge).
-                    drop(rux::fs::unsafe_edges::file_privdata_arc_take::<PtyPair>(&file));
+                    drop(rux::fs::r#unsafe::file_privdata_arc_take::<PtyPair>(&file));
                     if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
                         pair.slave_closed.store(true, Ordering::Release);
                     }

@@ -242,7 +242,7 @@ pub fn kill_other_threads(current: &Task) {
                 if XG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
                     // SAFETY: diagnostic volatile read of a linked ring
                     // member's field (bounded, read-only).
-                    let q = crate::unsafe_edges::read_volatile_u64(
+                    let q = crate::r#unsafe::read_volatile_u64(
                         core::ptr::addr_of!(m.ti_on_cpu) as *const u64,
                     );
                     let (ph, ph_ago) =
@@ -516,7 +516,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
     // dead-list arm). The claim owns the free — this body is its burn
     // (or its deferral, handed back).
     let member = claim.as_ptr();
-    let m = crate::unsafe_edges::borrow_task_mut(member);
+    let m = crate::r#unsafe::borrow_task_mut(member);
     // The member's final context switch-out may still be in flight —
     // on_cpu is cleared exactly when __switch_to has saved its context
     // (see release_task R9 for the full rationale).
@@ -654,7 +654,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
     m.free_kernel_stack();
 
     // Heap PtRegs from the legacy fork path (unused by the live path).
-    crate::unsafe_edges::free_fork_pt_regs(m);
+    crate::r#unsafe::free_fork_pt_regs(m);
 
     // Drop remaining Arc references (mm/fdtable were dropped at exit).
     m.set_address_space(None);
@@ -697,7 +697,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
 pub fn sweep_dead_threads(leader: *mut Task) {
     // Leader is a valid task (INV-PROC-BORROW-1: the caller's ring/tree
     // discipline keeps the slot alive through this sweep).
-    let leader_ref = crate::unsafe_edges::borrow_task(leader);
+    let leader_ref = crate::r#unsafe::borrow_task(leader);
     let pending: alloc::vec::Vec<*mut Task> = {
         let mut dl = leader_ref.dead_threads.lock();
         let old = core::mem::replace(&mut *dl, alloc::vec::Vec::new());
@@ -710,7 +710,7 @@ pub fn sweep_dead_threads(leader: *mut Task) {
             // R11: terminal_switch_done is REQUIRED — the terminal loop's
             // pre-schedule ownership release makes {DEAD, !on_cpu} true
             // while the member still runs its own schedule chain.
-            let m_ref = crate::unsafe_edges::borrow_task(m);
+            let m_ref = crate::r#unsafe::borrow_task(m);
             let dead_and_off_cpu = m_ref.state().is_dead()
                 && !m_ref.on_cpu()
                 && m_ref
@@ -834,7 +834,7 @@ const RELEASE_DRAIN_JIFFIES: u64 = 300;
 // references.
 pub fn release_task(task: *mut Task) {
     // SAFETY: zombie per the contract above; the reaper owns the release.
-    let t = crate::unsafe_edges::borrow_task_mut(task);
+    let t = crate::r#unsafe::borrow_task_mut(task);
     // A reaped leader first drains its dead-members list — every exited
     // group member is fully released before the leader's own storage
     // goes away (their group_leader pointers name `task`).
@@ -883,7 +883,7 @@ pub fn release_task(task: *mut Task) {
                     // R11: terminal_switch_done required for the same
                     // reason as the sweep's predicate.
                     {
-                        let m_ref = crate::unsafe_edges::borrow_task(*m);
+                        let m_ref = crate::r#unsafe::borrow_task(*m);
                         if m_ref.state().is_dead()
                             && !m_ref.on_cpu()
                             && m_ref
@@ -953,7 +953,7 @@ pub fn release_task(task: *mut Task) {
                     // Read-only diagnostics of parked member tasks.
                     if let Some(dl) = t.dead_threads.try_lock() {
                         for m in dl.iter().take(6) {
-                            let m_ref = crate::unsafe_edges::borrow_task(*m);
+                            let m_ref = crate::r#unsafe::borrow_task(*m);
                             line.push_str(&alloc::format!(
                                 " [{}:{} st={:#x} on_cpu={}]",
                                 m_ref.pid(),
@@ -1012,7 +1012,7 @@ pub fn release_task(task: *mut Task) {
         if Task::is_plausible_task_ptr(parent) {
             // Screened plausible above; remove_child takes the tree
             // lock itself.
-            crate::unsafe_edges::borrow_task(parent as *mut Task)
+            crate::r#unsafe::borrow_task(parent as *mut Task)
                 .remove_child(task);
         }
     }
@@ -1051,7 +1051,7 @@ pub fn release_task(task: *mut Task) {
                     // full child_exit siginfo, child's exit_signal).
                     // `child` is pinned (collect_children_pinned) and
                     // still linked.
-                    let c = crate::unsafe_edges::borrow_task(child);
+                    let c = crate::r#unsafe::borrow_task(child);
                     if c.state()
                         == crate::task::TaskState::new(
                             crate::task::TaskState::ZOMBIE,
@@ -1095,7 +1095,7 @@ pub fn release_task(task: *mut Task) {
     // single-threaded shape), so 1000 reaps = 3000 s and P4 could
     // never finish. Over cap (wedged drainer) the old bounded
     // synchronous path stands as the fallback.
-    if !crate::sched::reapdrain::defer_reap_storage(task, t.parent_ptr().map(|p: *const Task| crate::unsafe_edges::borrow_task(p as *mut Task).pid()).unwrap_or(0)) {
+    if !crate::sched::reapdrain::defer_reap_storage(task, t.parent_ptr().map(|p: *const Task| crate::r#unsafe::borrow_task(p as *mut Task).pid()).unwrap_or(0)) {
         // Over-cap fallback: the obligation the drainer could not take
         // is minted here and burned synchronously (the cold path's
         // exactly-once, typed the same way).
@@ -1134,7 +1134,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
     let task = claim.as_ptr();
     // SAFETY: unreachable through the pid hash / process tree (the
     // release contract); this call owns the storage.
-    let t = crate::unsafe_edges::borrow_task_mut(task);
+    let t = crate::r#unsafe::borrow_task_mut(task);
     // Wait for any RCU readers that may still be traversing this task's
     // pid_hash_links node to finish before we free the task memory.
     // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
@@ -1254,7 +1254,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
             if let Some(reaper) = crate::sched::current() {
                 let rp = reaper as *mut Task as *mut Task;
                 if rp != task {
-                    crate::unsafe_edges::borrow_task_mut(rp)
+                    crate::r#unsafe::borrow_task_mut(rp)
                         .dead_threads
                         .lock()
                         .push(claim.into_parked());
@@ -1271,7 +1271,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
     // Free heap-allocated PtRegs from fork.
     // copy_thread() allocates PtRegs on the heap for the child's first
     // context switch; clear_fork_child() keeps the pointer so we can free it here.
-    crate::unsafe_edges::free_fork_pt_regs(t);
+    crate::r#unsafe::free_fork_pt_regs(t);
 
     // Clear Arc references (this will decrement reference counts)
     t.set_address_space(None);
@@ -1345,7 +1345,7 @@ pub fn reparent_children_to_init(dying: &Task) {
             // class the retired treehunt probe drew as TREE-PARENT-DEAD
             // (with test/subreap_churn.c), and the ancestor sc304's
             // subreaper walk faulted into.
-            let m_ref = crate::unsafe_edges::borrow_task(member);
+            let m_ref = crate::r#unsafe::borrow_task(member);
             let st = m_ref.state();
             let member_exiting = m_ref.ti_flags()
                 & crate::task::task_flags::TaskFlags::PF_EXITING.bits()
@@ -1385,7 +1385,7 @@ pub fn reparent_children_to_init(dying: &Task) {
         } else {
             leader
         };
-        let mut p = crate::unsafe_edges::borrow_task(chain_root).parent_ptr();
+        let mut p = crate::r#unsafe::borrow_task(chain_root).parent_ptr();
         let mut hops = 0;
         // The whole walk under the tree lock: every release_task of a
         // chain member has to pass remove_child under this lock first,
@@ -1404,7 +1404,7 @@ pub fn reparent_children_to_init(dying: &Task) {
             if pp == dying_p || pp == init || hops > 64 {
                 break;
             }
-            let is_reaper = crate::unsafe_edges::borrow_task(pp)
+            let is_reaper = crate::r#unsafe::borrow_task(pp)
                 .signal
                 .as_ref()
                 .and_then(|s| {
@@ -1428,7 +1428,7 @@ pub fn reparent_children_to_init(dying: &Task) {
                     Some(s.is_child_subreaper.load(core::sync::atomic::Ordering::Acquire))
                 })
                 .unwrap_or(false);
-            let pp_exiting = crate::unsafe_edges::borrow_task(pp)
+            let pp_exiting = crate::r#unsafe::borrow_task(pp)
                 .ti_flags()
                 & crate::task::task_flags::TaskFlags::PF_EXITING.bits()
                 != 0;
@@ -1436,13 +1436,13 @@ pub fn reparent_children_to_init(dying: &Task) {
                 dest = pp;
                 // Pin the subreaper dest under the same lock hold (same
                 // argument as the member pin above).
-                crate::unsafe_edges::borrow_task(pp)
+                crate::r#unsafe::borrow_task(pp)
                     .task_refcnt
                     .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
                 dest_pin = pp;
                 break;
             }
-            p = crate::unsafe_edges::borrow_task(pp).parent_ptr();
+            p = crate::r#unsafe::borrow_task(pp).parent_ptr();
             hops += 1;
         }
     }
@@ -1479,7 +1479,7 @@ pub fn reparent_children_to_init(dying: &Task) {
         // PR_SET_PDEATHSIG: the old parent just died — deliver the signal
         // the child asked for (Linux: it fires on reparenting, before the
         // child could observe the orphaning).
-        let pdeath = crate::unsafe_edges::borrow_task(child).pdeath_signal;
+        let pdeath = crate::r#unsafe::borrow_task(child).pdeath_signal;
         if pdeath != 0 {
             // OH bring-up forensics: the *_host services all die of a
             // kernel-origin SIGHUP; this print names pdeathsig as the
@@ -1489,15 +1489,15 @@ pub fn reparent_children_to_init(dying: &Task) {
             if PDEATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
                 crate::pr_info!(
                     "pdeath: pid {} tgid {} gets sig {} (parent pid {} tgid {} dying)",
-                    crate::unsafe_edges::borrow_task(child).pid(),
-                    crate::unsafe_edges::borrow_task(child).tgid(),
+                    crate::r#unsafe::borrow_task(child).pid(),
+                    crate::r#unsafe::borrow_task(child).tgid(),
                     pdeath,
                     dying.pid(),
                     dying.tgid()
                 );
             }
             let _ = crate::signal::send_signal(
-                crate::unsafe_edges::borrow_task(child).pid(),
+                crate::r#unsafe::borrow_task(child).pid(),
                 pdeath as i32,
             );
         }
@@ -1505,9 +1505,9 @@ pub fn reparent_children_to_init(dying: &Task) {
         // If the orphan is already a zombie, the new parent must be
         // notified so it reaps it — otherwise it would sit unreapable
         // forever.
-        let child_ref = crate::unsafe_edges::borrow_task(child);
+        let child_ref = crate::r#unsafe::borrow_task(child);
         if child_ref.state() == TaskState::new(TaskState::ZOMBIE) {
-            let dest_pid = crate::unsafe_edges::borrow_task(dest).pid();
+            let dest_pid = crate::r#unsafe::borrow_task(dest).pid();
             // Full do_notify_parent siginfo: the new parent's SA_SIGINFO
             // handlers decode the orphan zombie's outcome from
             // si_code/si_status.

@@ -119,7 +119,7 @@ fn swap_page_slice_mut(phys_addr: usize) -> &'static mut [u8] {
     // page-aligned linear-mapping address of a live page; the
     // PAGE_SIZE length matches the buddy allocation exactly
     // (INV-MM-7 page-slice arm).
-    rux::mm::edges::page_slice_mut(virt_addr)
+    rux::mm::r#unsafe::page_slice_mut(virt_addr)
 }
 
 /// Shared-slice variant of [`swap_page_slice_mut`] (swap-out reads).
@@ -129,7 +129,7 @@ fn swap_page_slice(phys_addr: usize) -> &'static [u8] {
     ).0 as usize;
     // as swap_page_slice_mut; the page is exclusively owned
     // (refcount == 1) during swap-out (INV-MM-7 page-slice arm).
-    rux::mm::edges::page_slice(virt_addr)
+    rux::mm::r#unsafe::page_slice(virt_addr)
 }
 
 impl SwapDevice {
@@ -521,7 +521,7 @@ fn get_swap_disk(swap_type: u32) -> Result<&'static crate::drivers::blkdev::GenD
     }
     // the stored bits are a registered &'static GenDisk
     // (INV-BLKDEV-1) put there by swap_activate (INV-MM-2 arm).
-    Ok(crate::syscall::edges::boxed_ref(
+    Ok(crate::syscall::r#unsafe::boxed_ref(
         dev.disk.load(Ordering::Acquire) as *const crate::drivers::blkdev::GenDisk,
     ))
 }

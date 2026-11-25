@@ -254,7 +254,7 @@ static NODE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Early boot only, before other CPUs are online (INV-MM-12 init arm
 /// via the edge).
 pub fn init_node_data() {
-    super::edges::node_data_init();
+    super::r#unsafe::node_data_init();
     NODE_COUNT.store(1, Ordering::Release);
 }
 

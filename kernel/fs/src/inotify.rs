@@ -360,7 +360,7 @@ pub fn notify_file(file: &File, mask: u32) {
     }
     // inode and dentry are written once at open time and never mutated
     // afterwards (the FILEINODE/FILEPRIV write-once cells).
-    let inode = match rux::fs::unsafe_edges::file_inode_arc(file) {
+    let inode = match rux::fs::r#unsafe::file_inode_arc(file) {
         Some(i) => i,
         None => return,
     };
@@ -449,7 +449,7 @@ fn instance_of(file: &File) -> Option<Arc<InotifyInstance>> {    let ops = file.
     }
     // The instance Arc stays in the slot; the clone edge recovers an
     // independent reference (INV-FS-FILEPRIV-1).
-    rux::fs::unsafe_edges::file_privdata_arc_clone::<InotifyInstance>(file)
+    rux::fs::r#unsafe::file_privdata_arc_clone::<InotifyInstance>(file)
 }
 
 /// inotify_add_watch: register (or update) a watch for `path`.
@@ -704,7 +704,7 @@ fn inotify_poll(file: &File, _events: u16) -> u16 {
 fn inotify_close(file: &File) -> i32 {
     // The take edge hands us the Arc exactly once (close runs once,
     // at last reference).
-    if let Some(instance) = rux::fs::unsafe_edges::file_privdata_take_arc::<InotifyInstance>(file) {
+    if let Some(instance) = rux::fs::r#unsafe::file_privdata_take_arc::<InotifyInstance>(file) {
         // Watches die with the fd: drop every registry entry of this
         // instance (retain matches on Arc identity — no inner lock
         // needed, so no registry -> inner nesting here).

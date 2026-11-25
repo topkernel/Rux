@@ -10,7 +10,7 @@
 use super::sched_hooks::{CLASS_DL_BIT, CLASS_RT_BIT, CLASS_CFS_BIT};
 use core::sync::atomic::{AtomicU64, AtomicBool, AtomicU32, AtomicI64, AtomicUsize, Ordering};
 use alloc::collections::BTreeMap;
-use super::edges::{VruntimeKey, RbNode, RbTimeline, node_key, node_of_task, task_of_node};
+use super::r#unsafe::{VruntimeKey, RbNode, RbTimeline, node_key, node_of_task, task_of_node};
 use crate::list::ListHead;
 use crate::process::task::{Task, SchedPolicy};
 use crate::config::{MAX_CPUS, MAX_TASKS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
@@ -237,16 +237,16 @@ impl RtRunQueue {
                 let head = &self.queue[word_idx * 64 + bit] as *const _ as *mut ListHead;
                 // SAFETY: head anchors linked tasks; bounded walk (8) —
                 // a corrupted ring cannot loop forever.
-                let mut pos = crate::sched::edges::list_next(head);
+                let mut pos = crate::sched::r#unsafe::list_next(head);
                 let mut n = 0;
                 while pos != head && n < 8 {
                     n += 1;
                     // SAFETY: pos is an embedded rt_run_list in a linked Task.
-                    let task = crate::sched::edges::task_of_rt_list(pos);
-                    if crate::sched::edges::task_shared(task).cpus_allowed() & mask != 0 {
+                    let task = crate::sched::r#unsafe::task_of_rt_list(pos);
+                    if crate::sched::r#unsafe::task_shared(task).cpus_allowed() & mask != 0 {
                         return true;
                     }
-                    pos = crate::sched::edges::list_next(pos);
+                    pos = crate::sched::r#unsafe::list_next(pos);
                 }
             }
         }
@@ -270,14 +270,14 @@ impl RtRunQueue {
         // SAFETY: head anchors linked tasks; walking next pointers under
         // the GRQ lock is stable. Bounded at 8 entries to be safe against
         // a corrupted ring.
-        let mut pos = crate::sched::edges::list_next(head);
+        let mut pos = crate::sched::r#unsafe::list_next(head);
         let mut n = 0;
         while pos != head && n < 8 {
             n += 1;
             // SAFETY: pos is an embedded rt_run_list in a linked Task.
-            let task = crate::sched::edges::task_of_rt_list(pos);
+            let task = crate::sched::r#unsafe::task_of_rt_list(pos);
             f(task);
-            pos = crate::sched::edges::list_next(pos);
+            pos = crate::sched::r#unsafe::list_next(pos);
         }
     }
 
@@ -352,7 +352,7 @@ impl RtRunQueue {
         // task is not yet in the RT queue and we are adding it under the caller's lock.
         {
             // INV-SCE-1: GRQ-held task.
-            let t = crate::sched::edges::task_mut(task);
+            let t = crate::sched::r#unsafe::task_mut(task);
             let raw = t.rt_priority() as usize;
             if raw >= MAX_RT_PRIO {
                 return false;
@@ -372,10 +372,10 @@ impl RtRunQueue {
             // Add to priority list
             if head {
                 // Add to front of list (for preempted tasks)
-                crate::sched::edges::rt_list_add(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
+                crate::sched::r#unsafe::rt_list_add(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
             } else {
                 // Add to tail (for normal enqueue)
-                crate::sched::edges::rt_list_add_tail(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
+                crate::sched::r#unsafe::rt_list_add_tail(t as *mut Task, &mut self.queue[prio] as *mut ListHead);
             }
 
             // Set bit in bitmap
@@ -419,7 +419,7 @@ impl RtRunQueue {
         // null check above; dequeue removes it from the list.
         {
             // INV-SCE-1: GRQ-held task.
-            let t = crate::sched::edges::task_mut(task);
+            let t = crate::sched::r#unsafe::task_mut(task);
             // P08: dequeue of a task that is not linked (e.g. the currently
             // running task, already dequeued at pick time) must be a no-op —
             // it used to decrement rt_nr_running/rr_nr_running regardless,
@@ -435,7 +435,7 @@ impl RtRunQueue {
             let prio = MAX_RT_PRIO - 1 - raw; // same inversion as enqueue
 
             // Remove from list
-            crate::sched::edges::rt_list_del(t as *mut Task);
+            crate::sched::r#unsafe::rt_list_del(t as *mut Task);
 
             // Clear bit in bitmap if list is now empty
             if self.queue[prio].is_empty() {
@@ -477,7 +477,7 @@ impl RtRunQueue {
         if task.is_null() {
             return false;
         }
-        crate::sched::edges::rt_list_linked(task)
+        crate::sched::r#unsafe::rt_list_linked(task)
     }
 
     /// Unlink `task` from its priority list WITHOUT trusting the entity's
@@ -501,11 +501,11 @@ impl RtRunQueue {
         // lock and the Task memory is not yet freed/poisoned.
         {
             // INV-SCE-1: GRQ-held task.
-            let t = crate::sched::edges::task_mut(task);
+            let t = crate::sched::r#unsafe::task_mut(task);
             let raw = t.rt_priority() as usize;
             // Remove from list regardless of the (possibly stale) on_rq
             // flag — the linkage check above is the authority.
-            crate::sched::edges::rt_list_del(t as *mut Task);
+            crate::sched::r#unsafe::rt_list_del(t as *mut Task);
 
             if raw < MAX_RT_PRIO {
                 // Same bitmap inversion as enqueue/dequeue.
@@ -567,7 +567,7 @@ impl RtRunQueue {
         // Task contains rt_run_list at some offset
         // SAFETY: list_ptr is the head of a non-empty priority list; the embedded
         // ListHead is at offset rt_run_list within Task, so sub(offset) yields the Task.
-        let task = crate::sched::edges::task_of_rt_list(list_ptr);
+        let task = crate::sched::r#unsafe::task_of_rt_list(list_ptr);
 
         // Dequeue it
         self.dequeue(task);
@@ -587,7 +587,7 @@ impl RtRunQueue {
 
         // Calculate task pointer from list head pointer
         // SAFETY: same as pick_next — list_ptr is an embedded ListHead in an enqueued Task.
-        let task = crate::sched::edges::task_of_rt_list(list_ptr);
+        let task = crate::sched::r#unsafe::task_of_rt_list(list_ptr);
 
         Some(task)
     }
@@ -1256,7 +1256,7 @@ impl DlRunQueue {
         // futex_wake on another) both passed the is_sleeping check and
         // inserted the Task twice: two CPUs picked it and ran one kernel
         // stack on two harts.
-        if crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.load(Ordering::Acquire) {
+        if crate::process::r#unsafe::borrow_task(task).dl_entity().on_rq.load(Ordering::Acquire) {
             return false;
         }
 
@@ -1265,7 +1265,7 @@ impl DlRunQueue {
         // hold pins it — INV-PROC-BORROW-1's GRQ arm). The Task is not
         // currently on any runqueue (precondition for enqueue).
         {
-            let t = crate::process::unsafe_edges::borrow_task(task);
+            let t = crate::process::r#unsafe::borrow_task(task);
             let dl = t.dl_entity();
 
             // Get deadline
@@ -1314,7 +1314,7 @@ impl DlRunQueue {
         // Caller guarantees `task` points to a valid, live Task
         // (INV-PROC-BORROW-1's GRQ arm).
         {
-            let t = crate::process::unsafe_edges::borrow_task(task);
+            let t = crate::process::r#unsafe::borrow_task(task);
             let dl = t.dl_entity();
 
             // P08-mirror: a task that is not linked must be a no-op. The
@@ -1387,7 +1387,7 @@ impl DlRunQueue {
 
             // Clear on_rq flag: `task` was just removed from self.tasks
             // (a valid pointer to a live Task previously enqueued here).
-            crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
+            crate::process::r#unsafe::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
 
             return Some(task);
         }
@@ -1444,7 +1444,7 @@ impl DlRunQueue {
             let allowed = {
                 // R65-pick (probe-slow): single-qword ownership read —
                 // see the fair-class twin.
-                let t = crate::process::unsafe_edges::borrow_task(task);
+                let t = crate::process::r#unsafe::borrow_task(task);
                 let ownership_ok =
                     task == prev || t.ownership_pickable(cpu_id);
                 t.cpu_allowed(cpu_id) && ownership_ok
@@ -1462,7 +1462,7 @@ impl DlRunQueue {
 
                 // `task` was just removed from self.tasks; a valid
                 // pointer to a live Task previously enqueued.
-                crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
+                crate::process::r#unsafe::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
 
                 result = Some(task);
                 break;
@@ -1546,7 +1546,7 @@ impl CfsRunQueue {
             // SAFETY: curr is null or a valid Task set by set_curr;
             // GRQ-held read of stable fields. Per-CPU idle tasks (pid 0)
             // are not CFS competition (6.6's idle class): skip.
-            let c = crate::sched::edges::task_shared(self.curr);
+            let c = crate::sched::r#unsafe::task_shared(self.curr);
             if c.pid() != 0 {
                 let se = c.sched_entity();
                 let w = se.load.weight as i128;
@@ -1574,7 +1574,7 @@ impl CfsRunQueue {
         }
         // SAFETY: the caller passes the switching-out prev; stable-field
         // reads under the GRQ.
-        let se = crate::sched::edges::task_shared(task).sched_entity();
+        let se = crate::sched::r#unsafe::task_shared(task).sched_entity();
         if se.is_on_rq() {
             return; // linked sleeper: dequeue() owns the capture
         }
@@ -1587,7 +1587,7 @@ impl CfsRunQueue {
         let mut load = self.load_weight.load(Ordering::Acquire) as i128 + w;
         if !self.curr.is_null() && self.curr != task {
             // SAFETY: as avg_vruntime.
-            let c = crate::sched::edges::task_shared(self.curr);
+            let c = crate::sched::r#unsafe::task_shared(self.curr);
             if c.pid() != 0 {
                 let cse = c.sched_entity();
                 let cw = cse.load.weight as i128;
@@ -1631,7 +1631,7 @@ impl CfsRunQueue {
                         }
                     }
                     for &b in b"\nTL-INSERT-OF-LINKED pid=0x" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(task).pid() as u64);
+                    ph(crate::sched::r#unsafe::task_shared(task).pid() as u64);
                     putchar(b'\n');
                 }
             }
@@ -1641,7 +1641,7 @@ impl CfsRunQueue {
         {
             // INV-SCE-1/6: GRQ-held task; timeline ops are safe-signed
             // edges with the poison discipline inside.
-            let se = crate::sched::edges::task_shared(task);
+            let se = crate::sched::r#unsafe::task_shared(task);
             se.sched_entity().set_timeline_key(Some(key));
             if !self.timeline.insert(key, node_of_task(task)) {
                 // Poison discipline (see RbTimeline::insert): the descent
@@ -1666,7 +1666,7 @@ impl CfsRunQueue {
         // insert/remove pair exactly regardless of min_vr movement in
         // between.
         // SAFETY: linked node — valid Task.
-        let w = crate::sched::edges::task_shared(task).sched_entity().load.weight as i128;
+        let w = crate::sched::r#unsafe::task_shared(task).sched_entity().load.weight as i128;
         self.avg_vruntime_sum +=
             (key.vruntime as i128 - self.get_min_vruntime() as i128) * w;
         crate::debug::cctx::add(&crate::debug::cctx::FAIR_TL_NS, t0);
@@ -1711,7 +1711,7 @@ impl CfsRunQueue {
                     }
                 }
                 for &b in b"\nTL-ERASE-REFUSED-ON-LINKED pid=0x" { putchar(b); }
-                ph(crate::sched::edges::task_shared(task).pid() as u64);
+                ph(crate::sched::r#unsafe::task_shared(task).pid() as u64);
                 putchar(b'\n');
             }
             crate::sched::sched::tl_poison_erase_inc();
@@ -1720,9 +1720,9 @@ impl CfsRunQueue {
             return false;
         }
         // SAFETY: unlinked now; valid Task.
-        crate::sched::edges::task_shared(task).sched_entity().set_timeline_key(None);
+        crate::sched::r#unsafe::task_shared(task).sched_entity().set_timeline_key(None);
         if !task.is_null() {
-            let w = crate::sched::edges::task_shared(task).sched_entity().load.weight as i128;
+            let w = crate::sched::r#unsafe::task_shared(task).sched_entity().load.weight as i128;
             self.avg_vruntime_sum -=
                 (key.vruntime as i128 - self.get_min_vruntime() as i128) * w;
         }
@@ -1912,7 +1912,7 @@ impl CfsRunQueue {
         let curr_v = if self.curr.is_null() {
             None
         } else {
-            Some(crate::sched::edges::task_shared(self.curr).sched_entity().get_vruntime())
+            Some(crate::sched::r#unsafe::task_shared(self.curr).sched_entity().get_vruntime())
         };
 
         // Leg-55: O(1) via the leftmost cache (update_min_vruntime runs on
@@ -1970,7 +1970,7 @@ impl CfsRunQueue {
         // we only mutate the task's sched_entity fields which are owned by the scheduler.
         {
             // INV-SCE-1: GRQ-held task (the caller holds the runqueue).
-            let task_ref = crate::sched::edges::task_mut(task);
+            let task_ref = crate::sched::r#unsafe::task_mut(task);
 
             // Get scheduling entity
             let se = task_ref.sched_entity();
@@ -2017,7 +2017,7 @@ impl CfsRunQueue {
                 let mut load = self.load_weight.load(Ordering::Acquire) as i128;
                 if !self.curr.is_null() {
                     // SAFETY: curr is null or valid (set_curr); GRQ-held.
-                    let c = crate::sched::edges::task_shared(self.curr);
+                    let c = crate::sched::r#unsafe::task_shared(self.curr);
                     if c.pid() != 0 {
                         load += c.sched_entity().load.weight as i128;
                     }
@@ -2090,7 +2090,7 @@ impl CfsRunQueue {
         // null check above; we only access sched_entity fields.
         {
             // INV-SCE-1: GRQ-held task (the caller holds the runqueue).
-            let task_ref = crate::sched::edges::task_mut(task);
+            let task_ref = crate::sched::r#unsafe::task_mut(task);
             let se = task_ref.sched_entity();
 
             // grq-10ns: linkage is PHYSICAL — the entity's embedded node
@@ -2165,7 +2165,7 @@ impl CfsRunQueue {
         }
         // SAFETY: task is a valid Task pointer (null-checked above) and
         // the timeline discipline covers its sched_entity access.
-        let se = crate::sched::edges::task_shared(task).sched_entity();
+        let se = crate::sched::r#unsafe::task_shared(task).sched_entity();
         se.timeline_key().is_some()
     }
 
@@ -2215,10 +2215,10 @@ impl CfsRunQueue {
             let t = task_of_node(node);
             if !t.is_null() && filled < rows.len() {
                 // INV-SCE-2 diag: the packed {on_cpu, claim} qword read.
-                let q = crate::sched::edges::task_ownership_qword(t);
+                let q = crate::sched::r#unsafe::task_ownership_qword(t);
                 rows[filled] = (
-                    crate::sched::edges::task_shared(t).pid(),
-                    crate::sched::edges::task_shared(t).sched_entity().get_vruntime(),
+                    crate::sched::r#unsafe::task_shared(t).pid(),
+                    crate::sched::r#unsafe::task_shared(t).sched_entity().get_vruntime(),
                     (q & 0xFF) != 0,
                     (q >> 32) as i32,
                 );
@@ -2258,7 +2258,7 @@ impl CfsRunQueue {
             None
         } else {
             // SAFETY: GRQ-held timeline discipline covers the SE access.
-            crate::sched::edges::task_shared(victim).sched_entity().timeline_key()
+            crate::sched::r#unsafe::task_shared(victim).sched_entity().timeline_key()
         };
         let mut below = 0usize;
         let mut total = 0usize;
@@ -2289,7 +2289,7 @@ impl CfsRunQueue {
                 // pick must digest before reaching real work); a wall of
                 // RUNNING entries points at the pick-refusal class
                 // instead.
-                let st = crate::sched::edges::task_shared(t).state().bits();
+                let st = crate::sched::r#unsafe::task_shared(t).state().bits();
                 if st & 0x3 != 0 {
                     wall_sleeping += 1;
                 } else if st == 0 {
@@ -2300,7 +2300,7 @@ impl CfsRunQueue {
                 if filled < rows.len() {
                     // SAFETY: the map holds valid Task pointers; the GRQ
                     // we hold pins them against dequeue for the read.
-                    let tr = crate::sched::edges::task_shared(t);
+                    let tr = crate::sched::r#unsafe::task_shared(t);
                     let (policy, on_cpu, claim, aff) = (
                         tr.policy() as u8 as u64,
                         tr.on_cpu(),
@@ -2315,7 +2315,7 @@ impl CfsRunQueue {
                     // reason code with the highest count (1 on_cpu-mark,
                     // 2 foreign-claim, 3 affinity, 4 throttle, 5 heal).
                     let (visits, why) = {
-                        let tr = crate::sched::edges::task_shared(t);
+                        let tr = crate::sched::r#unsafe::task_shared(t);
                         let v = tr.pick_visit_n.load(Ordering::Relaxed) as u32;
                         let mut best = 0u64;
                         let mut bi = 0u32;
@@ -2331,7 +2331,7 @@ impl CfsRunQueue {
                     // 63rd: slot ownership + last-pick/wake counts at
                     // probe time (the lying-slot refusal input).
                     let (slot, lp_jif, wakes) = {
-                        let tr = crate::sched::edges::task_shared(t);
+                        let tr = crate::sched::r#unsafe::task_shared(t);
                         let mut sl: i32 = -1;
                         for c in 0..crate::config::MAX_CPUS {
                             if crate::sched::sched::cpu_state(c).current == t {
@@ -2354,7 +2354,7 @@ impl CfsRunQueue {
                     };
                     rows[filled] = StrandWallRow {
                         vruntime: k.vruntime,
-                        pid: crate::sched::edges::task_shared(t).pid(),
+                        pid: crate::sched::r#unsafe::task_shared(t).pid(),
                         policy,
                         on_cpu,
                         claim,
@@ -2437,7 +2437,7 @@ impl CfsRunQueue {
         crate::sched::sched::ww_claim_heal_inc();
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched::sched_hist_ring(
-                crate::sched::edges::task_shared(task),
+                crate::sched::r#unsafe::task_shared(task),
                 4,
                 2,
                 (cpu_id as u64 & 0xF) | (((was as u64) & 0xF) << 4),
@@ -2473,8 +2473,8 @@ impl CfsRunQueue {
             for &b in M {
                 putchar(b);
             }
-            pdec5(crate::sched::edges::task_shared(task).utime_ticks.load(Ordering::Relaxed)
-                + crate::sched::edges::task_shared(task).stime_ticks.load(Ordering::Relaxed));
+            pdec5(crate::sched::r#unsafe::task_shared(task).utime_ticks.load(Ordering::Relaxed)
+                + crate::sched::r#unsafe::task_shared(task).stime_ticks.load(Ordering::Relaxed));
             const M2: &[u8] = b" jif=";
             for &b in M2 {
                 putchar(b);
@@ -2523,7 +2523,7 @@ impl CfsRunQueue {
         // appear in the victim's history).
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched::sched_hist_ring(
-                crate::sched::edges::task_shared(task),
+                crate::sched::r#unsafe::task_shared(task),
                 5,
                 1,
                 (cpu_id as u64 & 0xF) | (((claim as u64) & 0xF) << 4) | (((pk as u64) & 0xF) << 8),
@@ -2535,7 +2535,7 @@ impl CfsRunQueue {
         // SAFETY: diagnostic reads of stable Task fields; the task is
         // linked on this queue (pinned by the GRQ lock the caller holds).
         {
-            let tr = crate::sched::edges::task_shared(task);
+            let tr = crate::sched::r#unsafe::task_shared(task);
             let pid = tr.pid();
             let st = tr.state().bits();
             let tcpu = tr.ti_cpu() as i64;
@@ -2617,7 +2617,7 @@ impl CfsRunQueue {
             // SAFETY: diagnostic write of one atomic field on a task pinned
             // in the timeline by the caller's GRQ lock.
             {
-                let tr = crate::sched::edges::task_shared(task);
+                let tr = crate::sched::r#unsafe::task_shared(task);
                 if !tr.on_cpu()
                     && tr.running_on_cpu.load(Ordering::Acquire) == -1
                 {
@@ -2652,7 +2652,7 @@ impl CfsRunQueue {
             // qword are stamped, so no legitimate in-flight ownership is
             // overwritten (running/picked tasks are not linked).
             {
-                let tr = crate::sched::edges::task_shared(task);
+                let tr = crate::sched::r#unsafe::task_shared(task);
                 if !tr.on_cpu()
                     && tr.running_on_cpu.load(Ordering::Acquire) == -1
                 {
@@ -2730,7 +2730,7 @@ impl CfsRunQueue {
             // during enqueue; the caller's GRQ hold pins the timeline and
             // excludes every concurrent pick publish / switch-out release.
             {
-                let tr = crate::sched::edges::task_shared(task);
+                let tr = crate::sched::r#unsafe::task_shared(task);
                 if tr.on_cpu() {
                     // Legitimate mid-switch-out / fast-repick transient,
                     // or an orphaned on_cpu mark. The idle-loop harvester
@@ -2759,7 +2759,7 @@ impl CfsRunQueue {
                         // GRQ-free asm switch-out release store can land
                         // under this scan, and releasing on a moved qword
                         // would wipe evidence a live owner just published.
-                        let whole = crate::sched::edges::task_ownership_qword(task);
+                        let whole = crate::sched::r#unsafe::task_ownership_qword(task);
                         let w_oncpu = (whole & 0xFF) != 0;
                         let claim = (whole >> 32) as i32;
                         if !w_oncpu {
@@ -2850,7 +2850,7 @@ impl CfsRunQueue {
             // pointer; just removed, no aliasing references exist.
             {
                 // Update status (INV-SCE-1: GRQ-held task).
-                let task_ref = crate::sched::edges::task_mut(task);
+                let task_ref = crate::sched::r#unsafe::task_mut(task);
                 let se = task_ref.sched_entity();
                 se.set_on_rq(false);
 
@@ -2892,7 +2892,7 @@ impl CfsRunQueue {
         // SAFETY: self.curr is set by set_curr() to a valid Task pointer; null check above.
         {
             // INV-SCE-1: the GRQ-held curr slot owner.
-            let task = crate::sched::edges::task_mut(self.curr);
+            let task = crate::sched::r#unsafe::task_mut(self.curr);
             let se = task.sched_entity();
 
             // Update execution time
@@ -3028,7 +3028,7 @@ impl CfsRunQueue {
                 // SAFETY: task is from the queue, a valid pointer; clear()
                 // drains the entire queue.
                 {
-                    let task_ref = crate::sched::edges::task_mut(task);
+                    let task_ref = crate::sched::r#unsafe::task_mut(task);
                     task_ref.sched_entity().set_on_rq(false);
                     task_ref.sched_entity().set_timeline_key(None);
                 }

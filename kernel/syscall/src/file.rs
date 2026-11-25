@@ -3804,7 +3804,7 @@ fn fill_rootfs_statfs(buf: &mut Statfs) {
         // sb_ptr is a valid superblock pointer from get_rootfs() when
         // non-null (INV-SYSC-2 reachability arm).
         let sb: &crate::fs::rootfs::RootFSSuperBlock =
-            crate::edges::boxed_ref(sb_ptr as *mut _);
+            crate::r#unsafe::boxed_ref(sb_ptr as *mut _);
         buf.f_bsize = sb.sb.s_blocksize as u64;
         buf.f_type = sb.sb.s_magic as u64;
     }
@@ -3858,7 +3858,7 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         if let Some(p) = inode.private_data {
             // SAFETY: ext4 inodes carry their filesystem instance in
             // private_data (installed at iget; valid for the inode's life).
-            let fs = crate::edges::boxed_ref(p as *const crate::fs::ext4::Ext4FileSystem);
+            let fs = crate::r#unsafe::boxed_ref(p as *const crate::fs::ext4::Ext4FileSystem);
             fill_ext4_statfs_live(fs, buf);
             // f_fsid: the instance's device (Linux compute_fsid: fs without
             // a uuid derive it from s_dev) — was the hardcoded EXT4 magic,
@@ -5121,7 +5121,7 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                             None => return -(errno::EIO as i64),
                         };
                         let ext4_inode = match inode.sb {
-                            Some(p) => crate::edges::boxed_ref(
+                            Some(p) => crate::r#unsafe::boxed_ref(
                                 p as *const crate::fs::ext4::inode::Ext4Inode,
                             ),
                             None => return -(errno::EIO as i64),
@@ -5141,7 +5141,7 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                         // INV-SYSC-2 reachability arm. ext4_sync_file is a
                         // safe fn; the old wrapper was vestigial.
                         crate::fs::ext4::file::ext4_sync_file(
-                            crate::edges::boxed_ref(fs_ptr),
+                            crate::r#unsafe::boxed_ref(fs_ptr),
                             ext4_inode,
                             datasync,
                         )
@@ -6763,7 +6763,7 @@ pub fn sys_open_tree(args: SyscallArgs) -> i64 {
         // read/write lease on the inode — INV-SYSC-7 pre-publish arm.
         file.set_dentry(dentry.clone());
         if let Some(ino) = dentry.get_inode() {
-            crate::edges::file_inode_set_pre_publish(&file, ino);
+            crate::r#unsafe::file_inode_set_pre_publish(&file, ino);
         }
         return match fapi::install_fd_with(file, flags & fapi::OPEN_TREE_CLOEXEC != 0) {
             Ok(fd) => fd as i64,

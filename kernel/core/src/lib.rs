@@ -129,7 +129,7 @@ pub mod signal;
 // deliberately NOT declared here — the signal service crate is its
 // sole compilation home, under #![forbid(unsafe_code)].
 pub mod signal_hooks;
-pub mod signal_edges;
+pub mod signal_unsafe;
 pub mod security;
 pub mod sync;
 pub mod errno;
@@ -142,9 +142,9 @@ pub mod syscall;
 // The syscall tree is #![forbid(unsafe_code)] (the Layer-1 structural
 // boundary); the subsystem's audited unsafe edges live OUTSIDE the
 // tree — same file, declared here so the forbid does not apply to it.
-// syscall::edges re-exports it so existing paths stay valid.
-#[path = "syscall/edges.rs"]
-pub mod syscall_edges;
+// syscall::unsafe re-exports it so existing paths stay valid.
+#[path = "syscall/unsafe.rs"]
+pub mod syscall_unsafe;
 pub mod interrupt;
 pub mod debug;
 pub mod ipc;

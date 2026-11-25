@@ -113,14 +113,14 @@ pub fn init() {
 pub fn pid_hash_insert(task: *mut Task) {
     // task is a valid pointer to a Task that was just constructed and
     /// not yet visible to other CPUs (called before enqueue_task).
-    let pid = crate::process::unsafe_edges::borrow_task(task).pid();
+    let pid = crate::process::r#unsafe::borrow_task(task).pid();
     let idx = bucket_index(pid);
 
     let flags = lock_bucket(idx);
     // Prepend to chain (LIFO — O(1) insert): bucket lock held, task
     // valid and not yet in any chain (INV-PROC-BORROW-1).
     {
-        let t = crate::process::unsafe_edges::borrow_task_mut(task);
+        let t = crate::process::r#unsafe::borrow_task_mut(task);
         let old_head = BUCKET_HEAD[idx].load(Ordering::Relaxed);
         t.pid_hash_next = old_head;
         BUCKET_HEAD[idx].store(task, Ordering::Release);
@@ -143,26 +143,26 @@ pub fn pid_hash_remove(pid: u32) {
         let mut prev: *mut *mut Task = &BUCKET_HEAD[idx] as *const AtomicPtr<Task> as *mut *mut Task;
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
         while !curr.is_null() {
-            if crate::process::unsafe_edges::borrow_task(curr).pid() == pid {
+            if crate::process::r#unsafe::borrow_task(curr).pid() == pid {
                 // sc82 forensics: record the unlink (thread OR leader) in
                 // the global exit ring — the rwlock-freeze dump replays a
                 // frozen tgid's deaths. No behavior change.
                 crate::sync::sync_diag_hooks::note_task_unlink(
                     pid,
-                    crate::process::unsafe_edges::borrow_task(curr).tgid() as u32,
+                    crate::process::r#unsafe::borrow_task(curr).tgid() as u32,
                 );
                 // Unlink: write *prev = curr->next.  This only touches the
                 // _previous_ node's next pointer (or the bucket head), not
                 // the removed node itself — safe for concurrent RCU readers
                 // who may already be at `curr`.
-                crate::process::unsafe_edges::pid_hash_unlink_store(
+                crate::process::r#unsafe::pid_hash_unlink_store(
                     prev,
-                    crate::process::unsafe_edges::borrow_task(curr).pid_hash_next,
+                    crate::process::r#unsafe::borrow_task(curr).pid_hash_next,
                 );
                 break;
             }
-            prev = &mut crate::process::unsafe_edges::borrow_task_mut(curr).pid_hash_next;
-            curr = crate::process::unsafe_edges::borrow_task(curr).pid_hash_next;
+            prev = &mut crate::process::r#unsafe::borrow_task_mut(curr).pid_hash_next;
+            curr = crate::process::r#unsafe::borrow_task(curr).pid_hash_next;
         }
     }
     unlock_bucket(idx, flags);
@@ -182,7 +182,7 @@ pub fn pid_hash_remove(pid: u32) {
 pub fn pid_hash_lookup_pinned(pid: u32) -> *mut Task {
     let t = pid_hash_lookup(pid);
     if !t.is_null() {
-        crate::process::unsafe_edges::borrow_task(t)
+        crate::process::r#unsafe::borrow_task(t)
             .task_refcnt
             .fetch_add(1, Ordering::AcqRel);
     }
@@ -201,7 +201,7 @@ pub fn pid_hash_lookup(pid: u32) -> *mut Task {
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
         let mut found: *mut Task = ptr::null_mut();
         while !curr.is_null() {
-            let t = crate::process::unsafe_edges::borrow_task(curr);
+            let t = crate::process::r#unsafe::borrow_task(curr);
             if t.pid() == pid {
                 found = curr;
                 break;
@@ -234,7 +234,7 @@ where
         {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                let t = crate::process::unsafe_edges::borrow_task(curr);
+                let t = crate::process::r#unsafe::borrow_task(curr);
                 f(t);
                 curr = t.pid_hash_next;
             }
@@ -265,7 +265,7 @@ where
         {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                let t = crate::process::unsafe_edges::borrow_task(curr);
+                let t = crate::process::r#unsafe::borrow_task(curr);
                 f(t);
                 curr = t.pid_hash_next;
             }
@@ -298,7 +298,7 @@ pub fn pid_hash_collect_all() -> alloc::vec::Vec<u32> {
         {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                let t = crate::process::unsafe_edges::borrow_task(curr);
+                let t = crate::process::r#unsafe::borrow_task(curr);
                 pids.push(t.pid());
                 curr = t.pid_hash_next;
             }

@@ -121,17 +121,17 @@ fn kernel_key(mutex: usize) -> FutexKey {
 /// pair is a transient a later walk re-evaluates (priority is a
 /// scheduling hint, not a memory-safety datum).
 fn task_live_rank(task: *mut Task) -> Option<(Option<u32>, i32)> {
-    let tr = crate::sched::edges::task_shared(task);
+    let tr = crate::sched::r#unsafe::task_shared(task);
     if task.is_null() {
         return None;
     }
-    let policy = crate::sched::edges::task_shared(task).policy();
+    let policy = crate::sched::r#unsafe::task_shared(task).policy();
     let rt = if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-        Some(crate::sched::edges::task_shared(task).rt_priority())
+        Some(crate::sched::r#unsafe::task_shared(task).rt_priority())
     } else {
         None
     };
-    Some((rt, crate::sched::edges::task_shared(task).nice()))
+    Some((rt, crate::sched::r#unsafe::task_shared(task).nice()))
 }
 
 /// One task queued on a PI futex. Allocated by the enqueue site (the
@@ -233,14 +233,14 @@ pub(crate) fn pi_bucket_lock(key: &FutexKey) -> crate::sync::spinlock::SpinlockI
 // ---------------------------------------------------------------------------
 
 fn word_read(uaddr: usize) -> Option<u32> {
-    crate::sync::edges::word_read(uaddr)
+    crate::sync::r#unsafe::word_read(uaddr)
 }
 
 /// Compare-and-swap the user word: writes `new` only when it reads
 /// `expect`. Returns the observed pre-value; callers compare against
 /// `expect` to learn whether the swap happened.
 fn word_cas(uaddr: usize, expect: u32, new: u32) -> Option<u32> {
-    crate::sync::edges::word_cas(uaddr, expect, new)
+    crate::sync::r#unsafe::word_cas(uaddr, expect, new)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,13 +253,13 @@ fn pi_waiter_alloc(task: *mut Task) -> Option<usize> {
     // waiter's class/priority cannot change while it is blocked, so the
     // enqueue-time snapshot is stable for the chain's lifetime.
     let (nice, rt_prio) = {
-        let policy = crate::sched::edges::task_shared(task).policy();
+        let policy = crate::sched::r#unsafe::task_shared(task).policy();
         let rt = if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-            Some(crate::sched::edges::task_shared(task).rt_priority())
+            Some(crate::sched::r#unsafe::task_shared(task).rt_priority())
         } else {
             None
         };
-        (crate::sched::edges::task_shared(task).nice(), rt)
+        (crate::sched::r#unsafe::task_shared(task).nice(), rt)
     };
     for i in 0..PI_WAITER_POOL_SIZE {
         let mut slot = PI_WAITER_POOL[i].lock_irqsave();
@@ -454,23 +454,23 @@ fn pi_state_waiter_count(si: usize) -> usize {
 /// migration handles both the RT->RT priority drop and the FIFO->CFS
 /// conversion; a pure nice change takes the renice path.
 fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
-    let cur_policy = crate::sched::edges::task_shared(task).policy();
+    let cur_policy = crate::sched::r#unsafe::task_shared(task).policy();
     if cur_policy != sv.policy {
         crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
         // change_task_policy does not restore the nice (it only moves
         // class/priority) — a boosted-then-converted owner returns to
         // its CFS weight here.
-        crate::sched::sched::sched_renice_locked(crate::sched::edges::task_mut(task), sv.nice);
+        crate::sched::sched::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), sv.nice);
         return;
     }
     if matches!(sv.policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-        if crate::sched::edges::task_shared(task).rt_priority() != sv.rt_prio {
+        if crate::sched::r#unsafe::task_shared(task).rt_priority() != sv.rt_prio {
             crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
         }
         return;
     }
-    if crate::sched::edges::task_shared(task).nice() != sv.nice {
-        crate::sched::sched::sched_renice_locked(crate::sched::edges::task_mut(task), sv.nice);
+    if crate::sched::r#unsafe::task_shared(task).nice() != sv.nice {
+        crate::sched::sched::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), sv.nice);
     }
 }
 
@@ -535,12 +535,12 @@ fn pi_adjust_owner_boost(si: usize) {
         match desired {
             None => saved.is_none(),
             Some((Some(p), _)) => {
-                matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
-                    && crate::sched::edges::task_shared(task).rt_priority() >= p.min(99)
+                matches!(crate::sched::r#unsafe::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                    && crate::sched::r#unsafe::task_shared(task).rt_priority() >= p.min(99)
             }
             Some((None, n)) => {
-                !matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
-                    && crate::sched::edges::task_shared(task).nice() <= n
+                !matches!(crate::sched::r#unsafe::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                    && crate::sched::r#unsafe::task_shared(task).nice() <= n
             }
         }
     };
@@ -564,21 +564,21 @@ fn pi_adjust_owner_boost(si: usize) {
         let mut st = PI_STATE_POOL[si].lock_irqsave();
         if let Some(ref mut s) = *st {
             s.owner_saved = Some(SavedSched {
-                nice: crate::sched::edges::task_shared(task).nice(),
-                policy: crate::sched::edges::task_shared(task).policy(),
-                rt_prio: crate::sched::edges::task_shared(task).rt_priority(),
+                nice: crate::sched::r#unsafe::task_shared(task).nice(),
+                policy: crate::sched::r#unsafe::task_shared(task).policy(),
+                rt_prio: crate::sched::r#unsafe::task_shared(task).rt_priority(),
             });
         }
     }
     match rt_prio {
         Some(p) => {
             let p = p.min(99);
-            if matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr) {
-                if crate::sched::edges::task_shared(task).rt_priority() < p {
+            if matches!(crate::sched::r#unsafe::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr) {
+                if crate::sched::r#unsafe::task_shared(task).rt_priority() < p {
                     // Same class, higher priority: the class migration
                     // re-links the priority-array bucket (change_task_policy
                     // keeps the policy when it matches).
-                    crate::sched::sched::change_task_policy(task, crate::sched::edges::task_shared(task).policy(), p);
+                    crate::sched::sched::change_task_policy(task, crate::sched::r#unsafe::task_shared(task).policy(), p);
                 }
             } else {
                 // CFS owner under an RT waiter: convert to FIFO at the
@@ -588,10 +588,10 @@ fn pi_adjust_owner_boost(si: usize) {
             }
         }
         None => {
-            if !matches!(crate::sched::edges::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
-                && crate::sched::edges::task_shared(task).nice() > nice
+            if !matches!(crate::sched::r#unsafe::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                && crate::sched::r#unsafe::task_shared(task).nice() > nice
             {
-                crate::sched::sched::sched_renice_locked(crate::sched::edges::task_mut(task), nice);
+                crate::sched::sched::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), nice);
             }
         }
     }
@@ -717,7 +717,7 @@ fn pi_chain_walk(owner: *mut Task) {
             return;
         }
         let next = crate::sched::sched::find_task_by_pid(next_pid);
-        if next.is_null() || crate::sched::edges::task_shared(next).state().is_dead() {
+        if next.is_null() || crate::sched::r#unsafe::task_shared(next).state().is_dead() {
             return;
         }
         cur = next;
@@ -863,7 +863,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
     let Some(current) = my_task() else {
         return -(crate::errno::constants::EFAULT as i64);
     };
-    let mytid = crate::sched::edges::task_shared(current).pid() as u32;
+    let mytid = crate::sched::r#unsafe::task_shared(current).pid() as u32;
 
     loop {
         let Some(uval) = (word_read(uaddr)) else {
@@ -900,7 +900,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             if t.is_null() {
                 false
             } else {
-                !crate::sched::edges::task_shared(t).state().is_dead()
+                !crate::sched::r#unsafe::task_shared(t).state().is_dead()
             }
         };
         if !owner_live {
@@ -982,7 +982,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
 
             // Park. C8 ordering: waiter state + INTERRUPTIBLE published
             // under the bucket lock, then drop, then schedule.
-            crate::sched::edges::task_shared(current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+            crate::sched::r#unsafe::task_shared(current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         }
         drop(_bkt);
         cpu::restore_irq(true);
@@ -1066,7 +1066,7 @@ pub fn futex_trylock_pi(uaddr: usize, shared: bool) -> i64 {
     let Some(current) = my_task() else {
         return -(EFAULT as i64);
     };
-    let mytid = crate::sched::edges::task_shared(current).pid() as u32;
+    let mytid = crate::sched::r#unsafe::task_shared(current).pid() as u32;
     loop {
         let Some(uval) = (word_read(uaddr)) else {
             return -(EFAULT as i64);
@@ -1096,7 +1096,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
     let Some(current) = my_task() else {
         return -(EFAULT as i64);
     };
-    let mytid = crate::sched::edges::task_shared(current).pid() as u32;
+    let mytid = crate::sched::r#unsafe::task_shared(current).pid() as u32;
 
     let Some(uval) = (word_read(uaddr)) else {
         return -(EFAULT as i64);
@@ -1158,7 +1158,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
             None => return -(ESRCH as i64),
         }
     };
-    let wtid = crate::sched::edges::task_shared(wtask).pid() as u32;
+    let wtid = crate::sched::r#unsafe::task_shared(wtask).pid() as u32;
     let newv = wtid | if more { FUTEX_WAITERS } else { 0 };
     match word_cas(uaddr, uval, newv) {
         Some(v) if v == uval => {}
@@ -1268,7 +1268,7 @@ pub fn rt_waiter_enter(
     task: *mut Task,
 ) -> Option<(usize, usize)> {
     {
-        let policy = crate::sched::edges::task_shared(task).policy();
+        let policy = crate::sched::r#unsafe::task_shared(task).policy();
         if !matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
             return None;
         }
@@ -1402,7 +1402,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
 
     // 2. Owner side: died holding PI locks — hand each to its top
     //    waiter with OWNER_DIED latched.
-    let dead_tid = crate::sched::edges::task_shared(task).pid() as u32;
+    let dead_tid = crate::sched::r#unsafe::task_shared(task).pid() as u32;
     for si in 0..PI_STATE_POOL_SIZE {
         let owner_key = {
             let st = PI_STATE_POOL[si].lock_irqsave();
@@ -1430,7 +1430,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
                         }
                     }
                 };
-                let wtid = crate::sched::edges::task_shared(wtask).pid() as u32;
+                let wtid = crate::sched::r#unsafe::task_shared(wtask).pid() as u32;
                 let newv = wtid
                     | FUTEX_OWNER_DIED
                     | if more { FUTEX_WAITERS } else { 0 };

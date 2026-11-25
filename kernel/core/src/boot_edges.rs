@@ -157,7 +157,7 @@ pub fn rawframes_line() {
 
 
 // ===========================================================================
-// The machine-reset repertoire (moved from syscall/edges.rs, crate-flip
+// The machine-reset repertoire (moved from syscall/unsafe.rs, crate-flip
 // step 3 2026-11-21: arch-shaped code — the 8042/triple-fault/SBI reset
 // sequences belong with the boot provenance edges, not the syscall
 // service). Contracts unchanged (INV-SYSC-4); callers are the process

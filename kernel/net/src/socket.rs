@@ -1434,7 +1434,7 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
         // run read *raw = the Socket's first field, not the count).
         // INV-NET-ARCREF-1a: volatile count pair in the same allocation
         // (net_edges forensics probe).
-        let (strong, weak) = crate::net_edges::arc_refcount_probe(raw);
+        let (strong, weak) = crate::r#unsafe::arc_refcount_probe(raw);
         if (1..=(1 << 20)).contains(&strong) {
             // Plausible live Arc — classify as valid, forensics only.
             static MAG_N: core::sync::atomic::AtomicU32 =
@@ -1492,7 +1492,7 @@ fn socket_borrow(file: &File, site: &'static str) -> Option<&'static Socket> {
     // INV-NET-ARCREF-1b: validated in-kernel-heap pointer naming a live
     // Arc<Socket> (strong ref held by private_data for the file's
     // lifetime) — net_edges audited deref.
-    Some(crate::net_edges::audited_deref(ptr as *const Socket))
+    Some(crate::r#unsafe::audited_deref(ptr as *const Socket))
 }
 
 fn socket_read(file: &File, buf: &mut [u8]) -> isize {

@@ -706,7 +706,7 @@ pub fn open_cli_segment(cpu: usize) -> Option<(&'static str, u32, u64)> {
     }
     // Keys are &'static Location references stored at open time by the
     // disable hook on this kernel's own code (INV-FOR-3 edge).
-    let l = crate::debug::forensics_edges::location(key as usize);
+    let l = crate::debug::r#unsafe::location(key as usize);
     let (file, line) = (l.file(), l.line());
     Some((file, line, age))
 }

@@ -94,7 +94,7 @@ impl DlRunQueue {
         // futex_wake on another) both passed the is_sleeping check and
         // inserted the Task twice: two CPUs picked it and ran one kernel
         // stack on two harts.
-        if crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.load(Ordering::Acquire) {
+        if crate::process::r#unsafe::borrow_task(task).dl_entity().on_rq.load(Ordering::Acquire) {
             return false;
         }
 
@@ -103,7 +103,7 @@ impl DlRunQueue {
         // hold pins it — INV-PROC-BORROW-1's GRQ arm). The Task is not
         // currently on any runqueue (precondition for enqueue).
         {
-            let t = crate::process::unsafe_edges::borrow_task(task);
+            let t = crate::process::r#unsafe::borrow_task(task);
             let dl = t.dl_entity();
 
             // Get deadline
@@ -152,7 +152,7 @@ impl DlRunQueue {
         // Caller guarantees `task` points to a valid, live Task
         // (INV-PROC-BORROW-1's GRQ arm).
         {
-            let t = crate::process::unsafe_edges::borrow_task(task);
+            let t = crate::process::r#unsafe::borrow_task(task);
             let dl = t.dl_entity();
 
             // P08-mirror: a task that is not linked must be a no-op. The
@@ -225,7 +225,7 @@ impl DlRunQueue {
 
             // Clear on_rq flag: `task` was just removed from self.tasks
             // (a valid pointer to a live Task previously enqueued here).
-            crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
+            crate::process::r#unsafe::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
 
             return Some(task);
         }
@@ -282,7 +282,7 @@ impl DlRunQueue {
             let allowed = {
                 // R65-pick (probe-slow): single-qword ownership read —
                 // see the fair-class twin.
-                let t = crate::process::unsafe_edges::borrow_task(task);
+                let t = crate::process::r#unsafe::borrow_task(task);
                 let ownership_ok =
                     task == prev || t.ownership_pickable(cpu_id);
                 t.cpu_allowed(cpu_id) && ownership_ok
@@ -300,7 +300,7 @@ impl DlRunQueue {
 
                 // `task` was just removed from self.tasks; a valid
                 // pointer to a live Task previously enqueued.
-                crate::process::unsafe_edges::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
+                crate::process::r#unsafe::borrow_task(task).dl_entity().on_rq.store(false, Ordering::Release);
 
                 result = Some(task);
                 break;
@@ -328,7 +328,7 @@ impl DlRunQueue {
     }
 }
 
-// Send/Sync impls live in side_edges.rs (this file carries zero unsafe).
+// Send/Sync impls live in unsafe.rs (this file carries zero unsafe).
 
 
 

@@ -170,7 +170,7 @@ pub fn check() {
             // The pick slot's task is another CPU's CURRENT pick — a
             // possibly-stale handle read through the forensics edge.
             let current = crate::sched::sched::cpu_state(cpu).current;
-            if current.is_null() || crate::debug::forensics_edges::t_pid(current) == 0 {
+            if current.is_null() || crate::debug::r#unsafe::t_pid(current) == 0 {
                 continue;
             }
         }

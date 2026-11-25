@@ -11,13 +11,13 @@
 //! and rux-obs / syscall (direct — the allowed downward edge).
 //!
 //! What the moved code consumes from the framework (the published
-//! surface, all on kernel/core/src/ipc/binder.rs + binder_edges.rs):
+//! surface, all on kernel/core/src/ipc/binder.rs + unsafe.rs):
 //! - the world machinery: world_lock / world_lock_try / World /
 //!   WorldGuard (the audits snapshot under WORLD exactly as before);
 //! - the object model (BinderProc / BinderThread / BinderTxn / Work /
 //!   BinderAlloc) — READ-only walks plus the documented OWING/
 //!   AMS46/TXN counter publishes;
-//! - the audited walker edges (binder_edges.rs): entry_frame*,
+//! - the audited walker edges (unsafe.rs): entry_frame*,
 //!   probe_*, stack_word, diag_task_comm, diag_task — the trap-regs /
 //!   page-table / raw-task unsafe stayed framework-side.
 //!
@@ -46,12 +46,12 @@ use crate::binder::{
     wake_thread, wake_proc_one,
 };
 #[allow(unused_imports)]
-use crate::binder_edges::{
+use crate::r#unsafe::{
     entry_frame, entry_frame_sp, probe_leaf,
     probe_u32, probe_u64, stack_word, diag_task_comm, diag_task,
 };
 #[cfg(feature = "x86_64")]
-use crate::binder_edges::entry_frame_futex_x86;
+use crate::r#unsafe::entry_frame_futex_x86;
 #[allow(unused_imports)]
 use alloc::sync::Arc;
 #[allow(unused_imports)]
@@ -1571,7 +1571,7 @@ pub fn txn_hang_audit() {
     // flip): the ONE audited raw-task comm read in the diagnostics; the
     // unsafe stayed framework-side, the closure is the typed call.
     let comm_of = |p: *mut crate::process::Task| -> &str {
-        crate::binder_edges::diag_task_comm(p)
+        crate::r#unsafe::diag_task_comm(p)
     };
     let mut w = crate::debug::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
@@ -2238,7 +2238,7 @@ pub fn bwr_park_audit() {
     // (comm_of capsule contract: INV-BINDER-DIAG-COMM; entry-frame read
     // contract: INV-BINDER-ENTRYFRAME.)
     let comm_of = |p: *mut crate::process::Task| -> &str {
-        crate::binder_edges::diag_task_comm(p)
+        crate::r#unsafe::diag_task_comm(p)
     };
     // Entry-frame (syscall nr, a0, a1, a2) of a task, if its kernel
     // stack is pinned and mapped.
@@ -3374,7 +3374,7 @@ pub fn user_task_park_stack_w(
     }
     // SAFETY: non-null live task from the caller's pid lookup (contract
     // named at the call sites); the fn is the park-stack capsule.
-    let tk = crate::binder_edges::diag_task(task);
+    let tk = crate::r#unsafe::diag_task(task);
     let Some(aspace) = tk.address_space() else { return };
     let root = aspace.root_ppn();
     let read_u64_at = |va: u64| -> Option<u64> {

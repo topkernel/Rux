@@ -16,7 +16,7 @@
 //! - rux-obs and syscall reach the moved functions DIRECTLY (the
 //!   allowed downward service edge; no row needed).
 //! The unsafe walkers the moved halves consume stay framework-side in
-//! binder_edges.rs (the audited zone).
+//! unsafe.rs (the audited zone).
 //!
 //! Registration runs from rust_main via ipc::register_all —
 //! OnceSlot-only (no Spinlock, no per-CPU state; the x86_64 unit-test

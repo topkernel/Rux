@@ -416,7 +416,7 @@ impl Zone {
                 // head came from the order-0 free list under the zone
                 // lock; descriptor access is exclusive here
                 // (INV-MM-2 locked-chain arm).
-                let p = super::edges::page_ref_of(head).unwrap();
+                let p = super::r#unsafe::page_ref_of(head).unwrap();
                 let (rc, linked, next) = (
                     p.refcount(),
                     p.test_flag(PageFlag::OnFreelist),
@@ -442,7 +442,7 @@ impl Zone {
                 // corrupt the free lists. One pass — flags, mapcount,
                 // refcount, order, and the stale next_free severed.
                 {
-                    let p = super::edges::page_of(head).unwrap();
+                    let p = super::r#unsafe::page_of(head).unwrap();
                     p.clear_all_flags();
                     p.reset_mapcount();
                     p.set_refcount(1);
@@ -486,7 +486,7 @@ impl Zone {
                     if !page.is_null() {
                         // block came from the shard_order free list
                         // under the zone lock (INV-MM-2).
-                        let p = super::edges::page_ref_of(block).unwrap();
+                        let p = super::r#unsafe::page_ref_of(block).unwrap();
                         let (rc, linked) = (
                             p.refcount(),
                             p.test_flag(PageFlag::OnFreelist),
@@ -660,7 +660,7 @@ impl Zone {
         {
             // Read-only descriptor access under the zone lock
             // (INV-MM-2 locked-chain arm).
-            if let Some(p) = super::edges::page_ref_of(head) {
+            if let Some(p) = super::r#unsafe::page_ref_of(head) {
                 let (rc, linked) = (
                     p.refcount(),
                     p.test_flag(PageFlag::OnFreelist),
@@ -753,7 +753,7 @@ impl Zone {
                 // (INV-MM-2 diag arm: this CPU's own stack).
                 {
                     let s0 = crate::debug::backtrace::current_frame_pointer();
-                    super::edges::walk_fp_chain(s0, &mut frames);
+                    super::r#unsafe::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {
                     if *f == 0 {
@@ -898,7 +898,7 @@ impl Zone {
         // buddy_pfn is within zone range; read-only access — the zone
         // lock is held so the descriptor's linked-state is stable
         // (INV-MM-2 locked-chain arm).
-        match super::edges::page_ref_of(buddy_pfn) {
+        match super::r#unsafe::page_ref_of(buddy_pfn) {
             // A buddy is only suitable for merging if ALL of:
             // 1. refcount == 0 (free)
             // 2. OnFreelist is set (authoritative linked-state bit)
@@ -922,7 +922,7 @@ impl Zone {
         {
             let count = 1usize << order;
             for i in 0..count {
-                if let Some(pg) = super::edges::page_of(pfn + i) {
+                if let Some(pg) = super::r#unsafe::page_of(pfn + i) {
                     pg.set_refcount(0);
                 }
             }
@@ -971,7 +971,7 @@ impl Zone {
             // Removing head, get next from Page descriptor
             let next = {
                 // pfn is from the free list, lock held (INV-MM-2).
-                match super::edges::page_ref_of(pfn) {
+                match super::r#unsafe::page_ref_of(pfn) {
                     Some(page) => page.next_free(),
                     None => FREE_LIST_NULL,
                 }
@@ -986,14 +986,14 @@ impl Zone {
                 }
 
                 // prev_page from the chain, lock held (INV-MM-2).
-                let Some(prev_page) = super::edges::page_of(prev) else {
+                let Some(prev_page) = super::r#unsafe::page_of(prev) else {
                     break;
                 };
 
                 let next = prev_page.next_free();
                 if next == pfn {
                     // Found it, update prev's next pointer
-                    let new_next = match super::edges::page_ref_of(pfn) {
+                    let new_next = match super::r#unsafe::page_ref_of(pfn) {
                         Some(target) => target.next_free(),
                         None => FREE_LIST_NULL,
                     };
@@ -1007,7 +1007,7 @@ impl Zone {
         self.free_area[order].dec_free();
         // R15-6: the removed page leaves the freelist — clear the
         // authoritative linked bit.
-        if let Some(rp) = super::edges::page_of(pfn) {
+        if let Some(rp) = super::r#unsafe::page_of(pfn) {
             rp.clear_flag(PageFlag::OnFreelist);
         }
     }
@@ -1056,7 +1056,7 @@ impl Zone {
                 }
                 // Read-only descriptor access on the diagnostic path
                 // (INV-MM-2 chain arm).
-                let Some(page) = super::edges::page_ref_of(cur) else {
+                let Some(page) = super::r#unsafe::page_ref_of(cur) else {
                     break;
                 };
                 let next = page.next_free();

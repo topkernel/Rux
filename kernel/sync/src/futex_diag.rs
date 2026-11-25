@@ -128,13 +128,13 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
                     Some(ref w) if !w.task.is_null() => {
                         // SAFETY: liveness verified via the pid hash before
                         // the tgid read; the derefs touch only pid fields.
-                        let t = crate::sched::edges::task_shared(w.task).pid();
+                        let t = crate::sched::r#unsafe::task_shared(w.task).pid();
                         let live = core::ptr::eq(
                             // SAFETY: diagnostic pid-hash lookup.
                             crate::sched::find_task_by_pid(t),
                             w.task,
                         );
-                        let hit = live && (crate::sched::edges::task_shared(w.task).tgid() as u32 == tgid);
+                        let hit = live && (crate::sched::r#unsafe::task_shared(w.task).tgid() as u32 == tgid);
                         (Some((hit, t, w.key.uaddr, w.woken)), w.next)
                     }
                     Some(ref w2) => (None, w2.next),
@@ -176,14 +176,14 @@ pub fn ffrt_chain_walk(
     // SAFETY: diagnostic reads of the parked task under the
     // for_each/try contract; the task is pinned by the caller's pid
     // lookup and parked in the futex this walk decodes.
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
-    let usp = crate::sched::edges::pt_regs_at_top(top).rsp as u64;
+    let usp = crate::sched::r#unsafe::pt_regs_at_top(top).rsp as u64;
     #[cfg(feature = "riscv64")]
-    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
+    let usp = crate::sched::r#unsafe::pt_regs_at_top(top).sp as u64;
     #[cfg(feature = "aarch64")]
-    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
+    let usp = crate::sched::r#unsafe::pt_regs_at_top(top).sp as u64;
     if usp == 0 {
         return None;
     }
@@ -192,13 +192,13 @@ pub fn ffrt_chain_walk(
     let mgr = aspace.vma_try_read()?;
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match rux::sync::edges::pt_walk(root, va) {
+        match rux::sync::r#unsafe::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -424,14 +424,14 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
     // SAFETY: diagnostic reads of the parked task under the
     // for_each/try contract; the task is pinned by the caller's pid
     // lookup and parked in the futex this scan decodes.
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
-    let usp = crate::sched::edges::pt_regs_at_top(top).rsp as u64;
+    let usp = crate::sched::r#unsafe::pt_regs_at_top(top).rsp as u64;
     #[cfg(feature = "riscv64")]
-    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
+    let usp = crate::sched::r#unsafe::pt_regs_at_top(top).sp as u64;
     #[cfg(feature = "aarch64")]
-    let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
+    let usp = crate::sched::r#unsafe::pt_regs_at_top(top).sp as u64;
     if usp == 0 {
         return None;
     }
@@ -440,13 +440,13 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
     let mgr = aspace.vma_try_read()?;
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match rux::sync::edges::pt_walk(root, va) {
+        match rux::sync::r#unsafe::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -700,7 +700,7 @@ pub fn fuxw_owner_park_state(tid: u32, uaddr: u64, now: u32) -> (u32, bool, usiz
             Some(ref w) if !w.task.is_null() => {
                 // SAFETY: liveness verified via the pid hash before the
                 // tid read; the derefs touch only pid fields.
-                let t = crate::sched::edges::task_shared(w.task).pid();
+                let t = crate::sched::r#unsafe::task_shared(w.task).pid();
                 if w.key.uaddr as u64 != uaddr {
                     continue;
                 }
@@ -737,7 +737,7 @@ pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<al
     }
     // SAFETY: diagnostic reads of the parked task under the caller's
     // pid-lookup pin; stack-top check only.
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     if tk.kernel_stack_top_checked().is_none() {
         return None;
     }
@@ -746,13 +746,13 @@ pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<al
     let mgr = aspace.vma_try_read()?;
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match rux::sync::edges::pt_walk(root, va) {
+        match rux::sync::r#unsafe::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -803,24 +803,24 @@ pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String
     }
     // SAFETY: diagnostic reads of the parked task under the caller's
     // pid-lookup pin; the derefs touch only the stack-top check.
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     let top = tk.kernel_stack_top_checked()?;
     #[cfg(feature = "x86_64")]
     let (urbp, ursp) = {
         // INV-SCE-9: the entry frame at the stack top.
-        let regs = crate::sched::edges::pt_regs_at_top(top);
+        let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
         (regs.rbp as u64, regs.rsp as u64)
     };
     #[cfg(feature = "riscv64")]
     let (urbp, ursp) = {
         // INV-SCE-9: the entry frame at the stack top.
-        let regs = crate::sched::edges::pt_regs_at_top(top);
+        let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
         (regs.s0 as u64, regs.sp as u64)
     };
     #[cfg(feature = "aarch64")]
     let (urbp, ursp) = {
         // INV-SCE-9: the entry frame at the stack top.
-        let regs = crate::sched::edges::pt_regs_at_top(top);
+        let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
         (regs.regs[29] as u64, regs.sp as u64)
     };
     if ursp == 0 {
@@ -830,13 +830,13 @@ pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String
     let root = aspace.root_ppn();
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the parked task's mm.
-        match rux::sync::edges::pt_walk(root, va) {
+        match rux::sync::r#unsafe::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -928,7 +928,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
             return;
         }
         // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -977,7 +977,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                 while va < chunk_top && hits < 12 {
                 // SAFETY: walker read of the frozen user region.
                 let Some(w) = (|| {
-                    match rux::sync::edges::pt_walk(root, va) {
+                    match rux::sync::r#unsafe::pt_walk(root, va) {
                         Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                             let kv = crate::arch::mm::memory_layout::phys_to_virt(
                                 crate::arch::mm::memory_layout::PhysAddr::new(
@@ -985,7 +985,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                 ),
                             );
                             // SAFETY: linear-mapped RAM word.
-                            Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                            Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
                         }
                         _ => None,
                     }
@@ -1020,7 +1020,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     for k in -128i64..72 {
                         let fa = (va as i64 + 8 * k - 0x40) as u64;
                         let Some(x) = (|| {
-                            match rux::sync::edges::pt_walk(root, fa) {
+                            match rux::sync::r#unsafe::pt_walk(root, fa) {
                                 Some((ppn2, bits2))
                                     if bits2 & 1 != 0 && bits2 & 0x4 != 0 && ppn2 != 0 =>
                                 {
@@ -1030,7 +1030,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                         ),
                                     );
                                     // SAFETY: linear-mapped RAM word.
-                                    Some(rux::sync::edges::read_volatile_u64(kv2.as_usize()))
+                                    Some(rux::sync::r#unsafe::read_volatile_u64(kv2.as_usize()))
                                 }
                                 _ => None,
                             }
@@ -1152,20 +1152,20 @@ pub fn oh67_poll_decode(
     }
     // SAFETY: diagnostic reads of the audited task under the census
     // contract (the task is pinned by the caller's iteration).
-    let tk = crate::sched::edges::task_shared(task);
+    let tk = crate::sched::r#unsafe::task_shared(task);
     let Some(aspace) = tk.address_space() else {
         return alloc::string::String::new();
     };
     let root = aspace.root_ppn();
     let rd = |va: u64| -> Option<u64> {
         // SAFETY: read-only page-table walk of the task's mm.
-        match rux::sync::edges::pt_walk(root, va) {
+        match rux::sync::r#unsafe::pt_walk(root, va) {
             Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                 let kv = crate::arch::mm::memory_layout::phys_to_virt(
                     crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
                 );
                 // SAFETY: linear-mapped RAM word.
-                Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
             }
             _ => None,
         }
@@ -1223,7 +1223,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
     let mut done = false;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read-only walk under the for_each contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if done || tk.tgid() as u32 != tgid {
             return;
         }
@@ -1233,7 +1233,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
         let root = aspace.root_ppn();
         let rd = |va: u64| -> Option<u64> {
             // SAFETY: read-only page-table walk of this task's mm.
-            match rux::sync::edges::pt_walk(root, va) {
+            match rux::sync::r#unsafe::pt_walk(root, va) {
                 Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                     let kv = crate::arch::mm::memory_layout::phys_to_virt(
                         crate::arch::mm::memory_layout::PhysAddr::new(
@@ -1241,7 +1241,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
                         ),
                     );
                     // SAFETY: linear-mapped RAM word.
-                    Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                    Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
                 }
                 _ => None,
             }
@@ -1474,7 +1474,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             return;
         }
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -1505,7 +1505,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                 return;
             }
             // SAFETY: diagnostic read under the for_each_task contract.
-            let tk = crate::sched::edges::task_shared(task);
+            let tk = crate::sched::r#unsafe::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -1557,7 +1557,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             return;
         }
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -1754,7 +1754,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                                 return;
                             }
                             // SAFETY: diagnostic read under for_each.
-                            let tk = crate::sched::edges::task_shared(task);
+                            let tk = crate::sched::r#unsafe::task_shared(task);
                             if tk.tgid() as u32 != tgid {
                                 return;
                             }
@@ -2285,7 +2285,7 @@ pub fn sqwalk_slice() {
     let mut regions: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if root != 0 || tk.tgid() as u32 != tgid {
             return;
         }
@@ -2427,7 +2427,7 @@ pub fn sqwalk_slice() {
                             let hit = rcur;
                             crate::sched::for_each_task_try(|t| {
                                 // SAFETY: diagnostic read, pt_regs only.
-                                let tk = crate::sched::edges::task_shared(t);
+                                let tk = crate::sched::r#unsafe::task_shared(t);
                                 if tk.tgid() as u32 != tgid {
                                     return;
                                 }
@@ -2437,7 +2437,7 @@ pub fn sqwalk_slice() {
                                 };
                                 #[cfg(feature = "x86_64")]
                                 let rsp = {
-                                    let regs = crate::sched::edges::pt_regs_at_top(top);
+                                    let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
                                     regs.rsp
                                 };
                                 #[cfg(not(feature = "x86_64"))]
@@ -2450,7 +2450,7 @@ pub fn sqwalk_slice() {
                                 {
                                     #[cfg(feature = "x86_64")]
                                     let (sys, a0) = {
-                                        let regs = crate::sched::edges::pt_regs_at_top(top);
+                                        let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
                                         (regs.orig_rax, regs.rdi)
                                     };
                                     #[cfg(not(feature = "x86_64"))]
@@ -2978,7 +2978,7 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
     let mut root: u64 = 0;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid || sig != 0 {
             return;
         }
@@ -3013,7 +3013,7 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
     let mut finished = true;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: walker-only reads of the tgid's frozen mm.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -3125,7 +3125,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
     let hi = lock + 0x28;
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -3133,11 +3133,11 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
             return;
         };
         #[cfg(feature = "x86_64")]
-        let usp = crate::sched::edges::pt_regs_at_top(top).rsp as u64;
+        let usp = crate::sched::r#unsafe::pt_regs_at_top(top).rsp as u64;
         #[cfg(feature = "riscv64")]
-        let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
+        let usp = crate::sched::r#unsafe::pt_regs_at_top(top).sp as u64;
         #[cfg(feature = "aarch64")]
-        let usp = crate::sched::edges::pt_regs_at_top(top).sp as u64;
+        let usp = crate::sched::r#unsafe::pt_regs_at_top(top).sp as u64;
         if usp == 0 {
             return;
         }
@@ -3149,7 +3149,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
             // SAFETY: walker read of the parked task's frozen user
             // stack page.
             let Some(w) = (|| {
-                match rux::sync::edges::pt_walk(root, usp + 8 * wi) {
+                match rux::sync::r#unsafe::pt_walk(root, usp + 8 * wi) {
                     Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
                         let kv = crate::arch::mm::memory_layout::phys_to_virt(
                             crate::arch::mm::memory_layout::PhysAddr::new(
@@ -3157,7 +3157,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                             ),
                         );
                         // SAFETY: linear-mapped RAM word.
-                        Some(rux::sync::edges::read_volatile_u64(kv.as_usize()))
+                        Some(rux::sync::r#unsafe::read_volatile_u64(kv.as_usize()))
                     }
                     _ => None,
                 }
@@ -3210,7 +3210,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     for k in 0..96u64 {
                         let fa = usp + 8 * k;
                         let Some(x) = (|| {
-                            match rux::sync::edges::pt_walk(root2, fa) {
+                            match rux::sync::r#unsafe::pt_walk(root2, fa) {
                                 Some((ppn2, bits2))
                                     if bits2 & 1 != 0 && bits2 & 0x4 != 0 && ppn2 != 0 =>
                                 {
@@ -3220,7 +3220,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                         ),
                                     );
                                     // SAFETY: linear-mapped RAM word.
-                                    Some(rux::sync::edges::read_volatile_u64(kv2.as_usize()))
+                                    Some(rux::sync::r#unsafe::read_volatile_u64(kv2.as_usize()))
                                 }
                                 _ => None,
                             }
@@ -3333,12 +3333,12 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
     if uaddr != 0 && tgid == RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed) {
         let t = crate::sched::find_task_by_pid(pid);
         if !t.is_null() {
-            let tk = crate::sched::edges::task_shared(t);
+            let tk = crate::sched::r#unsafe::task_shared(t);
             let comm = tk.comm();
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            let word = rux::sync::edges::read_u32_via_task(t, uaddr);
+            let word = rux::sync::r#unsafe::read_u32_via_task(t, uaddr);
             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "RWFRZ: EXIT-WORD tid {} comm='{}' word={:#x}",
@@ -3412,7 +3412,7 @@ pub fn kill_dump_tgid(tgid: u32) {
     let mut hdr = alloc::string::String::new();
     let _ = write!(hdr, "KILLDUMP: tgid {} threads={}", tgid, threads.len());
     for &t in threads.iter() {
-        let tk = crate::sched::edges::task_shared(t);
+        let tk = crate::sched::r#unsafe::task_shared(t);
         let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
         let _ = write!(hdr, " [{}:{}]", tk.pid(), comm);
     }
@@ -3433,11 +3433,11 @@ pub fn kill_dump_tgid(tgid: u32) {
                 break;
             }
         }
-        let tk = crate::sched::edges::task_shared(t);
+        let tk = crate::sched::r#unsafe::task_shared(t);
         let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
         match parked {
             Some((uaddr, bitset)) => {
-                let word = rux::sync::edges::read_u32_via_task(t, uaddr);
+                let word = rux::sync::r#unsafe::read_u32_via_task(t, uaddr);
                 // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                 crate::pr_warn!(
                     "KILLDUMP: tid {} comm='{}' parked uaddr={:#x} bitset={:#x} word={:#x}",
@@ -3483,7 +3483,7 @@ pub fn kill_dump_tgid(tgid: u32) {
             let top = _top;
             #[cfg(feature = "x86_64")]
             {
-                let regs = crate::sched::edges::pt_regs_at_top(top);
+                let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
                 // SAFETY: diagnostic read of this task's entry frame.
                 let r = regs;
                 // HOTPATH-PRINT: census/forensic emitter (1 Hz heartbeat- or wedge-gated caller; cold path).
@@ -3713,7 +3713,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                                 let holders_cell =
                                     core::cell::RefCell::new(alloc::string::String::new());
                                 crate::sched::for_each_task(|ht| {
-                                    let hk = crate::sched::edges::task_shared(ht);
+                                    let hk = crate::sched::r#unsafe::task_shared(ht);
                                     if hk.pid() == 0 {
                                         return;
                                     }
@@ -3789,7 +3789,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
             // raw buffer for write.
             if nr == 20 {
                 let mut iovs = alloc::vec![0u8; 3 * 16];
-                let n = rux::sync::edges::read_bytes_via_task(t, args[1] as usize, &mut iovs);
+                let n = rux::sync::r#unsafe::read_bytes_via_task(t, args[1] as usize, &mut iovs);
                 for i in 0..3 {
                     if n < (i + 1) * 16 {
                         break;
@@ -3797,7 +3797,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                     let base = u64::from_le_bytes(iovs[i * 16..i * 16 + 8].try_into().unwrap());
                     let len = u64::from_le_bytes(iovs[i * 16 + 8..i * 16 + 16].try_into().unwrap());
                     let mut head = alloc::vec![0u8; 48];
-                    let hn = rux::sync::edges::read_bytes_via_task(t, base as usize, &mut head);
+                    let hn = rux::sync::r#unsafe::read_bytes_via_task(t, base as usize, &mut head);
                     let mut txt = alloc::string::String::new();
                     for &b in &head[..hn] {
                         if b == 0 {
@@ -3823,15 +3823,15 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         }
         2 => {
             // open(2): pathname at args[0]
-            let p = rux::sync::edges::read_cstr_via_task(t, args[0] as usize, 96);
+            let p = rux::sync::r#unsafe::read_cstr_via_task(t, args[0] as usize, 96);
             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!("KILLDUMP: tid {} open path='{}'", tk.pid(), p);
         }
         165 => {
             // mount(2): source/target/fstype at args[0..2]
-            let s = rux::sync::edges::read_cstr_via_task(t, args[0] as usize, 96);
-            let tg = rux::sync::edges::read_cstr_via_task(t, args[1] as usize, 96);
-            let ft = rux::sync::edges::read_cstr_via_task(t, args[2] as usize, 32);
+            let s = rux::sync::r#unsafe::read_cstr_via_task(t, args[0] as usize, 96);
+            let tg = rux::sync::r#unsafe::read_cstr_via_task(t, args[1] as usize, 96);
+            let ft = rux::sync::r#unsafe::read_cstr_via_task(t, args[2] as usize, 32);
             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "KILLDUMP: tid {} mount src='{}' tgt='{}' fstype='{}'",
@@ -3847,17 +3847,17 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
 
 /// 81st: read the parked word's CURRENT value through the parked
 /// task's page tables (shape test for the frozen-rwlock class).
-/// INV-SY-1 in rux::sync::edges owns the read; kept here as the
+/// INV-SY-1 in rux::sync::unsafe owns the read; kept here as the
 /// pub face binder's diagnostic uses.
 pub fn read_park_word_via_task(task: *mut crate::process::Task, word: u64) -> Option<u32> {
     if task.is_null() || word < 0x1000 {
         return None;
     }
-    rux::sync::edges::read_u32_via_task(task as *const Task, word as usize)
+    rux::sync::r#unsafe::read_u32_via_task(task as *const Task, word as usize)
 }
 
 // The cross-task user-memory diagnostic readers (read_bytes_via_task,
-// read_cstr_via_task, read_u32_via_task) moved into rux::sync::edges
+// read_cstr_via_task, read_u32_via_task) moved into rux::sync::unsafe
 // (INV-SY-1).
 
 /// 81st: reader-identity scan for a FROZEN rwlock word. The 68th-era
@@ -3889,7 +3889,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         }
         // SAFETY: pid-hash walk contract; reads confined to pt-regs and
         // the task's own user pages.
-        let tk = crate::sched::edges::task_shared(t);
+        let tk = crate::sched::r#unsafe::task_shared(t);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -3898,7 +3898,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         };
         #[cfg(feature = "x86_64")]
         let (sys, a0, rsp) = {
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             { (regs.orig_rax, regs.rdi, regs.rsp) }
         };
         #[cfg(not(feature = "x86_64"))]
@@ -3931,8 +3931,8 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             if va & 0xfff > 0xff8 {
                 continue; // page-cross split — skip
             }
-            let lo = rux::sync::edges::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
-                | ((rux::sync::edges::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
+            let lo = rux::sync::r#unsafe::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
+                | ((rux::sync::r#unsafe::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
             let near = lo >= word.saturating_sub(0x400)
                 && lo < word + 0x20
                 && (lo & 3) == (word & 3);
@@ -3966,7 +3966,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         );
         if sys == FUTEX_SYSNO && a0 != 0 {
             // what this reader is blocked on, plus its wait word's shape
-            let w0 = rux::sync::edges::read_u32_via_task(t, a0 as usize).unwrap_or(0);
+            let w0 = rux::sync::r#unsafe::read_u32_via_task(t, a0 as usize).unwrap_or(0);
             let _ = writeln!(w, "    parkword={:#x} val={:#x}", a0 as u64, w0);
         }
     });
@@ -4011,7 +4011,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             }
             // SAFETY: pid-hash walk contract; reads confined to pt-regs
             // and the task's own user pages.
-            let tk = crate::sched::edges::task_shared(t);
+            let tk = crate::sched::r#unsafe::task_shared(t);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -4024,7 +4024,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             // E0433 on `crate::arch::x86_64`. Same gating as the twin.
             #[cfg(feature = "x86_64")]
             let (sys, a0, rsp) = {
-                let regs = crate::sched::edges::pt_regs_at_top(top);
+                let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
                 { (regs.orig_rax, regs.rdi, regs.rsp) }
             };
             #[cfg(not(feature = "x86_64"))]
@@ -4047,8 +4047,8 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
                 if va & 0xfff > 0xff8 {
                     continue; // page-cross split — skip
                 }
-                let lo = rux::sync::edges::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
-                    | ((rux::sync::edges::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
+                let lo = rux::sync::r#unsafe::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
+                    | ((rux::sync::r#unsafe::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
                 let cls = musl.map(|a| musl_off_class(a, lo)).unwrap_or(0);
                 if cls == 1 {
                     if nw < 3 {
@@ -4167,7 +4167,7 @@ pub fn musl_anchor(tgid: u32) -> Option<(u64, u64)> {
             return;
         }
         // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
+        let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -4241,7 +4241,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
         }
         // SAFETY: pid-hash walk contract; reads confined to pt-regs and
         // the task's own user pages.
-        let tk = crate::sched::edges::task_shared(t);
+        let tk = crate::sched::r#unsafe::task_shared(t);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -4250,7 +4250,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
         };
         #[cfg(feature = "x86_64")]
         let (sys, a0, rsp) = {
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             { (regs.orig_rax, regs.rdi, regs.rsp) }
         };
         #[cfg(not(feature = "x86_64"))]
@@ -4274,8 +4274,8 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
             if va & 0xfff > 0xff8 {
                 continue; // page-cross split — skip
             }
-            let lo = rux::sync::edges::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
-                | ((rux::sync::edges::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
+            let lo = rux::sync::r#unsafe::read_u32_via_task(t, va as usize).unwrap_or(0) as u64
+                | ((rux::sync::r#unsafe::read_u32_via_task(t, va as usize + 4).unwrap_or(0) as u64) << 32);
             let cls = musl.map(|a| musl_off_class(a, lo)).unwrap_or(0);
             if cls == 1 {
                 if nw < 3 {
@@ -4456,7 +4456,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
                 return;
             }
             // SAFETY: diagnostic read under the for_each_task contract.
-            let tk = crate::sched::edges::task_shared(task);
+            let tk = crate::sched::r#unsafe::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -4483,7 +4483,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
                 return;
             }
             // SAFETY: diagnostic read under the for_each_task contract.
-            let tk = crate::sched::edges::task_shared(task);
+            let tk = crate::sched::r#unsafe::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -4575,7 +4575,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
             }
             // SAFETY: diagnostic read under the for_each_task contract;
             // reads confined to pt-regs, TLS and the task's own pages.
-            let tk = crate::sched::edges::task_shared(task);
+            let tk = crate::sched::r#unsafe::task_shared(task);
             if tk.tgid() as u32 != tgid {
                 return;
             }
@@ -4588,7 +4588,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
             let Some(top) = tk.kernel_stack_top_checked() else {
                 return;
             };
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             let (sys, a0, rip) =
                 { (regs.orig_rax, regs.rdi, regs.rip) };
             let ripoff = match word_off(rip) {
@@ -4988,14 +4988,14 @@ fn waiter_clusters(min: usize) -> alloc::vec::Vec<WordCluster> {
                 match slot.as_ref() {
                     Some(w) if !w.task.is_null() => {
                         let t = w.task;
-                        let pid = crate::sched::edges::task_shared(t).pid();
+                        let pid = crate::sched::r#unsafe::task_shared(t).pid();
                         let live = core::ptr::eq(
                             crate::sched::find_task_by_pid(pid),
                             t,
                         );
                         if live {
                             (
-                                Some((w.key.uaddr, w.key.mm, crate::sched::edges::task_shared(t).tgid() as u32, t)),
+                                Some((w.key.uaddr, w.key.mm, crate::sched::r#unsafe::task_shared(t).tgid() as u32, t)),
                                 w.next,
                             )
                         } else {
@@ -5068,7 +5068,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // ---- adopt / refresh the watched word ----
     let mut adopted = false;
     for c in waiter_clusters(1) {
-        let v = match rux::sync::edges::read_u32_via_task(c.sample, c.uaddr) {
+        let v = match rux::sync::r#unsafe::read_u32_via_task(c.sample, c.uaddr) {
             Some(v) => v,
             None => continue,
         };
@@ -5100,7 +5100,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             // linked in a futex bucket (waiter_clusters ran
                             // under the bucket lock when it sampled).
                             {
-                    let cs = crate::sched::edges::task_shared(c.sample);
+                    let cs = crate::sched::r#unsafe::task_shared(c.sample);
                     (cs.pid(), cs.state().bits())
                 }
                         };
@@ -5133,7 +5133,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             // SAFETY: read-only diagnostics of a task still
                             // linked in a futex bucket (sampled under the
                             // bucket lock by waiter_clusters).
-                            let tk = crate::sched::edges::task_shared(c.sample);
+                            let tk = crate::sched::r#unsafe::task_shared(c.sample);
                             let cb = tk.comm();
                             let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
                             let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
@@ -5146,7 +5146,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             } else {
                                 // SAFETY: read-only comm of the tgid leader
                                 // found by pid-hash lookup.
-                                let lb = crate::sched::edges::task_shared(lead).comm();
+                                let lb = crate::sched::r#unsafe::task_shared(lead).comm();
                                 let ll = lb.iter().position(|&b| b == 0).unwrap_or(16);
                                 core::str::from_utf8(&lb[..ll]).unwrap_or("?")
                             };
@@ -5205,7 +5205,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                         break;
                                     }
                                     let va = base + idx * 4;
-                                    match rux::sync::edges::read_u32_via_task(c.sample, va) {
+                                    match rux::sync::r#unsafe::read_u32_via_task(c.sample, va) {
                                         Some(wv) => {
                                             let _ = write!(
                                                 words,
@@ -5565,7 +5565,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         crate::sched::for_each_task(|t| {
             // SAFETY: callback runs under the pid-hash bucket lock (same
             // contract as sleep_snapshot); reads confined to pid fields.
-            let tk = crate::sched::edges::task_shared(t);
+            let tk = crate::sched::r#unsafe::task_shared(t);
             let idx = {
                 let mut b = seen_cell.borrow_mut();
                 if tk.tgid() as u32 == census_tgid && b.0 < 64 {
@@ -5617,7 +5617,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     let mut word_now: Option<u32> = None;
     for c in waiter_clusters(1) {
         if c.uaddr == uaddr && c.mm == RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed) {
-            word_now = rux::sync::edges::read_u32_via_task(c.sample, c.uaddr);
+            word_now = rux::sync::r#unsafe::read_u32_via_task(c.sample, c.uaddr);
             break;
         }
     }
@@ -5680,10 +5680,10 @@ pub fn freeze_scan(now: u64, hz: u64) {
         for c in waiter_clusters(1) {
             if c.uaddr == uaddr && c.mm == mm {
                 nb = (
-                    rux::sync::edges::read_u32_via_task(c.sample, uaddr + 4).unwrap_or(0),
-                    rux::sync::edges::read_u32_via_task(c.sample, uaddr + 8).unwrap_or(0),
-                    rux::sync::edges::read_u32_via_task(c.sample, uaddr + 12).unwrap_or(0),
-                    rux::sync::edges::read_u32_via_task(c.sample, uaddr + 16).unwrap_or(0),
+                    rux::sync::r#unsafe::read_u32_via_task(c.sample, uaddr + 4).unwrap_or(0),
+                    rux::sync::r#unsafe::read_u32_via_task(c.sample, uaddr + 8).unwrap_or(0),
+                    rux::sync::r#unsafe::read_u32_via_task(c.sample, uaddr + 12).unwrap_or(0),
+                    rux::sync::r#unsafe::read_u32_via_task(c.sample, uaddr + 16).unwrap_or(0),
                 );
                 break;
             }
@@ -5721,7 +5721,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
             if c.tgid == tgid || c.n < 1 {
                 continue;
             }
-            let v = match rux::sync::edges::read_u32_via_task(c.sample, c.uaddr) {
+            let v = match rux::sync::r#unsafe::read_u32_via_task(c.sample, c.uaddr) {
                 Some(v) => v,
                 None => continue,
             };
@@ -5766,7 +5766,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as rwfz_dump_tgid (pid-hash walk, reads
         // confined to the pt-regs entry frame).
-        let tk = crate::sched::edges::task_shared(t);
+        let tk = crate::sched::r#unsafe::task_shared(t);
         if tk.tgid() as u32 != tgid {
             return;
         }
@@ -5777,13 +5777,13 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
         };
         #[cfg(feature = "x86_64")]
         let (sys, a0) = {
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             // SAFETY: diagnostic read of this task's entry frame.
             { (regs.orig_rax, regs.rdi) }
         };
         #[cfg(feature = "riscv64")]
         let (sys, a0) = {
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             // SAFETY: same contract, riscv64.
             { (regs.a7, regs.a0) }
         };
@@ -5813,10 +5813,10 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             // __state_ we see the writer bit. The frozen word itself is
             // 0x80000010-shaped, but this sibling lock's shape was never
             // captured (sc89/sc90 dumps only read the frozen word).
-            let w0 = rux::sync::edges::read_u32_via_task(t, a0 as usize).unwrap_or(0);
-            let wp4 = rux::sync::edges::read_u32_via_task(t, a0 as usize + 4).unwrap_or(0);
-            let wm4 = rux::sync::edges::read_u32_via_task(t, a0 as usize - 4).unwrap_or(0);
-            let wp8 = rux::sync::edges::read_u32_via_task(t, a0 as usize + 8).unwrap_or(0);
+            let w0 = rux::sync::r#unsafe::read_u32_via_task(t, a0 as usize).unwrap_or(0);
+            let wp4 = rux::sync::r#unsafe::read_u32_via_task(t, a0 as usize + 4).unwrap_or(0);
+            let wm4 = rux::sync::r#unsafe::read_u32_via_task(t, a0 as usize - 4).unwrap_or(0);
+            let wp8 = rux::sync::r#unsafe::read_u32_via_task(t, a0 as usize + 8).unwrap_or(0);
             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
             crate::pr_warn!(
                 "RWFRZ: NBR-WORD a0={:#x} word={:#x} +4={:#x} +8={:#x} -4={:#x}",
@@ -5838,9 +5838,9 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
                 // `top` is the guarded value from the closure head
                 // (kernel_stack_top_checked) — never raw here.
                 #[cfg(feature = "x86_64")]
-                let regs = crate::sched::edges::pt_regs_at_top(top);
+                let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
                 #[cfg(feature = "riscv64")]
-                let regs = crate::sched::edges::pt_regs_at_top(top);
+                let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
                 // SAFETY: diagnostic read of this task's entry frame.
                 #[cfg(feature = "x86_64")]
                 {
@@ -5859,10 +5859,10 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             let mut line = alloc::string::String::new();
             let mut n = 0u32;
             for i in 0..256u64 {
-                let Some(v) = (rux::sync::edges::read_u32_via_task(t, (sp + 8 * i) as usize))
+                let Some(v) = (rux::sync::r#unsafe::read_u32_via_task(t, (sp + 8 * i) as usize))
                     .map(|lo| lo as u64)
                     .and_then(|lo| {
-                        (rux::sync::edges::read_u32_via_task(t, (sp + 8 * i + 4) as usize))
+                        (rux::sync::r#unsafe::read_u32_via_task(t, (sp + 8 * i + 4) as usize))
                             .map(|hi| lo | ((hi as u64) << 32))
                     })
                 else {
@@ -5902,7 +5902,7 @@ pub fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
     let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as sleep_snapshot.
-        let tk = crate::sched::edges::task_shared(t);
+        let tk = crate::sched::r#unsafe::task_shared(t);
         if tk.tgid() as u32 != tgid || count_cell.get() >= max_tasks {
             return;
         }
@@ -5914,13 +5914,13 @@ pub fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
         };
         #[cfg(feature = "x86_64")]
         let (rip, sys, a0) = {
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             // SAFETY: diagnostic read of this task's entry frame.
             { (regs.rip, regs.orig_rax, regs.rdi) }
         };
         #[cfg(feature = "riscv64")]
         let (rip, sys, a0) = {
-            let regs = crate::sched::edges::pt_regs_at_top(top);
+            let regs = crate::sched::r#unsafe::pt_regs_at_top(top);
             // SAFETY: same contract, riscv64.
             { (regs.epc, regs.a7, regs.a0) }
         };

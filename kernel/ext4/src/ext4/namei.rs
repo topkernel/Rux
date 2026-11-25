@@ -41,7 +41,7 @@ pub(crate) fn set_current_handle(handle: *mut crate::jbd2::Handle) {
     if let Some(task) = crate::sched::current() {
         // The task slot is type-erased (rung-5); the raw-pointer cast
         // between pointer types is safe — only the crate dereferences
-        // it typed (see process::unsafe_edges::journal_handle).
+        // it typed (see process::unsafe::journal_handle).
         task.journal_handle.set(handle as *mut ());
     }
 }
@@ -128,7 +128,7 @@ fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blockn
         // (INV-EXT4-JHANDLE-1).
         if let Some(handle) = get_current_handle() {
             let _ = crate::jbd2::jbd2_journal_dirty_metadata(
-                crate::syscall::edges::boxed_mut(handle),
+                crate::syscall::r#unsafe::boxed_mut(handle),
                 bh,
             );
         }
@@ -418,7 +418,7 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
     // initialized; the EXT4_BIG_LOCK caller context serializes — the
     // interior mutation rides the boxed edge over the & reference).
     if let Some(sb_info) = fs.sb_info.as_ref().map(|b| {
-        crate::syscall::edges::boxed_mut(b.as_ref() as *const super::superblock::Ext4SuperBlockInfo
+        crate::syscall::r#unsafe::boxed_mut(b.as_ref() as *const super::superblock::Ext4SuperBlockInfo
             as *mut super::superblock::Ext4SuperBlockInfo)
     }) {
         if delta < 0 {
@@ -472,7 +472,7 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         // write_block_bitmap note).
         if let Some(handle) = get_current_handle() {
             let _ = crate::jbd2::jbd2_journal_dirty_metadata(
-                crate::syscall::edges::boxed_mut(handle),
+                crate::syscall::r#unsafe::boxed_mut(handle),
                 bh,
             );
         }
@@ -1131,7 +1131,7 @@ fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u64 {
     // task (us; INV-EXT4-JHANDLE-1) and returns exactly the blocks this
     // operation dirtied since the window was armed.
     let pre: alloc::vec::Vec<u64> =
-        crate::syscall::edges::boxed_mut(handle_ptr).take_pre_capture();
+        crate::syscall::r#unsafe::boxed_mut(handle_ptr).take_pre_capture();
     bio::publication_defer(fs.device, &pre, entry_blocknr)
 }
 
@@ -2234,7 +2234,7 @@ impl PostCaptureGuard {
                 // its owning task (us; INV-EXT4-JHANDLE-1).
                 if let Some(h) = get_current_handle() {
                     let (mj, mi) = bio::dev_key_of(fs.device);
-                    crate::syscall::edges::boxed_mut(h).begin_post_capture((mj, mi), id);
+                    crate::syscall::r#unsafe::boxed_mut(h).begin_post_capture((mj, mi), id);
                 }
                 return PostCaptureGuard { armed: true };
             }
@@ -2247,7 +2247,7 @@ impl PostCaptureGuard {
             self.armed = false;
             // Handle still alive (same syscall; INV-EXT4-JHANDLE-1).
             if let Some(h) = get_current_handle() {
-                crate::syscall::edges::boxed_mut(h).end_post_capture();
+                crate::syscall::r#unsafe::boxed_mut(h).end_post_capture();
             }
         }
     }
@@ -2618,7 +2618,7 @@ fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
     if let Some(handle_ptr) = get_current_handle() {
         // Same stack-lifetime contract as above (INV-EXT4-JHANDLE-1).
         let _ = crate::jbd2::jbd2_journal_revoke(
-            crate::syscall::edges::boxed_mut(handle_ptr),
+            crate::syscall::r#unsafe::boxed_mut(handle_ptr),
             block,
             None,
         );

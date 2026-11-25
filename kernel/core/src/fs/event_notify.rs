@@ -11,7 +11,7 @@
 //!
 //! INV-SYSC-1/2 contracts (the list walks + the pin discipline) moved
 //! with the code; the audited list helpers are replicated from
-//! syscall/edges.rs with the same INV-SYSC-1 wording.
+//! syscall/unsafe.rs with the same INV-SYSC-1 wording.
 
 use crate::list::ListHead;
 use crate::sync::spinlock::Spinlock;
@@ -591,7 +591,7 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
     // Serial-cleanliness: opt-in via rux:sfddbg (retired debug=sfddbg).
-    if crate::process::unsafe_edges::task_pid_of(task) == 1
+    if crate::process::r#unsafe::task_pid_of(task) == 1
         && crate::trace::EVENT_SFDDBG.armed()
     {
         static NT_N: core::sync::atomic::AtomicUsize =
@@ -629,7 +629,7 @@ pub fn signalfd_unregister(wq: *const crate::process::wait::WaitQueueHead) {
 }
 
 // Send proofs for the raw-pointer registry types (moved from
-// syscall/edges.rs with the types; same contracts: access only under
+// syscall/unsafe.rs with the types; same contracts: access only under
 // the shard/registry locks).
 unsafe impl Send for EpollWakeShard {}
 unsafe impl Send for SignalfdWakeRegistry {}

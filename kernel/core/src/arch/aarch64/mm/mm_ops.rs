@@ -32,7 +32,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::memory_layout::*;
-use super::unsafe_edges::PtTable;
+use super::r#unsafe::PtTable;
 use super::pagetable::*;
 use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
@@ -1208,7 +1208,7 @@ pub fn handle_cow_fault(
     let new_ppn = new_phys >> PAGE_SHIFT;
 
     // Copy while the old page is still pinned (refcount >= 2).
-    super::unsafe_edges::copy_page(old_ppn << PAGE_SHIFT, new_phys);
+    super::r#unsafe::copy_page(old_ppn << PAGE_SHIFT, new_phys);
 
     // New leaf: old permissions, W restored, no COW/PCACHE (the copy is
     // exclusively owned by this mapping).

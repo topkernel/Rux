@@ -9,12 +9,12 @@
 //! `signal.rs`, ...) end with ZERO `unsafe` keywords — checkable by
 //! grep, ready for a crate-level `forbid(unsafe_code)`. Every
 //! genuinely-unsafe operation they need lives HERE as a named edge with
-//! an INV contract, in the shape of `kernel/core/src/sync/edges.rs` and
-//! `kernel/core/src/process/unsafe_edges.rs` (one audit per edge, not per
+//! an INV contract, in the shape of `kernel/core/src/sync/unsafe.rs` and
+//! `kernel/core/src/process/unsafe.rs` (one audit per edge, not per
 //! call site). User-memory copies do not live here at all: they route
 //! through the already-safe `crate::arch::uaccess_safe` entries, and
 //! task-pointer borrows reuse
-//! [`crate::process::unsafe_edges::borrow_task`].
+//! [`crate::process::unsafe::borrow_task`].
 //!
 //! INV registry:
 //!
@@ -182,7 +182,7 @@ pub fn boxed_drop<T>(p: *mut T) {
 /// this thread and re-taken, or never parked).
 #[inline]
 pub fn task_park_unwind(task: *mut Task) {
-    let t = crate::process::unsafe_edges::borrow_task(task);
+    let t = crate::process::r#unsafe::borrow_task(task);
     t.set_state(crate::process::task::TaskState::new(
         crate::process::task::TaskState::RUNNING,
     ));
@@ -302,7 +302,7 @@ pub fn unmap_user_leaf_locked(mm: &crate::mm::AddressSpace, va: usize) -> bool {
 pub fn copy_page_linear(src_phys: u64, dst_phys: u64) {
     #[cfg(feature = "riscv64")]
     {
-        crate::arch::mm::unsafe_edges::copy_page(src_phys, dst_phys);
+        crate::arch::mm::r#unsafe::copy_page(src_phys, dst_phys);
     }
     #[cfg(not(feature = "riscv64"))]
     {
@@ -358,7 +358,7 @@ pub fn mprotect_rewrite_leaf_sv39(root_ppn: u64, virt: u64, new_flags: u64) {
     let vpn0 = virt_addr.vpn(0) as usize;
 
     // The walk runs under the caller's PTE lock (INV-RE-PT live arm).
-    let root_table = match crate::arch::mm::unsafe_edges::PtTable::from_phys_live(
+    let root_table = match crate::arch::mm::r#unsafe::PtTable::from_phys_live(
         root_ppn << crate::arch::mm::PAGE_SHIFT,
     ) {
         Some(t) => t,
@@ -368,7 +368,7 @@ pub fn mprotect_rewrite_leaf_sv39(root_ppn: u64, virt: u64, new_flags: u64) {
     if !pte2.is_valid() {
         return; // Page not mapped, skip
     }
-    let table1 = match crate::arch::mm::unsafe_edges::PtTable::from_phys_live(
+    let table1 = match crate::arch::mm::r#unsafe::PtTable::from_phys_live(
         pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
     ) {
         Some(t) => t,
@@ -378,7 +378,7 @@ pub fn mprotect_rewrite_leaf_sv39(root_ppn: u64, virt: u64, new_flags: u64) {
     if !pte1.is_valid() {
         return; // Page not mapped, skip
     }
-    let table0 = match crate::arch::mm::unsafe_edges::PtTable::from_phys_live(
+    let table0 = match crate::arch::mm::r#unsafe::PtTable::from_phys_live(
         pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
     ) {
         Some(t) => t,

@@ -216,7 +216,7 @@ impl PinnedUserPages {
         self.for_each_piece(off, src.len(), |dst, l| {
             // The pin keeps the frame alive; the alias is a valid
             // kernel address for l bytes (INV-MM-6 pinned-alias arm).
-            super::edges::copy_kva(dst, &src[s..][..l]);
+            super::r#unsafe::copy_kva(dst, &src[s..][..l]);
             s += l;
             true
         });
@@ -231,7 +231,7 @@ impl PinnedUserPages {
         let mut d = 0usize;
         self.for_each_piece(off, dst.len(), |src, l| {
             // Same alias validity; src is l readable bytes (INV-MM-6).
-            super::edges::copy_kva_from(&mut dst[d..][..l], src);
+            super::r#unsafe::copy_kva_from(&mut dst[d..][..l], src);
             d += l;
             true
         });
@@ -256,7 +256,7 @@ impl PinnedUserPages {
             if let Some(frame) = p.take() {
                 // pfn came from the page-table walk of a mapped page;
                 // each pin took exactly one reference (INV-MM-2).
-                if let Some(page) = super::edges::page_of((frame >> 12) as usize) {
+                if let Some(page) = super::r#unsafe::page_of((frame >> 12) as usize) {
                     page.put_page();
                 }
             }
@@ -312,7 +312,7 @@ pub fn pin_user_pages(va: usize, len: usize, write: bool) -> Option<PinnedUserPa
             // root is the pinned mm's live root; the walker
             // bounds-checks the root and every intermediate entry
             // (INV-SY-1 walk edge).
-            let r = crate::sync::edges::pt_walk(root, page_va as u64);
+            let r = crate::sync::r#unsafe::pt_walk(root, page_va as u64);
             pages.push(match r {
                 // Present but NOT writable = a COW-shared leaf (fork's
                 // write-protected mapping). Pinning it directly would
@@ -326,7 +326,7 @@ pub fn pin_user_pages(va: usize, len: usize, write: bool) -> Option<PinnedUserPa
                     // Descriptor of a machine frame (vmemmap-published);
                     // mapped frame (refcount >= 1) — one reference,
                     // dropped in unpin() (INV-MM-2).
-                    match super::edges::page_of(ppn as usize) {
+                    match super::r#unsafe::page_of(ppn as usize) {
                         Some(page) => {
                             page.get_page();
                             Some(ppn << 12)
@@ -418,11 +418,11 @@ fn pin_one_faulted(
     // root is the pinned mm's live root; the walker bounds
     // checks the root and every intermediate entry (INV-SY-1 walk
     // edge).
-    let (ppn, _bits) = crate::sync::edges::pt_walk(root, page_va as u64)?;
+    let (ppn, _bits) = crate::sync::r#unsafe::pt_walk(root, page_va as u64)?;
     // Descriptor of a machine frame (vmemmap-published); the frame is
     // mapped (refcount >= 1) — the pin takes one reference, dropped in
     // unpin() (INV-MM-2).
-    let page = super::edges::page_of(ppn as usize)?;
+    let page = super::r#unsafe::page_of(ppn as usize)?;
     page.get_page();
     drop(guard);
     Some(ppn << 12)

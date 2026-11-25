@@ -394,7 +394,7 @@ pub fn jbd2_journal_has_revoke_feature(journal: &Arc<Journal>) -> bool {
     if journal.j_superblock.is_null() {
         return false;
     }
-    let sb: &journal_superblock_t = crate::syscall::edges::boxed_ref(journal.j_superblock);
+    let sb: &journal_superblock_t = crate::syscall::r#unsafe::boxed_ref(journal.j_superblock);
     u32::from_be(sb.s_feature_incompat) & JBD2_FEATURE_INCOMPAT_REVOKE != 0
 }
 
@@ -432,8 +432,8 @@ pub fn scan_revoke_records(
     // framework's kernel_slice edge.
     {
         let journal_block_size = journal.j_blocksize as usize;
-        let bh_ref: &BufferHead = crate::syscall::edges::boxed_ref(bh);
-        let data = rux::fs::unsafe_edges::kernel_slice(
+        let bh_ref: &BufferHead = crate::syscall::r#unsafe::boxed_ref(bh);
+        let data = rux::fs::r#unsafe::kernel_slice(
             bh_ref.b_data as *const u8,
             journal_block_size,
         );

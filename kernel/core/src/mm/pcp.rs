@@ -78,7 +78,7 @@ impl PcpPageset {
 /// window (INV-PCP-3), which serializes nested entry on the same CPU.
 #[repr(C, align(64))]
 pub(super) struct PcpRow(pub(super) UnsafeCell<PcpPageset>);
-/// Sync proof + raw-row edges live in mm::edges (INV-MM-5).
+/// Sync proof + raw-row edges live in mm::unsafe (INV-MM-5).
 
 pub(super) static PCP_ROWS: [PcpRow; MAX_CPUS] = {
     #[allow(clippy::declare_interior_mutable_const)]
@@ -107,7 +107,7 @@ fn with_row<R>(f: impl FnOnce(&mut PcpPageset) -> R) -> Option<R> {
         // derived from it is exclusive because only this CPU can touch
         // the row and interrupts are disabled (INV-PCP-3 / INV-MM-5
         // exclusive arm, via the edge).
-        Some(super::edges::pcp_row_exclusive(c, f))
+        Some(super::r#unsafe::pcp_row_exclusive(c, f))
     } else {
         None
     };
@@ -247,7 +247,7 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
     // three states owns the frame, and every state change validates
     // the previous state first (INV-MM-2 via the edge).
     {
-        let page: &mut _ = super::edges::page_of(pfn).unwrap();
+        let page: &mut _ = super::r#unsafe::page_of(pfn).unwrap();
         // Textbook in-use state only; anything else goes to the zone
         // slow path whose tripwires own the diagnosis.
         if page.refcount() != 1
@@ -409,7 +409,7 @@ pub fn cached_pages_total() -> usize {
         // Read-only peek of a single usize — no reference is formed; a
         // moment-stale value is acceptable for reporting (INV-MM-5 peek
         // arm).
-        total += super::edges::pcp_row_count_peek(c);
+        total += super::r#unsafe::pcp_row_count_peek(c);
     }
     total
 }
@@ -420,7 +420,7 @@ pub fn cached_pages_per_cpu() -> [usize; MAX_CPUS] {
     for c in 0..MAX_CPUS {
         // Read-only single-usize peek, see cached_pages_total
         // (INV-MM-5 peek arm).
-        out[c] = super::edges::pcp_row_count_peek(c);
+        out[c] = super::r#unsafe::pcp_row_count_peek(c);
     }
     out
 }
@@ -437,7 +437,7 @@ pub fn forensics_scan_rows(pfn: usize, out: &mut [usize]) -> usize {
         // Read-only peek of the row's list/count — no reference escapes;
         // moment-stale values are fine for a forensic snapshot
         // (INV-MM-5 peek arm).
-        let r = super::edges::pcp_row_ref_peek(c);
+        let r = super::r#unsafe::pcp_row_ref_peek(c);
         let count = r.count.min(PCP_HIGH);
         let mut hit = false;
         for i in 0..count {

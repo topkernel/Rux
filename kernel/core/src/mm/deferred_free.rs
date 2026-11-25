@@ -140,7 +140,7 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
     let deadline = now.saturating_add(DEFER_MS);
     let _g = POOL_LOCK.lock_irqsave();
     // INV-MM-8: the lock is held.
-    let pool = super::edges::defer_pool_mut();
+    let pool = super::r#unsafe::defer_pool_mut();
     let head = POOL_HEAD.load(Ordering::Relaxed);
     let drained = POOL_DRAINED.load(Ordering::Relaxed);
     let used = head.wrapping_sub(drained);
@@ -194,7 +194,7 @@ pub fn drain(now: u64) -> usize {
     {
         let _g = POOL_LOCK.lock_irqsave();
         // INV-MM-8: the lock is held.
-        let pool = super::edges::defer_pool_mut();
+        let pool = super::r#unsafe::defer_pool_mut();
         let mut drained = POOL_DRAINED.load(Ordering::Relaxed);
         let head = POOL_HEAD.load(Ordering::Relaxed);
         while drained < head && batch_n < batch.len() {
@@ -235,7 +235,7 @@ pub fn drain(now: u64) -> usize {
             // claimed "calls dealloc_direct" but the code never did.
             // kfree never re-defers, so the no-re-defer contract holds
             // (INV-MM-8 drain arm).
-            super::edges::defer_dealloc(ptr, layout);
+            super::r#unsafe::defer_dealloc(ptr, layout);
         }
     }
     batch_n

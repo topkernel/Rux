@@ -64,7 +64,7 @@ impl WaitQueueEntry {
         let pid = if task.is_null() {
             0
         } else {
-            crate::process::unsafe_edges::borrow_task(task).pid() as u32
+            crate::process::r#unsafe::borrow_task(task).pid() as u32
         };
         Self {
             task,
@@ -147,7 +147,7 @@ pub struct WaitQueueHead {
     waiters: AtomicUsize,
 }
 
-// Send/Sync impls live in unsafe_edges.rs (wait.rs carries zero unsafe).
+// Send/Sync impls live in unsafe.rs (wait.rs carries zero unsafe).
 
 /// Total stale wait-queue entries evicted by the R127 wake-time screen
 /// (wake-drop hunt diagnostic: a non-zero value on a boot means tasks
@@ -165,7 +165,7 @@ pub static WQ_STALE_EVICTED: AtomicU64 = AtomicU64::new(0);
 /// the clamp keeps a recycled page's count honest either way).
 fn wq_regs_dec(t: *mut Task, n: u32) {
     use core::sync::atomic::Ordering as AO;
-    let t = crate::process::unsafe_edges::borrow_task(t);
+    let t = crate::process::r#unsafe::borrow_task(t);
     let mut cur = t.wq_regs.load(AO::Relaxed);
     loop {
         let next = cur.saturating_sub(n);
@@ -208,7 +208,7 @@ impl WaitQueueHead {
         if !t.is_null() {
             // SAFETY: the entry's task is parking on this queue; the
             // count is a diagnostic mirror of the list we hold.
-            crate::process::unsafe_edges::borrow_task(t)
+            crate::process::r#unsafe::borrow_task(t)
                 .wq_regs
                 .fetch_add(1, Ordering::Relaxed);
         }
@@ -245,7 +245,7 @@ impl WaitQueueHead {
         let pid = if task.is_null() {
             0
         } else {
-            crate::process::unsafe_edges::borrow_task(task).pid() as u32
+            crate::process::r#unsafe::borrow_task(task).pid() as u32
         };
         let mut list = self.list.lock_irqsave();
         let before = list.len();
@@ -373,8 +373,8 @@ impl WaitQueueHead {
                 // Read at a compile-time Task offset inside the kernel
                 // linear map (same contract as the poison probe in
                 // Task::is_plausible_task_ptr — cannot fault).
-                let cur_pid = crate::process::unsafe_edges::read_volatile_u32(
-                    crate::process::unsafe_edges::slot_ptr(
+                let cur_pid = crate::process::r#unsafe::read_volatile_u32(
+                    crate::process::r#unsafe::slot_ptr(
                         entry_task as *mut u8,
                         crate::process::task::task_offsets::TASK_PID,
                     ) as *const u32,
@@ -411,9 +411,9 @@ impl WaitQueueHead {
                         // Lost-park ring (rux:lostpark tracepoint; retired token rux:lostpark (retired debug=lostpark)): the refused-wake
                         // token return — pid, state bits, preempt_count.
                         if crate::debug::lostpark::armed() {
-                            let st = crate::process::unsafe_edges::borrow_task(task).state();
-                            let pc = crate::process::unsafe_edges::borrow_task(task).preempt_count();
-                            let pid = crate::process::unsafe_edges::borrow_task(task).pid();
+                            let st = crate::process::r#unsafe::borrow_task(task).state();
+                            let pc = crate::process::r#unsafe::borrow_task(task).preempt_count();
+                            let pid = crate::process::r#unsafe::borrow_task(task).pid();
                             crate::debug::lostpark::record(
                                 4,
                                 pid as u64,
@@ -455,7 +455,7 @@ impl WaitQueueHead {
                 if !task.is_null() {
                     // SAFETY: read-only state snapshot; wake_up_process's
                     // WP2/R15-6 guards handle stale task pointers.
-                    let st = crate::process::unsafe_edges::borrow_task(task).state();
+                    let st = crate::process::r#unsafe::borrow_task(task).state();
                     if st.is_sleeping() || st.contains(crate::process::task::TaskState::STOPPED) {
                         if crate::sched::wake_up_process(task) {
                             awakened += 1;
@@ -534,9 +534,9 @@ impl WaitQueueHead {
             // SAFETY: read-only diagnostic snapshot of a queued entry's
             // task; the entry keeps the task alive on this queue.
             let (pid, st, oncpu) = (
-                crate::process::unsafe_edges::borrow_task(t).pid(),
-                crate::process::unsafe_edges::borrow_task(t).state().bits(),
-                crate::process::unsafe_edges::borrow_task(t).on_cpu(),
+                crate::process::r#unsafe::borrow_task(t).pid(),
+                crate::process::r#unsafe::borrow_task(t).state().bits(),
+                crate::process::r#unsafe::borrow_task(t).on_cpu(),
             );
             out.push((pid as u32, st, e.is_woken(), oncpu));
         }
@@ -578,8 +578,8 @@ impl WaitQueueHead {
             }
             // Read at compile-time Task offsets inside the kernel
             // linear map (same contract as wake_up's screen).
-            let cur_pid = crate::process::unsafe_edges::read_volatile_u32(
-                crate::process::unsafe_edges::slot_ptr(
+            let cur_pid = crate::process::r#unsafe::read_volatile_u32(
+                crate::process::r#unsafe::slot_ptr(
                     t as *mut u8,
                     crate::process::task::task_offsets::TASK_PID,
                 ) as *const u32,
@@ -589,7 +589,7 @@ impl WaitQueueHead {
             }
             let (is_rt, rt_prio) = {
                 use crate::process::task::SchedPolicy;
-                let t_ref = crate::process::unsafe_edges::borrow_task(t);
+                let t_ref = crate::process::r#unsafe::borrow_task(t);
                 let p = t_ref.policy();
                 (
                     matches!(p, SchedPolicy::Fifo | SchedPolicy::Rr),
@@ -632,8 +632,8 @@ impl WaitQueueHead {
             // SAFETY: read-only diagnostic snapshot; the entry keeps the
             // task alive on this queue while the lock is held.
             let (pid, st) = (
-                crate::process::unsafe_edges::borrow_task(t).pid(),
-                crate::process::unsafe_edges::borrow_task(t).state().bits(),
+                crate::process::r#unsafe::borrow_task(t).pid(),
+                crate::process::r#unsafe::borrow_task(t).state().bits(),
             );
             out.push((pid as u32, st, e.is_woken(), t));
         }
@@ -689,11 +689,11 @@ impl WaitQueueHead {
         //   - task still RUNNING, entry not on queue → no action (correct)
         //   - task INTERRUPTIBLE, entry on queue → wake_up succeeds (correct)
         if interruptible {
-            crate::process::unsafe_edges::borrow_task(task).set_state(
+            crate::process::r#unsafe::borrow_task(task).set_state(
                 crate::process::task::TaskState::new(
                     crate::process::task::TaskState::INTERRUPTIBLE));
         } else {
-            crate::process::unsafe_edges::borrow_task(task).set_state(
+            crate::process::r#unsafe::borrow_task(task).set_state(
                 crate::process::task::TaskState::new(
                     crate::process::task::TaskState::UNINTERRUPTIBLE));
         }
@@ -727,7 +727,7 @@ impl WaitQueueHead {
         // If task is still sleeping (condition met before schedule, or
         // called from finish path), restore to RUNNING.
         {
-            let t = crate::process::unsafe_edges::borrow_task(task);
+            let t = crate::process::r#unsafe::borrow_task(task);
             let state = t.state();
             if state.is_sleeping() {
                 t.set_state(crate::process::task::TaskState::new(
