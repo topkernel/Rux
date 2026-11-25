@@ -513,9 +513,10 @@ so the path was `rux-fs/src/fs/pipe.rs`), role-less names (`rux-` on
 every crate, so nothing said which one was the core; `edges` spelled
 four ways; nineteen `*hooks.rs` files of which several held no hook
 table at all), and unsafe scattered through the mechanism files
-instead of collected. This section fixes all three. Measured on
-main 8d7de77e8: 1,984 unsafe constructs in the core, of which 361 sit
-in the edge files and 1,623 are scattered across 179 other files.
+instead of collected. This section fixes all three. Measured after
+pass 1b (the edge files already renamed): 1,917 unsafe constructs in
+the core, of which 346 sit in the `unsafe.rs` files and 1,571 are
+scattered across the rest.
 
 ### 2c.1 Crate names: the subsystem's own name
 
@@ -607,13 +608,37 @@ A reader looking for every place memory safety can be broken opens the
 `unsafe.rs` files and nothing else. A reader optimizing the switch
 path opens `hotpath.rs` and knows no unsafe is hidden in it.
 
+Three shapes, not one. A directory is filed by what it is, and the
+three-file split applies only to the first shape:
+
+1. **A subsystem with all three kinds of code** (`sched`, `mm`, `fs`,
+   `process`, `sync`, `ipc`, `drivers`, `net`, `debug`): the
+   three-file split below.
+2. **A directory that is unsafe throughout** (`safety/`: eight files
+   of audited wrappers, `ptr.rs`, `dma.rs`, `bytes.rs`, …, each with
+   its INV contracts; the lock primitives inside `sync/`). It is one
+   `unsafe.rs` already, kept as several files by topic because one
+   file of 1,500 lines is harder to read than eight. Nothing in it is
+   hot-path code that a split would separate; the directory is
+   renamed `unsafe/` or its files are left as they are and the
+   gate (§2c.5) treats the directory as a unit.
+3. **A single small subsystem** (`interrupt`, `io_uring`, `perf`,
+   `trace`, `timer`, `module`, `security`): one file today. It is
+   not split into three for the sake of the pattern; its unsafe goes
+   to an `unsafe.rs` beside it in pass 3 and the rest keeps its name.
+
+The arch directories are the irreducible floor (§2) and keep their
+per-architecture layout; their unsafe is collected per architecture
+in pass 3.
+
 ```
 kernel/core/src/
   sched/   unsafe.rs  hotpath.rs  types.rs
   mm/      unsafe.rs  hotpath.rs  types.rs
   sync/    unsafe.rs  hotpath.rs  types.rs
   fs/      unsafe.rs  hotpath.rs  types.rs
-  …        (one directory per subsystem with code in the core)
+  …        (shape 1: one directory per subsystem with code in the core)
+  safety/  ptr.rs  dma.rs  bytes.rs …  (shape 2: unsafe throughout)
   api/     sched.rs  mm.rs  fs.rs  …     (§2c.4)
   printk.rs  console.rs  boot.rs  …       (cross-cutting: used by every subsystem)
 ```
@@ -661,9 +686,9 @@ table exists — filling the second too early is the reboot loop of
 
 ### 2c.5 Collecting the scattered unsafe
 
-Today 1,623 of the core's 1,984 unsafe constructs are not in an edge
-file: they sit inline in the mechanism code, without a contract
-number, mixed into logic. They are the ones the ledger audit found
+After pass 1b, 1,571 of the core's 1,917 unsafe constructs are not in
+an `unsafe.rs`: they sit inline in the mechanism code, without a
+contract number, mixed into logic. They are the ones the ledger audit found
 mis-annotated. After collection every unsafe construct in the core is
 in an `unsafe.rs`:
 
