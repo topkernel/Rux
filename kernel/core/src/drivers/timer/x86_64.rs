@@ -569,7 +569,7 @@ pub fn timer_interrupt_handler() -> u64 {
     // behavior-identical minus the wasted dispatch. count() is a
     // high-water mark: once any TCP socket has existed the raise
     // resumes unconditionally (and the handler then has real work).
-    if crate::net::net_hooks::tcp_table_nonempty() {
+    if crate::api::net::tcp_table_nonempty() {
         crate::interrupt::softirq::raise_softirq_irqoff(
             crate::interrupt::softirq::SoftirqIndex::Timer as usize,
         );

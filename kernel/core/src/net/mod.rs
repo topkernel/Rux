@@ -4,7 +4,7 @@
 //!
 //! Network Subsystem
 
-pub mod net_hooks;
+// The network hook table (NetHooks) is crate::api::net.
 pub mod file_arc;
 pub mod r#unsafe;
 pub mod buffer;

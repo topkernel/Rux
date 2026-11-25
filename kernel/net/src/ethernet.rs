@@ -288,7 +288,7 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     if let Some(ip) = dest_ip {
         if ip >> 24 == 127 {
             eth_push_header(&mut skb, [0, 0, 0, 0, 0, 0], src_mac, EthProtocol::ETH_P_IP)?;
-            let _ = crate::drivers::hooks::loopback_send(skb);
+            let _ = rux::api::drivers::loopback_send(skb);
             return Ok(());
         }
     }
@@ -368,7 +368,7 @@ fn ethernet_send_ipv6(mut skb: SkBuff, src_mac: [u8; ETH_ALEN]) -> Result<(), ()
             src_mac,
             EthProtocol::ETH_P_IPV6,
         )?;
-        let _ = crate::drivers::hooks::loopback_send(skb);
+        let _ = rux::api::drivers::loopback_send(skb);
         return Ok(());
     }
 
@@ -443,7 +443,7 @@ pub(crate) fn transmit_to_device(skb: SkBuff) -> i32 {
         return device.xmit(skb);
     }
 
-    crate::drivers::hooks::loopback_send(skb);
+    rux::api::drivers::loopback_send(skb);
     0
 }
 
@@ -544,7 +544,7 @@ pub fn ethernet_poll() {
     // block loopback delivery.
     let mut lo_n = 0;
     while lo_n < POLL_BUDGET_PER_SRC {
-        let Some(skb) = crate::drivers::hooks::loopback_poll() else {
+        let Some(skb) = rux::api::drivers::loopback_poll() else {
             break;
         };
         lo_n += 1;

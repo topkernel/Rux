@@ -2865,7 +2865,7 @@ pub fn param_stall_dump() {
     // tick context — see trap.rs WW-P1-WATCH-ADD).
     if crate::trace::EVENT_SCHEDTRACE.armed() {
         let mut p1_watched = false;
-        for (i, &t) in rux::sched::sched_hooks::ww_watch_slots().iter().enumerate() {
+        for (i, &t) in rux::api::sched::ww_watch_slots().iter().enumerate() {
             if t == 0 {
                 continue;
             }

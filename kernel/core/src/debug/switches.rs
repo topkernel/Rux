@@ -302,7 +302,7 @@ pub fn init_from_cmdline() {
     // sc57: the fuxwatch write-watchpoint target is its own boot param
     // (fuxwatch=0xADDR[,DELAYSEC]) — parsed here so it is live from the
     // first censusd round.
-    crate::sync::sync_diag_hooks::fuxwatch_parse();
+    crate::api::sync::fuxwatch_parse();
     let raw = match crate::cmdline::get_param("debug") {
         Some(v) => v,
         None => return,

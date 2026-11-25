@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Framework-side adapters for the substrate/boot leaf interface tables
-//! (`fs::leaf_hooks` — the fs-substrate tranche). Each adapter forwards
+//! (`crate::api::fs` — the fs-substrate tranche). Each adapter forwards
 //! to its row; the generic-closure population fns box their closures
 //! here so the kernel's call sites keep their pre-trace shape
 //! (`debugfs::create_file(path, mode, show, store)`). A call site differs
@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use super::file::File;
 use super::file::FileOps;
 use super::inode::Inode;
-use super::leaf_hooks::{boot_hooks, path_hooks, populate_hooks};
+use crate::api::fs::{boot_hooks, path_hooks, populate_hooks};
 
 /// Identity compare: `ops` is the exact table published for this slot.
 #[inline]
@@ -364,7 +364,7 @@ pub mod devfs {
 pub mod procfs {
     use super::*;
     // The /proc ino-space layout consts (vfs's magic-link dispatch).
-    pub use super::super::leaf_hooks::{PROCFS_FD_LINK_INO_OFF, PROCFS_NS_LINK_INO_OFF};
+    pub use crate::api::fs::{PROCFS_FD_LINK_INO_OFF, PROCFS_NS_LINK_INO_OFF};
 
     pub fn init_procfs() -> Result<(), i32> {
         (boot_hooks().procfs_init)()

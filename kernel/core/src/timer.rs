@@ -709,23 +709,23 @@ pub fn timer_softirq_handler(_nr: usize) {
             // lines print only on rux:wwcensus (retired debug=wwcensus) boots; ordinary boots keep
             // a clean serial prompt.
             if crate::trace::EVENT_WWCENSUS.armed() {
-                crate::timer_hooks::ww_heartbeat(now_time);
+                crate::api::timer::ww_heartbeat(now_time);
             }
             // leg-27: in-flight binder txn hang audit (rux:txnhunt (retired debug=txnhunt),
             // self-gated + rate-capped inside). Runs on the same ~1 Hz
             // heartbeat slot; zero cost when off.
-            crate::ipc::binder_diag_hooks::txn_hang_audit();
+            crate::api::ipc::txn_hang_audit();
             // holder-chain lane (rux:txnhunt (retired debug=txnhunt), same switch): BWR-park
             // audit — every binder thread with a transaction stack (or
             // an anomalous ioctl park) gets one line naming its CURRENT
             // syscall + the decoded write sub-command of the BWR it is
             // parked in; the FFRT mutex holders parked inside a binder
             // ioctl (the futex-census blind spot) surface here.
-            crate::ipc::binder_diag_hooks::bwr_park_audit();
+            crate::api::ipc::bwr_park_audit();
             // leg-30B: AMS46 node/proc census (rux:ams46 (retired debug=ams46), self-gated +
             // rate-capped inside) — the Gate-1 delivery adjudication
             // backdrop for the accountmgr->AMS StartUser oneway.
-            crate::ipc::binder_diag_hooks::ams46_audit();
+            crate::api::ipc::ams46_audit();
             // (2026-11-23: the treehunt tick that ran here retired with
             // debug/treehunt.rs — the E8-REPAR class closed with the
             // 7d4481320 reparent fixes.)
@@ -752,7 +752,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // census — self-gated 1 Hz + anomaly-gated inside (zero
             // serial on healthy boots); a parked waiter with a reapable
             // zombie child prints the full wake-chain verdict line.
-            crate::process::process_hooks::wait4_park_audit();
+            crate::api::process::wait4_park_audit();
             // stress-port SP-5: direct-reclaim gate census — names the
             // holder's phase/wait-site when the gate has been held >=2 s
             // (self-gated: one atomic load when the gate is free; zero
@@ -761,7 +761,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // stress-port SP-7: per-page swap skip-reason census — one
             // line per second ONLY while anon reclaim is being exercised
             // (self-gated on census deltas; zero serial otherwise).
-            crate::mm::mm_hooks::vscan_heartbeat();
+            crate::api::mm::vscan_heartbeat();
             // stress-port r9 (kill10 face-1 handoff): overdue-wheel
             // anomaly — an entry still IN the wheel more than 2 s past
             // its deadline is a wheel-side loss (the delivery-loss face
@@ -1800,7 +1800,7 @@ pub fn ww_hres_age_ms(cpu: usize) -> u64 {
 // the WW census REPORT half (formatting). Its markers and statics stay
 // framework-side (ww_note_*, WW_FIRE_*, WW_TICK_IRQ — written on the fire/
 // tick paths); the crate reads them and the wheel_census() accessor, and
-// is reached through the arm-gated timer_hooks::ww_heartbeat row (the
+// is reached through the arm-gated crate::api::timer::ww_heartbeat row (the
 // EVENT_WWCENSUS gate at the call site fires before the table is touched
 // — disarmed boots pay nothing).
 

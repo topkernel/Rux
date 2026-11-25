@@ -1069,7 +1069,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 /// historical-name wrapper dispatches the cold ArchDiagHooks row (the
 /// report fires once per SIGILL death).
 fn sigill_mapping_forensics(pid: usize, epc: usize) {
-    (crate::arch::arch_diag_hooks::arch_diag().sigill_mapping_forensics)(pid, epc)
+    (crate::api::arch::arch_diag().sigill_mapping_forensics)(pid, epc)
 }
 
 /// Handle breakpoint
@@ -1550,7 +1550,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             // this task dies. Retry on true, die on false (struck out or
             // nothing killable).
             if regs.user_mode() {
-                if !crate::mm::mm_hooks::fault_oom_kill_or_retry(
+                if !crate::api::mm::fault_oom_kill_or_retry(
                     crate::process::current_pid(),
                 ) {
                     // Terminate user process via do_exit (properly notifies parent)
@@ -1565,7 +1565,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
                 // chance to free memory for the retry; if nothing is
                 // killable there is no memory source left — die loudly
                 // (the x86_64 twin's kernel-mode policy).
-                if !crate::mm::mm_hooks::kernel_fault_oom_kill() {
+                if !crate::api::mm::kernel_fault_oom_kill() {
                     panic!(
                         "pagefault: OOM in kernel mode at {:#x}, epc={:#x}",
                         fault_addr, regs.epc

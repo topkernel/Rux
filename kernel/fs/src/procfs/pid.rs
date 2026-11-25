@@ -117,7 +117,7 @@ fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
     }
     let path = task.get_exe_path();
     if path.is_empty() {
-        if let Some(name) = crate::process::process_hooks::kthread_name(task.pid()) {
+        if let Some(name) = rux::api::process::kthread_name(task.pid()) {
             let mut len = name.len().min(15);
             while len > 0 && !name.is_char_boundary(len) {
                 len -= 1;
@@ -1213,7 +1213,7 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
         })
         .unwrap_or(0);
 
-    let score = crate::mm::mm_hooks::oom_badness(task, totalpages);
+    let score = rux::api::mm::oom_badness(task, totalpages);
     format!("{}\n", score).into_bytes()
 }
 
@@ -1406,7 +1406,7 @@ pub fn generate_fdinfo(pid: u64, fd: u32) -> Vec<u8> {
         out.push_str(&alloc::format!("Pid:\t{}\nNSpid:\t{}\n", pid, pid));
     }
 
-    if let Some(watches) = (rux::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&rux::fs::fs_hooks::FsHooks::EMPTY).inotify_fdinfo_watches)(&file) {
+    if let Some(watches) = (rux::api::fs::FS_HOOKS.get().unwrap_or(&rux::api::fs::FsHooks::EMPTY).inotify_fdinfo_watches)(&file) {
         for (wd, sdev, ino, mask) in watches {
             out.push_str(&alloc::format!(
                 "inotify wd:{:x} ino:{:x} sdev:{:x} mask:{:x} ignored_mask:0 \n",

@@ -435,5 +435,5 @@ fn handle_mm_fault_checked(
     va: usize,
     flags: u32,
 ) -> crate::arch::mm::MmFaultResult {
-    crate::mm::mm_hooks::handle_mm_fault(mm, crate::arch::mm::VirtAddr::new(va as u64), flags)
+    crate::api::mm::handle_mm_fault(mm, crate::arch::mm::VirtAddr::new(va as u64), flags)
 }

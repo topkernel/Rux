@@ -138,5 +138,5 @@ pub fn kmsg_write(buf: &[u8]) {
 /// `hilog_dump` row (process's reboot cascade and any framework
 /// site keep the historical name).
 pub fn dump() {
-    crate::debug::debug_hooks::hilog_dump();
+    crate::api::debug::hilog_dump();
 }

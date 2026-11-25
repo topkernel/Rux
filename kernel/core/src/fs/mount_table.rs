@@ -66,11 +66,11 @@ pub fn register_builtin_handlers() {
     // The substrate/boot leaves' mount rows (tmpfs, procfs, devfs, sysfs,
     // cgroup, debugfs, tracefs, selinuxfs — fs-substrate tranche): ONE
     // entry from the fs crate, run at THIS boot point.
-    (super::leaf_hooks::boot_hooks().mount_rows_register)();
+    (crate::api::fs::boot_hooks().mount_rows_register)();
     // The ext4 service crate's mount rows (rung 5): the SAME boot
     // point as the leaves above — NOT at rust_main registration time
     // (the fs 'R'-loop conviction; the row body self-guards).
-    super::ext4_hooks::mount_rows_register();
+    crate::api::ext4::mount_rows_register();
 }
 
 // Re-export for the leaf mount_instance bodies (register_mount row).

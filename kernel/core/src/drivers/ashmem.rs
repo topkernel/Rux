@@ -674,7 +674,7 @@ pub fn ashmem_mmap(
     // as-is (VmaFlags::SHARED is the COW exemption key in
     // copy_page_table_cow). file_fd stays unset — the SysV shm detach
     // accounting keys on it and must not see ashrem VMAs.
-    let placement = crate::mm::mm_hooks::mmap(
+    let placement = crate::api::mm::mmap(
         &address_space,
         crate::mm::page::VirtAddr::new(addr),
         length,

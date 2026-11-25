@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// /proc/sys/kernel/pid_max — Linux default 32768 (riscv64 max 4194304).
 /// P2: stored in the PID allocator (process::pid) and consulted by
 /// alloc_pid — the sysctl file is the read/write face of the live value.
-pub use crate::process::process_hooks::{pid_max_live as read_pid_max, set_pid_max_live};
+pub use rux::api::process::{pid_max_live as read_pid_max, set_pid_max_live};
 pub const PID_MAX_MIN: u32 = 2;
 pub const PID_MAX_MAX: u32 = 4 * 1024 * 1024;
 
@@ -396,7 +396,7 @@ pub fn write_pipe_user_pages_hard(input: &[u8]) -> i32 {
 /// /proc/sys/kernel/msgmni — System V message queue count limit. Matches
 /// the IPC_IDS_MAX slots the ipc table offers.
 pub fn generate_msgmni() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::ipc_hooks::msgmni()).into_bytes()
+    alloc::format!("{}\n", rux::api::ipc::msgmni()).into_bytes()
 }
 
 /// /proc/sys/kernel/msgmni write — LTP msgget03 lowers MSGMNI and expects
@@ -404,7 +404,7 @@ pub fn generate_msgmni() -> Vec<u8> {
 pub fn write_msgmni(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            if v > i32::MAX as u64 || !crate::ipc::ipc_hooks::set_msgmni(v as i32) {
+            if v > i32::MAX as u64 || !rux::api::ipc::set_msgmni(v as i32) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
             0
@@ -480,13 +480,13 @@ pub fn write_printk_devkmsg(input: &[u8]) -> i32 {
 /// check and shmctl(IPC_INFO) both consult it (writable; LTP shmget02
 /// lowers it to 8192, shmctl03 asserts IPC_INFO equality).
 pub fn generate_shmmax() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::ipc_hooks::shm_ctlmax()).into_bytes()
+    alloc::format!("{}\n", rux::api::ipc::shm_ctlmax()).into_bytes()
 }
 
 pub fn write_shmmax(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            crate::ipc::ipc_hooks::set_shm_ctlmax(v);
+            rux::api::ipc::set_shm_ctlmax(v);
             0
         }
         Err(e) => e,
@@ -496,7 +496,7 @@ pub fn write_shmmax(input: &[u8]) -> i32 {
 /// /proc/sys/kernel/shmmni — max segments system-wide (LTP shmget03 reads
 /// it and creates exactly that many segments).
 pub fn generate_shmmni() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::ipc_hooks::shm_ctlni()).into_bytes()
+    alloc::format!("{}\n", rux::api::ipc::shm_ctlni()).into_bytes()
 }
 
 pub fn write_shmmni(input: &[u8]) -> i32 {
@@ -504,7 +504,7 @@ pub fn write_shmmni(input: &[u8]) -> i32 {
         Ok(v) => {
             // The clamp at IPC_IDS_MAX moved with the static into
             // the service setter (set_shm_ctlni).
-            crate::ipc::ipc_hooks::set_shm_ctlni(v);
+            rux::api::ipc::set_shm_ctlni(v);
             0
         }
         Err(e) => e,
@@ -513,13 +513,13 @@ pub fn write_shmmni(input: &[u8]) -> i32 {
 
 /// /proc/sys/kernel/shmall — total shm page budget (ENOSPC past it).
 pub fn generate_shmall() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::ipc_hooks::shm_ctlall()).into_bytes()
+    alloc::format!("{}\n", rux::api::ipc::shm_ctlall()).into_bytes()
 }
 
 pub fn write_shmall(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            crate::ipc::ipc_hooks::set_shm_ctlall(v);
+            rux::api::ipc::set_shm_ctlall(v);
             0
         }
         Err(e) => e,
@@ -528,13 +528,13 @@ pub fn write_shmall(input: &[u8]) -> i32 {
 
 /// /proc/sys/fs/mqueue/queues_max — writable POSIX mq count limit.
 pub fn generate_mq_queues_max() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::ipc_hooks::queues_max()).into_bytes()
+    alloc::format!("{}\n", rux::api::ipc::queues_max()).into_bytes()
 }
 
 pub fn write_mq_queues_max(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v) => {
-            if v > i32::MAX as u64 || !crate::ipc::ipc_hooks::set_queues_max(v as i32) {
+            if v > i32::MAX as u64 || !rux::api::ipc::set_queues_max(v as i32) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
             0
@@ -600,7 +600,7 @@ pub fn write_core_pattern(input: &[u8]) -> i32 {
 /// Live: the inotify enqueue path consults it (rw; LTP inotify05 reads it
 /// and relies on the IN_Q_OVERFLOW-last semantics when it is exceeded).
 pub fn generate_inotify_max_queued_events() -> Vec<u8> {
-    alloc::format!("{}\n", (rux::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&rux::fs::fs_hooks::FsHooks::EMPTY).inotify_max_queued_events)()).into_bytes()
+    alloc::format!("{}\n", (rux::api::fs::FS_HOOKS.get().unwrap_or(&rux::api::fs::FsHooks::EMPTY).inotify_max_queued_events)()).into_bytes()
 }
 
 pub fn write_inotify_max_queued_events(input: &[u8]) -> i32 {
@@ -611,7 +611,7 @@ pub fn write_inotify_max_queued_events(input: &[u8]) -> i32 {
             if v > (1 << 20) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
-            (rux::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&rux::fs::fs_hooks::FsHooks::EMPTY).inotify_set_max_queued_events)(v as usize);
+            (rux::api::fs::FS_HOOKS.get().unwrap_or(&rux::api::fs::FsHooks::EMPTY).inotify_set_max_queued_events)(v as usize);
             0
         }
         Err(e) => e,
@@ -661,7 +661,7 @@ pub fn write_inotify_max_user_watches(input: &[u8]) -> i32 {
 /// contract CRIU and LTP pidfd_send_signal03 use to force pid reuse).
 /// Root-only write (the reference handler is 0600-root).
 pub fn generate_ns_last_pid() -> Vec<u8> {
-    alloc::format!("{}\n", crate::process::process_hooks::last_pid()).into_bytes()
+    alloc::format!("{}\n", rux::api::process::last_pid()).into_bytes()
 }
 
 pub fn write_ns_last_pid(input: &[u8]) -> i32 {
@@ -672,7 +672,7 @@ pub fn write_ns_last_pid(input: &[u8]) -> i32 {
     }
     match parse_u64(input) {
         Ok(v) => {
-            if v > u32::MAX as u64 || !crate::process::process_hooks::set_last_pid(v as u32) {
+            if v > u32::MAX as u64 || !rux::api::process::set_last_pid(v as u32) {
                 return -(crate::errno::constants::EINVAL as i32);
             }
             0
@@ -752,14 +752,14 @@ pub fn write_perf_event_mlock_kb(input: &[u8]) -> i32 {
 // read back their stored value and accept writes like the reference.
 // ============================================================================
 
-fn generate_key_quota(q: crate::ipc::ipc_hooks::KeyQuota) -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::ipc_hooks::key_quota(q)).into_bytes()
+fn generate_key_quota(q: rux::api::ipc::KeyQuota) -> Vec<u8> {
+    alloc::format!("{}\n", rux::api::ipc::key_quota(q)).into_bytes()
 }
 
-fn write_key_quota(q: crate::ipc::ipc_hooks::KeyQuota, input: &[u8]) -> i32 {
+fn write_key_quota(q: rux::api::ipc::KeyQuota, input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(n) if n <= i32::MAX as u64 => {
-            crate::ipc::ipc_hooks::set_key_quota(q, n as i32);
+            rux::api::ipc::set_key_quota(q, n as i32);
             0
         }
         _ => -(crate::errno::constants::EINVAL as i32),
@@ -767,28 +767,28 @@ fn write_key_quota(q: crate::ipc::ipc_hooks::KeyQuota, input: &[u8]) -> i32 {
 }
 
 pub fn generate_root_maxkeys() -> Vec<u8> {
-    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxKeys)
+    generate_key_quota(rux::api::ipc::KeyQuota::RootMaxKeys)
 }
 pub fn write_root_maxkeys(input: &[u8]) -> i32 {
-    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxKeys, input)
+    write_key_quota(rux::api::ipc::KeyQuota::RootMaxKeys, input)
 }
 pub fn generate_root_maxbytes() -> Vec<u8> {
-    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxBytes)
+    generate_key_quota(rux::api::ipc::KeyQuota::RootMaxBytes)
 }
 pub fn write_root_maxbytes(input: &[u8]) -> i32 {
-    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::RootMaxBytes, input)
+    write_key_quota(rux::api::ipc::KeyQuota::RootMaxBytes, input)
 }
 pub fn generate_maxkeys() -> Vec<u8> {
-    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxKeys)
+    generate_key_quota(rux::api::ipc::KeyQuota::MaxKeys)
 }
 pub fn write_maxkeys(input: &[u8]) -> i32 {
-    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxKeys, input)
+    write_key_quota(rux::api::ipc::KeyQuota::MaxKeys, input)
 }
 pub fn generate_maxbytes() -> Vec<u8> {
-    generate_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxBytes)
+    generate_key_quota(rux::api::ipc::KeyQuota::MaxBytes)
 }
 pub fn write_maxbytes(input: &[u8]) -> i32 {
-    write_key_quota(crate::ipc::ipc_hooks::KeyQuota::MaxBytes, input)
+    write_key_quota(rux::api::ipc::KeyQuota::MaxBytes, input)
 }
 
 // ============================================================================

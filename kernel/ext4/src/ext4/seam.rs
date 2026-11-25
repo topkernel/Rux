@@ -11,12 +11,12 @@
 //!
 //! SELF-RECURSION RULE (the S1 boot-wedge lesson): no row body calls
 //! the framework WRAPPER of its own slot (e.g. the journal rows call
-//! jbd2 directly, never fs::ext4_hooks::journal_dirty).
+//! jbd2 directly, never rux::api::ext4::journal_dirty).
 
 use crate::drivers::blkdev::GenDisk;
 use crate::errno;
 use rux::fs::bio;
-use rux::fs::ext4_hooks::{self, Ext4Hooks};
+use rux::api::ext4::Ext4Hooks;
 use rux::fs::file::File;
 use rux::fs::inode::{Inode, INodeOps};
 use crate::jbd2;
@@ -387,7 +387,7 @@ fn mount_rows_register_row() {
 /// ext4::init -> ... -> mounts). At the flip: bin's register_all
 /// owns this call.
 pub fn register_all() {
-    ext4_hooks::ext4_register_hooks(Ext4Hooks {
+    rux::api::ext4::ext4_register_hooks(Ext4Hooks {
         init: super::init,
         mount_root: mount_root_row,
         root_inode: root_inode_row,

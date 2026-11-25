@@ -660,12 +660,12 @@ pub fn tick(now_jiffies: u64) {
     LAST_DUMP.store(now_jiffies, Ordering::Relaxed);
     // The report body lives in the debug crate (crate-flip rung
     // debug); the row fires only on the dump cadence.
-    crate::debug::debug_hooks::fsw_dump();
+    crate::api::debug::fsw_dump();
 }
 
 /// The counter snapshot (moved to the debug crate): same-named
 /// wrapper so the shutdown cascade's historical call site is unchanged;
 /// dispatches the hook row.
 pub fn dump() {
-    crate::debug::debug_hooks::fsw_dump();
+    crate::api::debug::fsw_dump();
 }

@@ -849,7 +849,7 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 /// Processes received network packets deferred from the interrupt handler.
 /// Runs in softirq context (at `irq_exit` time or from ksoftirqd).
 pub fn net_rx_softirq_handler(_vec: usize) {
-    crate::net::net_hooks::ethernet_poll();
+    crate::api::net::ethernet_poll();
 }
 
 /// Enable VirtIO-Net device interrupt

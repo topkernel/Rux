@@ -20,7 +20,7 @@
 //!   sit there); fw_record/pdec/phex — markers with hot callers.
 //!
 //! The framework reaches THIS crate through the TimerHooks table
-//! (kernel/core/src/timer_hooks.rs): one arm-gated row today (the WW
+//! (kernel/core/src/api/timer.rs): one arm-gated row today (the WW
 //! heartbeat report — the call site already gates on
 //! EVENT_WWCENSUS.armed(), so disarmed boots never touch the table).
 
@@ -53,7 +53,7 @@ pub use rux::timer::*;
 /// No boot-point constraint: the row is only consumed behind the
 /// EVENT_WWCENSUS arm gate, long after registration.
 pub fn register_all() {
-    rux::timer_hooks::timer_register_hooks(rux::timer_hooks::TimerHooks {
+    rux::api::timer::timer_register_hooks(rux::api::timer::TimerHooks {
         ww_heartbeat: ww_report::ww_heartbeat,
     });
 }

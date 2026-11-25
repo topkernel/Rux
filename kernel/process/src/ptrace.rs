@@ -120,7 +120,7 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
         if crate::r#unsafe::ptrace_translate(&mm, page_fault_addr).is_none() {
             // Fault the page in through the target's mm (file-backed VMAs
             // are filled from their pinned File, anonymous ones zeroed).
-            let r = crate::mm::mm_hooks::handle_mm_fault(
+            let r = rux::api::mm::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page_fault_addr),
                 crate::arch::mm::FaultFlags::READ,
@@ -209,7 +209,7 @@ pub fn process_vm_copy(
             } else {
                 crate::arch::mm::FaultFlags::READ
             };
-            let res = crate::mm::mm_hooks::handle_mm_fault(
+            let res = rux::api::mm::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page),
                 fl,

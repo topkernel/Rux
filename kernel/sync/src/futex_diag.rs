@@ -39,7 +39,7 @@
 //! - framework cold sites (exit, pid_hash, signal kill dumps, taskdump,
 //!   schb, debug switches, binder devmgr latch, the do_futex/census
 //!   latch sections) ride the SyncDiagHooks rows
-//!   (kernel/core/src/sync/sync_diag_hooks.rs) — cold rows only.
+//!   (kernel/core/src/api/sync.rs) — cold rows only.
 
 // The published futex surface this file consumes (see the header): the
 // watch statics, the waiter pool + hash heads, and the walker helpers
@@ -3544,22 +3544,22 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
     };
     let ops = ops_ref as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
-    if crate::fs::fs_hooks::is_pipe_ops(ops_ref) {
+    if rux::api::fs::is_pipe_ops(ops_ref) {
         return "pipe";
     }
-    if crate::fs::fs_hooks::is_fifo_ops(ops_ref) {
+    if rux::api::fs::is_fifo_ops(ops_ref) {
         return "fifo";
     }
-    if crate::net::net_hooks::is_unix_socket_ops(ops_ref) {
+    if rux::api::net::is_unix_socket_ops(ops_ref) {
         return "unix-sock";
     }
-    if crate::net::net_hooks::is_inet_socket_ops(ops_ref) {
+    if rux::api::net::is_inet_socket_ops(ops_ref) {
         return "inet-sock";
     }
     if is(&crate::ipc::binder::BINDER_OPS) {
         return "binder";
     }
-    if crate::fs::fs_hooks::is_inotify_ops(ops_ref) {
+    if rux::api::fs::is_inotify_ops(ops_ref) {
         return "inotify";
     }
     if file.get_ops().is_some_and(crate::syscall::support::is_eventfd_ops) {
@@ -3602,7 +3602,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     // counters — deltas across consecutive launcher kills isolate this
     // child's share; rip pages symbolize via nm/addr2line.
     {
-        let (reads, misses, cycles, fills) = crate::fs::ext4_hooks::demand_read_stats();
+        let (reads, misses, cycles, fills) = rux::api::ext4::demand_read_stats();
         let mhz = {
             #[cfg(feature = "x86_64")]
             {
@@ -3691,7 +3691,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                 );
                 match ty {
                     "pipe" => {
-                        if let Some((fill, cap, rc, wc)) = crate::fs::fs_hooks::pipe_diag_snapshot(&f) {
+                        if let Some((fill, cap, rc, wc)) = rux::api::fs::pipe_diag_snapshot(&f) {
                             let pipe_ptr = f.private_data_ptr()
                                 .map(|p| p as usize)
                                 .unwrap_or(0);
@@ -3760,7 +3760,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                         }
                     }
                     "unix-sock" => {
-                        if let Some(us) = crate::net::net_hooks::unix_file_diag(&f) {
+                        if let Some(us) = rux::api::net::unix_file_diag(&f) {
                             // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                             crate::pr_warn!(
                                 "KILLDUMP: tid {} unix kind={} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",

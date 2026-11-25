@@ -23,7 +23,7 @@ use crate::arch::mm::pagetable::*;
 use rux::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
 use rux::mm::vma::VmaType;
 use rux::mm::AddressSpace;
-use rux::mm::mm_hooks::{FaultFlags, MmFaultResult};
+use rux::api::mm::{FaultFlags, MmFaultResult};
 use rux::mm::mm_struct::MmStruct;
 use rux::mm::pagemap::{MapError, Perm, PageTableType};
 use rux::mm::vma::{Vma, VmaFlags, VmaOrigin};
@@ -1221,7 +1221,7 @@ pub fn handle_mm_fault(
                     }
                     // Shared-memory attachments: increment nattch.
                     if vma_type == rux::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
-                        crate::ipc::ipc_hooks::shm_attach_vma(file_fd);
+                        rux::api::ipc::shm_attach_vma(file_fd);
                     }
                     let copied_pages = new_vma.page_count() as u64;
                     let _ = new_vma_mgr.add(new_vma);

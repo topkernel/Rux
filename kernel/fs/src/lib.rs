@@ -126,10 +126,10 @@ fn leaf_mount_rows_register() {
 
 /// The boot-time registration (bin calls this before kmain): the
 /// rung-3 FsHooks plus the three leaf interface tables
-/// (rux::fs::leaf_hooks). THE composition contract. Publishing only
+/// (rux::api::fs). THE composition contract. Publishing only
 /// stores plain values — no row body runs here.
 pub fn register_all() {
-    rux::fs::fs_hooks::fs_register_hooks(rux::fs::fs_hooks::FsHooks {
+    rux::api::fs::fs_register_hooks(rux::api::fs::FsHooks {
         notify: crate::inotify::notify,
         notify_file: crate::inotify::notify_file,
         notify_file_close: crate::inotify::notify_file_close,
@@ -177,10 +177,10 @@ pub fn register_all() {
         get_lease: crate::locks::get_lease,
     });
 
-    use rux::fs::leaf_hooks::{LeafBootHooks, LeafPathHooks, LeafPopulateHooks};
+    use rux::api::fs::{LeafBootHooks, LeafPathHooks, LeafPopulateHooks};
 
     // 1. Boot + mount lifecycle. Every row is a plain leaf fn.
-    rux::fs::leaf_hooks::register_boot_hooks(LeafBootHooks {
+    rux::api::fs::register_boot_hooks(LeafBootHooks {
         mount_rows_register: leaf_mount_rows_register,
         debugfs_init: crate::debugfs::init_debugfs,
         debugfs_root_present: crate::debugfs::root_present,
@@ -214,7 +214,7 @@ pub fn register_all() {
     });
 
     // 2. Kernel-side population.
-    rux::fs::leaf_hooks::register_populate_hooks(LeafPopulateHooks {
+    rux::api::fs::register_populate_hooks(LeafPopulateHooks {
         debugfs_create_dir: crate::debugfs::create_dir,
         debugfs_create_file: crate::debugfs::create_file_boxed,
         tracefs_create_dir: crate::tracefs::create_dir,
@@ -234,7 +234,7 @@ pub fn register_all() {
     // 3. Path dispatch. The identities are the leaves' real ops tables;
     // the framework compares them INLINE at the call sites, so the three
     // identity probes that used to be rows are gone.
-    rux::fs::leaf_hooks::register_path_hooks(LeafPathHooks {
+    rux::api::fs::register_path_hooks(LeafPathHooks {
         tmpfs_file_ops: &crate::tmpfs::TMPFS_FILE_OPS,
         devfs_reg_file_ops: &crate::devfs::DEVFS_REG_FILE_OPS,
         loop_file_ops: &crate::devfs::LOOP_FILE_OPS,

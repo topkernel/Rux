@@ -29,9 +29,9 @@
 
 #![forbid(unsafe_code)]
 use crate::process::task::{Task, SchedPolicy};
-use super::class::SchedClass;
-use super::sched::{GlobalRunQueue, GrqPendingReport};
-use super::entities::W2RefusalCensus;
+use crate::sched::class::SchedClass;
+use crate::sched::sched::{GlobalRunQueue, GrqPendingReport};
+use crate::sched::entities::W2RefusalCensus;
 use crate::config::MAX_CPUS;
 
 // ---- The data contract (S1b): shared event codes / slot tags ----

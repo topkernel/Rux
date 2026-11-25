@@ -26,7 +26,7 @@
 //! worklists' arch cold columns over-count: the mm/smp/ipi families
 //! are framework-called mechanism, not movable policy).
 //!
-//! The seam: `rux::arch::arch_diag_hooks::ArchDiagHooks` — cold rows
+//! The seam: `rux::api::arch::ArchDiagHooks` — cold rows
 //! only, published from rust_main via `arch::register_all`
 //! (OnceSlot; INV-SVCTEST-1's no-Spinlock rule). Raw reads cross
 //! through the audited framework diag edges.
@@ -59,7 +59,7 @@ pub mod riscv64;
 pub fn register_all() {
     #[cfg(feature = "x86_64")]
     {
-        use rux::arch::arch_diag_hooks::{ArchDiagHooks, ARCH_DIAG_HOOKS};
+        use rux::api::arch::{ArchDiagHooks, ARCH_DIAG_HOOKS};
         let _ = ARCH_DIAG_HOOKS.publish(ArchDiagHooks {
             scribble_foreign_entry: x86_64::trap_diag::scribble_foreign_entry,
             user_segv_forensics: x86_64::trap_diag::user_segv_forensics,
@@ -74,7 +74,7 @@ pub fn register_all() {
     }
     #[cfg(feature = "riscv64")]
     {
-        use rux::arch::arch_diag_hooks::{ArchDiagHooks, ARCH_DIAG_HOOKS};
+        use rux::api::arch::{ArchDiagHooks, ARCH_DIAG_HOOKS};
         let _ = ARCH_DIAG_HOOKS.publish(ArchDiagHooks {
             sigill_mapping_forensics: riscv64::trap_diag::sigill_mapping_forensics,
             ..ArchDiagHooks::NOOP

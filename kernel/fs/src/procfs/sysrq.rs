@@ -34,7 +34,7 @@ use crate::errno;
 fn run_command(cmd: u8) {
     match cmd {
         // Restart the machine immediately.
-        b'b' => crate::process::process_hooks::force_reboot(),
+        b'b' => rux::api::process::force_reboot(),
         // Force a crash (a dump is created if crash dumping is configured).
         b'c' => {
             crate::println!("sysrq: crashing the kernel on request");
@@ -54,7 +54,7 @@ fn run_command(cmd: u8) {
         b'e' => signal_all_except_init(crate::signal::Signal::SIGTERM as i32),
         // Invoke the OOM killer.
         b'f' => {
-            let killed = crate::mm::mm_hooks::sysrq_oom_kill();
+            let killed = rux::api::mm::sysrq_oom_kill();
             crate::println!(
                 "sysrq: OOM killer {}",
                 if killed { "killed a process" } else { "found nothing to kill" }
@@ -82,7 +82,7 @@ fn run_command(cmd: u8) {
             crate::println!("sysrq: making RT tasks nice-able is not supported");
         }
         // Power the system off.
-        b'o' => crate::process::process_hooks::force_power_off(),
+        b'o' => rux::api::process::force_power_off(),
         // Write the current registers and flags to the console.
         b'p' => crate::debug::backtrace::dump_regs_inline(),
         // Display the armed per-CPU high-resolution timer lists.
@@ -95,7 +95,7 @@ fn run_command(cmd: u8) {
         }
         // Synchronize every mounted filesystem.
         b's' => {
-            if let Err(e) = rux::fs::ext4_hooks::shutdown_sync() {
+            if let Err(e) = rux::api::ext4::shutdown_sync() {
                 crate::println!("sysrq: filesystem sync failed, err={}", e);
             } else {
                 crate::println!("sysrq: filesystems synced");

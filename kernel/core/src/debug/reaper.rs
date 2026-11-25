@@ -160,21 +160,21 @@ pub fn comm_str(raw: &[u8]) -> &str {
 /// SPAWN arm (moved to the debug crate): same-named wrapper; the call
 /// sites (exec basename / PR_SET_NAME) pre-gate on on().
 pub fn note_nameset(pid: u32, comm: &[u8]) {
-    crate::debug::debug_hooks::reaper_note_nameset(pid, comm)
+    crate::api::debug::reaper_note_nameset(pid, comm)
 }
 
 /// ZEXIT arm (moved to the debug crate): same-named wrapper; called
 /// from do_exit right after the ZOMBIE store + notify resolution (the
 /// call site pre-gates on on()).
 pub fn on_zombie(pid: u32, code: i32, parent_pid: u32, comm: &[u8; 16], last_nr: u32, last_a0: u64) {
-    crate::debug::debug_hooks::reaper_on_zombie(pid, code, parent_pid, comm, last_nr, last_a0)
+    crate::api::debug::reaper_on_zombie(pid, code, parent_pid, comm, last_nr, last_a0)
 }
 
 /// REAP arm: successful wait4 reap (moved to the debug crate):
 /// same-named wrapper; `nohang` distinguishes the blocking do_wait path
 /// (REAP4) from the WNOHANG do_wait_nonblock path (REAP4N).
 pub fn on_reap_wait4(reaper: u32, child: u32, wstatus: i32, nohang: bool) {
-    crate::debug::debug_hooks::reaper_on_reap_wait4(reaper, child, wstatus, nohang)
+    crate::api::debug::reaper_on_reap_wait4(reaper, child, wstatus, nohang)
 }
 
 /// REAP arm: successful waitid event (moved to the debug crate):
@@ -191,7 +191,7 @@ pub fn on_reap_waitid(
     wnowait: bool,
     via_pidfd: bool,
 ) {
-    crate::debug::debug_hooks::reaper_on_reap_waitid(
+    crate::api::debug::reaper_on_reap_waitid(
         reaper,
         si_pid,
         si_code,
@@ -207,7 +207,7 @@ pub fn on_reap_waitid(
 /// Sampled no-event waitid print (moved to the debug crate):
 /// same-named wrapper; proves the poll shape without flooding.
 pub fn poll_note(reaper: u32, idtype: i32, id: i32, options: i32) {
-    crate::debug::debug_hooks::reaper_poll_note(reaper, idtype, id, options)
+    crate::api::debug::reaper_poll_note(reaper, idtype, id, options)
 }
 
 /// ZLINGER arm: 1 Hz zombie scan, called from the timer softirq under

@@ -10,7 +10,7 @@
 //! module tree (kernel/core/src/lib.rs never names it): the signal
 //! service crate is its sole compilation home, under
 //! #![forbid(unsafe_code)]. The framework reaches this code only
-//! through kernel/core/src/signal_hooks.rs (OnceSlot rows, all cold paths).
+//! through kernel/core/src/api/signal.rs (OnceSlot rows, all cold paths).
 //!
 //! The MECHANISM stays framework-side: the pending set and its queue,
 //! the pt_regs frame build/restore, the wake path, the pinned pid-hash
@@ -287,7 +287,7 @@ pub fn send_signal_core(
         let t_len = t_comm.iter().position(|&b| b == 0).unwrap_or(t_comm.len());
         if let Ok(t_str) = core::str::from_utf8(&t_comm[..t_len]) {
             if t_str.contains("launcher") {
-                crate::sync::sync_diag_hooks::kill_dump_tgid(task.tgid() as u32);
+                rux::api::sync::kill_dump_tgid(task.tgid() as u32);
             }
         }
     }
@@ -594,8 +594,8 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
 /// state changes, CLD_STOPPED/CLD_CONTINUED parent notification,
 /// do_exit_group — stays framework-side (it holds the audited
 /// TaskBorrow edges) and matches on the returned class.
-pub fn default_action_class(sig: i32) -> crate::signal_hooks::DefaultActionClass {
-    use crate::signal_hooks::DefaultActionClass;
+pub fn default_action_class(sig: i32) -> rux::api::signal::DefaultActionClass {
+    use rux::api::signal::DefaultActionClass;
     match sig {
         // Ignore by default: SIGCHLD(17), SIGURG(23), SIGWINCH(28);
         // unknown signal numbers default-ignore too.

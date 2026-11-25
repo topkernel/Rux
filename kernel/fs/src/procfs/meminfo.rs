@@ -70,7 +70,7 @@ fn lru_kb() -> (u64, u64, u64, u64) {
 
 /// Swap totals in kB: (total, free).
 fn swap_kb() -> (u64, u64) {
-    let s = crate::mm::mm_hooks::swap_stats();
+    let s = rux::api::mm::swap_stats();
     (
         (s.swap_total as u64).saturating_mul(4),
         (s.swap_free as u64).saturating_mul(4),

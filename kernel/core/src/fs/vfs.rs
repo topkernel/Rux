@@ -395,10 +395,10 @@ fn apply_mnt_flags(
     // write path does not maintain checksums).
     if let Some(root_inode) = mnt.root.get_inode() {
         if let Some(ops) = root_inode.ops {
-            if crate::fs::ext4_hooks::is_ext4_inode_ops(ops) {
+            if crate::api::ext4::is_ext4_inode_ops(ops) {
                 // The leaf's ro latch sync (the fs instance and its
                 // metadata_csum downgrade policy are crate-side).
-                crate::fs::ext4_hooks::remount_ro_latch(new_flags.is_readonly());
+                crate::api::ext4::remount_ro_latch(new_flags.is_readonly());
             }
         }
     }
@@ -801,7 +801,7 @@ pub fn sync_dirty_filesystems() -> Result<(), i32> {
     // a file that claims 8 MB of data the device never received
     // (measured: the fiE3 crash-window boot — full size, full extent
     // map, ~35 % of the data). The data goes first; the metadata last.
-    let _ = crate::fs::ext4_hooks::sync_flushed_data(&flushed_targets);
+    let _ = crate::api::ext4::sync_flushed_data(&flushed_targets);
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
     // INODE-TABLE BLOCKS (data-integrity lane, 2026-11-11): the size the
@@ -813,7 +813,7 @@ pub fn sync_dirty_filesystems() -> Result<(), i32> {
     // creation size (0 bytes, md5-of-empty) with its data blocks already
     // on the device. Synced AFTER the buffer-cache drain above, so the
     // metadata lands after the data it describes (ordered data).
-    let _ = crate::fs::ext4_hooks::sync_inode_tables(&flushed_targets);
+    let _ = crate::api::ext4::sync_inode_tables(&flushed_targets);
     // And persist the disk's volatile cache (see sys_fsync).
     crate::drivers::virtio::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
 }
@@ -3125,7 +3125,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                         // directories (dynamic filesystems
                                         // never memo).
                                         if crate::debug::fsw::negmemo_on()
-                                            && crate::fs::ext4_hooks::is_ext4_lookup(ops)
+                                            && crate::api::ext4::is_ext4_lookup(ops)
                                         {
                                             let pgen = dir_inode.dir_mut_gen_load();
                                             cur_now.memo_negative(component, pgen);
@@ -5987,7 +5987,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // sd_is_socket() decides unix-fd NEGOTIATION on it
                 // (gdmr71 session-fifo hunt: without this every
                 // fd-carrying sd-bus send returned EOPNOTSUPP).
-                if crate::net::net_hooks::socket_file_stat(&file, stat).is_some() {
+                if crate::api::net::socket_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 if crate::fs::file_hooks::char_dev_stat(&file, stat).is_some() {
@@ -7304,7 +7304,7 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
     // Route to the filesystem implementation (ext4): the whole
     // dispatch + cache-refresh epilogue is the crate's (rung-5 seam
     // row; the None-ops default IS the ext4 table — legacy shape).
-    crate::fs::ext4_hooks::fallocate(inode, mode, offset, len)
+    crate::api::ext4::fallocate(inode, mode, offset, len)
 }
 
 /// Filesystem-side utimensat: update atime/mtime of a path. `times` carries

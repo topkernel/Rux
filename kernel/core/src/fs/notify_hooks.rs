@@ -27,20 +27,20 @@ pub(crate) fn notify(
     name: Option<&[u8]>,
     cookie: u32,
 ) {
-    crate::fs::fs_hooks::notify(parent, inode, mask, name, cookie);
+    crate::api::fs::notify(parent, inode, mask, name, cookie);
 }
 
 /// File access/modify event (read/write paths).
 pub fn notify_file(file: &crate::fs::file::File, mask: u32) {
-    crate::fs::fs_hooks::notify_file(file, mask);
+    crate::api::fs::notify_file(file, mask);
 }
 
 /// File close event.
 pub fn notify_file_close(file: &crate::fs::file::File) {
-    crate::fs::fs_hooks::notify_file_close(file);
+    crate::api::fs::notify_file_close(file);
 }
 
 /// Event-pairing cookie (rename/move).
 pub(crate) fn alloc_cookie() -> u32 {
-    crate::fs::fs_hooks::alloc_cookie()
+    crate::api::fs::alloc_cookie()
 }

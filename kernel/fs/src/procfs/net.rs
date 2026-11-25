@@ -61,7 +61,7 @@ fn hex_addr_v6(a: &[u8; 16]) -> String {
 fn dev_rows() -> Vec<(&'static str, crate::drivers::net::space::DeviceStats)> {
     let mut rows = Vec::new();
     // lo is always present (loopback_init runs at boot).
-    rows.push(("lo", crate::drivers::hooks::loopback_stats()));
+    rows.push(("lo", rux::api::drivers::loopback_stats()));
     if let Some(dev) = crate::drivers::net::virtio_net::get_device() {
         rows.push(("eth0", dev.get_stats()));
     }
@@ -139,7 +139,7 @@ fn sock_row(sl: u32, local: &str, lport: u16, remote: &str, rport: u16, state: u
 pub fn generate_tcp() -> Vec<u8> {
     let mut out = String::from(sock_table_header());
     let mut sl = 0u32;
-    for s in crate::net::net_hooks::tcp_rows_dump() {
+    for s in rux::api::net::tcp_rows_dump() {
         if s.is_v6 {
             continue;
         }
@@ -160,7 +160,7 @@ pub fn generate_tcp() -> Vec<u8> {
 pub fn generate_tcp6() -> Vec<u8> {
     let mut out = String::from(sock_table_header());
     let mut sl = 0u32;
-    for s in crate::net::net_hooks::tcp_rows_dump() {
+    for s in rux::api::net::tcp_rows_dump() {
         if !s.is_v6 {
             continue;
         }
@@ -182,7 +182,7 @@ pub fn generate_tcp6() -> Vec<u8> {
 pub fn generate_udp() -> Vec<u8> {
     let mut out = String::from(sock_table_header());
     let mut sl = 0u32;
-    for s in crate::net::net_hooks::udp_rows_dump() {
+    for s in rux::api::net::udp_rows_dump() {
         if s.is_v6 {
             continue;
         }
@@ -203,7 +203,7 @@ pub fn generate_udp() -> Vec<u8> {
 pub fn generate_udp6() -> Vec<u8> {
     let mut out = String::from(sock_table_header());
     let mut sl = 0u32;
-    for s in crate::net::net_hooks::udp_rows_dump() {
+    for s in rux::api::net::udp_rows_dump() {
         if !s.is_v6 {
             continue;
         }
@@ -228,7 +228,7 @@ pub fn generate_udp6() -> Vec<u8> {
 pub fn generate_arp() -> Vec<u8> {
     let mut out =
         String::from("IP address       HW type     Flags       HW address            Mask     Device\n");
-    for e in crate::net::net_hooks::arp_rows_dump() {
+    for e in rux::api::net::arp_rows_dump() {
         out.push_str(&alloc::format!(
             "{:>15}  {:<10} 0x{:x}     {}  *        eth0\n",
             format_v4(e.ip),
@@ -268,7 +268,7 @@ pub fn generate_route() -> Vec<u8> {
     let mut out = String::from(
         "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n",
     );
-    for r in crate::net::net_hooks::route_rows_dump() {
+    for r in rux::api::net::route_rows_dump() {
         // Presented interface indices: lo=1, eth0=2 (P0-2 netlink space).
         let iface = if r.oif == 2 { "eth0" } else { "lo" };
         out.push_str(&alloc::format!(
@@ -296,7 +296,7 @@ pub fn generate_route() -> Vec<u8> {
 /// trie's "leaf/prefix" summary shape; an empty table prints just the
 /// header-less empty trie (matching Linux's empty-fs output: nothing).
 pub fn generate_fib_trie() -> Vec<u8> {
-    let routes = crate::net::net_hooks::route_rows_dump();
+    let routes = rux::api::net::route_rows_dump();
     if routes.is_empty() {
         return Vec::new();
     }
@@ -321,8 +321,8 @@ pub fn generate_fib_trie() -> Vec<u8> {
 
 /// Generate /proc/net/sockstat content
 pub fn generate_sockstat() -> Vec<u8> {
-    let tcp = crate::net::net_hooks::tcp_rows_dump();
-    let udp = crate::net::net_hooks::udp_rows_dump();
+    let tcp = rux::api::net::tcp_rows_dump();
+    let udp = rux::api::net::udp_rows_dump();
     let tcp6 = tcp.iter().filter(|s| s.is_v6).count();
     let udp6 = udp.iter().filter(|s| s.is_v6).count();
     let tw = tcp
@@ -362,7 +362,7 @@ pub fn generate_sockstat() -> Vec<u8> {
 /// leading NUL, matching Linux. gnome-shell/gsd/lsof/ss scan this file.
 pub fn generate_unix() -> Vec<u8> {
     let mut out = String::new();
-    for line in crate::net::net_hooks::unix_net_snapshot() {
+    for line in rux::api::net::unix_net_snapshot() {
         out.push_str(&line);
         out.push('\n');
     }

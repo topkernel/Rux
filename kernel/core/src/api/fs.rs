@@ -2,46 +2,178 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The substrate/boot leaf interface tables (fs-substrate tranche): the
-//! framework -> fs crossing for the eleven leaves that left the
-//! framework (debugfs, tracefs, cgroup, sysfs, char_dev, tty, pty,
-//! rootfs, tmpfs, devfs, procfs). THREE tables, one per lifecycle
-//! (crate-plan §3a rule 1 — split by concern, never a mega-table; FsHooks
-//! stays the rung-3 pipe/fifo/inotify/memfd table):
+//! Rung-3 FLIP SEAM: the fs-service hook table (the NetHooks pattern).
+//! The framework's per-File op hooks (pipe/fifo/memfd), the lifecycle
+//! notify fanout, and the ops-identity probes dispatch through THIS
+//! nullable table — no-op until the fs crate registers at boot
+//! (bin calls its register_all before kmain, the composition
+//! contract). The framework never names a service leaf.
 //!
-//!   LeafBootHooks      boot + mount lifecycle: lib.rs's boot sequence,
-//!                      fsctx's mount arms, the mount table, initrd
-//!   LeafPopulateHooks  kernel-side population: drivers, dfx, the trace
-//!                      subsystem, the module loader, printk
-//!   LeafPathHooks      per-syscall / per-fault dispatch: the VFS core,
-//!                      mm policy, vt, loop_dev, coredump, console input
-//!
-//! NOTHING here runs at rust_main time. Registration only publishes the
-//! tables (plain Copy values, no allocation); each row body runs when the
-//! framework calls it. The mount registration in particular is invoked by
-//! mount_table::register_builtin_handlers at ITS boot point — calling it
-//! at rust_main time wedges x86_64 before the console exists (the boot.S
-//! 'R'-beacon reboot loop).
-//!
-//! crate-plan §3a rule 2 (static dispatch first on data paths): the path
-//! table carries the ops-table IDENTITIES the call sites compare inline
-//! (leaf_glue), so no identity probe on a per-fault or per-ioctl path
-//! costs an indirect call; the two devfs logic rows reached from the
-//! file-fault path are gated inline on the same identity / on fs_id ==
-//! FS_ID_DEVFS, so every other filesystem crosses zero times per fault.
-//!
-//! Row signatures carry the leaf's native types (crate-plan §3a rule 3);
-//! the adapters in leaf_glue contain no logic.
+//! This is the rung-3 table only (pipe/fifo/inotify/memfd/selinuxfs).
+//! The substrate/boot leaves that moved later (fs-substrate tranche:
+//! tmpfs, procfs, rootfs, devfs, sysfs, debugfs, tracefs, cgroup, pty,
+//! tty, char_dev) cross through `crate::api::fs` — three tables split
+//! by lifecycle (crate-plan §3a rule 1), including every leaf's
+//! mount-table registration.
 
 #![forbid(unsafe_code)]
+use crate::fs::file::File;
+use crate::fs::inode::Inode;
+
+/// The fs-service hook set.
+#[derive(Clone, Copy)]
+pub struct FsHooks {
+    // ---- lifecycle notify (inotify) ----
+    pub notify: fn(Option<&Inode>, Option<&Inode>, u32, Option<&[u8]>, u32),
+    pub notify_file: fn(&File, u32),
+    pub notify_file_close: fn(&File),
+    pub alloc_cookie: fn() -> u32,
+    // ---- pipe per-File ops ----
+    pub pipe_stat: fn(&File, &mut crate::fs::Stat) -> Option<i32>,
+    pub pipe_get_sz: fn(&File) -> Option<usize>,
+    pub pipe_set_sz: fn(&File, usize) -> Result<usize, i32>,
+    pub pipe_oasync_register: fn(&File, i32),
+    pub pipe_oasync_unregister: fn(u64),
+    /// The futex park-dump snapshot: (fill, capacity, r_open, w_open).
+    pub pipe_diag_snapshot: fn(&File) -> Option<(usize, usize, bool, bool)>,
+    // ---- fifo ----
+    pub fifo_forget: fn(u64, u64),
+    /// The special-open path: peer resolution + open, one call.
+    pub fifo_open: fn(u64, u64, u32) -> Result<alloc::sync::Arc<File>, i32>,
+    // ---- memfd seals ----
+    pub memfd_add_seals: fn(&File, u32) -> Result<(), i32>,
+    pub memfd_get_seals: fn(&File) -> Result<u32, i32>,
+    pub memfd_name_by_ino: fn(u64) -> Option<&'static str>,
+    // ---- ops-identity probes (fd-kind census + futex dumps) ----
+    pub is_pipe_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub is_fifo_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub is_inotify_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub is_memfd_ops: fn(&'static crate::fs::FileOps) -> bool,
+    // ---- misc leaf surfaces ----
+    /// fsctx's selinuxfs root-inode factory.
+    pub selinuxfs_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
+    /// procfs sysctl: /proc/sys/fs/inotify/max_queued_events value.
+    pub inotify_max_queued_events: fn() -> usize,
+    pub inotify_set_max_queued_events: fn(usize),
+    /// procfs fdinfo: an inotify fd's watch rows.
+    pub inotify_fdinfo_watches: fn(&File) -> Option<alloc::vec::Vec<(i32, u64, u64, u32)>>,
+}
+
+impl FsHooks {
+    pub const EMPTY: FsHooks = FsHooks {
+        notify: |_, _, _, _, _| {},
+        notify_file: |_, _| {},
+        notify_file_close: |_| {},
+        alloc_cookie: || 0,
+        pipe_stat: |_, _| None,
+        pipe_get_sz: |_| None,
+        pipe_set_sz: |_, _| Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
+        pipe_oasync_register: |_, _| {},
+        pipe_oasync_unregister: |_| {},
+        pipe_diag_snapshot: |_| None,
+        fifo_forget: |_, _| {},
+        fifo_open: |_, _, _| Err(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        memfd_add_seals: |_, _| Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
+        memfd_get_seals: |_| Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
+        memfd_name_by_ino: |_| None,
+        is_pipe_ops: |_| false,
+        is_fifo_ops: |_| false,
+        is_inotify_ops: |_| false,
+        is_memfd_ops: |_| false,
+        selinuxfs_root_inode: || None,
+        inotify_max_queued_events: || 16384,
+        inotify_set_max_queued_events: |_| {},
+        inotify_fdinfo_watches: |_| None,
+    };
+}
+
+pub static FS_HOOKS: crate::safety::slot::OnceSlot<FsHooks> =
+    crate::safety::slot::OnceSlot::new();
+
+/// The service crate's registration entry (idempotent: first wins).
+pub fn fs_register_hooks(hooks: FsHooks) {
+    let _ = FS_HOOKS.publish(hooks);
+}
+
+#[inline]
+fn hooks() -> &'static FsHooks {
+    FS_HOOKS.get().unwrap_or(&FsHooks::EMPTY)
+}
+
+pub fn notify(parent: Option<&Inode>, inode: Option<&Inode>, mask: u32, name: Option<&[u8]>, cookie: u32) {
+    (hooks().notify)(parent, inode, mask, name, cookie)
+}
+pub fn notify_file(file: &File, mask: u32) {
+    (hooks().notify_file)(file, mask)
+}
+pub fn notify_file_close(file: &File) {
+    (hooks().notify_file_close)(file)
+}
+pub fn alloc_cookie() -> u32 {
+    (hooks().alloc_cookie)()
+}
+
+// ---- ergonomic accessors (the net_hooks shape) ----
+pub fn is_pipe_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_pipe_ops)(ops) }
+pub fn is_fifo_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_fifo_ops)(ops) }
+pub fn is_inotify_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_inotify_ops)(ops) }
+pub fn is_memfd_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_memfd_ops)(ops) }
+pub fn pipe_diag_snapshot(file: &File) -> Option<(usize, usize, bool, bool)> { (hooks().pipe_diag_snapshot)(file) }
+pub fn memfd_name_by_ino(ino: u64) -> Option<&'static str> { (hooks().memfd_name_by_ino)(ino) }
+
+// ---------------------------------------------------------------------------
+// Joined into this file from fs/leaf_hooks.rs (pass 1b, seed-core-design 2c.4:
+// the interface tables of one subsystem in one file). Everything below
+// is that file as it was, except for what the join itself needed (see
+// the lines marked `join:`). Its header was a module doc comment and is
+// kept as plain comments; its own #![forbid(unsafe_code)] line is gone
+// because the one at the top of this file covers the whole module.
+// Two edits were forced by the join, both to the joined part's imports:
+// its own `use crate::fs::file::File;` is dropped, and `Inode` leaves
+// `use crate::fs::inode::{..}` (the first half imports both).
+// ---------------------------------------------------------------------------
+// MIT License
+//
+// Copyright (c) 2026 Fei Wang
+//
+// The substrate/boot leaf interface tables (fs-substrate tranche): the
+// framework -> fs crossing for the eleven leaves that left the
+// framework (debugfs, tracefs, cgroup, sysfs, char_dev, tty, pty,
+// rootfs, tmpfs, devfs, procfs). THREE tables, one per lifecycle
+// (crate-plan §3a rule 1 — split by concern, never a mega-table; FsHooks
+// stays the rung-3 pipe/fifo/inotify/memfd table):
+//
+//   LeafBootHooks      boot + mount lifecycle: lib.rs's boot sequence,
+//                      fsctx's mount arms, the mount table, initrd
+//   LeafPopulateHooks  kernel-side population: drivers, dfx, the trace
+//                      subsystem, the module loader, printk
+//   LeafPathHooks      per-syscall / per-fault dispatch: the VFS core,
+//                      mm policy, vt, loop_dev, coredump, console input
+//
+// NOTHING here runs at rust_main time. Registration only publishes the
+// tables (plain Copy values, no allocation); each row body runs when the
+// framework calls it. The mount registration in particular is invoked by
+// mount_table::register_builtin_handlers at ITS boot point — calling it
+// at rust_main time wedges x86_64 before the console exists (the boot.S
+// 'R'-beacon reboot loop).
+//
+// crate-plan §3a rule 2 (static dispatch first on data paths): the path
+// table carries the ops-table IDENTITIES the call sites compare inline
+// (leaf_glue), so no identity probe on a per-fault or per-ioctl path
+// costs an indirect call; the two devfs logic rows reached from the
+// file-fault path are gated inline on the same identity / on fs_id ==
+// FS_ID_DEVFS, so every other filesystem crosses zero times per fault.
+//
+// Row signatures carry the leaf's native types (crate-plan §3a rule 3);
+// the adapters in leaf_glue contain no logic.
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::dev_t::DevNo;
-use crate::fs::file::File;
 use crate::fs::file::FileOps;
-use crate::fs::inode::{Inode, InodeMode, INodeOps};
+use crate::fs::inode::{InodeMode, INodeOps};
 use crate::fs::leaf_glue::{InputEventReg, RamfsView, TmpfsTagKind};
 use crate::fs::Stat;
 use crate::safety::slot::OnceSlot;

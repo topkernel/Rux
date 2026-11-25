@@ -38,7 +38,7 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
 
     loop {
         // Check if we should stop
-        if crate::process::process_hooks::kthread_should_stop() {
+        if crate::api::process::kthread_should_stop() {
             break;
         }
 
@@ -170,7 +170,7 @@ pub fn init() {
         // BEFORE the first enqueue, so the task only ever becomes
         // visible with its final CPU identity. Linux parity:
         // kthread_create + kthread_bind + wake_up_process.
-        let task = crate::process::process_hooks::kthread_run_on_cpu(
+        let task = crate::api::process::kthread_run_on_cpu(
             ksoftirqd_fn,
             cpu as *mut core::ffi::c_void,
             name,

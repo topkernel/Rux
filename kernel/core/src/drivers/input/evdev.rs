@@ -1909,7 +1909,7 @@ fn cad_detect(event: InputEvent) {
             if CAD_MOD_CTRL.load(core::sync::atomic::Ordering::Acquire)
                 && CAD_MOD_ALT.load(core::sync::atomic::Ordering::Acquire)
             {
-                crate::process::process_hooks::ctrl_alt_del_latch();
+                crate::api::process::ctrl_alt_del_latch();
             }
         }
         _ => {}

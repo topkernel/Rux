@@ -3,13 +3,13 @@
 //! census/diagnostic walks — under a crate-level unsafe-forbid
 //! boundary. The framework keeps sched/sched.rs (the CORE half: GRQ +
 //! guards, the switch machinery, current/tp, NEED_RESCHED, task-slot
-//! lifecycle, the walkers) and sched/sched_hooks.rs (the hook table);
+//! lifecycle, the walkers) and api/sched.rs (the hook table);
 //! drivers and arch consume the policy through those.
 //!
 //! Sole-copy state (the rung-2 recipe's final step): the policy files
 //! LIVE in this crate (src/), flat under its root; the framework keeps sched.rs (the
 //! core half), class.rs (the dispatch contract), entities.rs (the
-//! storage), sched_hooks.rs (the seam), edges/side_edges/reapdrain.
+//! storage), api/sched.rs (the seam), edges/side_edges/reapdrain.
 
 #![forbid(unsafe_code)]
 #![no_std]
@@ -73,7 +73,7 @@ fn stop_class_fn() -> &'static dyn crate::sched::class::SchedClass {
 /// (sched/entities.rs) with direct framework accessors; only policy
 /// rows and armed-gated diagnostics remain registered here.
 pub fn register_all() {
-    use rux::sched::sched_hooks::{SchedHooks, sched_register_hooks};
+    use rux::api::sched::{SchedHooks, sched_register_hooks};
     sched_register_hooks(SchedHooks {
             r56_print_pid: sched_policy::r56_print_pid,
             change_task_policy: sched_policy::change_task_policy,

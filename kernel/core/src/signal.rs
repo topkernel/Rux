@@ -517,7 +517,7 @@ impl SignalStruct {
     /// method is the framework-side seam call. Semantics unchanged —
     /// see the crate body for the POSIX/clone3 notes.
     pub fn reset_all_handlers_default(&self) {
-        crate::signal_hooks::reset_all_handlers_default(self);
+        crate::api::signal::reset_all_handlers_default(self);
     }
 
     /// Get signal handling action
@@ -534,7 +534,7 @@ impl SignalStruct {
     /// bit per signal disposed to SIG_IGN, SigCgt a bit per signal
     /// with a user handler installed.
     pub fn ign_cgt_masks(&self) -> (u64, u64) {
-        crate::signal_hooks::ign_cgt_masks(self)
+        crate::api::signal::ign_cgt_masks(self)
     }
 
     /// Add signal mask
@@ -575,7 +575,7 @@ impl SignalStruct {
     /// some privileged exec paths). Policy body moved to the signal
     /// crate (signal_policy.rs); this method is the seam call.
     pub fn flush_handlers(&self, force_default: bool) {
-        crate::signal_hooks::flush_handlers(self, force_default)
+        crate::api::signal::flush_handlers(self, force_default)
     }
 
     /// The ONE accessor added for the signal carve: run `f` over the
@@ -1485,7 +1485,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // signal; the peek below feeds it the queued siginfo's
         // si_code/si_pid (0 when the queue holds no payload).
         let qi = current.pending.peek_info(sig);
-        let discard = crate::signal_hooks::init_delivery_filter(
+        let discard = crate::api::signal::init_delivery_filter(
             sig,
             handled,
             qi.map(|i| i.si_code).unwrap_or(0),
@@ -2725,9 +2725,9 @@ fn handle_default_signal(sig: i32) {
 
     use crate::sched;
 
-    match crate::signal_hooks::default_action_class(sig) {
+    match crate::api::signal::default_action_class(sig) {
         // Ignore by default: SIGCHLD(17), SIGURG(23), SIGWINCH(28)
-        crate::signal_hooks::DefaultActionClass::Ignore => {
+        crate::api::signal::DefaultActionClass::Ignore => {
             // Default ignore
         }
         // SIGCONT(18): resume a job-control stop AND record the
@@ -2738,7 +2738,7 @@ fn handle_default_signal(sig: i32) {
         // sentinel = -SIGCONT (negative = "continued pending"; the stop
         // arms only read it while the task is STOPPED, so the sentinel
         // is invisible to them), stop_reported re-armed = unreported.
-        crate::signal_hooks::DefaultActionClass::Continue => {
+        crate::api::signal::DefaultActionClass::Continue => {
             // SAFETY: current is a valid task pointer from sched::current().
             {
                 if let Some(current) = sched::current() {
@@ -2794,7 +2794,7 @@ fn handle_default_signal(sig: i32) {
             }
         }
         // Stop process: SIGSTOP(19), SIGTSTP(20), SIGTTIN(21), SIGTTOU(22)
-        crate::signal_hooks::DefaultActionClass::GroupStop => {
+        crate::api::signal::DefaultActionClass::GroupStop => {
             // SIGSTOP, SIGTSTP - stop process
             // SAFETY: current is a valid task pointer from sched::current().
             {
@@ -2838,7 +2838,7 @@ fn handle_default_signal(sig: i32) {
         // Terminate process (core dump or direct termination) — the
         // signal-number list lives in the crate's table (1-16, 24-27,
         // 29-31).
-        crate::signal_hooks::DefaultActionClass::Terminate => {
+        crate::api::signal::DefaultActionClass::Terminate => {
             // Call do_group_exit to properly terminate the WHOLE thread
             // group (Linux: a fatal signal in any thread runs
             // do_group_exit — the surviving-leader model would leave a
@@ -2888,7 +2888,7 @@ fn handle_default_signal(sig: i32) {
 /// their siginfo is SI_KERNEL with no sender.
 /// POLICY moved to the signal crate (signal_policy.rs); seam call.
 pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
-    crate::signal_hooks::send_from_user(pid, sig)
+    crate::api::signal::send_from_user(pid, sig)
 }
 
 // abort_reason_dump MOVED to kernel/core/src/signal_unsafe.rs (the
@@ -2904,7 +2904,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
 /// forensics printed si_pid=0/si_code=0 and the real sender stayed
 /// invisible (gnome-session-binary SIGTERM hunt, fire-gate-merged-r1).
 pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
-    crate::signal_hooks::send_from_user_tkill(tid, sig)
+    crate::api::signal::send_from_user_tkill(tid, sig)
 }
 
 /// Force-unblock a SYNCHRONOUS signal in the current task (Linux
@@ -2920,7 +2920,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
 /// hardware-generated signals are delivered regardless of the mask, so
 /// the kernel clears the bit for the faulting thread before returning.
 pub fn force_unblock_current(sig: i32) {
-    crate::signal_hooks::force_unblock_current(sig)
+    crate::api::signal::force_unblock_current(sig)
 }
 
 pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {    // Check if signal number is valid
@@ -2997,7 +2997,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
         None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
     };
 
-    crate::signal_hooks::send_signal_core(&*task_ref, sig, None, group)
+    crate::api::signal::send_signal_core(&*task_ref, sig, None, group)
 }
 
 // send_signal_locked / send_signal_locked_info MOVED to the
@@ -3011,7 +3011,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
 /// Queues a full SigInfo for real-time signals (sigwaitinfo consumers)
 /// and falls back to the plain bitmap for standard signals.
 pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
-    crate::signal_hooks::send_info(pid, sig, si_code)
+    crate::api::signal::send_info(pid, sig, si_code)
 }
 
 impl SigInfo {
@@ -3090,7 +3090,7 @@ fn send_signal_with_info_g(pid: u32, info: SigInfo, group: i32) -> Result<(), i3
         Some(t) => t,
         None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
     };
-    crate::signal_hooks::send_signal_core(&*task_ref, sig, Some(info), group)
+    crate::api::signal::send_signal_core(&*task_ref, sig, Some(info), group)
 }
 
 /// Send a signal to all processes in a given process group.
@@ -3098,7 +3098,7 @@ fn send_signal_with_info_g(pid: u32, info: SigInfo, group: i32) -> Result<(), i3
 /// Used by the TTY ISIG handler to deliver SIGINT/SIGQUIT/SIGTSTP
 /// to the foreground process group.
 pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
-    crate::signal_hooks::send_to_pgid(pgid, sig)
+    crate::api::signal::send_to_pgid(pgid, sig)
 }
 
 pub fn park_stopped_task(task: *mut crate::process::task::Task) {
@@ -3166,7 +3166,7 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
     // Ctrl-Alt-Del path: same task-context delivery rule. The input
     // detectors (UART RX IRQ, evdev) only latch an atomic; the SIGINT to
     // init (or the immediate-reboot cascade) runs here.
-    crate::process::process_hooks::cad_deliver_pending();
+    crate::api::process::cad_deliver_pending();
 
     // regs is the trap handler's frame pointer (the one frame edge
     // lives inside do_signal); sched::current() returns a typed &mut.

@@ -122,7 +122,7 @@ pub fn compact_line() {
     l.push(b" slab_pages=");
     l.dec(slab.total_pages as u64);
     l.push(b" swap_active=");
-    l.dec(crate::mm::mm_hooks::nr_active_swap() as u64);
+    l.dec(crate::api::mm::nr_active_swap() as u64);
     l.emit();
 }
 

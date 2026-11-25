@@ -12,7 +12,7 @@ edition = "2021"
 # the WaitQueueHead family in process/wait.rs, the namespace types in
 # process/ns.rs, and process/exit.rs's exit/reap machinery whose
 # callers are the arch traps, signal delivery and the scheduler reap
-# path) plus the seam (process/process_hooks.rs — three cold-path
+# path) plus the seam (api/process.rs — three cold-path
 # tables).
 #
 # Zero-move step: #[path]-includes of the service files living in the

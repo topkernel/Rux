@@ -116,7 +116,7 @@ pub fn load() -> Result<CpioStats, &'static str> {
 
     let cpio: CpioSource = if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
         CpioSource::Owned(
-            (crate::fs::leaf_hooks::boot_hooks().initrd_gunzip)(raw)?
+            (crate::api::fs::boot_hooks().initrd_gunzip)(raw)?
         )
     } else {
         CpioSource::Borrowed(raw)
@@ -126,7 +126,7 @@ pub fn load() -> Result<CpioStats, &'static str> {
     // lives in the fs crate; the trait is the seam).
     let sb = crate::fs::leaf_glue::rootfs::sb_view().ok_or("rootfs not initialized")?;
 
-    let stats = (crate::fs::leaf_hooks::boot_hooks().initrd_unpack_newc)(
+    let stats = (crate::api::fs::boot_hooks().initrd_unpack_newc)(
         cpio.as_slice(), sb,
     )?;
     INITRD_LOADED.store(true, Ordering::Release);

@@ -4,7 +4,7 @@
 //! access_token registry — under a crate-level unsafe-deny boundary.
 //! The framework keeps ipc/binder.rs (the rung's verdict: its
 //! block-view windows, Arc adoption and diagnostic walkers are
-//! floor-shaped), ipc/ipc_hooks.rs (the 26-row seam), ipc/unsafe.rs
+//! floor-shaped), api/ipc.rs (the 26-row seam), ipc/unsafe.rs
 //! (INV-IPC-PAGEOP-1) and the SemUndoEntry type substrate.
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
@@ -61,7 +61,6 @@ pub use rux::ipc::sysv_sem;
 pub use rux::ipc::util;
 // the seam zones the service files consume (the hook table's
 // KeyQuota type; the audited page-refcount edges).
-pub use rux::ipc::ipc_hooks;
 // the one audited-edge zone of the subsystem (page refcounts and the
 // binder diagnostic edges, joined in rux::ipc::unsafe).
 pub use rux::ipc::r#unsafe;
@@ -87,7 +86,7 @@ pub mod ipc_sysv;
 /// The boot-time registration (bin calls this before kmain): the
 /// IpcHooks table's rows. THE composition contract.
 pub fn register_all() {
-    rux::ipc::ipc_hooks::ipc_register_hooks(rux::ipc::ipc_hooks::IpcHooks {
+    rux::api::ipc::ipc_register_hooks(rux::api::ipc::IpcHooks {
         mq_fds_cleanup: posix_mq::mq_fds_cleanup,
         exec_clear_thread_keyring: keys::exec_clear_thread_keyring,
         at_registered_token_of: access_token::registered_token_of,
@@ -116,8 +115,8 @@ pub fn register_all() {
     // The binder diagnostic rows (cold-four lane): the moved audits and
     // census reports the framework's heartbeat slot / taskdump paths
     // reach through the seam (OnceSlot-only publication).
-    rux::ipc::binder_diag_hooks::binder_diag_register_hooks(
-        rux::ipc::binder_diag_hooks::BinderDiagHooks {
+    rux::api::ipc::binder_diag_register_hooks(
+        rux::api::ipc::BinderDiagHooks {
             txn_hang_audit: binder_diag::txn_hang_audit,
             bwr_park_audit: binder_diag::bwr_park_audit,
             ams46_audit: binder_diag::ams46_audit,

@@ -43,7 +43,7 @@ struct BootMount {
 /// `/dev/shm` and `/sys/fs/cgroup` come in through the live namespace
 /// table (they are mounted via do_mount, which registers them).
 fn boot_mounts() -> Vec<BootMount> {
-    let root_is_ext4 = rux::fs::ext4_hooks::mounted();
+    let root_is_ext4 = rux::api::ext4::mounted();
     let mut out = Vec::new();
     out.push(BootMount {
         mount_id: 1,

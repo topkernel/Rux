@@ -41,7 +41,7 @@ pub fn init() {
     }
 
     // Start khungtaskd kernel thread
-    let result = crate::process::process_hooks::kthread_run(
+    let result = crate::api::process::kthread_run(
         khungtaskd_fn,
         core::ptr::null_mut(),
         "khungtaskd",
@@ -68,7 +68,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
     loop {
         // Check for stop request
-        if crate::process::process_hooks::kthread_should_stop() {
+        if crate::api::process::kthread_should_stop() {
             break;
         }
 
@@ -123,15 +123,15 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // Binder stall scan: threads parked in a blocking binder read are
         // S-state (invisible above); they mark an IPC chain that stopped
         // answering — the common OH bring-up stall shape.
-        crate::ipc::binder_diag_hooks::stall_report();
+        crate::api::ipc::stall_report();
 
         // rux:sleepsnap (retired debug=sleepsnap): name the syscall every other S-state thread is
         // parked in (appspawn-server wedge hunt, b11) — self-gated.
-        crate::ipc::binder_diag_hooks::sleep_snapshot();
+        crate::api::ipc::sleep_snapshot();
 
         // rux:socksnap (retired debug=socksnap): AF_UNIX listener queue depths + every epoll
         // interest set (appspawn-server wedge hunt, b15) — self-gated.
-        crate::net::net_hooks::unix_listener_snapshot();
+        crate::api::net::unix_listener_snapshot();
         crate::syscall::support::epoll_interest_snapshot();
     }
 

@@ -312,13 +312,12 @@ pub fn do_mount(
 }
 
 pub fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {
-    use crate::fs::ext4_hooks;
 
     // Currently only support unmounting ext4 (mounted at root "/")
     let is_root = target == "/" || target.is_empty();
 
-    if is_root && ext4_hooks::mounted() {
-        ext4_hooks::unmount();
+    if is_root && crate::api::ext4::mounted() {
+        crate::api::ext4::unmount();
         crate::println!("vfs: unmounted ext4 filesystem from {}", target);
         return Ok(());
     }

@@ -404,7 +404,7 @@ fn resolve_futex_phys(uaddr: usize) -> usize {
     {
         if let Some(mm) = crate::sched::r#unsafe::task_shared(task).address_space() {
             let page = uaddr & !0xfff;
-            let _ = crate::mm::mm_hooks::handle_mm_fault(
+            let _ = crate::api::mm::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page as u64),
                 crate::arch::mm::FaultFlags::READ,
@@ -2571,7 +2571,7 @@ pub fn futex_stuck_census() {
             && g.uaddr > 0x1000
             && comm_s.starts_with("EventRunner")
         {
-            crate::sync::sync_diag_hooks::ctd_decode(g.tgid, g.uaddr as u64, "V");
+            crate::api::sync::ctd_decode(g.tgid, g.uaddr as u64, "V");
         }
         // 118th (mouse-endgame): standing-word holder scan. A group whose
         // park has stood >= 60 s names a lock that will never turn again;
@@ -2634,7 +2634,7 @@ pub fn futex_stuck_census() {
                 SCAN_TGID[slot_ix].store(g.tgid, Relaxed);
                 SCAN_WORD[slot_ix].store(g.uaddr as u64, Relaxed);
                 SCAN_J[slot_ix].store(now as u32, Relaxed);
-                crate::sync::sync_diag_hooks::rwfrz_reader_scan(g.tgid, g.uaddr as u64);
+                crate::api::sync::rwfrz_reader_scan(g.tgid, g.uaddr as u64);
                 // 120th ROOT-CAUSE CORRECTION: the 118th's gate
                 // `uaddr & 0xffff_f000 == 0x3fbf_13e000` used a 32-bit
                 // mask against a 42-bit constant — always false, so LLVM
@@ -2642,7 +2642,7 @@ pub fn futex_stuck_census() {
                 // release binary since the 118th. 64-bit page mask.
                 let gu = g.uaddr as u64;
                 if gu & 0xffff_ffff_f000 == 0x3fbf_13e000 {
-                    crate::sync::sync_diag_hooks::malloc_holder_scan(g.tgid, gu);
+                    crate::api::sync::malloc_holder_scan(g.tgid, gu);
                 }
                 // 120th GENERALIZED TRIGGER: a word that stood parked
                 // >= 60 s with zero wakes gets the CoTask decoder with
@@ -2659,7 +2659,7 @@ pub fn futex_stuck_census() {
                 // now decodable. Cost bound: the per-tgid DONE latch
                 // inside ctd_decode (16 slots) allows one decode per
                 // tgid per boot.
-                crate::sync::sync_diag_hooks::ctd_decode(g.tgid, gu, "W");
+                crate::api::sync::ctd_decode(g.tgid, gu, "W");
             }
         }
         // 51st session: follow this word's futex lifecycle from here on
@@ -4958,9 +4958,9 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         val
                     );
                     let ctw = CTDE_WORD;
-                    crate::sync::sync_diag_hooks::fuxpark_latch(ctw, tid, tgid);
-                    crate::sync::sync_diag_hooks::malloc_holder_scan(tgid, ctw);
-                    crate::sync::sync_diag_hooks::ctd_decode(tgid, ctw, "E");
+                    crate::api::sync::fuxpark_latch(ctw, tid, tgid);
+                    crate::api::sync::malloc_holder_scan(tgid, ctw);
+                    crate::api::sync::ctd_decode(tgid, ctw, "E");
                 }
             }
         }
@@ -5039,7 +5039,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     .unwrap_or("")
                     .trim_end_matches('\0');
                 if name == "hdf_devmgr" {
-                    crate::sync::sync_diag_hooks::fxdv_latch_devmgr(crate::sched::r#unsafe::task_shared(t).tgid() as u32);
+                    crate::api::sync::fxdv_latch_devmgr(crate::sched::r#unsafe::task_shared(t).tgid() as u32);
                 }
             }
         }
@@ -5806,8 +5806,8 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let kind = match f.get_ops() {
                                         Some(ops) => {
                                             let p = ops as *const crate::fs::FileOps;
-                                            if crate::net::net_hooks::is_unix_socket_ops(ops) {
-                                                match crate::net::net_hooks::unix_fd_bound_peer(
+                                            if crate::api::net::is_unix_socket_ops(ops) {
+                                                match crate::api::net::unix_fd_bound_peer(
                                                     fd as usize,
                                                 ) {
                                                     Some((bn, peer)) => {
@@ -5818,22 +5818,22 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                     }
                                                     None => "unix".into(),
                                                 }
-                                            } else if crate::net::net_hooks::is_inet_socket_ops(
+                                            } else if crate::api::net::is_inet_socket_ops(
                                                 ops,
                                             ) {
                                                 "inet-socket".into()
-                                            } else if crate::net::net_hooks::is_netlink_ops(ops) {
+                                            } else if crate::api::net::is_netlink_ops(ops) {
                                                 "netlink".into()
-                                            } else if crate::net::net_hooks::is_raw_ops(ops) {
+                                            } else if crate::api::net::is_raw_ops(ops) {
                                                 "raw-socket".into()
                                             } else if core::ptr::eq(
                                                 p,
                                                 &crate::ipc::binder::BINDER_OPS,
                                             ) {
                                                 "binder".into()
-                                            } else if crate::fs::fs_hooks::is_pipe_ops(ops) {
+                                            } else if crate::api::fs::is_pipe_ops(ops) {
                                                 "pipe".into()
-                                            } else if crate::fs::fs_hooks::is_memfd_ops(ops) {
+                                            } else if crate::api::fs::is_memfd_ops(ops) {
                                                 "memfd".into()
                                             } else if core::ptr::eq(
                                                 p,
@@ -5964,7 +5964,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // park time (the appconn hex was unreadable —
                             // strncpy stopped at the abstract NUL).
                             if n == 0 {
-                                for line in crate::net::net_hooks::unix_registry_snapshot() {
+                                for line in crate::api::net::unix_registry_snapshot() {
                                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                                     crate::pr_warn!("{}", line);
                                 }
@@ -6285,7 +6285,7 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
     if let Some(rest) = p.strip_prefix("anon_inode:[") {
         if let Some(num) = rest.strip_suffix(']') {
             if let Ok(ino) = num.parse::<u64>() {
-                if let Some(name) = crate::fs::fs_hooks::memfd_name_by_ino(ino) {
+                if let Some(name) = crate::api::fs::memfd_name_by_ino(ino) {
                     return alloc::format!("{} memfd:{}", p, name);
                 }
             }

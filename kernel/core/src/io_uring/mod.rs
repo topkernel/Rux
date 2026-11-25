@@ -594,7 +594,7 @@ pub fn io_uring_mmap_handler(
     // MMAP_START made every SECOND ring mmap collide with the first).
     // find_free_area honors existing VMAs, so repeated NULL mappings stack.
     let vaddr = if addr == 0 {
-        match crate::mm::mm_hooks::find_free_area(&addr_space, region.size) {
+        match crate::api::mm::find_free_area(&addr_space, region.size) {
             Ok(v) => v.as_usize(),
             Err(_) => return Err(-12), // ENOMEM: no gap left
         }

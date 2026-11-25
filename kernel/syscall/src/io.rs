@@ -1375,8 +1375,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // and died past-EOF on the resulting wrong-size mapping.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if crate::drivers::hooks::is_fb_file(&file) {
-                return crate::drivers::hooks::fbdev_ioctl(request, arg) as i64;
+            if rux::api::drivers::is_fb_file(&file) {
+                return rux::api::drivers::fbdev_ioctl(request, arg) as i64;
             }
         }
     }
@@ -1535,7 +1535,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if let Some(ret) = crate::drivers::hooks::watchdog_ioctl(&file, request, arg) {
+            if let Some(ret) = rux::api::drivers::watchdog_ioctl(&file, request, arg) {
                 return ret;
             }
         }
@@ -1560,7 +1560,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) =
-                crate::drivers::hooks::tokenid_ioctl(&file, request, arg)
+                rux::api::drivers::tokenid_ioctl(&file, request, arg)
             {
                 return ret;
             }

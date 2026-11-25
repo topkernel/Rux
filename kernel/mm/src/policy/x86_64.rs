@@ -32,7 +32,7 @@ use crate::arch::mm::pagetable::*;
 use rux::mm::page::PAGE_SIZE as PAGE_SIZE_USIZE;
 use rux::mm::vma::VmaType;
 use rux::mm::AddressSpace;
-use rux::mm::mm_hooks::{FaultFlags, MmFaultResult};
+use rux::api::mm::{FaultFlags, MmFaultResult};
 use rux::mm::mm_struct::MmStruct;
 use rux::mm::pagemap::{MapError, Perm, PageTableType};
 use rux::mm::vma::{Vma, VmaFlags, VmaOrigin};
@@ -3371,7 +3371,7 @@ fn handle_swap_fault(
                     }
                     // Increment nattch for shared memory attachments inherited by child
                     if vma_type == rux::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
-                        crate::ipc::ipc_hooks::shm_attach_vma(file_fd);
+                        rux::api::ipc::shm_attach_vma(file_fd);
                     }
                     // Fork copy: the child's mapping carries the same
                     // virtual size as the parent's (the reference kernel

@@ -194,21 +194,21 @@ pub static MAXBYTES: AtomicI32 = AtomicI32::new(20_000);
 /// The /proc/sys/kernel/keys quota rows (IpcHooks): the framework's
 /// sysctl generates/writes through these instead of touching the
 /// service-owned statics directly.
-pub fn key_quota(q: crate::ipc_hooks::KeyQuota) -> i32 {
+pub fn key_quota(q: rux::api::ipc::KeyQuota) -> i32 {
     let s = match q {
-        crate::ipc_hooks::KeyQuota::RootMaxKeys => &ROOT_MAXKEYS,
-        crate::ipc_hooks::KeyQuota::RootMaxBytes => &ROOT_MAXBYTES,
-        crate::ipc_hooks::KeyQuota::MaxKeys => &MAXKEYS,
-        crate::ipc_hooks::KeyQuota::MaxBytes => &MAXBYTES,
+        rux::api::ipc::KeyQuota::RootMaxKeys => &ROOT_MAXKEYS,
+        rux::api::ipc::KeyQuota::RootMaxBytes => &ROOT_MAXBYTES,
+        rux::api::ipc::KeyQuota::MaxKeys => &MAXKEYS,
+        rux::api::ipc::KeyQuota::MaxBytes => &MAXBYTES,
     };
     s.load(core::sync::atomic::Ordering::Relaxed)
 }
-pub fn set_key_quota(q: crate::ipc_hooks::KeyQuota, v: i32) {
+pub fn set_key_quota(q: rux::api::ipc::KeyQuota, v: i32) {
     let s = match q {
-        crate::ipc_hooks::KeyQuota::RootMaxKeys => &ROOT_MAXKEYS,
-        crate::ipc_hooks::KeyQuota::RootMaxBytes => &ROOT_MAXBYTES,
-        crate::ipc_hooks::KeyQuota::MaxKeys => &MAXKEYS,
-        crate::ipc_hooks::KeyQuota::MaxBytes => &MAXBYTES,
+        rux::api::ipc::KeyQuota::RootMaxKeys => &ROOT_MAXKEYS,
+        rux::api::ipc::KeyQuota::RootMaxBytes => &ROOT_MAXBYTES,
+        rux::api::ipc::KeyQuota::MaxKeys => &MAXKEYS,
+        rux::api::ipc::KeyQuota::MaxBytes => &MAXBYTES,
     };
     s.store(v, core::sync::atomic::Ordering::Relaxed);
 }

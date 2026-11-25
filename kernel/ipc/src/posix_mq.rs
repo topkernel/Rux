@@ -609,7 +609,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                     if let Some(sock) = mq.notify_sock.lock().take() {
                         let mut msg = [0u8; 32];
                         msg[31] = 1;
-                        crate::net::net_hooks::netlink_push_kernel_message(&sock, msg);
+                        rux::api::net::netlink_push_kernel_message(&sock, msg);
                     }
                     let signo = mq.notify_signo.load(Ordering::Relaxed);
                     if signo > 0 {
@@ -1004,7 +1004,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // the same EINVAL/EBADF split Linux's sockfd_lookup makes).
         let sock_file = crate::sched::get_current_fdtable()
             .and_then(|ft| ft.get_file(sev.sigev_signo as usize))
-            .filter(|f| f.get_ops().map(|o| crate::net::net_hooks::is_netlink_ops(o)).unwrap_or(false));
+            .filter(|f| f.get_ops().map(|o| rux::api::net::is_netlink_ops(o)).unwrap_or(false));
         match sock_file {
             Some(sock) => {
                 mq.notify_pid.store(my_pid, Ordering::Relaxed);

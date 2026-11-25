@@ -716,7 +716,7 @@ fn transmit_arp_packet(skb: SkBuff) {
         return;
     }
 
-    crate::drivers::hooks::loopback_send(skb);
+    rux::api::drivers::loopback_send(skb);
 }
 
 /// Resolve IP address to MAC address

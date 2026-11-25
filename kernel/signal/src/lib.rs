@@ -5,7 +5,7 @@
 //! unsafe-forbid boundary. The framework keeps the MECHANISM (the
 //! pending set and its queue on the task, the pt_regs frame build and
 //! sigreturn restore, the wake path, the pinned pid-hash lookups, the
-//! schedule loop) plus the hook table (kernel/core/src/signal_hooks.rs);
+//! schedule loop) plus the hook table (kernel/core/src/api/signal.rs);
 //! the composition bin registers this crate's rows before the framework
 //! boots.
 //!
@@ -28,7 +28,7 @@ pub use rux::{
     arch, cmdline, config, console, debug, drivers, errno, fs, interrupt, ipc,
     mm, process, safety, sched, security, sync, syscall, timer, trace,
 };
-pub use rux::{signal_hooks, signal_unsafe};
+pub use rux::signal_unsafe;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 
@@ -54,7 +54,7 @@ pub mod signal_policy;
 /// lock, no per-CPU state (registration runs from rust_main, before
 /// arch::smp::init()).
 pub fn register_all() {
-    rux::signal_hooks::signal_register_hooks(rux::signal_hooks::SignalHooks {
+    rux::api::signal::signal_register_hooks(rux::api::signal::SignalHooks {
         send_signal_core: crate::signal_policy::send_signal_core,
         send_from_user: crate::signal_policy::send_signal_from_user,
         send_from_user_tkill: crate::signal_policy::send_signal_from_user_tkill,

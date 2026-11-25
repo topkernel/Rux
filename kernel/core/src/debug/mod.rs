@@ -156,11 +156,7 @@ pub mod cctx;
 /// app-cycle children, and whether they linger un-reaped; see
 /// debug/reaper.rs.
 pub mod reaper;
-/// The observability hook table (crate-flip rung debug): the cold
-/// framework entry points into the debug service crate's
-/// report/init/publish surface (the IpcHooks pattern). The per-event
-/// record markers stay direct framework calls.
-pub mod debug_hooks;
+// The observability hook table (DebugHooks) is crate::api::debug.
 
 /// Initialize the DEBUG subsystem.
 ///
@@ -186,7 +182,7 @@ pub fn init() {
     // Publish the tracepoint control surface (tracefs) — the file set
     // moved to the debug crate (debug::trace_files); the row is
     // registered by the composition bin before this runs.
-    crate::debug::debug_hooks::trace_files_register();
+    crate::api::debug::trace_files_register();
 
     // aarch64 bring-up probe (debug-aa64-uaccess-selftest): exercise the
     // uaccess exception-table fault containment with a poisoned user

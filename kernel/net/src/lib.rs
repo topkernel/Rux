@@ -1,7 +1,7 @@
 //! The NET SERVICE CRATE (crate-flip rung 2): the network stack —
 //! TCP/UDP/UNIX/ICMP/ARP/route/netlink + the ethernet layer — under a
 //! crate-level unsafe-deny boundary. The framework keeps
-//! net/net_hooks.rs (the hook table) and the drivers consume the
+//! api/net.rs (the hook table) and the drivers consume the
 //! stack's packet-ingress surface downward.
 //!
 //! Sole-copy state (the rung-1 recipe's final step): the service files
@@ -46,7 +46,6 @@ pub use rux::net::file_arc::file_arc;
 pub use rux::net::file_arc::take_file_arc as reclaim_file_arc;
 pub use rux::net::file_arc::take_file_arc;
 pub use rux::net::r#unsafe;
-pub use rux::net::net_hooks;
 pub mod ethernet;
 pub mod icmp;
 pub mod netlink;
@@ -70,7 +69,7 @@ pub mod net_globs {
 /// futex diagnostics, syscost, timers, softirq, vfs stat, posix_mq,
 /// the boot init seam) resolve through these.
 mod hooks_impl {
-    use rux::net::net_hooks::{TcpRow, UdpRow, ArpRow, RouteRow, DevRow, UnixDiag, TcpCensusRow};
+    use rux::api::net::{TcpRow, UdpRow, ArpRow, RouteRow, DevRow, UnixDiag, TcpCensusRow};
 
     pub fn tcp_rows() -> alloc::vec::Vec<TcpRow> {
         crate::tcp::tcp_dump()
@@ -128,7 +127,7 @@ mod hooks_impl {
 
     pub fn dev_rows() -> alloc::vec::Vec<DevRow> {
         let mut rows = alloc::vec::Vec::new();
-        let lo = rux::drivers::hooks::loopback_stats();
+        let lo = rux::api::drivers::loopback_stats();
         rows.push(DevRow {
             name: alloc::string::String::from("lo"),
             rx_bytes: lo.rx_bytes,
@@ -274,7 +273,7 @@ mod hooks_impl {
 /// rung-2 data seam). Called by the composition bin before the
 /// framework impl.
 pub fn register_all() {
-    use rux::net::net_hooks::{NetHooks, net_register_hooks};
+    use rux::api::net::{NetHooks, net_register_hooks};
     net_register_hooks(NetHooks {
         tcp_rows: hooks_impl::tcp_rows,
         udp_rows: hooks_impl::udp_rows,

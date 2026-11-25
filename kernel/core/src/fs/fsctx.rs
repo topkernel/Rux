@@ -337,7 +337,7 @@ pub fn create_fs_root(
             ))
         }
         "selinuxfs" => Ok((
-            (crate::fs::fs_hooks::FS_HOOKS.get().unwrap_or(&crate::fs::fs_hooks::FsHooks::EMPTY).selinuxfs_root_inode)()
+            (crate::api::fs::FS_HOOKS.get().unwrap_or(&crate::api::fs::FsHooks::EMPTY).selinuxfs_root_inode)()
                 .ok_or(crate::errno::Errno::NoSuchDevice.as_neg_i32())?,
             false,
         )),
@@ -378,7 +378,7 @@ pub fn create_fs_root(
         // replay, like a fresh scratch mount).
         // The whole ext-family arm is the crate's (rung-5 seam row):
         // loop-idx/named-disk resolution + second-instance mount.
-        "ext2" | "ext3" | "ext4" => crate::fs::ext4_hooks::fsctx_mount_instance(src, ro),
+        "ext2" | "ext3" | "ext4" => crate::api::ext4::fsctx_mount_instance(src, ro),
         _ => Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
     }
 }

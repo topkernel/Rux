@@ -513,12 +513,12 @@ fn devtmpfs_populate() {
         &crate::drivers::ashmem::ASHMEM_OPS,
     );
     // The driver-leaf rows (access_tokenid, watchdog) come through the
-    // driver service seam (drivers/hooks.rs) — the historical order is
+    // driver service seam (api/api/drivers.rs) — the historical order is
     // preserved: after ashmem, before the node batch below.
     // /dev/watchdog (misc 10:130): OH watchdog_service (init_watchdog.c)
     // stats/opens it at boot; without the node the service waits 10s and
     // dies (b151 pid 306). Non-firing softdog — see drivers/watchdog.rs.
-    let leaf_rows = crate::drivers::hooks::devfs_char_rows();
+    let leaf_rows = rux::api::drivers::devfs_char_rows();
     for row in &leaf_rows {
         let _ = registry::register_char_device(row.devno, row.ops);
     }
@@ -640,7 +640,7 @@ fn devtmpfs_populate() {
     // the SET path permission-checks uid internally (root/3020).
     // The access_token char device rides the IpcHooks row (the device
     // number + ops static are service-owned; None = not registered).
-    if let Some((at_devno, at_ops)) = crate::ipc::ipc_hooks::at_char_device() {
+    if let Some((at_devno, at_ops)) = rux::api::ipc::at_char_device() {
         let _ = registry::register_char_device(at_devno, at_ops);
         children.insert(
             String::from("access_token_id"),

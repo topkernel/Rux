@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 use crate::sched::entities::{CfsRunQueue, SchedEntity, LoadWeight, NICE_0_LOAD, StrandWallRow};
 use crate::sched::r#unsafe::{node_key, node_of_task, task_of_node};
-use crate::sched::sched_hooks::{CLASS_CFS_BIT, WW_EV_LINK, WW_EV_UNLINK_POISON};
+use rux::api::sched::{CLASS_CFS_BIT, WW_EV_LINK, WW_EV_UNLINK_POISON};
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::{MAX_CPUS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
 use crate::process::task::{Task, SchedPolicy};
@@ -51,7 +51,7 @@ pub fn pick_giveups() -> (u64, u64) {
 pub fn ww_pick_walks() -> u64 {
     // S1b sole-copy bug (the boot wedge): this impl is REGISTERED as the
     // framework hook (lib.rs register_all row `ww_pick_walks`), so the
-    // old body's forward back to sched_hooks::ww_pick_walks() was
+    // old body's forward back to rux::api::sched::ww_pick_walks() was
     // self-recursion — hooks wrapper -> registered impl -> forwarder ->
     // hooks wrapper, each level copying the 73-row hook table to the
     // stack, until the stack chewed past the .bss page tables and the
@@ -433,7 +433,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                 crate::sched::sched::tl_poison_erase_inc();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
-                crate::sched::sched_hooks::ww_record(task, crate::sched::sched_hooks::WW_EV_UNLINK_POISON);
+                rux::api::sched::ww_record(task, rux::api::sched::WW_EV_UNLINK_POISON);
                 break;
             }
 
@@ -863,7 +863,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                 }
 
                 result = Some(task);
-                crate::sched::sched_hooks::ww_record(task, crate::sched::sched_hooks::WW_EV_UNLINK_PICK);
+                rux::api::sched::ww_record(task, rux::api::sched::WW_EV_UNLINK_PICK);
                 crate::sched::sched::pick_trace(task, 1);
                 break;
             }
@@ -1132,7 +1132,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         // budget can swallow the line (a budgeted-out heal must still
         // appear in the victim's history).
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
-            crate::sched::sched_hooks::sched_hist_ring(
+            rux::api::sched::sched_hist_ring(
                 crate::sched::r#unsafe::task_shared(task),
                 5,
                 1,
@@ -1195,7 +1195,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
         crate::sched::entities::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
-            crate::sched::sched_hooks::sched_hist_ring(
+            rux::api::sched::sched_hist_ring(
                 crate::sched::r#unsafe::task_shared(task),
                 4,
                 2,

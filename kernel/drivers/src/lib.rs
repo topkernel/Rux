@@ -9,7 +9,7 @@
 //! framework keeps the mechanism drivers (virtio transports + virtio
 //! device families, intc, timer/clockevent machinery, rtc timekeeping,
 //! pci, the netdev/block/GPU registries, DRM's GEM allocator, the
-//! framebuffer pixel substrate) and the two seams: drivers/hooks.rs
+//! framebuffer pixel substrate) and the two seams: api/api/drivers.rs
 //! (the DriverHooks table this crate fills) and drivers/initcalls.rs
 //! (the leveled device-init table).
 //!
@@ -75,7 +75,7 @@ pub mod of_fdt;
 // (rux::drivers::timer is NOT among them: the crate root's `timer` is
 // the framework's timekeeping module, which the service files use; the
 // driver one is named by its full path.)
-pub use rux::drivers::{blkdev, drm, hooks, initcalls, input,
+pub use rux::drivers::{blkdev, drm, initcalls, input,
     intc, loop_dev, pci, rtc};
 pub use rux::drivers::ashmem;
 
@@ -115,8 +115,8 @@ pub mod gpu {
 /// getters (devfs populate, the netdev registry, /proc/net, the ioctl
 /// and mmap dispatch, the fbdev boot init) resolve through these.
 pub fn register_all() {
-    use rux::drivers::hooks::CharDeviceRow;
-    rux::drivers::hooks::register_driver_hooks(rux::drivers::hooks::DriverHooks {
+    use rux::api::drivers::CharDeviceRow;
+    rux::api::drivers::register_driver_hooks(rux::api::drivers::DriverHooks {
         devfs_char_rows: || {
             alloc::vec![
                 CharDeviceRow {
@@ -159,7 +159,7 @@ pub fn register_all() {
     // The boot FDT scanners (root-cold lane): the moved cmdline walkers.
     // Registered here like every other row — publication stores plain
     // values only; the framework's boot-core dispatch sites are all cold.
-    rux::boot_scan_hooks::register_boot_scan_hooks(rux::boot_scan_hooks::BootScanHooks {
+    rux::api::boot::register_boot_scan_hooks(rux::api::boot::BootScanHooks {
         parse_bootargs: of_fdt::parse_bootargs,
         parse_memory_regions: of_fdt::parse_memory_regions,
         parse_initrd_region: of_fdt::parse_initrd_region,

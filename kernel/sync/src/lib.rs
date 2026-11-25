@@ -18,7 +18,7 @@
 //!   from the staying do_futex; the PI protocol on the wake path).
 //!
 //! The framework reaches THIS crate through the SyncDiagHooks table
-//! (kernel/core/src/sync/sync_diag_hooks.rs — 16 cold rows; the do_futex /
+//! (kernel/core/src/api/sync.rs — 16 cold rows; the do_futex /
 //! census latch sites are arm-gated, the S1 pattern). Sibling service
 //! crates (ipc binder_diag, process exit_teardown) reach the
 //! moved functions DIRECTLY at their historical crate::futex::X
@@ -77,8 +77,8 @@ pub use rux::test_assert_eq;
 /// rust_main_impl): the SyncDiagHooks table's rows. OnceSlot-only — no
 /// Spinlock, no per-CPU state (the x86_64 unit-test kernel lesson).
 pub fn register_all() {
-    rux::sync::sync_diag_hooks::sync_diag_register_hooks(
-        rux::sync::sync_diag_hooks::SyncDiagHooks {
+    rux::api::sync::sync_diag_register_hooks(
+        rux::api::sync::SyncDiagHooks {
             fxdv_latch_devmgr: futex_diag::fxdv_latch_devmgr,
             rwfz_exit_watch_tgid: futex_diag::rwfz_exit_watch_tgid,
             rwfrz_tgid_frozen: futex_diag::rwfrz_tgid_frozen,

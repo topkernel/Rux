@@ -189,7 +189,7 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
 /// # Notes
 /// Loopback device is always available as a fallback network device
 fn init_loopback_device() -> bool {
-    if crate::hooks::loopback_init() {
+    if rux::api::drivers::loopback_init() {
         // U3: registration-time uevent for "lo".
         crate::fs::leaf_glue::sysfs::netdev_uevent("lo", "add");
         true

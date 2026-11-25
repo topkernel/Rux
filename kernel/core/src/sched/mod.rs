@@ -19,7 +19,7 @@
 //! 5. idle_sched_class - Per-CPU idle task
 
 pub mod r#unsafe;
-pub mod sched_hooks;
+// The scheduler hook table (SchedHooks) is crate::api::sched.
 pub mod entities;
 pub mod reapdrain;
 pub mod sched;
@@ -188,13 +188,13 @@ pub use entities::{
 pub use entities::DlRunQueue;
 
 // Export fair scheduler
-// FAIR_SCHED_CLASS: class chain via sched_hooks::fair_sched_class()
+// FAIR_SCHED_CLASS: class chain via crate::api::sched::fair_sched_class()
 
 // Export idle scheduler
-// IDLE_SCHED_CLASS: via sched_hooks::idle_sched_class()
+// IDLE_SCHED_CLASS: via crate::api::sched::idle_sched_class()
 
 // Export stop scheduler
-// STOP_SCHED_CLASS: via sched_hooks::stop_sched_class()
+// STOP_SCHED_CLASS: via crate::api::sched::stop_sched_class()
 
 // Export MAX_CPUS directly from config
 pub use crate::config::MAX_CPUS;

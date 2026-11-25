@@ -4509,13 +4509,13 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
 }
 
 // == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
-// == binder_diag_hooks.rs and the file's header for the split record) ==
+// == api/ipc.rs and the file's header for the split record) ==
 
 // == MOVED TO kernel/core/src/ipc/unsafe.rs (the audited trap-regs /
 // == page-table walker zone the moved diagnostics consume) ==
 
 // == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
-// == binder_diag_hooks.rs and the file's header for the split record) ==
+// == api/ipc.rs and the file's header for the split record) ==
 
 /// huks-wedge Edge B (114th): the audit's LIVE OWING set — the lock-free
 /// POD snapshot txnhunt publishes every pass for exit.rs. The
@@ -4577,10 +4577,10 @@ pub fn txn_owing_of(tgid: u32, tid: u32) -> (usize, u64, u32) {
 /// (only) server-side entries (to_tid == owning thread) picked up but
 /// unreplied for >= 1 s, then — with the guard released (sc89/sc207
 // == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
-// == binder_diag_hooks.rs and the file's header for the split record) ==
+// == api/ipc.rs and the file's header for the split record) ==
 
 // == MOVED TO ipc/src/ipc/binder_diag.rs (cold-four lane; see the seam
-// == binder_diag_hooks.rs and the file's header for the split record) ==
+// == api/ipc.rs and the file's header for the split record) ==
 
 /// One line of the transition ring (sc74 forensics). sc89: the ring is
 /// SNAPSHOTTED under WORLD into a fixed array; formatting + printing
@@ -4827,7 +4827,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 drop(w);
                 // The access_token registry consult rides the IpcHooks row
                 // (the registry lives in the service crate; cold ioctl path).
-                let (t, f) = crate::ipc::ipc_hooks::at_token_of(token_src);
+                let (t, f) = crate::api::ipc::at_token_of(token_src);
                 if trace {
                     crate::pr_debug!(
                         "btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}",
@@ -8103,7 +8103,7 @@ fn binder_transaction(
                     && sb[60] == 0xec
                     && sb[61] == 0x13
                 {
-                    crate::sync::sync_diag_hooks::fxdv_latch_devmgr(proc.pid);
+                    crate::api::sync::fxdv_latch_devmgr(proc.pid);
                 }
             }
         }

@@ -58,9 +58,9 @@ use crate::mm::AddressSpace;
 // ==================== Fault Flags ====================
 
 /// Fault access type flags (interface parity with the other backends)
-// FaultFlags + MmFaultResult unified at the SEAM (mm/mm_hooks.rs) with
+// FaultFlags + MmFaultResult unified at the SEAM (api/mm.rs) with
 // the M1a carve; re-export keeps every historical path resolving.
-pub use crate::mm::mm_hooks::{FaultFlags, MmFaultResult};
+pub use crate::api::mm::{FaultFlags, MmFaultResult};
 
 // ==================== Fault Result ====================
 

@@ -194,7 +194,7 @@ fn refresh_connected(entry: &mut IfaceEntry) {
 fn iface_hw(index: u32) -> (u32, u32, [u8; 6], u16) {
     match index {
         LO_INDEX => {
-            let flags = crate::drivers::hooks::get_loopback_device()
+            let flags = rux::api::drivers::get_loopback_device()
                 .map(|d| d.flags)
                 .unwrap_or(IFF_UP | IFF_RUNNING | IFF_LOOPBACK);
             (flags, 65536, [0; 6], 772) // ARPHRD_LOOPBACK
@@ -222,7 +222,7 @@ fn iface_hw(index: u32) -> (u32, u32, [u8; 6], u16) {
 /// Apply an IFF_UP change to the underlying device.
 fn iface_set_up(index: u32, up: bool) {
     let dev = match index {
-        LO_INDEX => crate::drivers::hooks::get_loopback_device(),
+        LO_INDEX => rux::api::drivers::get_loopback_device(),
         ETH0_INDEX => crate::drivers::net::get_virtio_net_device_net(),
         _ => return,
     };

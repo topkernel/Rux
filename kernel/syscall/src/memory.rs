@@ -155,7 +155,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 // Unmap pages that are no longer needed
                 if new_page_end < current_page_end {
                     if let Some(addr_space) = current_task.address_space() {
-                        let _ = crate::mm::mm_hooks::munmap(&addr_space, 
+                        let _ = rux::api::mm::munmap(&addr_space, 
                             crate::mm::page::VirtAddr::new(new_page_end as usize),
                             (current_page_end - new_page_end) as usize,
                         );
@@ -952,7 +952,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // identical bits in both mm layers.
                     if fd >= 0 {
                         let is_fb = crate::fs::file::get_file_fd(fd as usize)
-                            .map(|f| crate::drivers::hooks::is_fb_file(&f))
+                            .map(|f| rux::api::drivers::is_fb_file(&f))
                             .unwrap_or(false);
                         if is_fb {
                             let info = match crate::drivers::gpu::get_framebuffer_info() {
@@ -974,7 +974,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // inserts under ONE vma_write (and runs the
                             // MAP_FIXED replace surgery + unmap_pages), so
                             // the range below is exclusively ours.
-                            let placement = match crate::mm::mm_hooks::mmap(&address_space, 
+                            let placement = match rux::api::mm::mmap(&address_space, 
                                 VirtAddr::new(addr),
                                 actual_length,
                                 vma_flags,
@@ -1012,7 +1012,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // already present), unmap only clears PTEs.
                             // Kick the auto-flush presenter awake: this
                             // mapper may be a flush-less renderer (Xorg).
-                            crate::drivers::hooks::mark_fb_user_mapped();
+                            rux::api::drivers::mark_fb_user_mapped();
                             return placement as i64;
                         }
                     }
@@ -1052,7 +1052,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 // MmStruct::mmap under ONE vma_write, with
                                 // MAP_FIXED replace surgery when requested;
                                 // only then install the GEM pages eagerly.
-                                let placement = match crate::mm::mm_hooks::mmap(&address_space, 
+                                let placement = match rux::api::mm::mmap(&address_space, 
                                     VirtAddr::new(addr),
                                     actual_length,
                                     vma_flags,
@@ -1198,7 +1198,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     }
 
                     // Call AddressSpace::mmap
-                    let result = crate::mm::mm_hooks::mmap(&address_space, 
+                    let result = rux::api::mm::mmap(&address_space, 
                         VirtAddr::new(addr),
                         actual_length,
                         vma_flags,
@@ -1355,7 +1355,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 if failed {
                                     // Unwind the partial mapping and the VMA;
                                     // munmap frees the eagerly mapped frames.
-                                    let _ = crate::mm::mm_hooks::munmap(&address_space, 
+                                    let _ = rux::api::mm::munmap(&address_space, 
                                         VirtAddr::new(mapped_addr.as_usize()),
                                         actual_length,
                                     );
@@ -1538,7 +1538,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
             match current_task.address_space_mut() {
                 Some(address_space) => {
                     // Call AddressSpace::munmap
-                    match crate::mm::mm_hooks::munmap(&address_space, VirtAddr::new(addr), length) {
+                    match rux::api::mm::munmap(&address_space, VirtAddr::new(addr), length) {
                         Ok(()) => {
                             // cgroup v2 (U1b): give the unmapped length
                             // back to the cgroup memory charge.
@@ -2606,7 +2606,7 @@ fn copy_old_to_new_pages(
                         new_virt as usize,
                     );
                 }
-                crate::mm::mm_hooks::page_add_anon_lru(page);
+                rux::api::mm::page_add_anon_lru(page);
             }
         }
         offset += PAGE_SIZE as usize;
@@ -2897,7 +2897,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
             let root_ppn = address_space.root_ppn();
             // Create mapping at new address first
             let perm = vma_flags.to_page_perm();
-            let mmap_result = crate::mm::mm_hooks::mmap(&address_space, 
+            let mmap_result = rux::api::mm::mmap(&address_space, 
                 VirtAddr::new(new_addr_arg),
                 new_size_aligned,
                 vma_flags,
@@ -2921,7 +2921,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                     let copy_size = old_size_aligned.min(new_size_aligned);
                     copy_old_to_new_pages(address_space, old_addr, new_addr_arg, copy_size);
                     // Unmap old mapping
-                    let _ = crate::mm::mm_hooks::munmap(&address_space, VirtAddr::new(old_addr), old_size_aligned);
+                    let _ = rux::api::mm::munmap(&address_space, VirtAddr::new(old_addr), old_size_aligned);
                     new_addr.as_usize() as i64
                 }
                 Err(e) => {
@@ -2944,7 +2944,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         let unmap_start = old_addr + new_size_aligned;
         let unmap_size = old_size_aligned - new_size_aligned;
 
-        match crate::mm::mm_hooks::munmap(&address_space, VirtAddr::new(unmap_start), unmap_size) {
+        match rux::api::mm::munmap(&address_space, VirtAddr::new(unmap_start), unmap_size) {
             Ok(()) => old_addr as i64,
             Err(_) => mmap_error::ENOMEM,
         }
@@ -2978,7 +2978,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         if can_expand {
             // Expand in place: map extra pages
             let perm = vma_flags.to_page_perm();
-            match crate::mm::mm_hooks::mmap(&address_space, 
+            match rux::api::mm::mmap(&address_space, 
                 VirtAddr::new(vma_end.as_usize()),
                 extra_size,
                 vma_flags,
@@ -3008,7 +3008,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         } else if (flags & MREMAP_MAYMOVE) != 0 {
             // Can move: find new location
             let perm = vma_flags.to_page_perm();
-            match crate::mm::mm_hooks::mmap(&address_space, 
+            match rux::api::mm::mmap(&address_space, 
                 VirtAddr::new(0),  // Let kernel choose address
                 new_size_aligned,
                 vma_flags,
@@ -3039,7 +3039,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                         copy_size,
                     );
                     // Unmap old mapping
-                    let _ = crate::mm::mm_hooks::munmap(&address_space, VirtAddr::new(old_addr), old_size_aligned);
+                    let _ = rux::api::mm::munmap(&address_space, VirtAddr::new(old_addr), old_size_aligned);
                     new_mapping_addr.as_usize() as i64
                 }
                 Err(_) => mmap_error::ENOMEM,
@@ -3244,7 +3244,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             // (review批次1: previously a silent no-op). MADV_FREE is
             // permitted to behave like DONTNEED (eager discard instead of
             // lazy marking).
-            match crate::mm::mm_hooks::zap_page_range(&address_space, VirtAddr::new(addr), length_aligned) {
+            match rux::api::mm::zap_page_range(&address_space, VirtAddr::new(addr), length_aligned) {
                 Ok(()) => 0,
                 Err(_) => mmap_error::ENOMEM,
             }
@@ -3256,7 +3256,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             // VMA and every later madvise on the same region failed with
             // ENOMEM (LTP madvise01's post-REMOVE cases). Zap the pages
             // only (same page-discard engine as DONTNEED).
-            match crate::mm::mm_hooks::zap_page_range(&address_space, VirtAddr::new(addr), length_aligned) {
+            match rux::api::mm::zap_page_range(&address_space, VirtAddr::new(addr), length_aligned) {
                 Ok(()) => 0,
                 Err(_) => mmap_error::ENOMEM,
             }
@@ -3693,7 +3693,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                         } else {
                             crate::arch::mm::FaultFlags::READ
                         };
-                        let _ = crate::mm::mm_hooks::handle_mm_fault(
+                        let _ = rux::api::mm::handle_mm_fault(
                             &mm,
                             crate::arch::mm::VirtAddr::new(p as u64),
                             flags,

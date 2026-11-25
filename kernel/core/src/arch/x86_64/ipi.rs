@@ -450,7 +450,7 @@ fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
 /// ArchDiagHooks row (the IRQ-work capture halves and the BT_*/SNAP_*
 /// statics stay here, published for the crate's readers).
 pub fn remote_backtrace(target: usize, why: &str) -> bool {
-    (crate::arch::arch_diag_hooks::arch_diag().remote_backtrace)(target, why)
+    (crate::api::arch::arch_diag().remote_backtrace)(target, why)
 }
 
 // ============================================================================

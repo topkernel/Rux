@@ -4,7 +4,7 @@
 //! framework-side (ww_note_tick_arrival / ww_note_rearm / the fire
 //! counters — written on the tick/fire paths); this file only READS
 //! them and formats. Reached through the arm-gated
-//! timer_hooks::ww_heartbeat row (EVENT_WWCENSUS gate at the call
+//! rux::api::timer::ww_heartbeat row (EVENT_WWCENSUS gate at the call
 //! site — disarmed boots never load the table).
 
 use rux::timer::{
@@ -216,12 +216,12 @@ pub fn ww_heartbeat(now_time: u64) {
     let walks_total = crate::sched::ww_pick_walks();
     let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
     LAST_WALKS.store(walks_total, Ordering::Relaxed);
-    let (oh, ch) = crate::sched::sched_hooks::ww_heals();
+    let (oh, ch) = rux::api::sched::ww_heals();
     let oh_d = oh.saturating_sub(LAST_OH.load(Ordering::Relaxed));
     let ch_d = ch.saturating_sub(LAST_CH.load(Ordering::Relaxed));
     LAST_OH.store(oh, Ordering::Relaxed);
     LAST_CH.store(ch, Ordering::Relaxed);
-    let (s250, s500, s750) = crate::sched::sched_hooks::ww_subgate_counts();
+    let (s250, s500, s750) = rux::api::sched::ww_subgate_counts();
     crate::pr_info!(
         "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
         walks_d, oh_d, ch_d, s250, s500, s750
@@ -249,7 +249,7 @@ pub fn ww_heartbeat(now_time: u64) {
         let f_n = WW_FIRE_N.load(Ordering::Relaxed);
         let f_sum_us = WW_FIRE_SUM_TICKS.load(Ordering::Relaxed) / ticks_per_us;
         let f_avg = if f_n > 0 { f_sum_us / f_n } else { 0 };
-        let (rt_n, rt_avg, rt_max) = crate::sched::sched_hooks::ww_rt_pick_stats();
+        let (rt_n, rt_avg, rt_max) = rux::api::sched::ww_rt_pick_stats();
         crate::pr_info!(
             "WW6: fire_n={} fire_avg={}us fire_max={}us rt_pick_n={} rt_pick_avg={}us rt_pick_max={}us",
             f_n,
@@ -280,10 +280,10 @@ pub fn ww_heartbeat(now_time: u64) {
         sched[4], sched[5], sched[6],
         sched[7], sched[8], sched[9]
     );
-    crate::sched::sched_hooks::heartbeat();
+    rux::api::sched::heartbeat();
     // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
     // registrar threads - see wakewatch::stallwatch_tick.
-    crate::sched::sched_hooks::stallwatch_tick();
+    rux::api::sched::stallwatch_tick();
 }
 
 /// The DEL_DM diagnostic ring's reader (moved from kernel/core/src/timer.rs

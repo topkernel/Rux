@@ -28,7 +28,7 @@ edition = "2021"
 #   sys_ioperm/sys_iopl are 27 lines fused into framework dispatch —
 #   rows would cost more than they move).
 #
-# The seam: kernel/core/src/arch/arch_diag_hooks.rs — cold ArchDiagHooks rows
+# The seam: kernel/core/src/api/arch.rs — cold ArchDiagHooks rows
 # published from rust_main via arch::register_all (OnceSlot only;
 # every row fires only post-boot: user-fault deaths, armed reports,
 # hunter pokes). Raw reads the walkers need cross through audited

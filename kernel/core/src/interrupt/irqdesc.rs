@@ -577,7 +577,7 @@ extern "C" fn irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
         None => return 0,
     };
     loop {
-        if crate::process::process_hooks::kthread_should_stop() {
+        if crate::api::process::kthread_should_stop() {
             break;
         }
         // Consume pending, run the chain, EOI, re-park. The W3 lost-wake
@@ -670,7 +670,7 @@ fn irq_thread_spawn(irq: u32, name: &'static str) {
         owned.into_boxed_slice(),
     ))
     .unwrap_or("irq");
-    if let Some(t) = crate::process::process_hooks::kthread_run(
+    if let Some(t) = crate::api::process::kthread_run(
         irq_thread_fn,
         irq as *mut core::ffi::c_void,
         tname,

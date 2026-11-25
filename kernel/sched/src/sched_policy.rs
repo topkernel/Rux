@@ -18,7 +18,7 @@ use crate::sched::entities::W2RefusalCensus;
 // Devirt lane: the shared observability state moved framework-side
 // (sched/entities.rs); this crate's census readers keep the bare names.
 use crate::sched::entities::{CLASS_NONEMPTY, SCHED_CALLS};
-use crate::sched::sched_hooks::{
+use rux::api::sched::{
     CLASS_DL_BIT,
     CLASS_RT_BIT,
     CLASS_CFS_BIT,
@@ -967,7 +967,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
         // now|rt_nr).
         if cpu_id == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
             crate::sched_ev::sched_ev(
-                crate::sched::sched_hooks::EV_RT_THROTTLED,
+                rux::api::sched::EV_RT_THROTTLED,
                 cpu_id as u32,
                 (RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed) << 32)
                     | RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
@@ -1510,7 +1510,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
             // Rule 1 (grq-lock-1st): NO print under the GRQ — the event
             // ring carries the evidence; the tick drain prints it.
             crate::sched_ev::sched_ev(
-                crate::sched::sched_hooks::EV_ENQ_POISONED,
+                rux::api::sched::EV_ENQ_POISONED,
                 pid,
                 0,
                 0,
@@ -1536,7 +1536,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
             // Rule 1: event ring, not the console (was console::putchar
             // under GRQ).
             crate::sched_ev::sched_ev(
-                crate::sched::sched_hooks::EV_ENQ_DEAD,
+                rux::api::sched::EV_ENQ_DEAD,
                 task.pid(),
                 st.bits() as u64,
                 0,
@@ -1604,7 +1604,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
                 // prints it (a = delta to deadline in ms, b = timer id;
                 // b == 0 with a live deadline is the LOST-timer shape).
                 crate::sched_ev::sched_ev(
-                    crate::sched::sched_hooks::EV_DL_ENQ_DEFERRED,
+                    rux::api::sched::EV_DL_ENQ_DEFERRED,
                     task.pid(),
                     (deadline.saturating_sub(now)) / 1_000_000,
                     dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire) as u64,

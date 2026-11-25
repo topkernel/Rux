@@ -862,7 +862,7 @@ pub fn dump_mem() {
         {
             taskdump_raw_line(b"\nTCPCEN ");
             let mut n = 0;
-            for row in crate::net::net_hooks::tcp_census_rows() {
+            for row in crate::api::net::tcp_census_rows() {
                 taskdump_raw_line(b"[");
                 taskdump_dec(row.fd as u64);
                 taskdump_raw_line(b":st=");

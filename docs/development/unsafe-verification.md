@@ -35,8 +35,8 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1617**
-- recovered from reference versions: **322** (same-file 0, edited-site 2, file-move 318, moved-item 2)
+- artifacts kept by id: **1906**
+- recovered from reference versions: **33** (same-file 33, edited-site 0, file-move 0, moved-item 0)
 - references consulted: HEAD
 - annotated regions, baseline -> this bank: **1939 -> 1939**
 
@@ -1288,30 +1288,30 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 314 | pcache_dirty_histogram | block | - | INV:F13 | `d50c70a1869d` |
-| 539 | claim_entry_arc | block | - | INV:INV-PC-CLAIM | `ef3e5877f5f0` |
-| 584 | fill_from | block | ptr-ops | INV:INV-PC-WIN | `a7c1583eca42` |
-| 598 | copy_frame_from | block | ptr-ops | INV:INV-PC-WIN | `867089b3f4b9` |
-| 637 | copy_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `04ce747e8871` |
-| 650 | copy_user_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `a6e1e62ef0b8` |
-| 760 | probe_slot_ptr | block | - | INV:INV-PC-CLAIM | `610cb20bab82` |
-| 784 | table_find | block | - | INV:INV-PC-CLAIM | `f57d54fcf82d` |
-| 842 | table_publish | block | - | INV:INV-PC-CLAIM | `802aa68cc918` |
-| 844 | table_publish | block | - | INV:INV-PC-CLAIM | `22c6a5a2d958` |
-| 853 | table_publish | block | - | INV:INV-PC-CLAIM | `f047342f803a` |
-| 856 | table_publish | block | - | INV:INV-PC-CLAIM | `829f7cd01a2d` |
-| 857 | table_publish | block | - | INV:INV-PC-CLAIM | `8867211ec5ba` |
-| 886 | remove_entry | block | - | INV:INV-PC-CLAIM | `cfd0ee0db4cb` |
-| 2047 | flush_all_dirty | block | - | INV:F13 | `5d4958730807` |
-| 3285 | collect_wb_work | block | - | INV:INV-FRAME-1 | `a2c8b03d22df` |
-| 3688 | evict_one_locked | block | - | INV:F13 | `e4d131c62bfa` |
-| 3743 | evict_one_locked | block | - | INV:F13 | `2e29e250c095` |
-| 3818 | evict_one_locked | block | - | INV:F13 | `f04bc6cfc0c4` |
-| 3851 | evict_one_locked | block | - | INV:F13 | `f4df4c09cbd0` |
-| 3994 | shared_file_fault_page | block | - | INV:F13 | `8b81dc7d302d` |
-| 4014 | shared_file_fault_page | block | ptr-ops,addr-arith | INV:F13 | `28c1be3e3b66` |
-| 4024 | shared_file_fault_page | block | - | INV:F13 | `dbf37ca34e65` |
-| 4030 | shared_file_fault_page | block | raw-construct | INV:F13 | `8dd0d613ec31` |
+| 313 | pcache_dirty_histogram | block | - | INV:F13 | `c39bfa3b7230` |
+| 538 | claim_entry_arc | block | - | INV:INV-PC-CLAIM | `6e9b0d4f8c60` |
+| 583 | fill_from | block | ptr-ops | INV:INV-PC-WIN | `f68aada9ca34` |
+| 597 | copy_frame_from | block | ptr-ops | INV:INV-PC-WIN | `7181de2f36b5` |
+| 636 | copy_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `5a27e36177d6` |
+| 649 | copy_user_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `723b6d90f96a` |
+| 759 | probe_slot_ptr | block | - | INV:INV-PC-CLAIM | `37800dc81aba` |
+| 783 | table_find | block | - | INV:INV-PC-CLAIM | `72318bd8f71e` |
+| 841 | table_publish | block | - | INV:INV-PC-CLAIM | `127a190d2434` |
+| 843 | table_publish | block | - | INV:INV-PC-CLAIM | `6f3d0e94dded` |
+| 852 | table_publish | block | - | INV:INV-PC-CLAIM | `ee1b2e88faa8` |
+| 855 | table_publish | block | - | INV:INV-PC-CLAIM | `da0e4bcddffe` |
+| 856 | table_publish | block | - | INV:INV-PC-CLAIM | `9ff8e827dbe3` |
+| 885 | remove_entry | block | - | INV:INV-PC-CLAIM | `efdfc93ffe66` |
+| 2046 | flush_all_dirty | block | - | INV:F13 | `be85616dbb69` |
+| 3284 | collect_wb_work | block | - | INV:INV-FRAME-1 | `f6b835f7e8d7` |
+| 3687 | evict_one_locked | block | - | INV:F13 | `d9b2e57b836e` |
+| 3742 | evict_one_locked | block | - | INV:F13 | `315ac9f1e530` |
+| 3817 | evict_one_locked | block | - | INV:F13 | `8ed25877af53` |
+| 3850 | evict_one_locked | block | - | INV:F13 | `7fe7a4b28edf` |
+| 3993 | shared_file_fault_page | block | - | INV:F13 | `e359747d2b06` |
+| 4013 | shared_file_fault_page | block | ptr-ops,addr-arith | INV:F13 | `9a29c902009a` |
+| 4023 | shared_file_fault_page | block | - | INV:F13 | `c888a1acb791` |
+| 4029 | shared_file_fault_page | block | raw-construct | INV:F13 | `c24d1533c38e` |
 
 ### kernel/core/src/fs/permission.rs (1)
 
@@ -1753,11 +1753,11 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 284 | register_debugfs_knobs | block | volatile | INV:F10 | `d2045464e507` |
-| 295 | register_debugfs_knobs | block | asm | INV:F10 | `3704360766a7` |
-| 301 | register_debugfs_knobs | block | asm | INV:F10 | `1649d3148dd3` |
-| 394 | walk_read | block | - | INV:F10 | `28e15a17dca2` |
-| 396 | walk_read | block | volatile,ptr-ops | INV:F10 | `49face3f6c51` |
+| 280 | register_debugfs_knobs | block | volatile | INV:F10 | `0213c1338954` |
+| 291 | register_debugfs_knobs | block | asm | INV:F10 | `5866f2a04cf8` |
+| 297 | register_debugfs_knobs | block | asm | INV:F10 | `b40633befaf6` |
+| 390 | walk_read | block | - | INV:F10 | `dfe3cc32358b` |
+| 392 | walk_read | block | volatile,ptr-ops | INV:F10 | `334aec47125f` |
 
 ### kernel/core/src/debug/oops.rs (1)
 
@@ -2281,8 +2281,8 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 93 | current_pgid | block | - | INV:INV-PROC-BORROW-1 | `067a48503cb9` |
-| 114 | find_task_by_pid | block | - | INV:INV-PROC-BORROW-1 | `47fcbd83c528` |
+| 92 | current_pgid | block | - | INV:INV-PROC-BORROW-1 | `1e5c6b612bea` |
+| 113 | find_task_by_pid | block | - | INV:INV-PROC-BORROW-1 | `76569e342729` |
 
 ### kernel/core/src/process/task_ref.rs (5)
 
@@ -2529,7 +2529,7 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 76 | test_loopback_send | block | ptr-ops | INV:INV-TESTHARNESS-1 | `167b3e792848` |
+| 75 | test_loopback_send | block | ptr-ops | INV:INV-TESTHARNESS-1 | `3f6e4f68d0b5` |
 
 ### kernel/core/src/tests/wait4.rs (3)
 
@@ -2606,7 +2606,7 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 1818 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `290d48558d13` |
+| 1817 | rust_main_impl | block | asm | INV:INV-BOOT-ZEROPAGE-1 | `b3e3195358bf` |
 
 ### kernel/core/src/list.rs (7)
 

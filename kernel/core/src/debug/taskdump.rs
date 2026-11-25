@@ -1440,7 +1440,7 @@ pub fn ensure_defer_thread() {
     if THREAD_ON.swap(true, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    crate::process::process_hooks::kthread_run(
+    crate::api::process::kthread_run(
         defer_emit_fn,
         core::ptr::null_mut(),
         "censusd",
@@ -1450,7 +1450,7 @@ pub fn ensure_defer_thread() {
 extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
     use crate::process::task::{Task, TaskState};
     loop {
-        if crate::process::process_hooks::kthread_should_stop() {
+        if crate::api::process::kthread_should_stop() {
             break;
         }
         // 56th: BEFORE draining, dump any latched-but-mapless tgid's
@@ -1459,7 +1459,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // for samgr in ohc53). The dump's lines land IN the focus ring
         // this pass drains. Cheap when nothing is pending: two ring
         // scans of atomics.
-        crate::ipc::binder_diag_hooks::dump_latched_maps_taskctx();
+        crate::api::ipc::dump_latched_maps_taskctx();
         // sc57 (57th): fuxwatch arm round — clears W on the watched
         // word's page in every mapping mm (kthread context; TLB
         // shootdown via flush_tlb_all is safe here).
@@ -1469,7 +1469,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // in the timer softirq held softirq-context locks across
         // seconds of page walks and deadlocked both CPUs. The slice
         // self-gates to one burst per ~500 ms.
-        crate::sync::sync_diag_hooks::sqwalk_resume();
+        crate::api::sync::sqwalk_resume();
         // 61st: the ONE-SHOT ffrt::mutex heap map — armed by the first
         // closed chain walk, consumed ONCE here (kthread/sleepable
         // context; the full-heap walk is seconds of page-table walks
@@ -1484,20 +1484,20 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
             if arm != 0 {
                 let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
                 if samgr != 0 {
-                    let out = crate::sync::sync_diag_hooks::ffrt_mutex_heap_map(samgr, arm);
+                    let out = crate::api::sync::ffrt_mutex_heap_map(samgr, arm);
                     if !out.is_empty() {
                         crate::sync::futex::HEAPMAP_ARM.store(
                             0,
                             core::sync::atomic::Ordering::Relaxed,
                         );
                         crate::pr_warn!("FFRT-HEAPMAP tgid={} base={:#x}{}", samgr, arm, out);
-                    } else if crate::sync::sync_diag_hooks::ffrt_mutex_heap_map_done() {
+                    } else if crate::api::sync::ffrt_mutex_heap_map_done() {
                         // Completed with ZERO qualifying locks — the arm
                         // fired pre-wedge (no waiters yet). Retry up to
                         // 4 times: reset the burn gates and let the next
                         // rounds re-scan as the wedge deepens.
                         if HM_TRIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
-                            crate::sync::sync_diag_hooks::ffrt_mutex_heap_map_rearm();
+                            crate::api::sync::ffrt_mutex_heap_map_rearm();
                         } else {
                             crate::sync::futex::HEAPMAP_ARM.store(
                                 0,
@@ -1646,10 +1646,10 @@ pub fn sleep_snapshot_early() {
         return;
     }
     N.fetch_add(1, Ordering::Relaxed);
-    crate::ipc::binder_diag_hooks::sleep_snapshot();
+    crate::api::ipc::sleep_snapshot();
     // 53rd drain hunt: park-side AF_UNIX queue/wait census on the same
     // cadence (self-gated on rux:sleepsnap (retired debug=sleepsnap) inside).
-    crate::net::net_hooks::unix_park_audit();
+    crate::api::net::unix_park_audit();
     // 53rd timer-drive hunt: armed timerfd wheel entries + waiter census
     // (self-gated on rux:sleepsnap (retired debug=sleepsnap) inside).
     crate::syscall::support::timerfd_wheel_audit();

@@ -1047,7 +1047,7 @@ fn scribble_foreign_entry(
     tp: *mut crate::process::task::Task,
     frame: usize,
 ) {
-    (crate::arch::arch_diag_hooks::arch_diag().scribble_foreign_entry)(cpu, vector, regs, tp, frame)
+    (crate::api::arch::arch_diag().scribble_foreign_entry)(cpu, vector, regs, tp, frame)
 }
 
 // ============================================================================
@@ -2581,11 +2581,11 @@ fn sigfpe_has_handler() -> bool {
 /// death report is one bounded dump per user-fault death — the process
 /// exits immediately after).
 fn gp_regmem_dump(regs: &PtRegs) {
-    (crate::arch::arch_diag_hooks::arch_diag().gp_regmem_dump)(regs)
+    (crate::api::arch::arch_diag().gp_regmem_dump)(regs)
 }
 
 fn gp_mmhistory_dump(regs: &PtRegs) {
-    (crate::arch::arch_diag_hooks::arch_diag().gp_mmhistory_dump)(regs)
+    (crate::api::arch::arch_diag().gp_mmhistory_dump)(regs)
 }
 
 /// Age (in jiffies) of this tid's most recent delivered SIGSEGV, plus
@@ -2593,11 +2593,11 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
 /// ring + this reader live in arch; the wrapper keeps the
 /// historical path for do_exit's holder-exit print.)
 pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
-    (crate::arch::arch_diag_hooks::arch_diag().segv_hist_age)(tid)
+    (crate::api::arch::arch_diag().segv_hist_age)(tid)
 }
 
 fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
-    (crate::arch::arch_diag_hooks::arch_diag().user_segv_forensics)(regs, fault_addr)
+    (crate::api::arch::arch_diag().user_segv_forensics)(regs, fault_addr)
 }
 
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
@@ -2997,7 +2997,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // selection, rate-limited) the chance to free the real
                 // hog before this task dies. Retry on true, die on false
                 // (struck out or nothing killable).
-                if !crate::mm::mm_hooks::fault_oom_kill_or_retry(
+                if !crate::api::mm::fault_oom_kill_or_retry(
                     crate::process::current_pid(),
                 ) {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
@@ -3563,7 +3563,7 @@ fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
 /// crate now; this historical-name wrapper dispatches the cold
 /// ArchDiagHooks row.
 pub fn utime_ripsample_report() {
-    (crate::arch::arch_diag_hooks::arch_diag().utime_ripsample_report)()
+    (crate::api::arch::arch_diag().utime_ripsample_report)()
 }
 
 /// Record one kernel-mode tick at `rip` for `comm`.
@@ -3671,5 +3671,5 @@ fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
 /// ArchDiagHooks row (the sampler statics and their tick-path writers
 /// stay here, published for the crate's readers).
 pub fn stime_profile_top(focus: bool) -> alloc::vec::Vec<([u8; 16], u64, u64)> {
-    (crate::arch::arch_diag_hooks::arch_diag().stime_profile_top)(focus)
+    (crate::api::arch::arch_diag().stime_profile_top)(focus)
 }

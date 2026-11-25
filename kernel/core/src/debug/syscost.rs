@@ -938,7 +938,7 @@ pub static RECV: [RxSlot; 16] = [const { EMPTY_RX }; 16];
 /// pointer for host-side nm symbolization.
 fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
     let mut s = alloc::string::String::new();
-    if let Some(desc) = crate::net::net_hooks::unix_recv_describe(fd) {
+    if let Some(desc) = crate::api::net::unix_recv_describe(fd) {
         s = desc;
     } else if let Some(file) = crate::fs::get_file_fd(fd) {
         let ops = file.get_ops().map(|p| p as *const _ as u64).unwrap_or(0);
@@ -1632,5 +1632,5 @@ pub fn tick(now_jiffies: u64) {
     LAST_DUMP.store(now_jiffies, Ordering::Relaxed);
     // The report body lives in the debug crate (crate-flip rung
     // debug); the row fires only on the dump cadence.
-    crate::debug::debug_hooks::syscost_dump();
+    crate::api::debug::syscost_dump();
 }

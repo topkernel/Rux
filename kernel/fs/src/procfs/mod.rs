@@ -1079,7 +1079,7 @@ self.create_dynamic_file("cgroups", || {
         self.root_node.add_child(dir.clone());
         dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"msg".to_vec(),
-            crate::ipc::ipc_hooks::msg_proc_show,
+            rux::api::ipc::msg_proc_show,
             self.alloc_ino(),
         )));
         dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
@@ -1089,7 +1089,7 @@ self.create_dynamic_file("cgroups", || {
         )));
         dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"shm".to_vec(),
-            crate::ipc::ipc_hooks::shm_proc_show,
+            rux::api::ipc::shm_proc_show,
             self.alloc_ino(),
         )));
     }

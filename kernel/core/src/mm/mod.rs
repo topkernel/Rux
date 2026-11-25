@@ -9,10 +9,7 @@ pub mod buddy_allocator;
 pub mod r#unsafe;
 pub mod allocator;
 pub mod layout;
-/// M1a FLIP SEAM: the mm-policy hook table (the NetHooks pattern) —
-/// the framework's door into the (carveable) policy half of
-/// mm_ops/page_fault. See the module doc for the self-recursion rule.
-pub mod mm_hooks;
+// The mm-policy hook tables (MmHooks, MmPolicyHooks) are crate::api::mm.
 pub mod page;
 pub mod page_desc;
 pub mod vma;

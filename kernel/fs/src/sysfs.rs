@@ -1279,7 +1279,7 @@ fn build_tree() -> Arc<KObject> {
         &net,
         "lo",
         1,
-        crate::drivers::hooks::get_loopback_device,
+        rux::api::drivers::get_loopback_device,
         [0, 0, 0, 0, 0, 0],
         65536,
         0x1 | 0x40 | 0x8 | 0x1000, // UP|RUNNING|LOOPBACK|MULTICAST
@@ -1596,7 +1596,7 @@ fn build_tree() -> Arc<KObject> {
         "rescan",
         || b"\n".to_vec(),
         |_buf| {
-            crate::drivers::hooks::pci_rescan_block_hotplug();
+            rux::api::drivers::pci_rescan_block_hotplug();
             0
         },
     );
@@ -1776,7 +1776,7 @@ pub fn uevent_send_full(
     extra_env: &[(&str, &str)],
 ) -> u64 {
     let (msg, seq) = uevent_payload_for(devpath, action, subsystem, extra_env);
-    crate::net::net_hooks::uevent_broadcast(&msg);
+    rux::api::net::uevent_broadcast(&msg);
     seq
 }
 

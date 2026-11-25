@@ -114,7 +114,7 @@ impl ThreadedIrq {
         if !spawns_allowed() {
             return false;
         }
-        if let Some(t) = crate::process::process_hooks::kthread_run(thread_fn, arg, name) {
+        if let Some(t) = crate::api::process::kthread_run(thread_fn, arg, name) {
             let tp = t as *mut Task;
             crate::sched::sched::change_task_policy(tp, SchedPolicy::Fifo, 50);
             self.task.store(tp as usize, Ordering::Release);
@@ -131,7 +131,7 @@ impl ThreadedIrq {
     /// ksoftirqd_fn).
     pub fn thread_loop<F: FnMut()>(&'static self, mut service: F) -> i32 {
         loop {
-            if crate::process::process_hooks::kthread_should_stop() {
+            if crate::api::process::kthread_should_stop() {
                 break;
             }
             if self.pending.swap(false, Ordering::AcqRel) {

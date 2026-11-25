@@ -128,7 +128,7 @@ impl MmStruct {
                     self as *const _ as usize,
                     virt_addr.bits() as usize,
                 );
-                crate::mm::mm_hooks::page_add_anon_lru(&*page);
+                crate::api::mm::page_add_anon_lru(&*page);
             }
         }
 
@@ -166,10 +166,10 @@ impl MmStruct {
                     self.pgd,
                     VirtAddr::new(addr as u64),
                 ) {
-                    if crate::mm::mm_hooks::is_swap_entry(raw) {
-                        crate::mm::mm_hooks::swap_free_slot(
-                            crate::mm::mm_hooks::swap_entry_type(raw),
-                            crate::mm::mm_hooks::swap_entry_offset(raw),
+                    if crate::api::mm::is_swap_entry(raw) {
+                        crate::api::mm::swap_free_slot(
+                            crate::api::mm::swap_entry_type(raw),
+                            crate::api::mm::swap_entry_offset(raw),
                         );
                         // SAFETY: addr is a page-aligned user address whose
                         // PTE we just verified above.
@@ -1747,7 +1747,7 @@ pub fn handle_cow_fault(
                     mm as *const _ as usize,
                     virt_addr as usize,
                 );
-                crate::mm::mm_hooks::page_add_anon_lru(np);
+                crate::api::mm::page_add_anon_lru(np);
             }
             mm.add_rss(1);
         }

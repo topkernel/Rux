@@ -25,10 +25,8 @@ pub mod mount_table;
 pub mod notify_hooks;
 pub mod file_hooks;
 pub mod leaf_glue;
-pub mod leaf_hooks;
 pub mod perf_ctr;
 pub mod lock_hooks;
-pub mod fs_hooks;
 pub mod notify_events;
 // pub mod rootfs; — MOVED to the fs service crate (fs-substrate tranche)
 // pub mod tmpfs; — MOVED to the fs service crate (fs-substrate tranche)
@@ -57,10 +55,9 @@ pub mod pidfd;
 // pub mod fifo; — MOVED to the fs service crate (rung 3)
 // pub mod cgroup; — MOVED to the fs service crate (fs-substrate tranche)
 pub mod fsctx;
-// The rung-5 ext4 seam: the framework's ext4/jbd2 hook table (the
-// service crate registers at boot; the ext4/jbd2 module lines above
-// stay until the ext4 flip deletes them).
-pub mod ext4_hooks;
+// The seam tables are under crate::api: FsHooks and the three leaf
+// tables in api::fs (they are filled at different boot points), the
+// ext4/jbd2 table in api::ext4.
 pub mod journal_seam;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, close_file_fd_report, set_cloexec_fd};

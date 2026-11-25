@@ -4030,7 +4030,7 @@ impl Task {
                 // pick materialized into a register restore.
                 crate::sched::sched::ww_record(
                     self as *const Task as *mut Task,
-                    crate::sched::sched_hooks::WW_EV_AFFIRM,
+                    crate::api::sched::WW_EV_AFFIRM,
                 );
                 // pick→switch ledger (wake-fastrepro): the pick
                 // terminated — consume its publication record.

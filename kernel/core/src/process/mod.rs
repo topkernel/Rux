@@ -29,16 +29,15 @@ pub mod exec_ring;
 // The wrapper surface for sibling crates and framework callers
 // (the hook-table indirection lives in process_hooks; these are the
 // #[inline] entry points).
-pub use process_hooks::{kthread_run, kthread_run_on_cpu, kthread_should_stop};
+pub use crate::api::process::{kthread_run, kthread_run_on_cpu, kthread_should_stop};
 // pub mod ptrace; — moved to the process service crate; the two
 // entry points the trap files call by name stay core-side:
 pub mod ptrace_core;
 // pub mod coredump; — moved to the process service crate.
 pub mod ns;
 pub mod r#unsafe;
-// The flip seam: the framework's cold door into the process service
-// crate (three tables — lifecycle, kthread, pid; see the file header).
-pub mod process_hooks;
+// The flip seam (ProcessHooks, KthreadHooks, PidHooks, ExitHooks) is
+// crate::api::process.
 
 pub use task::Task;
 

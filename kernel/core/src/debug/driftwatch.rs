@@ -115,5 +115,5 @@ pub fn note_zero_put(site: usize) {
 /// same-named wrapper for the ledger's historical call site; dispatches
 /// the hook row.
 pub fn report() {
-    crate::debug::debug_hooks::driftwatch_report();
+    crate::api::debug::driftwatch_report();
 }

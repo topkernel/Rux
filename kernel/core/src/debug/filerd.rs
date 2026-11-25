@@ -92,5 +92,5 @@ pub fn note_miss() {
 /// Render /proc/filerd (moved to the debug crate): same-named
 /// wrapper for the procfs registration site; dispatches the hook row.
 pub fn generate() -> alloc::vec::Vec<u8> {
-    crate::debug::debug_hooks::filerd_generate()
+    crate::api::debug::filerd_generate()
 }

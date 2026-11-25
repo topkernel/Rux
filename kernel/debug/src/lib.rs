@@ -13,7 +13,7 @@
 //! PUBLISHES those counters: the report generators, the dump kthreads,
 //! the wedge census, the print arms, and the tracefs file set. It calls
 //! DOWN into the framework for the statics (pub peek surfaces) and is
-//! called UP only through kernel/core/src/debug/debug_hooks.rs — 18 cold rows
+//! called UP only through kernel/core/src/api/debug.rs — 18 cold rows
 //! (boot init, shutdown/cadence dumps, procfs readers, arm-gated event
 //! prints) — plus the direct sibling-dep surface debug::scmtap.
 //!
@@ -70,7 +70,7 @@ pub mod trace_files;
 /// only — no locks, no per-CPU state (registration runs from
 /// rust_main, before arch::smp::init()). THE composition contract.
 pub fn register_all() {
-    debug::debug_hooks::debug_register_hooks(debug::debug_hooks::DebugHooks {
+    rux::api::debug::debug_register_hooks(rux::api::debug::DebugHooks {
         syscost_dump: syscost::dump,
         hilog_dump: hilogcensus::dump,
         fsw_dump: fsw::dump,

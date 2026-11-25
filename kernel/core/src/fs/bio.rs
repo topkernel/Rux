@@ -639,9 +639,9 @@ impl BlockCache {
         let v_dirty = ve.bh().is_some_and(|bh| bh.is_dirty());
         drop(ve);
         if crate::trace::EVENT_EXTHUNT.armed()
-            && crate::fs::ext4_hooks::exthunt_phys_watched(vkey.2)
+            && crate::api::ext4::exthunt_phys_watched(vkey.2)
         {
-            crate::fs::ext4_hooks::exthunt_evict_unhash(vkey.2, v_dirty);
+            crate::api::ext4::exthunt_evict_unhash(vkey.2, v_dirty);
         }
 
         {
@@ -673,9 +673,9 @@ impl BlockCache {
                     None => -5,
                 };
                 if crate::trace::EVENT_EXTHUNT.armed()
-                    && crate::fs::ext4_hooks::exthunt_phys_watched(vkey.2)
+                    && crate::api::ext4::exthunt_phys_watched(vkey.2)
                 {
-                    crate::fs::ext4_hooks::exthunt_evict_done(vkey.2, sync_rc);
+                    crate::api::ext4::exthunt_evict_done(vkey.2, sync_rc);
                 }
                 crate::debug::fsw::note_evict(true);
             } else {
@@ -937,7 +937,7 @@ impl BlockCache {
             // Phase 2: Read from disk (no locks held)
             // rux:exthunt (retired debug=exthunt): fresh-entry fabrication, sync path.
             if crate::trace::EVENT_EXTHUNT.armed() {
-                crate::fs::ext4_hooks::exthunt_fab(blocknr, skipped_evicting, true);
+                crate::api::ext4::exthunt_fab(blocknr, skipped_evicting, true);
             }
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
@@ -1524,7 +1524,7 @@ pub fn drop_freed_block_forgotten(
         // bracket).
         let h = crate::fs::journal_seam::current_handle_raw();
         if !h.is_null() {
-            crate::fs::ext4_hooks::journal_forget(h, bh);
+            crate::api::ext4::journal_forget(h, bh);
         }
         get_block_cache().put(bh);
     }
@@ -1700,7 +1700,7 @@ pub fn bread_async(
                     // SAFETY: hit_bh passed the b_data length guard above.
                     unsafe {
                         let d = &(*hit_bh).b_data;
-                        crate::fs::ext4_hooks::exthunt_rxbhit(
+                        crate::api::ext4::exthunt_rxbhit(
                             blocknr,
                             d.as_ptr(),
                             d[0],
@@ -1731,7 +1731,7 @@ pub fn bread_async(
         // rux:exthunt (retired debug=exthunt): fresh-entry fabrication (adjudicates the unhashed
         // evicting-victim race — see the tracers in ext4/extent.rs).
         if crate::trace::EVENT_EXTHUNT.armed() {
-            crate::fs::ext4_hooks::exthunt_fab(blocknr, skipped_evicting, false);
+            crate::api::ext4::exthunt_fab(blocknr, skipped_evicting, false);
         }
         let block_size = cache.block_size;
         let mut bh = Box::new(BufferHead::new_uninit(blocknr, block_size));
@@ -1945,7 +1945,7 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
         }
         drop(bucket);
         if evicting_match && crate::trace::EVENT_EXTHUNT.armed() {
-            crate::fs::ext4_hooks::exthunt_bc_blind(blocknr);
+            crate::api::ext4::exthunt_bc_blind(blocknr);
         }
         false
     }
@@ -3812,7 +3812,7 @@ pub fn with_block_mut<T>(
     // write, replacing the two direct calls.
     let handle = crate::fs::journal_seam::current_handle_raw();
     if !handle.is_null() {
-        crate::fs::ext4_hooks::journal_dirty(handle, bh);
+        crate::api::ext4::journal_dirty(handle, bh);
     }
     let sync_res = sync_dirty_buffer(bh);
     brelse(bh);
@@ -3838,7 +3838,7 @@ pub fn with_block_deferred_mut<T>(
     // The journal tag (rung-5 seam row; deferred-write twin).
     let handle = crate::fs::journal_seam::current_handle_raw();
     if !handle.is_null() {
-        crate::fs::ext4_hooks::journal_dirty(handle, bh);
+        crate::api::ext4::journal_dirty(handle, bh);
     }
     brelse(bh);
     out

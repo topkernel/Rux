@@ -94,7 +94,7 @@ pub const MAX_MEMORY_REGIONS: usize = 8;
 
 /// Parse the kernel command line from the bootloader DTB (`/chosen`).
 fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
-    (crate::boot_scan_hooks::boot_scan_hooks().parse_bootargs)(dtb_ptr)
+    (crate::api::boot::boot_scan_hooks().parse_bootargs)(dtb_ptr)
 }
 
 /// Parse the /memory nodes' reg pairs into the stack region array
@@ -103,19 +103,19 @@ fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 pub fn parse_memory_regions(
     dtb_ptr: u64,
 ) -> [MemoryRegion; MAX_MEMORY_REGIONS] {
-    (crate::boot_scan_hooks::boot_scan_hooks().parse_memory_regions)(dtb_ptr)
+    (crate::api::boot::boot_scan_hooks().parse_memory_regions)(dtb_ptr)
 }
 
 /// Parse the initrd location from /chosen (linux,initrd-start/end —
 /// physical addresses, early mapping).
 pub fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
-    (crate::boot_scan_hooks::boot_scan_hooks().parse_initrd_region)(dtb_ptr)
+    (crate::api::boot::boot_scan_hooks().parse_initrd_region)(dtb_ptr)
 }
 
 /// True when the first /cpus/cpu@* node's "riscv,isa" property lists
 /// the V extension (primes the vext capability cache at boot).
 pub fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
-    (crate::boot_scan_hooks::boot_scan_hooks().parse_cpu_isa_has_v)(dtb_ptr)
+    (crate::api::boot::boot_scan_hooks().parse_cpu_isa_has_v)(dtb_ptr)
 }
 
 /// Initialize command line arguments

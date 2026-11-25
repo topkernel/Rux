@@ -207,5 +207,5 @@ pub fn check() {
 /// The one-shot lockup report (moved to the debug crate): same-named
 /// wrapper dispatched from check() after the REPORTED gate wins.
 pub fn report(cpu: usize, elapsed_secs: u64, timer_cnt: u64) {
-    crate::debug::debug_hooks::softlockup_report(cpu, elapsed_secs, timer_cnt);
+    crate::api::debug::softlockup_report(cpu, elapsed_secs, timer_cnt);
 }

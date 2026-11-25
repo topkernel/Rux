@@ -5,7 +5,7 @@
 //! ROUTING (which arm) — under a crate-level unsafe-forbid boundary.
 //! The framework keeps the MECHANISM (kernel/core/src/arch/*/mm/: walks, PTE
 //! atomics, fill/copy frame primitives, uaccess bottoms) plus the hook
-//! table (kernel/core/src/mm/mm_hooks.rs); the composition bin registers
+//! table (kernel/core/src/api/mm.rs); the composition bin registers
 //! this crate's rows before the framework impl boots.
 //!
 //! Migration state (M1a): all three arches' carves are flipped — the
@@ -67,7 +67,7 @@ pub mod policy;
 /// registration attempt.
 pub fn register_all() {
     #[cfg(any(feature = "x86_64", feature = "riscv64", feature = "aarch64"))]
-    rux::mm::mm_hooks::mm_register_hooks(rux::mm::mm_hooks::MmHooks {
+    rux::api::mm::mm_register_hooks(rux::api::mm::MmHooks {
         handle_mm_fault: crate::policy::handle_mm_fault,
         mmap: crate::policy::mmap,
         munmap: crate::policy::munmap,
@@ -83,7 +83,7 @@ pub fn register_all() {
     // its row points at the framework module (identical behavior);
     // each flip repoints the row at this crate's module. OnceSlot
     // first-wins over the framework's later in-tree registration.
-    rux::mm::mm_hooks::mm_register_policy_hooks(rux::mm::mm_hooks::MmPolicyHooks {
+    rux::api::mm::mm_register_policy_hooks(rux::api::mm::MmPolicyHooks {
         kswapd_init: crate::kswapd::init,
         kswapd_enable_oom: crate::kswapd::enable_oom,
         wakeup_kswapd: crate::kswapd::wakeup_kswapd,

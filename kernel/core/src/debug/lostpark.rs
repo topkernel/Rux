@@ -58,5 +58,5 @@ pub fn record(event: u64, pid: u64, a: u64, b: u64, jiffies: u64) {
 /// for the wakewatch heartbeat's frozen-state branch; dispatches the
 /// hook row.
 pub fn dump_once(tag: &[u8]) {
-    crate::debug::debug_hooks::lostpark_dump_once(tag);
+    crate::api::debug::lostpark_dump_once(tag);
 }

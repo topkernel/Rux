@@ -21,11 +21,11 @@ use rux::mm::PAGE_SIZE;
 // ==================== Swap Entry Encoding ====================
 //
 // The PTE-entry codec is SEAM VOCABULARY (M1b): compiled in
-// mm_hooks.rs, named by both the arch fault mechanism and this policy
+// api/mm.rs, named by both the arch fault mechanism and this policy
 // module. Re-exported here so the historical swap::/make_/is_ paths
 // keep resolving on both sides of the crate boundary.
 
-pub use rux::mm::mm_hooks::{
+pub use rux::api::mm::{
     is_migration_entry, is_swap_entry, make_migration_entry, make_swap_entry,
     swap_entry_offset, swap_entry_type, MIGRATION_ENTRY_SIGNATURE, SWAP_ENTRY_SIGNATURE,
 };
@@ -474,7 +474,7 @@ pub fn swap_write_census() -> (u64, u64, u64) {
 
 // SwapStats is seam vocabulary (framework /proc consumers match on its
 // fields); re-exported so swap::SwapStats keeps resolving.
-pub use rux::mm::mm_hooks::SwapStats;
+pub use rux::api::mm::SwapStats;
 
 /// Get swap statistics.
 pub fn swap_stats() -> SwapStats {

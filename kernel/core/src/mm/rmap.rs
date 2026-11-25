@@ -122,7 +122,7 @@ pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: b
         // Add to LRU_INACTIVE_ANON on first mapping
         // Safe now: LRU uses dedicated lru_next field, not mapping/index
         if page.mapcount() == 0 {
-            super::mm_hooks::page_add_anon_lru(page);
+            crate::api::mm::page_add_anon_lru(page);
         }
     }
 }
@@ -147,7 +147,7 @@ pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
         // Add to LRU_INACTIVE_FILE on first mapping
         // Safe now: LRU uses dedicated lru_next field, not mapping/index
         if page.mapcount() == 0 {
-            super::mm_hooks::page_add_file_lru(page);
+            crate::api::mm::page_add_file_lru(page);
         }
     }
 }
@@ -179,7 +179,7 @@ pub fn page_remove_rmap(page: &Page) {
         if new_count == -1 && page.page_type() != super::page_desc::PageType::PageCache {
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
             page.clear_flag(super::page_desc::PageFlag::SwapBacked);
-            super::mm_hooks::page_remove_lru(page);
+            crate::api::mm::page_remove_lru(page);
         }
     }
 }
@@ -307,7 +307,7 @@ pub fn page_record_mapping(page: &Page, mm_ptr: usize, vaddr: usize) {
 /// # Returns
 /// Number of PTEs successfully replaced with migration markers.
 pub fn try_to_unmap_migration(page: &Page) -> i32 {
-    try_to_unmap_inner(page, super::mm_hooks::make_migration_entry())
+    try_to_unmap_inner(page, crate::api::mm::make_migration_entry())
 }
 
 /// Shared implementation for try_to_unmap and try_to_unmap_with_swap.

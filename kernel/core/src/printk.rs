@@ -2297,7 +2297,7 @@ mod persistent_log {
         // Resolve or create the file before the first flush so the
         // flush path never creates.
         resolve_file();
-        if crate::process::process_hooks::kthread_run(
+        if crate::api::process::kthread_run(
             klogd_fn,
             core::ptr::null_mut(),
             "klogd",
@@ -2318,7 +2318,7 @@ mod persistent_log {
     /// the cached-ino validity check and creation live ext4-side; the
     /// crate's row resets OUR write offset when it (re)creates).
     fn resolve_file() -> Option<u32> {
-        let fresh = crate::fs::ext4_hooks::kmsg_resolve();
+        let fresh = crate::api::ext4::kmsg_resolve();
         if let Some(ino) = fresh {
             if ino as u64 != FILE_INO.swap(ino as u64, Ordering::Relaxed) {
                 // A newly-created (or first-resolved) file: the archive
@@ -2339,7 +2339,7 @@ mod persistent_log {
         let interval_jiffies =
             (FLUSH_PERIOD_SECS * crate::config::KERNEL_HZ as u64).max(1);
         loop {
-            if crate::process::process_hooks::kthread_should_stop() {
+            if crate::api::process::kthread_should_stop() {
                 break;
             }
             let my_pid = match crate::sched::current() {
@@ -2384,7 +2384,7 @@ mod persistent_log {
                 // round and retry the arm.
                 crate::sched::schedule();
             }
-            if crate::process::process_hooks::kthread_should_stop() {
+            if crate::api::process::kthread_should_stop() {
                 break;
             }
             flush_once();
@@ -2467,7 +2467,7 @@ mod persistent_log {
         let mut written = 0usize;
         for (seq, line) in &lines {
             let data = &line.buf[..line.len];
-            let n = crate::fs::ext4_hooks::kmsg_write_at(ino, offset, data);
+            let n = crate::api::ext4::kmsg_write_at(ino, offset, data);
             if n > 0 {
                 offset += n as u64;
                 if offset >= MAX_LOG_SIZE {

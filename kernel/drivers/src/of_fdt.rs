@@ -16,7 +16,7 @@
 //! crate forbid.
 //!
 //! The framework dispatches here through the four BootScanHooks rows
-//! (kernel/core/src/boot_scan_hooks.rs) — every call site is boot-time
+//! (kernel/core/src/api/boot.rs) — every call site is boot-time
 //! cold (cmdline::init, lib.rs's memblock/paging phases, vext's ISA
 //! prime), so the row indirection is a few ns on paths doing µs–ms
 //! of work. The one behavioral edit forced by the forbid: the

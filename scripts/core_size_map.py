@@ -72,8 +72,11 @@ CALL = re.compile(
     r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
 # Subsystems that already have a service crate: only there does a name a
 # service crate calls force the function to stay.
+# "api" is the interface-table directory (core/src/api): every file there
+# is a table or wrapper a service crate calls by name, so rule 3 applies
+# to it although it is not a subsystem of its own.
 HAS_CRATE = {"fs", "drivers", "mm", "sched", "ipc", "syscall", "net", "debug",
-             "(root)", "process", "sync", "timer", "io_uring"}
+             "(root)", "process", "sync", "timer", "io_uring", "api"}
 
 NESTED = {"fs", "drivers", "mm", "arch", "process", "ipc", "sched", "debug",
           "sync", "interrupt", "timer", "trace", "perf", "syscall", "safety",

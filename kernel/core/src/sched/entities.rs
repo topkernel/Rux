@@ -7,7 +7,7 @@
 //! this storage; the diag counters route through SchedHooks rows).
 
 #![forbid(unsafe_code)]
-use super::sched_hooks::{CLASS_DL_BIT, CLASS_RT_BIT, CLASS_CFS_BIT};
+use crate::api::sched::{CLASS_DL_BIT, CLASS_RT_BIT, CLASS_CFS_BIT};
 use core::sync::atomic::{AtomicU64, AtomicBool, AtomicU32, AtomicI64, AtomicUsize, Ordering};
 use alloc::collections::BTreeMap;
 use super::r#unsafe::{VruntimeKey, RbNode, RbTimeline, node_key, node_of_task, task_of_node};
@@ -302,7 +302,7 @@ impl RtRunQueue {
         ) {
             if old == 1 {
                 crate::sched::sched::class_nonempty_clear(
-                    crate::sched::sched_hooks::CLASS_RT_BIT,
+                    crate::api::sched::CLASS_RT_BIT,
                 );
             }
         }
@@ -389,7 +389,7 @@ impl RtRunQueue {
             let rt_old = self.rt_nr_running.fetch_add(1, Ordering::AcqRel);
             if rt_old == 0 {
                 crate::sched::sched::class_nonempty_set(
-                    crate::sched::sched_hooks::CLASS_RT_BIT,
+                    crate::api::sched::CLASS_RT_BIT,
                 );
             }
 
@@ -1237,7 +1237,7 @@ impl DlRunQueue {
         ) {
             if old == 1 {
                 crate::sched::sched::class_nonempty_clear(
-                    crate::sched::sched_hooks::CLASS_DL_BIT,
+                    crate::api::sched::CLASS_DL_BIT,
                 );
             }
         }
@@ -1284,7 +1284,7 @@ impl DlRunQueue {
             let dl_old = self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
             if dl_old == 0 {
                 crate::sched::sched::class_nonempty_set(
-                    crate::sched::sched_hooks::CLASS_DL_BIT,
+                    crate::api::sched::CLASS_DL_BIT,
                 );
             }
 
@@ -1758,7 +1758,7 @@ impl CfsRunQueue {
             // grq-hold-slim Cut 2: CFS emptied — clear the class
             // nonempty bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
             crate::sched::sched::class_nonempty_clear(
-                crate::sched::sched_hooks::CLASS_CFS_BIT,
+                crate::api::sched::CLASS_CFS_BIT,
             );
         }
         if old == 0 {
@@ -1767,7 +1767,7 @@ impl CfsRunQueue {
             // restore — keep the class bit identical to what is_empty()
             // would now report.
             crate::sched::sched::class_nonempty_clear(
-                crate::sched::sched_hooks::CLASS_CFS_BIT,
+                crate::api::sched::CLASS_CFS_BIT,
             );
             // REGRESSION GUARD: the counter was already 0 when a
             // removal path decremented again. The one historical producer
@@ -2036,7 +2036,7 @@ impl CfsRunQueue {
             // else: preempted prev (state RUNNING) — keep vruntime.
 
             // 64th: vruntime sanity canary (see vr_canary).
-            crate::sched::sched_hooks::vr_canary(self, task, b"ENQ", se.get_vruntime());
+            crate::api::sched::vr_canary(self, task, b"ENQ", se.get_vruntime());
 
             // Generate unique key
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
@@ -2060,7 +2060,7 @@ impl CfsRunQueue {
             let nr_old = self.nr_running.fetch_add(1, Ordering::AcqRel);
             if nr_old == 0 {
                 crate::sched::sched::class_nonempty_set(
-                    crate::sched::sched_hooks::CLASS_CFS_BIT,
+                    crate::api::sched::CLASS_CFS_BIT,
                 );
             }
             self.load_weight.fetch_add(se.load.weight, Ordering::AcqRel);
@@ -2068,7 +2068,7 @@ impl CfsRunQueue {
             // Update minimum vruntime
             self.update_min_vruntime();
 
-            crate::sched::sched_hooks::ww_record(task, crate::sched::sched_hooks::WW_EV_LINK);
+            crate::api::sched::ww_record(task, crate::api::sched::WW_EV_LINK);
 
             true
         }
@@ -2104,7 +2104,7 @@ impl CfsRunQueue {
             if se.timeline_key().is_some() {
                 let key = se.timeline_key().unwrap_or(VruntimeKey::new(0, 0));
                 // 64th: vruntime sanity canary (see vr_canary).
-                crate::sched::sched_hooks::vr_canary(self, task, b"DEQ", key.vruntime);
+                crate::api::sched::vr_canary(self, task, b"DEQ", key.vruntime);
                 // 64th (update_entity_lag parity, 6.6 fair.c:5534):
                 // capture the clamped lag BEFORE the removal —
                 // avg_vruntime still includes this entity, exactly like
@@ -2187,11 +2187,11 @@ impl CfsRunQueue {
         self.nr_running.store(truth, Ordering::Release);
         if truth > 0 {
             crate::sched::sched::class_nonempty_set(
-                crate::sched::sched_hooks::CLASS_CFS_BIT,
+                crate::api::sched::CLASS_CFS_BIT,
             );
         } else {
             crate::sched::sched::class_nonempty_clear(
-                crate::sched::sched_hooks::CLASS_CFS_BIT,
+                crate::api::sched::CLASS_CFS_BIT,
             );
         }
         Some((was, truth))
@@ -2774,7 +2774,7 @@ impl CfsRunQueue {
                         let was_pk = tr.pick_state();
                         tr.release_pick_ownership();
                         stale_reset += 1;
-                        crate::sched::sched_hooks::stale_oncpu_healed(
+                        crate::api::sched::stale_oncpu_healed(
                             b"SWEEP-ONCPU-RESET",
                             cpu_id,
                             task,
@@ -2830,7 +2830,7 @@ impl CfsRunQueue {
         // node — the reference's rb_leftmost)
         if let Some((key, task)) = self.leftmost_entry() {
             // 64th: vruntime sanity canary (see vr_canary).
-            crate::sched::sched_hooks::vr_canary(self, task, b"PK1", key.vruntime);
+            crate::api::sched::vr_canary(self, task, b"PK1", key.vruntime);
             // b50 #GP guard family — a non-canonical pointer must never
             // reach the derefs below. grq-10ns: with the intrusive
             // timeline the entry cannot be unlinked (the link fields live
@@ -3046,7 +3046,7 @@ impl CfsRunQueue {
         self.load_weight.store(0, Ordering::Release);
         // grq-hold-slim Cut 2: the drain emptied CFS — clear the class
         // bit (GRQ-held).
-        crate::sched::sched::class_nonempty_clear(crate::sched::sched_hooks::CLASS_CFS_BIT);
+        crate::sched::sched::class_nonempty_clear(crate::api::sched::CLASS_CFS_BIT);
     }
 }
 

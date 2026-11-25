@@ -419,7 +419,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 }
                 // Zone allocator failed — wake kswapd if below low watermark
                 if !zone.watermark_ok(order, WMARK_LOW) {
-                    super::mm_hooks::wakeup_kswapd(order as i32);
+                    crate::api::mm::wakeup_kswapd(order as i32);
                 }
                 // Leg-15 pace: one tick per slowpath entry (zone fastpath
                 // failed), rux:schb (retired debug=schb)-gated counter only.
@@ -560,7 +560,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             if crate::sched::current_is_dying() {
                                 break;
                             }
-                            let freed = super::mm_hooks::try_to_free_pages(order as i32);
+                            let freed = crate::api::mm::try_to_free_pages(order as i32);
                             gate_note_phase(GATE_PHASE_RETRY);
                             if let Some(pfn) = zone.alloc_pages(order) {
                                 ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
@@ -601,7 +601,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         } else {
                         gate_note_phase(GATE_PHASE_DEEP);
                         let deep_freed =
-                            super::mm_hooks::drain_file_cache_before_oom(deep_target);
+                            crate::api::mm::drain_file_cache_before_oom(deep_target);
                         gate_note_phase(GATE_PHASE_RETRY);
                         if deep_freed > 0 {
                             if let Some(pfn) = zone.alloc_pages(order) {
@@ -624,8 +624,8 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     let zone_ptr: *mut Zone = zone;
                     // zone_ptr is a valid pointer to an initialized zone
                     // (compact_zone is now a safe fn over the same pointer).
-                    let cr = super::mm_hooks::compact_zone(zone_ptr, order);
-                    if matches!(cr, super::mm_hooks::CompactResult::Success) {
+                    let cr = crate::api::mm::compact_zone(zone_ptr, order);
+                    if matches!(cr, crate::api::mm::CompactResult::Success) {
                         // compact_zone does not destroy the zone; the
                         // pointer remains valid for the lifetime of the
                         // node (INV-SYSC-2 reachability arm).
@@ -747,7 +747,7 @@ pub fn oom_forensic_dump(site: &str) {
 
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
-        let (n, slow, max_ns) = super::mm_hooks::swap_write_census();
+        let (n, slow, max_ns) = crate::api::mm::swap_write_census();
         // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::println!(
             "OOM-FORENSIC: swapwrite n={} slow={} max_ms={}",
@@ -759,7 +759,7 @@ pub fn oom_forensic_dump(site: &str) {
     // SP-7: per-page skip reasons — why anon candidates never reach the
     // swap write above.
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
-    crate::println!("OOM-FORENSIC: {}", super::mm_hooks::vscan_census_line());
+    crate::println!("OOM-FORENSIC: {}", crate::api::mm::vscan_census_line());
     // falloc-wedge census: the page-cache reclaim/evict skip faces (same
     // SP-7 shape — names the filter that holds the file LRU hostage).
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
@@ -885,7 +885,7 @@ pub fn oom_forensic_dump(site: &str) {
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: swap active={}",
-        super::mm_hooks::nr_active_swap()
+        crate::api::mm::nr_active_swap()
     );
 
     // Seed-detector counters (see zone.rs)

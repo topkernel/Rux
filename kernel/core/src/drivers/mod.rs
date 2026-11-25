@@ -22,7 +22,7 @@ pub mod input;
 pub mod loop_dev;
 pub mod ashmem;
 pub mod initcalls;
-pub mod hooks;
+// The driver hook table (DriverHooks) is crate::api::drivers.
 pub mod drm;
 
 // The VirtIO probe orchestrator moved to the drivers service crate

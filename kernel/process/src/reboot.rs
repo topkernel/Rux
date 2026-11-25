@@ -252,7 +252,7 @@ pub fn shutdown_cascade(cmd: u32) {
     crate::debug::forkprof::report();
     // mmprof (cmdline mmprof=1): vm-op stage table, same discipline.
     crate::debug::mmprof::report_line(0);
-    if let Err(e) = crate::fs::ext4_hooks::shutdown_sync() {
+    if let Err(e) = rux::api::ext4::shutdown_sync() {
         crate::pr_err!("reboot: filesystem sync failed, err={}", e);
     }
 

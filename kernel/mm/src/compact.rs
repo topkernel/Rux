@@ -35,7 +35,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 // CompactResult is seam vocabulary (the framework allocator matches on
 // it, this module produces it); re-exported so compact::CompactResult
 // keeps resolving.
-pub use rux::mm::mm_hooks::CompactResult;
+pub use rux::api::mm::CompactResult;
 
 /// Controls a single compaction pass over a zone.
 struct CompactControl {
@@ -438,8 +438,8 @@ fn migrate_page_window(
     // Unlink src here, and link dst in its place — the migrated page
     // keeps its reclaim visibility (same shape as the vmscan swap-out
     // cleanup).
-    rux::mm::mm_hooks::page_remove_lru(src);
-    rux::mm::mm_hooks::page_add_anon_lru(dst);
+    rux::api::mm::page_remove_lru(src);
+    rux::api::mm::page_add_anon_lru(dst);
 
     // Clear src metadata
     // Note: try_to_unmap() only decrements _mapcount, not _refcount.

@@ -75,7 +75,7 @@ impl DlRunQueue {
         ) {
             if old == 1 {
                 crate::sched::sched::class_nonempty_clear(
-                    crate::sched::sched_hooks::CLASS_DL_BIT,
+                    rux::api::sched::CLASS_DL_BIT,
                 );
             }
         }
@@ -122,7 +122,7 @@ impl DlRunQueue {
             let dl_old = self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
             if dl_old == 0 {
                 crate::sched::sched::class_nonempty_set(
-                    crate::sched::sched_hooks::CLASS_DL_BIT,
+                    rux::api::sched::CLASS_DL_BIT,
                 );
             }
 

@@ -44,7 +44,7 @@ pub fn on() -> bool {
 /// Compatibility arm (moved to the debug crate): same-named wrapper
 /// for the boot arming site; dispatches the hook row.
 pub fn compat_arm() {
-    crate::debug::debug_hooks::spinwatch_compat_arm();
+    crate::api::debug::spinwatch_compat_arm();
 }
 
 /// The window count of the LAST report (set by `record` right before it

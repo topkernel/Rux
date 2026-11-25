@@ -14,7 +14,7 @@ edition = "2021"
 # (kernel/core/src/debug/) as direct calls (the hot/cold split of the flip's
 # measurement); this crate READS those statics through their pub
 # surfaces and prints. Framework-side cold entry points dispatch
-# through kernel/core/src/debug/debug_hooks.rs (the 18-row seam); syscall
+# through kernel/core/src/api/debug.rs (the 18-row seam); syscall
 # and fs call the scmtap module here DIRECTLY (sibling service dep,
 # zero indirection on the armed-gated tap paths).
 

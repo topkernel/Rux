@@ -4040,13 +4040,13 @@ pub fn tcp_dump() -> alloc::vec::Vec<TcpSlotInfo> {
 /// memwatch's TCPCEN census (the crate-flip rung-2 hook row): up to 8
 /// live slots as (fd, state, rx len, advertised window, local port) —
 /// the bwslow zero-window hunt's row shape.
-pub fn tcp_census_dump() -> alloc::vec::Vec<crate::net_hooks::TcpCensusRow> {
+pub fn tcp_census_dump() -> alloc::vec::Vec<rux::api::net::TcpCensusRow> {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
     let table = tcp_socket_table_ref();
     let mut out = alloc::vec::Vec::new();
     for (fd, slot) in table.sockets.iter().take(table.count).enumerate() {
         if let Some(s) = slot.as_ref() {
-            out.push(crate::net_hooks::TcpCensusRow {
+            out.push(rux::api::net::TcpCensusRow {
                 fd: fd as u32,
                 state: s.state as u8,
                 rx_len: s.recv_buffer.len() as u64,

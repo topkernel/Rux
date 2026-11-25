@@ -63,7 +63,7 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
         };
 
         if crate::process::r#unsafe::ptrace_translate(&mm, page_fault_addr).is_none() {
-            let r = crate::mm::mm_hooks::handle_mm_fault(
+            let r = crate::api::mm::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page_fault_addr),
                 crate::arch::mm::FaultFlags::READ,

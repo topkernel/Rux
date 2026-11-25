@@ -103,7 +103,7 @@ fn spawn_helper(semid: i64, wait_zcnt: bool) -> bool {
     PLAN.semid.store(semid as i32, Ordering::Release);
     PLAN.wait_zcnt.store(if wait_zcnt { 1 } else { 0 }, Ordering::Release);
     PLAN.observed.store(false, Ordering::Release);
-    crate::process::process_hooks::kthread_run(sem_post_helper, core::ptr::null_mut(), "semtest_post")
+    crate::api::process::kthread_run(sem_post_helper, core::ptr::null_mut(), "semtest_post")
         .is_some()
 }
 
@@ -236,7 +236,7 @@ pub fn test_sysv_sem_block() {
         PLAN.semid.store(semid as i32, Ordering::Release);
         PLAN.wait_zcnt.store(1, Ordering::Release);
         PLAN.observed.store(false, Ordering::Release);
-        let spawned = crate::process::process_hooks::kthread_run(
+        let spawned = crate::api::process::kthread_run(
             sem_zrelease_helper,
             core::ptr::null_mut(),
             "semtest_zrel",

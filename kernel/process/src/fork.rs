@@ -793,7 +793,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // exactly where child tables are about to be allocated
                 // (no-op on arches without the protocol).
                 crate::arch::mm::pt_pending_drain();
-                match crate::mm::mm_hooks::fork(parent_as) {
+                match rux::api::mm::fork(parent_as) {
                     Ok(child_as) => {
                         #[cfg(feature = "debug-futex-trace")]
                         {
@@ -1021,9 +1021,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         child.set_access_token(current.access_token());
         child.set_access_ftoken(0);
         {
-            if let Some((ptok, _)) = crate::ipc::ipc_hooks::at_registered_token_of(current.tgid() as u32) {
+            if let Some((ptok, _)) = rux::api::ipc::at_registered_token_of(current.tgid() as u32) {
                 if ptok != 0 {
-                    crate::ipc::ipc_hooks::at_mirror_set(child.tgid() as u32, false, ptok);
+                    rux::api::ipc::at_mirror_set(child.tgid() as u32, false, ptok);
                 }
             }
         }

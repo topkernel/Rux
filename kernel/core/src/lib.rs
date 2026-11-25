@@ -21,6 +21,8 @@ use core::panic::PanicInfo;
 use alloc::format;
 
 pub mod arch;
+// The interface tables, one file per subsystem (seed-core-design 2c.4).
+pub mod api;
 
 /// Print initialization status message
 ///
@@ -116,7 +118,6 @@ pub mod print;
 pub mod printk;
 pub mod drivers;
 pub mod config;
-pub mod boot_scan_hooks;
 pub mod list;
 pub mod process;
 pub mod sched;
@@ -128,7 +129,6 @@ pub mod signal;
 // policy moved to the crate. signal_policy.rs (the moved bodies) is
 // deliberately NOT declared here — the signal service crate is its
 // sole compilation home, under #![forbid(unsafe_code)].
-pub mod signal_hooks;
 pub mod signal_unsafe;
 pub mod security;
 pub mod sync;
@@ -150,7 +150,6 @@ pub mod debug;
 pub mod ipc;
 pub mod io_uring;
 pub mod timer;
-pub mod timer_hooks;
 pub mod panic_policy;
 pub mod trace;
 pub mod perf;
@@ -681,7 +680,7 @@ pub fn rust_main_tail() -> ! {
 
             // Initialize ext4 file system (the crate's init row —
             // ext4's register_all filled the table before kmain)
-            fs::ext4_hooks::init();
+            crate::api::ext4::init();
             print_status("fs", "ext4 driver loaded", true);
 
             // Initialize RootFS
@@ -856,7 +855,7 @@ pub fn rust_main_tail() -> ! {
             // seam (drivers owns probe.rs since the rung-4 tranche
             // 2); the row body performs the historical three
             // register_initcall calls verbatim at this exact point.
-            drivers::hooks::register_probe_initcalls();
+            crate::api::drivers::register_probe_initcalls();
             // First scan MMIO devices (virtio-blk-device)
             let mmio_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Early);
             if mmio_count > 0 {
@@ -893,11 +892,11 @@ pub fn rust_main_tail() -> ! {
         // swap_init refuses to enable when the tail carve would overlap
         // the ext4 filesystem (see the ext4 guard in mm/swap.rs).
         {
-            mm::mm_hooks::swap_init();
+            crate::api::mm::swap_init();
             print_status_ex(
                 "mm",
                 &format!("swap {} MB tail carve", crate::config::SWAP_SIZE_MB),
-                if mm::mm_hooks::nr_active_swap() { Some(true) } else { None },
+                if crate::api::mm::nr_active_swap() { Some(true) } else { None },
             );
         }
 
@@ -914,9 +913,9 @@ pub fn rust_main_tail() -> ! {
             // Net bring-up rides the NetHooks registration (the
             // composition bin registers the service crate's fns before
             // rust_main_impl — the crate-flip rung-2 entry seam).
-            crate::net::net_hooks::init_tcp();
-            crate::net::net_hooks::init_tcp_timer();
-            crate::net::net_hooks::init_route();
+            crate::api::net::init_tcp();
+            crate::api::net::init_tcp_timer();
+            crate::api::net::init_route();
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
             crate::mm::vdso::vdso_init();
@@ -933,7 +932,7 @@ pub fn rust_main_tail() -> ! {
             // line — replaces hardcoding for non-default QEMU networks.
             if let Some(ip_str) = cmdline::get_param("ip") {
                 if let Some(ip) = cmdline::parse_ipv4_addr(&ip_str) {
-                    crate::net::net_hooks::set_local_ip(ip);
+                    crate::api::net::set_local_ip(ip);
                     let a = (ip >> 24) & 0xFF;
                     let b = (ip >> 16) & 0xFF;
                     let c = (ip >> 8) & 0xFF;
@@ -949,7 +948,7 @@ pub fn rust_main_tail() -> ! {
             }
             // P1 IPv6: SLAAC link-local (fe80::/64 + EUI-64) + Router
             // Solicitation. No NIC is fine — the stack simply stays v4-only.
-            crate::net::net_hooks::ipv6_init();
+            crate::api::net::ipv6_init();
         }
 
         // Initialize security subsystem (before scheduler / process creation)
@@ -970,7 +969,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize kswapd background reclaim thread
         {
-            mm::mm_hooks::kswapd_init();
+            crate::api::mm::kswapd_init();
             print_status("mm", "kswapd reclaim thread", true);
         }
 
@@ -997,7 +996,7 @@ pub fn rust_main_tail() -> ! {
         // instruction (kernel/trace/trace_events.c __setup). The file
         // set lives in the debug crate now; the row applies it.
         {
-            debug::debug_hooks::trace_files_init_from_cmdline();
+            crate::api::debug::trace_files_init_from_cmdline();
         }
 
         // __setup("nohz_full=") — the full-dynticks CPU list
@@ -1034,7 +1033,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize IPC subsystem
         {
-            ipc::ipc_hooks::init();
+            crate::api::ipc::init();
             print_status("ipc", "System V + POSIX MQ", true);
         }
 
@@ -1135,7 +1134,7 @@ pub fn rust_main_tail() -> ! {
             // /dev/fb0 — framebuffer char device (registered when the GPU
             // initialized successfully above)
             if drivers::gpu::get_framebuffer_info().is_some() {
-                match drivers::hooks::init_fbdev() {
+                match crate::api::drivers::init_fbdev() {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),
                     Err(()) => print_status("driver", "/dev/fb0 registration failed", false),
                 }
@@ -1256,7 +1255,7 @@ pub fn rust_main_tail() -> ! {
         println!();
 
         // Enable OOM killer now that boot is complete
-        mm::mm_hooks::kswapd_enable_oom();
+        crate::api::mm::kswapd_enable_oom();
 
         // ========== Timer interrupt setup ==========
         // Enable timer interrupts (also sets the first trigger internally)
@@ -1475,7 +1474,7 @@ pub extern "C" fn rust_main_impl() -> ! {
     // flip lands. Must precede every consumer: the allocator's
     // wakeup_kswapd/direct-reclaim rows, the boot swap_init below, and
     // the mmu_init teardown's swap_free_slot codec path.
-    mm::mm_hooks::register_in_tree_mm_policy();
+    crate::api::mm::register_in_tree_mm_policy();
 
     // Initialize SMP (multi-core support) - must run first!
     // On QEMU virt, OpenSBI only starts one hart into S-mode.
@@ -1915,17 +1914,17 @@ fn mount_boot_disk_ext4() {
 /// Mount `disk`'s ext4 as THE root (full mount path with journal replay),
 /// then rebuild the /proc and cgroup2 mounts the ext4 overlay shadowed.
 fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
-    let mount_result = fs::ext4_hooks::mount_root(disk);
+    let mount_result = crate::api::ext4::mount_root(disk);
     let mount_point = crate::config::EXT4_MOUNT_POINT;
     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
     if mount_result.is_err() {
         return;
     }
-    if fs::ext4_hooks::mounted() {
+    if crate::api::ext4::mounted() {
         // Build dentry tree for ext4 (overlays root)
         fs::vfs::vfs_mount(
             "/",
-            fs::ext4_hooks::root_inode(),
+            crate::api::ext4::root_inode(),
             fs::mount::MntFlags::new(0),
         );
     }

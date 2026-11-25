@@ -23,7 +23,7 @@
 //!   `exit_wait`.
 //! - `process/exec_ring.rs`: the STACKZERO ring the riscv64 fault
 //!   path walks (hot read; the crate's exec policy writes it).
-//! - `process/process_hooks.rs`: the seam — three cold tables
+//! - `api/process.rs`: the seam — three cold tables
 //!   (ProcessHooks / KthreadHooks / PidHooks), OnceSlot-published.
 
 #![forbid(unsafe_code)]
@@ -136,8 +136,7 @@ pub mod test_smp_schedule;
 /// consumes): the three process seam tables. OnceSlot-only — no
 /// Spinlock, no per-CPU state (the x86_64 unit-test kernel lesson).
 pub fn register_all() {
-    use rux::process::process_hooks;
-    process_hooks::process_register_hooks(process_hooks::ProcessHooks {
+    rux::api::process::process_register_hooks(rux::api::process::ProcessHooks {
         do_execve_elf: exec_policy::do_execve_elf,
         wait4_park_audit: exit_wait::wait4_park_audit,
         signal_makes_core: coredump::signal_makes_core,
@@ -149,14 +148,14 @@ pub fn register_all() {
         cad_deliver_pending: reboot::cad_deliver_pending,
         init_exited_fallback_cascade: reboot::init_exited_fallback_cascade,
     });
-    process_hooks::kthread_register_hooks(process_hooks::KthreadHooks {
+    rux::api::process::kthread_register_hooks(rux::api::process::KthreadHooks {
         kthread_run: kthread::kthread_run,
         kthread_run_on_cpu: kthread::kthread_run_on_cpu,
         kthread_should_stop: kthread::kthread_should_stop,
         kthread_stop: kthread::kthread_stop,
         kthread_name: kthread::kthread_name,
     });
-    process_hooks::exit_register_hooks(process_hooks::ExitHooks {
+    rux::api::process::exit_register_hooks(rux::api::process::ExitHooks {
         exit_robust_list: exit_teardown::exit_robust_list,
         exit_clear_child_tid: exit_teardown::exit_clear_child_tid,
         kill_other_threads: exit_teardown::kill_other_threads,
@@ -164,7 +163,7 @@ pub fn register_all() {
         sweep_dead_threads: exit_teardown::sweep_dead_threads,
         reparent_children_to_init: exit_teardown::reparent_children_to_init,
     });
-    process_hooks::pid_register_hooks(process_hooks::PidHooks {
+    rux::api::process::pid_register_hooks(rux::api::process::PidHooks {
         alloc_pid: pid::alloc_pid,
         free_pid: pid::free_pid,
         pid_max_live: pid::pid_max_live,

@@ -138,7 +138,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
             let my_tgid = cur.tgid() as u32;
             let is_leader = dying_pid == my_tgid;
-            let frozen = crate::sync::sync_diag_hooks::rwfrz_tgid_frozen(my_tgid);
+            let frozen = crate::api::sync::rwfrz_tgid_frozen(my_tgid);
             #[cfg(feature = "x86_64")]
             let segv = crate::arch::x86_64::trap::segv_hist_age(dying_pid);
             #[cfg(not(feature = "x86_64"))]
@@ -452,7 +452,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             use core::sync::atomic::Ordering::Relaxed;
             static UDEXIT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            let watch_tgid = crate::sync::sync_diag_hooks::rwfz_exit_watch_tgid();
+            let watch_tgid = crate::api::sync::rwfz_exit_watch_tgid();
             let is_leader = dying_pid == tgid;
             if !is_leader
                 && watch_tgid != 0
@@ -693,7 +693,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             // The rung-5 seam row: the handle type is ext4-crate-owned;
             // the row body does the refcount drop + slot clear
             // (INV-PROC-JOURNAL-1 documented crate-side).
-            crate::fs::ext4_hooks::exit_journal_unwind();
+            crate::api::ext4::exit_journal_unwind();
         }
 
         // ===== Ext4 big lock force-release =====
@@ -758,10 +758,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         // still intact). This is the single funnel for both the signal
         // default-action path (handle_default_signal -> do_exit_group)
         // and the direct trap paths (SIGSEGV/SIGILL/... -> do_exit).
-        if exit_code < 0 && crate::process::process_hooks::signal_makes_core(-exit_code) {
+        if exit_code < 0 && crate::api::process::signal_makes_core(-exit_code) {
             // cur is the exiting task (do_coredump's contract; it never
             // runs twice for one task).
-            crate::process::process_hooks::do_coredump(cur, -exit_code);
+            crate::api::process::do_coredump(cur, -exit_code);
         }
 
         crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
@@ -868,8 +868,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Both write into user memory and futex-wake with THIS task's mm
         // as the key identity; once set_address_space(None) runs the key
         // is unobtainable and the user words unreachable.
-        crate::process::process_hooks::exit_robust_list(cur);
-        crate::process::process_hooks::exit_clear_child_tid(cur);
+        crate::api::process::exit_robust_list(cur);
+        crate::api::process::exit_clear_child_tid(cur);
 
         // ===== cgroup v2 (U1b): leave the cgroup + settle memory =====
         // Drops cgroup membership (pids.current / cgroup.procs) and
@@ -928,7 +928,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::sync::futex_pi::futex_pi_exit_cleanup(cur);
 
         // ===== Clean up POSIX MQ fd entries =====
-        crate::ipc::ipc_hooks::mq_fds_cleanup(cur);
+        crate::api::ipc::mq_fds_cleanup(cur);
 
         // ===== Disarm interval timers (ITIMER_REAL/VIRTUAL/PROF) =====
         for i in 0..3 {
@@ -960,7 +960,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Applies to threads too: a thread may have fork()ed children.
         // Process-tree mutations take PROCESS_TREE_LOCK inside.
         let fp_t_rep = if fp { crate::debug::forkprof::now() } else { 0 };
-        crate::process::process_hooks::reparent_children_to_init(cur);
+        crate::api::process::reparent_children_to_init(cur);
         if fp {
             crate::debug::forkprof::add(crate::debug::forkprof::P_EX_REPARENT, fp_t_rep);
         }
@@ -1015,13 +1015,13 @@ pub fn do_exit(exit_code: i32) -> ! {
             // Opportunistically reclaim older dead members (frees stacks of
             // previously-joined threads; `current` is skipped — on_cpu).
             if !leader.is_null() {
-                crate::process::process_hooks::sweep_dead_threads(leader);
+                crate::api::process::sweep_dead_threads(leader);
             }
 
             // PID + hash bookkeeping: the tid disappears now (gettid/tgkill
             // on it → ESRCH, no zombie window).
             crate::process::pid_hash::pid_hash_remove(current_pid);
-            crate::process::process_hooks::free_pid(current_pid);
+            crate::api::process::free_pid(current_pid);
 
             // R9-3 discipline: no preempt window between DEAD and the
             // final schedule.
@@ -1054,11 +1054,11 @@ pub fn do_exit(exit_code: i32) -> ! {
         // exit_group), kill them and wait for the drain before tearing
         // down the shared-mm-dependent state any further.
         if cur.nr_threads() > 1 {
-            crate::process::process_hooks::kill_other_threads(cur);
+            crate::api::process::kill_other_threads(cur);
             // NOT killable: an exiting leader cannot unwind, and the
             // shared-mm teardown below requires the drain (see the
             // wait_for_thread_group_death doc).
-            crate::process::process_hooks::wait_for_thread_group_death(cur, false);
+            crate::api::process::wait_for_thread_group_death(cur, false);
         }
 
         // ===== pid-namespace init exit: tear the namespace down =====
@@ -1138,7 +1138,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // reboot(2) cascade (never returns) unless one is already in
         // flight — that caller is waiting for exactly this exit.
         if current_pid == 1 {
-            crate::process::process_hooks::init_exited_fallback_cascade();
+            crate::api::process::init_exited_fallback_cascade();
         }
 
         // R9-3: close the preempt window between ZOMBIE and the deferred
@@ -1285,7 +1285,7 @@ pub fn do_exit_group(exit_code: i32) -> ! {
         ss.group_exiting
             .store(true, core::sync::atomic::Ordering::Release);
     }
-    crate::process::process_hooks::kill_other_threads(cur);
+    crate::api::process::kill_other_threads(cur);
     do_exit(exit_code)
 }
 
