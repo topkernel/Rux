@@ -1212,24 +1212,36 @@ were written against (`driftwatch`, `lostpark`, `schb`, `scmtap`,
 `spinwatch`, `mmprof`, `forkprof`, `hilogcensus`, `allocwatch`,
 `wildwatch`, `leakorigin`, `scribble`): each watches one symptom,
 each is reached by the debug event that arms it, and none answers a
-question it was not written for. The trace points follow the same
-pattern — `AMS46`, `ACQDIV`, `EPOLLSCAN`, `BINDERTRACE` are named for
-the session that needed them, while the per-subsystem events every
-investigation starts from (task switch, wake-up, block request
-issued and completed, page fault, IRQ enter and exit, timer expiry)
-are missing or partial. So the NOVMA-EXEC investigation of 2026-11-23
-needed seven commits of capture code to answer one question — which
-process issued a given system call — that a syscall trace point
-would have answered from the log. Those 17,000 lines of scattered
-instruments (§2c.3) and the missing general ones are the same fact
-seen twice.
+question it was not written for. A first draft of this section said the
+per-subsystem trace points were missing. They are not. Measured on
+2026-11-25: 216 trace points in 18 groups. The `sched` group has 18,
+`raw_syscalls` has `sys_enter` and `sys_exit` wired into
+`syscall/dispatch.rs`, `irq` has `irq_handler_entry` and
+`irq_handler_exit`, `block` has `block_rq_issue` and
+`block_rq_complete`; `signal`, `timer`, `kmem`, `vmscan`, `oom` and
+`printk` have theirs. Two defects remain in the trace points. One:
+`exceptions:page_fault_user` and `exceptions:page_fault_kernel` are
+declared with no call site — the page-fault event exists by name
+only. Two: the largest group is `rux`, 58 of the 216, named for the
+session that needed each point (`ams46`, `acqdiv`, `leakhunt`,
+`ohhunt`, `epollscan`). Whether the NOVMA-EXEC investigation could
+have used `sys_enter` instead of its capture code is a question
+about how that investigation was run, not about a missing point;
+it is not settled here.
+
+So the gap is not the absence of general instruments. It is that
+17,000 lines of instruments (§2c.3) were written for single failures
+while the general ones went unused, and that some general points are
+shells. The remedy is the same three the method calls for: fill the
+shells, use the general points, and turn the single-failure
+instruments into general ones or delete them.
 
 **What the reference kernel provides, and the state here.**
 
 | facility | what it is for | here |
 |---|---|---|
 | log buffer with levels (`printk`, `dmesg`) | what happened, in order | yes (`printk`); some writers bypass it (§9) |
-| trace points per subsystem (`sched_switch`, `sched_wakeup`, `block_rq_issue`, `block_rq_complete`, `page_fault`, `irq_handler_entry`, `irq_handler_exit`, `timer_expire_entry`, `sys_enter`, `sys_exit`) | the sequence of events around a failure | framework exists; few general points, many hunt-specific ones |
+| trace points per subsystem (`sched_switch`, `sched_wakeup`, `block_rq_issue`, `block_rq_complete`, `page_fault`, `irq_handler_entry`, `irq_handler_exit`, `sys_enter`, `sys_exit`) | the sequence of events around a failure | yes: 216 points, 18 groups; `sched` 18. Open: the two page-fault points have no call site; 58 points in the `rux` group are hunt-specific |
 | dynamic debug (`pr_debug`, switched per file / line / format string at run time) | turn up detail in one place without a rebuild | no |
 | kprobes (a probe on any function, at run time) | answer a new question without new code | no |
 | function tracer (call sequence, call graph, per-function timing) | where the time goes, who calls whom | no (`syscost` samples syscalls) |
@@ -1247,14 +1259,15 @@ seen twice.
 **Order of work.** Each item is a lane with its own gate; the order
 is by how many investigations an item would have shortened.
 
-1. **General trace points** in every subsystem, named for the event
-   (`sched:sched_switch`, `sched:sched_wakeup`, `block:block_rq_issue`,
-   `mm:mm_page_fault`, `irq:irq_handler_entry`, `sys:sys_enter`), in
-   the reference's shape so the same tooling reads them. On a debug
-   build they cost nothing until armed (the existing trace-event
-   framework). This is what makes "run again under a debug build and
-   read the log" possible, and it retires the hunt-specific points as
-   it lands.
+1. **Complete the trace points.** Wire the two page-fault points
+   (`page_fault_user`, `page_fault_kernel`) into the fault handler.
+   Then go through the `rux` group point by point: one that a
+   subsystem's general point already covers is deleted; one that
+   records something no general point records is renamed for the
+   event and moved to its subsystem's group. Compare the per-group
+   lists with the reference's to find general points not yet
+   declared (timer expiry, for one: the `timer` group holds only
+   `itimer_arm`). On a debug build an unarmed point costs one branch.
 2. **Dynamic debug**: every diagnostic print in the core and the
    crates becomes a `pr_debug!` site switched by a control file, and
    the raw writers go through it (closing the §9 gap). This is where
