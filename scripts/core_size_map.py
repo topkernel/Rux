@@ -51,13 +51,19 @@ OUT = os.path.join(ROOT, "docs", "development", "core-size")
 
 HOT_FILES = re.compile(
     r"kernel/core/src/("
-    r"arch/[^/]+/(trap|context|cpu|uaccess|exception|mm/mmu_ops|mm/exception|thread|smp)\.rs"
-    r"|sched/(sched|unsafe)\.rs"
-    r"|fs/(vfs|bio|page_cache|dentry|buffer|file)\.rs"
+    # arch: trap entry/return, context switch, register access, user
+    # access, fault entry, thread/FPU state, per-CPU setup
+    r"arch/[^/]+/(trap|context|cpu|uaccess|exception|thread|smp)\.rs"
+    r"|arch/[^/]+/mm/(mmu_ops|exception)\.rs"
+    # the scheduler's mechanism
+    r"|sched/(sched|hotpath|unsafe)\.rs"
+    # the VFS walk, the block layer, the page cache, the dcache
+    r"|fs/(vfs|bio|page_cache|dentry|buffer|file|hotpath|unsafe)\.rs"
+    # the lock primitives and the per-CPU layer
     r"|sync/(spinlock|rwlock|percpu|seqlock|unsafe)\.rs"
     r"|interrupt/[^/]+\.rs"
-    r"|timer\.rs"
-    r"|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|unsafe)\.rs"
+    # the timekeeping core and the allocator entry points
+    r"|timer\.rs|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|unsafe)\.rs"
     r"|process/(task_ref|unsafe)\.rs"
     r"|safety/.*\.rs)$")
 
