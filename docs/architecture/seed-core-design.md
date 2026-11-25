@@ -654,7 +654,21 @@ the core-size goal (§1a.4) is measured against.
 
 A function that is not on any such path does not simply move to the
 crate (user decision 2026-11-25): moving it keeps the code alive under
-another name. It is dealt with in this order:
+another name. The sweep covers the WHOLE core, not `hotpath.rs` alone
+(same day: the scheduler was one example; every subsystem is
+examined). Measured before pass 2 over the core without `tests/`:
+216,971 lines, of which 5,976 are hand-written number-to-text
+printers and 17,087 are functions whose name carries a diagnostic or
+forensic marker — 23,063 lines, 10.6%. `debug/` accounts for 5,938 of
+those (it is the diagnostic subsystem); about 17,000 are scattered
+through the others.
+
+The name is only the search key; the test is the CALLER. A
+`stats()` that `/proc/meminfo` reads is a feature. A
+`forensic_free_report()` whose only caller is a hunt's debug event is
+an instrument. Same shape of name, opposite verdicts — so each
+candidate is read with its call sites before anything is removed.
+It is dealt with in this order:
 
 1. **Replace.** If the debug subsystem already has a feature that
    does the same job, the function is deleted and its callers use that
