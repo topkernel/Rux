@@ -87,27 +87,10 @@ pub const CONTROLLER_NAMES: [&str; 3] = ["cpu", "memory", "pids"];
 // Controller state
 // ============================================================================
 
-/// Per-cgroup controller configuration.
-///
-/// `subtree_control` is the cgroup.subtree_control bitset (which controllers
-/// are enabled FOR THE CHILDREN). The limit knobs are atomics so the timer
-/// tick can read them without the enclosing Spinlock; the Spinlock still
-/// serializes multi-field updates (e.g. cpu.max quota+period pairs).
-pub struct CgroupControllers {
-    /// Controllers enabled for children via cgroup.subtree_control.
-    pub subtree_control: u32,
-
-    /// cpu controller: bandwidth quota per period (ns; LIMIT_MAX = max).
-    pub cpu_quota_ns: AtomicU64,
-    /// cpu controller: period length (ns). Defaults to 100 ms.
-    pub cpu_period_ns: AtomicU64,
-
-    /// memory controller: memory.max in bytes (LIMIT_MAX = max).
-    pub memory_max_bytes: AtomicU64,
-
-    /// pids controller: pids.max task ceiling (LIMIT_MAX = max).
-    pub pids_max: AtomicU64,
-}
+// CgroupControllers, CgroupNode — the definitions live in sched/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `sched::cgroup::…` paths are unchanged.
+pub use super::types::{CgroupControllers, CgroupNode};
 
 impl CgroupControllers {
     pub const fn new() -> Self {
@@ -124,51 +107,6 @@ impl CgroupControllers {
 // ============================================================================
 // Cgroup node
 // ============================================================================
-
-/// A node in the unified cgroup hierarchy.
-///
-/// Node lifetime: see module docs — nodes are never freed once created
-/// (rmdir only unlinks), so `Arc<CgroupNode>` → raw pointer → `&'static`
-/// reinterpretation is sound.
-pub struct CgroupNode {
-    /// Name of this cgroup (component name; "" for the root).
-    pub name: String,
-    /// Parent node (None for the root only).
-    pub parent: Option<Arc<CgroupNode>>,
-    /// Child cgroups, keyed by name (mkdir/rmdir on cgroupfs).
-    pub children: Spinlock<BTreeMap<String, Arc<CgroupNode>>>,
-    /// Depth from the root (root = 0).
-    pub level: u32,
-    /// PIDs of member tasks (leaf membership; ancestors see them via the
-    /// subtree walk in `count_tasks_subtree`).
-    pub tasks: Spinlock<Vec<u32>>,
-    /// Controller configuration (limits + subtree_control).
-    pub controllers: Spinlock<CgroupControllers>,
-
-    // ---- cpu runtime accounting (atomics: touched from timer IRQ) ----
-    /// Total cpu time consumed by this cgroup's tasks (ns), all periods.
-    pub cpu_usage_total_ns: AtomicU64,
-    /// cpu time consumed in the CURRENT period (ns).
-    pub cpu_usage_period_ns: AtomicU64,
-    /// sched_clock timestamp when the current period started (ns).
-    pub cpu_period_start_ns: AtomicU64,
-    /// Throttle flag: set when usage exceeds quota, cleared at rollover.
-    pub cpu_throttled: AtomicBool,
-    /// How many times this cgroup entered the throttled state.
-    pub nr_throttled: AtomicU64,
-    /// Throttle duration accumulator (ns) — approximated at unthrottle.
-    pub throttled_ns: AtomicU64,
-
-    // ---- memory accounting (atomics) ----
-    /// memory.current: bytes charged to this cgroup (includes children —
-    /// charges propagate up the chain).
-    pub memory_usage_bytes: AtomicU64,
-
-    /// Inode-number base for this node (cgroupfs). File inodes are
-    /// `ino_base + file kind`, so the stride below must exceed the number
-    /// of control files.
-    pub ino_base: u64,
-}
 
 /// Inode-number stride between sibling cgroups (room for the control files).
 pub const CGROUP_INO_STRIDE: u64 = 32;

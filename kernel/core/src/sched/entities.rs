@@ -17,53 +17,11 @@ use crate::config::{MAX_CPUS, MAX_TASKS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_
 use crate::trace;
 
 
-/// CFS run queue
-pub struct CfsRunQueue {
-    /// Task timeline sorted by vruntime
-    ///
-    /// grq-10ns: entity-embedded intrusive red-black tree (the reference
-    /// kernel's cfs_rq tasks_timeline / rb_root_cached). The nodes live
-    /// inside each task's SchedEntity, so insert/erase under the GRQ are
-    /// pointer rewires — the BTreeMap's allocator-backed split/merge is
-    /// gone from the critical section.
-    pub timeline: RbTimeline,
-
-    /// Currently running scheduling entity
-    pub curr: *mut crate::process::Task,
-
-    /// Minimum vruntime in queue
-    ///
-    /// Used for new task vruntime initialization
-    /// New task vruntime = min_vruntime, this prevents new tasks from getting too much CPU time
-    pub min_vruntime: AtomicU64,
-
-    /// Number of tasks in run queue
-    nr_running: AtomicU64,
-
-    /// Total weight
-    pub load_weight: AtomicU64,
-
-    /// Next task ID (for generating unique keys)
-    next_task_id: AtomicU64,
-    /// 64th (EEVDF avg_vruntime, 6.6 fair.c:706-739 parity): Sum of
-    /// (vruntime_i - min_vruntime)*w_i over the QUEUED entities -- the
-    /// RELATIVE form the reference derives explicitly ("since v_i is u64,
-    /// and the multiplication could easily overflow, transform it into a
-    /// relative form"). Maintained O(1) at timeline insert/remove; REBASED
-    /// by avg_vruntime_update (sum -= delta*load) on every min_vruntime
-    /// advance so every stored offset stays relative to the CURRENT
-    /// min_vruntime. The 63rd's first attempt stored ABSOLUTE
-    /// vruntime*weight sums and still added min_vruntime in the read --
-    /// V ~ min_vr + true average, the placed values fed back
-    /// multiplicatively (~2x per wake generation), wrapped u64 and froze
-    /// garbage vruntimes within a minute (ohw36: init vr=0xfd79.. frozen
-    /// unpicked from t=53s). The relative form is also leak-bounded: any
-    /// unpaired insert/remove residue is (vr - min_vr)*w -- the size of
-    /// the clamp window, never boot-magnitude. GRQ-HELD. i128: offsets
-    /// are small but weight-scaled products of a deep queue still fit
-    /// trivially.
-    avg_vruntime_sum: i128,
-}
+// CfsRunQueue, StrandWallRow, MAX_RT_PRIO, RtRunQueue, LoadWeight, SchedEntity, SchedRtEntity, SchedDlEntity, W2RefusalCensus, DlRunQueue, DlKey, TlPoisonCounters — the definitions live in sched/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `sched::entities::…` paths are unchanged.
+pub use super::types::{CfsRunQueue, StrandWallRow, MAX_RT_PRIO, RtRunQueue, LoadWeight, SchedEntity, SchedRtEntity, SchedDlEntity, W2RefusalCensus, DlRunQueue, TlPoisonCounters};
+use super::types::{DlKey};
 
 /// Get current time (nanoseconds)
 ///
@@ -99,70 +57,6 @@ const TIMEBASE_MULT: u64 = 100;
 
 /// Clock frequency (HZ) - from config
 const HZ: u64 = KERNEL_HZ as u64;
-
-/// One row of the strand-wall probe (CfsRunQueue::strand_wall_probe):
-/// a timeline entry that sorts before a stranded victim — a pick-order
-/// predecessor whose refusal every pick must digest before the victim
-/// can be reached.
-#[derive(Clone, Copy)]
-pub struct StrandWallRow {
-    pub vruntime: u64,
-    pub pid: u32,
-    /// SchedPolicy as u8 (0 Normal, 1 Fifo, 2 Rr, 3 Batch, 5 Idle, 6 Deadline)
-    pub policy: u64,
-    pub on_cpu: bool,
-    pub claim: i32,
-    pub aff: u32,
-    /// 61st: the entry's pick-walk refusal history — a wall of entries
-    /// with growing skip counts explains a victim deeper in the tree
-    /// that is never even VISITED (the 32-slot stash never gets past a
-    /// permanently-refused left edge; no overflow fires because the
-    /// pick succeeds at position <= 33).
-    pub skips: u32,
-    pub why: u32,
-    /// 63rd: which CPU slot names this entry at probe time (-1 = none)
-    /// — a wall entry that is BOTH linked and on a slot is the R56d
-    /// lying-slot / mid-switch-out shape, the refusal input the 62nd
-    /// asked to name.
-    pub slot: i32,
-    /// 63rd: jiffies since this entry's last pick (u32::MAX = never
-    /// picked since boot) — distinguishes the never-picked wheel class
-    /// from the cycling churn.
-    pub lp_jif: u32,
-    /// 63rd: times this entry was linked (woken) since boot — the churn
-    /// rate numerator.
-    pub wakes: u32,
-}
-
-/// RT runqueue
-/// Maximum RT priority (0-99, HIGHER value = higher priority, matching
-/// Linux). The runqueue bitmap index is inverted (bit 0 = priority 99) so
-/// the lowest set bit is the highest-priority runnable task.
-pub const MAX_RT_PRIO: usize = 100;
-
-pub struct RtRunQueue {
-    /// Number of RT tasks
-    pub rt_nr_running: AtomicU32,
-
-    /// Number of RR tasks
-    ///
-    /// Maintained by enqueue/dequeue but not yet read anywhere (reserved for
-    /// /proc/schedstat and RR throttling diagnostics) — kept accurate so a
-    /// future reader does not inherit drift.
-    pub rr_nr_running: AtomicU32,
-
-    /// Highest priority in queue
-    pub highest_prio: AtomicU32,
-
-    /// Priority bitmap: bit i is set if priority i has runnable tasks
-    /// We need 100 bits, so use 2 x 64-bit words
-    pub bitmap: [AtomicU64; 2],
-
-    /// Per-priority task lists
-    ///
-    /// Each list head anchors tasks at that priority level
-    pub queue: [ListHead; MAX_RT_PRIO],
-}
 
 impl RtRunQueue {
     /// Create a new RT runqueue
@@ -597,14 +491,6 @@ impl RtRunQueue {
 
 pub const NICE_0_LOAD: u64 = 1024;
 
-/// Load weight
-#[derive(Debug, Clone, Copy)]
-pub struct LoadWeight {
-    /// Weight value
-    pub weight: u64,
-    /// Weight multiplier (for fast division)
-    pub inv_weight: u64,
-}
 impl LoadWeight {
     /// Create new load weight
     ///
@@ -652,64 +538,6 @@ impl Default for LoadWeight {
     }
 }
 
-/// Scheduling entity
-#[derive(Debug)]
-pub struct SchedEntity {
-    /// Load weight
-    pub load: LoadWeight,
-
-    /// Virtual runtime
-    ///
-    /// Smaller vruntime means the process has obtained less CPU time
-    /// Scheduler prioritizes processes with smaller vruntime
-    pub vruntime: AtomicU64,
-
-    /// Cumulative execution time (nanoseconds)
-    pub sum_exec_runtime: AtomicU64,
-
-    /// Last execution start time (nanoseconds)
-    pub exec_start: AtomicU64,
-
-    /// Last cumulative execution time (for calculating delta)
-    pub prev_sum_exec_runtime: AtomicU64,
-
-    /// Whether in run queue
-    pub on_rq: AtomicBool,
-
-    /// Time slice (nanoseconds)
-    pub slice: AtomicU64,
-
-    /// Leg-55 GRQ slimming: the exact timeline key this entity is linked
-    /// under, while linked. Set at enqueue_inner (the key's birthplace),
-    /// cleared at every removal (dequeue/pick_next/pick_next_cpu).
-    /// GRQ-HELD access only — the timeline is GRQ-protected, so the key
-    /// shares its discipline (UnsafeCell, not atomic: no lockless reader).
-    /// grq-10ns: with the intrusive timeline this key is the ORDER key
-    /// only — the authoritative linkage is the embedded `run_node`'s
-    /// `linked` flag; erase never needs the key (the node's position IS
-    /// the linkage).
-    pub(crate) timeline_key: core::cell::Cell<Option<VruntimeKey>>,
-    /// grq-10ns: the entity-embedded red-black link (the reference
-    /// kernel's sched_entity rb_node). While `linked`, parent/left/right
-    /// name the timeline structure; insert/erase are pointer rewires with
-    /// ZERO allocation. GRQ-HELD discipline (same as timeline_key).
-    pub(crate) run_node: RbNode,
-    /// 64th (EEVDF wake placement, 6.6 place_entity parity): the clamped
-    /// VIRTUAL lag captured at the last sleep-dequeue (update_entity_lag,
-    /// 6.6 fair.c:791: vlag = clamp(V - vruntime, +/- calc_delta_fair(
-    /// max(2*slice, TICK_NSEC)))). Read once, at the next WAKE enqueue, to
-    /// place the entity at V - vlag*(load+w)/load -- the property that
-    /// keeps producer threads (FFRT wheel/workers) from ever sitting
-    /// hundreds of ms behind a low-duty wake-churn pack (ohw34: a 400ms
-    /// link->pick on a worker BEFORE the wedge; the old placement preserved
-    /// unbounded vruntime debt). GRQ-HELD (Cell): no lockless reader.
-    pub vlag: core::cell::Cell<i64>,
-    /// 64th: false until this entity's first-ever link -- discriminates the
-    /// 6.6 ENQUEUE_INITIAL placement (vruntime = avg_vruntime, lag zero)
-    /// from a WAKE placement. GRQ-HELD. Fork children start false (fresh
-    /// SchedEntity::new()), matching __sched_fork's vlag = 0.
-    pub ever_enqueued: core::cell::Cell<bool>,
-}
 impl SchedEntity {
     /// Create new scheduling entity
     pub fn new() -> Self {
@@ -922,17 +750,6 @@ impl Clone for SchedEntity {
     }
 }
 
-/// RT scheduling entity
-///
-/// Stored in the Task struct
-#[derive(Debug)]
-pub struct SchedRtEntity {
-    /// Time slice (for SCHED_RR)
-    pub time_slice: AtomicU32,
-
-    /// Whether on runqueue
-    pub on_rq: AtomicBool,
-}
 impl SchedRtEntity {
     /// Create a new RT entity
     pub fn new() -> Self {
@@ -990,46 +807,6 @@ impl Default for SchedRtEntity {
     }
 }
 
-/// Deadline scheduling entity
-#[derive(Debug)]
-pub struct SchedDlEntity {
-    /// Absolute deadline
-    pub deadline: AtomicU64,
-
-    /// Remaining runtime
-    pub runtime: AtomicI64,
-
-    /// Scheduling period
-    pub dl_period: AtomicU64,
-
-    /// Maximum runtime per period
-    pub dl_runtime: AtomicU64,
-
-    /// Whether throttled (out of runtime)
-    pub dl_throttled: AtomicBool,
-
-    /// Kernel timer ID armed to replenish this entity at its deadline
-    /// (0 = no timer pending). See sched.rs::arm_dl_replenish_timer —
-    /// a throttled task sits off the runqueue and is re-enqueued (with a
-    /// refilled budget) only by this timer's wake.
-    pub replenish_timer: AtomicU64,
-
-    /// Whether on runqueue
-    pub on_rq: AtomicBool,
-
-    /// Whether boosted (inheriting priority)
-    pub dl_boosted: AtomicBool,
-
-    /// Timestamp (ns) when this entity last started executing.
-    /// Used by update_curr() to calculate actual runtime consumed.
-    pub exec_start: AtomicU64,
-
-    /// The RELATIVE deadline value from the user's sched_attr
-    /// (sched_setattr), kept verbatim for sched_getattr readback. The
-    /// scheduler's own absolute `deadline` above is internal state that
-    /// moves with every replenishment and must not leak to user space.
-    pub attr_deadline: AtomicU64,
-}
 impl SchedDlEntity {
     /// Create a new deadline entity
     pub fn new() -> Self {
@@ -1144,22 +921,6 @@ pub const DL_DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
 /// Deadline bandwidth unit (1 << 20 for precision)
 pub const DL_BW_UNIT: u64 = 1 << 20;
 
-/// r24 (kill10 wedge hunt): discriminator census for the W2
-/// WAKE-REFUSED-SLEEPING report — captured under the GRQ lock so the
-/// line tells "linked but starved" from "orphaned live pick mark" from
-/// "lying busy slot". Probe-lock discipline: this helper ONLY reads and
-/// formats; the caller prints after the guard is dropped.
-#[derive(Default)]
-pub struct W2RefusalCensus {
-    pub linked: bool,
-    pub on_rq: bool,
-    pub busy_slot: i32,
-    pub idle_slot: i32,
-    pub exec_ns: u64,
-    pub jiffies: u64,
-    pub quantum_ms: u32,
-}
-
 impl core::fmt::Display for W2RefusalCensus {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
@@ -1174,31 +935,6 @@ impl core::fmt::Display for W2RefusalCensus {
             self.quantum_ms
         )
     }
-}
-
-/// Deadline runqueue
-pub struct DlRunQueue {
-    /// Tasks sorted by deadline (earliest first)
-    ///
-    /// Key: (deadline, task_id)
-    /// Value: Task pointer
-    tasks: BTreeMap<DlKey, *mut Task>,
-
-    /// Number of DL tasks
-    pub dl_nr_running: AtomicU32,
-
-    /// Earliest deadline in queue
-    pub earliest_dl: AtomicU64,
-
-    /// Next task ID for unique keys
-    next_id: AtomicU64,
-}
-
-/// Key for deadline BTreeMap
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct DlKey {
-    deadline: u64,
-    task_id: u64,
 }
 
 impl DlRunQueue {
@@ -3048,15 +2784,6 @@ impl CfsRunQueue {
         // bit (GRQ-held).
         crate::sched::sched::class_nonempty_clear(crate::api::sched::CLASS_CFS_BIT);
     }
-}
-
-/// grq-10ns: poison-discipline trip counters for the intrusive timeline
-/// (an insert descent or erase neighbor that failed the kernel-range
-/// check — the op was refused to keep the kernel alive). Reported by
-/// grq_diag_counts; a persistent nonzero rate names a scribble producer.
-pub struct TlPoisonCounters {
-    pub inserts: core::sync::atomic::AtomicU64,
-    pub erases: core::sync::atomic::AtomicU64,
 }
 
 pub static TL_POISON: TlPoisonCounters = TlPoisonCounters {

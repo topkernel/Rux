@@ -79,33 +79,11 @@ const SUSTAINED_FREE_TICKS: u32 = 20;
 /// already have named.
 const PENDING_CAP: usize = 1024;
 
-/// ReapClaim — the linearly-owned storage-free obligation for one
-/// unreachable task (Round-B pilot; the design page in run/UR-L1.md).
-///
-/// **MINT** — [`ReapClaim::mint`], exactly once per reap, from
-/// `release_task` AFTER pid_hash_remove + tree detach (the
-/// unreachability contract): from that moment nobody else can or will
-/// free this task's storage — the claim IS that obligation as a type.
-///
-/// **BURN** — [`ReapClaim::into_free`], consumes `self`, runs the
-/// storage-free window. Exactly-once is compiler-enforced: the claim
-/// is not `Clone`/`Copy` and `into_free` takes it by value.
-///
-/// **READS** — the ladder's checks go through [`ReapClaim::task`]
-/// (shared) and [`ReapClaim::as_ptr`] (the identity comparisons
-/// against per-CPU slots): no raw task pointer escapes this module.
-///
-/// **DROP** — the over-cap leak path (explicit, counted in
-/// [`CLAIM_DROPPED`]): a dropped claim leaks the Task page loudly,
-/// exactly the pre-pilot over-cap semantics.
-///
-/// The page's own lifecycle (alloc/poison/dealloc, INV-TL-1/2) is
-/// UNCHANGED — the claim types the free-obligation, not the page.
-/// Identity preservation: `as_ptr()` returns the minted pointer,
-/// always; the slot comparison and `into_free`'s body are
-/// byte-identical to the raw-pointer form they replace (the
-/// corruption-battery obligation).
-pub struct ReapClaim(core::ptr::NonNull<Task>);
+// ReapClaim, PendingReap — the definitions live in sched/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `sched::reapdrain::…` paths are unchanged.
+pub use super::types::{ReapClaim};
+use super::types::{PendingReap};
 
 /// Claims ever dropped unburned (the over-cap leak counter — nonzero
 /// growth names a wedged drainer, same as the pre-pilot semantics).
@@ -172,34 +150,6 @@ impl ReapClaim {
         core::mem::forget(self);
         reap_storage_free(task)
     }
-}
-
-struct PendingReap {
-    claim: ReapClaim,
-    /// The parent's pid at reap time (boot-118's WAIT4-PARK fix: a
-    /// parent parked in wait4 on THIS child gets a deferred-notify
-    /// wake when the drainer completes the child's storage — the
-    /// reaper-side notify already ran in do_exit, but a racing park
-    /// could have missed it; this is the belt-and-braces arm, 0 = no
-    /// parent known). Captured at MINT (release_task still knows the
-    /// tree), consumed at BURN.
-    parent_pid: u32,
-    /// Consecutive ticks the entry has held the R85 conjunction.
-    r85_ticks: u32,
-    /// Past the switch stage, waiting for the batch grace target.
-    grace: bool,
-    /// P0 exit-reap (per-entry grace bound): the FIRST generation
-    /// OPENED AFTER this entry's pid_hash removal (RCU_GEN at mint +
-    /// 1). The entry frees only when the grace watermark reaches it —
-    /// a report at generation G can only have been taken at a round
-    /// opened after the removal, which is exactly the coverage the
-    /// free needs (the synchronize_rcu_forced discipline). The old
-    /// whole-batch target could not give this guarantee to entries
-    /// that minted WHILE a round was already open: their removals
-    /// postdate the target, and a CPU whose last report predates the
-    /// removal could still satisfy "reported >= target" — a free
-    /// under a live pid_hash reader.
-    needs: u32,
 }
 
 

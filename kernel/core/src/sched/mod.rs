@@ -19,6 +19,10 @@
 //! 5. idle_sched_class - Per-CPU idle task
 
 pub mod r#unsafe;
+/// The subsystem's type definitions (seed-core-design §2c.3): every
+/// struct/enum/alias that has no file of its own; impls stay in the
+/// topic files, which re-export their types from here.
+pub mod types;
 // The scheduler hook table (SchedHooks) is crate::api::sched.
 pub mod entities;
 pub mod reapdrain;

@@ -2082,51 +2082,10 @@ use crate::config::MAX_TASKS;
 
 // ==================== Global RunQueue ====================
 
-/// Global run queue — one instance for the whole system.
-///
-/// Protected by a single `RawSpinlock`.  All enqueue / dequeue / pick_next
-/// operations must hold this lock.  Timer-tick updates (`scheduler_tick`)
-/// only touch the per-CPU `current` task and do NOT need the lock.
-///
-/// NOTE (2b092c49 withdrawal, 2026-10-29; mechanism corrected same day
-/// by the refactor lane, 75dbf637): this lock was briefly a
-/// `KeyedRawSpinlock<GrqKey>` (§3 typed lock keys pilot). That swap is
-/// CONVICTED as the trigger of the d2a58ccb stochastic panic family by
-/// a 13-boot paired adjudication (identical tree differing only by the
-/// swap): WITH the swap, 6/6 x86 exitwalk boots panic in the CFS
-/// timeline btree walk (navigate.rs:552 next_unchecked unwrap, stack:
-/// pick_next_cpu → Iter::next) and the riscv64 orphan-storm churn
-/// panics on a torn-context wild epc right after an R74-DOUBLE-SEED;
-/// WITHOUT it (revert arm + all pre-swap kernels), 7/7 boots run the
-/// full churn clean on both arches.
-///
-/// TRUE ROOT CAUSE (75dbf637 — the initial "latent GRQ race" theory
-/// was WRONG): `RawSpinlock::lock()` returns `()` — the statement IS
-/// the acquire — while `KeyedRawSpinlock::lock()` returns a guard, and
-/// the swap kept the bare `self.lock.lock();` statement: the guard was
-/// DISCARDED at the end of the statement and its Drop released the
-/// lock immediately, so EVERY GRQ critical section ran unexcluded.
-/// The R74-DOUBLE-SEED shape was the expected downstream of a lock
-/// that never held. There is NO latent GRQ pick/ownership race; the
-/// protocol is exonerated. The guard class is now `#[must_use]` (the
-/// discard no longer compiles silently) and protocol-wrapping
-/// subsystems use `lock_claim()`; a corrected re-adoption is staged
-/// with its own fresh paired adjudication. This struct stays on
-/// RawSpinlock until that lands.
-pub struct GlobalRunQueue {
-    /// Protects dl_rq, rt_rq, cfs_rq, nr_running
-    lock: crate::sync::spinlock::RawSpinlock,
-    /// Deadline queue (EDF sorted by deadline)
-    pub dl_rq: crate::sched::entities::DlRunQueue,
-    /// Real-time queue (bitmap + per-priority lists)
-    pub rt_rq: crate::sched::entities::RtRunQueue,
-    /// CFS queue (BTreeMap sorted by vruntime)
-    pub cfs_rq: crate::sched::entities::CfsRunQueue,
-    /// Total runnable task count (read atomically for idle checks)
-    pub nr_running: core::sync::atomic::AtomicUsize,
-    /// Bitmap of idle CPUs: bit N = 1 means CPU N is idle
-    pub idle_cpus: core::sync::atomic::AtomicU32,
-}
+// GlobalRunQueue, GrqGuard, GrqPlainGuard, PerCpuState, GrqPendingReport, RunQueue — the definitions live in sched/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `sched::sched::…` paths are unchanged.
+pub use super::types::{GlobalRunQueue, GrqGuard, GrqPlainGuard, PerCpuState, GrqPendingReport, RunQueue};
 
 /// Rotating scan start for find_idle_cpu (review batch 8 — idle spreading).
 static LAST_IDLE_HINT: core::sync::atomic::AtomicUsize =
@@ -2372,13 +2331,6 @@ impl GlobalRunQueue {
 
 // ==================== GRQ Guards ====================
 
-/// Guard for `lock_irqsave()` — unlock + preempt enable + IRQ restore on drop.
-pub struct GrqGuard<'a> {
-    grq: *mut GlobalRunQueue,
-    flags: bool,
-    _marker: core::marker::PhantomData<&'a GlobalRunQueue>,
-}
-
 impl<'a> GrqGuard<'a> {
     /// Release the spinlock but keep interrupts disabled.
     /// Returns the saved IRQ flags. Caller must call restore_irq() later.
@@ -2450,12 +2402,6 @@ impl Drop for GrqGuard<'_> {
     }
 }
 
-/// Guard for plain `lock_plain()` (no IRQ save).
-pub struct GrqPlainGuard<'a> {
-    grq: *mut GlobalRunQueue,
-    _marker: core::marker::PhantomData<&'a GlobalRunQueue>,
-}
-
 impl core::ops::Deref for GrqPlainGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
@@ -2482,16 +2428,6 @@ impl Drop for GrqPlainGuard<'_> {
 }
 
 // ==================== Per-CPU State ====================
-
-/// Minimal per-CPU state — no queues, just task pointers.
-pub struct PerCpuState {
-    /// Currently running task
-    pub current: *mut Task,
-    /// Per-CPU idle task (PID 0)
-    pub idle: *mut Task,
-    /// Per-CPU stop task (for hotplug)
-    pub stop: *mut Task,
-}
 
 impl PerCpuState {
     pub(crate) const fn new() -> Self {
@@ -2527,31 +2463,6 @@ impl PerCpuState {
 /// crime-scene dump's holder/waiter roles, and the terminal release's
 /// ownership proof. The unreachable-state detector lives in
 /// `RawSpinlock::holder_cpu` (debug_assert, hot-path rules).
-
-/// A diagnostic report CAPTURED under the GRQ and EMITTED after the lock
-/// is released (grq-lock-1st).
-///
-/// printk is not lock-free: its ring-buffer write ends in
-/// `KMSG_READ_WQ.wake_up_all()`, whose waitqueue lock is held across
-/// `wake_up_process` -> `wake_up_enqueue_opt` -> `grq().lock_irqsave()`.
-/// A report issued while the GRQ is held therefore re-acquires the GRQ
-/// on the same cpu — the non-reentrant spinlock then spins forever with
-/// IRQs off (the "IRQs-dead GRQ holder" wedge) — and against another cpu
-/// it is the textbook ABAA (this cpu: GRQ -> WQ; the other: WQ -> GRQ).
-/// The capture-then-emit shape keeps every field's value exact (they are
-/// read under the lock) while moving the report itself out of the
-/// critical section.
-#[derive(Clone, Copy)]
-pub struct GrqPendingReport {
-    /// Which report this is (see the `GRQ_RPT_*` constants).
-    pub kind: u8,
-    pub a: u64,
-    pub b: u64,
-    pub c: u64,
-    pub d: u64,
-    pub e: u64,
-    pub comm: [u8; 16],
-}
 
 /// Report kinds for [`GrqPendingReport`].
 pub const GRQ_RPT_COUNTER_RESYNC: u8 = 1;
@@ -3896,9 +3807,6 @@ pub fn cpu_running_idle(cpu_id: usize) -> bool {
 }
 
 // ==================== Dummy RunQueue (compatibility) ====================
-
-/// Dummy RunQueue for compatibility with SchedClass trait / procfs output.
-pub struct RunQueue;
 
 // ==================== Initialization ====================
 

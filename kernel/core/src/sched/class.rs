@@ -37,9 +37,10 @@ pub const WF_SYNC: i32 = 0x10;
 pub const WF_MIGRATED: i32 = 0x20;
 pub const WF_CURRENT_CPU: i32 = 0x40;
 
-/// RunQueue type alias (forward declaration)
-/// The actual struct is defined in sched.rs
-pub type RunQueueRef = *mut crate::sched::sched::RunQueue;
+// RunQueueRef, SchedClassId, SchedClassIter, SchedClassFromIter — the definitions live in sched/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `sched::class::…` paths are unchanged.
+pub use super::types::{RunQueueRef, SchedClassId, SchedClassIter, SchedClassFromIter};
 
 /// Scheduling Class Trait
 ///
@@ -180,22 +181,6 @@ pub trait SchedClass: Send + Sync {
     fn next_class(&self) -> Option<&'static dyn SchedClass>;
 }
 
-/// Scheduling class IDs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum SchedClassId {
-    /// Stop class (highest priority)
-    Stop = 0,
-    /// Deadline class
-    Deadline = 1,
-    /// Real-time class
-    Rt = 2,
-    /// Fair class (CFS)
-    Fair = 3,
-    /// Idle class (lowest priority)
-    Idle = 4,
-}
-
 impl SchedClassId {
     /// Get the scheduling class for this ID
     pub fn to_class(self) -> &'static dyn SchedClass {
@@ -224,11 +209,6 @@ pub fn task_sched_class(task: &Task) -> &'static dyn SchedClass {
     }
 }
 
-/// Iterate through scheduling classes in priority order (highest to lowest)
-pub struct SchedClassIter {
-    current: Option<&'static dyn SchedClass>,
-}
-
 impl SchedClassIter {
     /// Create a new iterator starting from the highest priority class
     pub fn new() -> Self {
@@ -246,11 +226,6 @@ impl Iterator for SchedClassIter {
         self.current = current.next_class();
         Some(current)
     }
-}
-
-/// Iterate through scheduling classes from a starting class
-pub struct SchedClassFromIter {
-    current: Option<&'static dyn SchedClass>,
 }
 
 impl SchedClassFromIter {
