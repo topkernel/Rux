@@ -658,13 +658,12 @@ another name. It is dealt with in this order:
 
 1. **Replace.** If the debug subsystem already has a feature that
    does the same job, the function is deleted and its callers use that
-   feature. Measured on `sched` before pass 2: of the 3,732 lines of
-   diagnostic code the file-level test had counted as hot, 3,306 are
-   hand-written number-to-text printers (`pdec`, `pdec3`, `ph`) and
-   the print statements that call them. The same printers were
-   re-written in place by each hunt: `fn pdec` exists in five core
-   files, `fn ph` in eight, `fn phex` in six. A formatting routine is
-   one feature of the debug subsystem, not twenty.
+   feature. In `sched` alone, 3,306 of the 3,732 diagnostic lines are
+   hand-written number-to-text printers (`pdec`, `pdec3`, `ph`) and the
+   print statements that call them. Across the core the same printers
+   were re-written in place by each hunt: `fn ph` exists in 21 files,
+   `fn pdec` in 7, `fn phex` in 6. A formatting routine is one feature
+   of the debug subsystem, not twenty-one.
 2. **Fold in.** If no existing debug feature covers it but the
    check is worth keeping (a state dump a hunt needed), it becomes a
    proper feature of the debug subsystem — one implementation, behind
