@@ -36,6 +36,10 @@ pub mod ptrace_core;
 // pub mod coredump; — moved to the process service crate.
 pub mod ns;
 pub mod r#unsafe;
+/// The subsystem's type definitions (seed-core-design §2c.3): every
+/// struct/enum/alias that has no file of its own; impls stay in the
+/// topic files, which re-export their types from here.
+pub mod types;
 // The flip seam (ProcessHooks, KthreadHooks, PidHooks, ExitHooks) is
 // crate::api::process.
 

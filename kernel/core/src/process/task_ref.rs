@@ -36,15 +36,10 @@ use core::ptr::NonNull;
 
 use super::task::Task;
 
-/// Unpinned borrowed handle: syscall-context short reads.
-///
-/// Contract (unchanged from `pid_hash_lookup`'s doc): the pointer stays
-/// valid for a short read because the caller executes in syscall
-/// context on this CPU and the reaper cannot run here mid-read. Do NOT
-/// hold across `schedule()`, sleeps, or any path that yields the CPU;
-/// do NOT store; use [`TaskRef`] when the handle must outlive such a
-/// point.
-pub struct TaskBorrow(NonNull<Task>);
+// TaskBorrow, TaskRef — the definitions live in process/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `process::task_ref::…` paths are unchanged.
+pub use super::types::{TaskBorrow, TaskRef};
 
 impl TaskBorrow {
     /// Borrow the task with `pid`, if it is in the PID hash.
@@ -101,25 +96,6 @@ impl DerefMut for TaskBorrow {
         unsafe { self.0.as_mut() }
     }
 }
-
-/// Pinned task handle owning a `task_refcnt` pin (R12-5).
-///
-/// `lookup` takes the pin; `Drop` releases it with `task_put` (the
-/// last put frees the task slot). Valid across scheduling points and
-/// cross-CPU wake/notify paths.
-///
-/// INV-TASKREF-1 (pin exclusivity, added by the slim4-fix lane
-/// 2026-11-20): the handle owns its pin EXCLUSIVELY. Callers must NOT
-/// call `task_put` on `as_ptr()` while the handle is alive — Drop
-/// releases the same pin, so a manual put is a double release: the
-/// receiver's `task_refcnt` erodes by one per call and `free_task_slot`
-/// eventually fires on a task still linked in the pid hash, its
-/// parent's child list, and the timer/runqueue structures (the slim4
-/// fio-corruption regression: signal receivers freed early, wait4
-/// walking a pid=0xdeadbeef page). A raw consumer that must release
-/// the pin itself takes ownership with [`TaskRef::into_raw`] (which
-/// `forget`s the handle and its Drop).
-pub struct TaskRef(NonNull<Task>);
 
 impl TaskRef {
     /// Look up and pin the task with `pid`; `None` if not found.

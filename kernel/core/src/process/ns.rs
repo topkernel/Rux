@@ -56,17 +56,11 @@ pub const CLONE_NEWMASK: u64 = CLONE_NEWNS
 // UTS namespace — hostname / domainname
 // ============================================================================
 
-/// Linux __NEW_UTS_LEN = 64 (65 with NUL; we store without NUL).
-pub const UTS_LEN: usize = 64;
-
-pub struct UtsNamespace {
-    /// nsfs inode number (unique per namespace instance).
-    pub inum: u64,
-    /// NUL-terminated hostname buffer.
-    pub hostname: Spinlock<[u8; UTS_LEN]>,
-    /// NUL-terminated domainname buffer.
-    pub domainname: Spinlock<[u8; UTS_LEN]>,
-}
+// UTS_LEN, UtsNamespace, MountEntry, MountNamespace, PidNamespace, NetNamespace, IpcNamespace, UserNamespace, NsKind, NsRef, NsFileContent — the definitions live in process/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `process::ns::…` paths are unchanged.
+pub use super::types::{UTS_LEN, UtsNamespace, MountEntry, MountNamespace, PidNamespace, NetNamespace, IpcNamespace, UserNamespace, NsKind, NsRef};
+use super::types::{NsFileContent};
 
 impl UtsNamespace {
     fn new(inum: u64) -> Self {
@@ -134,27 +128,6 @@ impl UtsNamespace {
 // Mount namespace — private mount table
 // ============================================================================
 
-/// One row of the mount table (mirrors the legacy global registry tuple).
-#[derive(Clone)]
-pub struct MountEntry {
-    /// Permanent mount ID (Linux struct mount.mnt_id, allocated once per
-    /// mount from a global counter). /proc/self/mountinfo emits THIS id —
-    /// the old generator numbered rows POSITIONALLY over ns_get_mounts(),
-    /// and ns_register_mount's retain+push moved re-registered rows to
-    /// the Vec tail, so the same id re-paired with a different mount
-    /// between two reads. systemd's mount monitor diffed those phantom
-    /// changes against its table and failed freshly-mounted units
-    /// ("Mount process finished, but there is no mount" — the
-    /// sys-kernel-tracing class). Ids are stable for the row's life; a
-    /// re-registration of the SAME mountpoint (flags refresh, row
-    /// relocation) keeps the row's id, like remount keeps mnt_id.
-    pub mount_id: u32,
-    pub device: String,
-    pub mount_point: String,
-    pub fs_type: String,
-    pub flags: String,
-}
-
 /// Global mount-ID allocator (Linux mnt_id_start discipline: monotonic,
 /// never reused). Starts above the synthesized boot-layout ids (1-6 in
 /// procfs::mounts).
@@ -163,32 +136,6 @@ static NEXT_MOUNT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 /// Allocate the next mount ID.
 pub fn alloc_mount_id() -> u32 {
     NEXT_MOUNT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-}
-
-pub struct MountNamespace {
-    /// nsfs inode number.
-    pub inum: u64,
-    /// Namespace-private root dentry. Captured at ns creation from the
-    /// global VFS root (CLONE_NEWNS does not move "/" — it only private-
-    /// copies the mount table). Reserved as the pivot_root bookkeeping
-    /// anchor; path_lookup still walks the shared dentry tree.
-    pub root: Spinlock<Option<Arc<crate::fs::dentry::Dentry>>>,
-    /// Private copy of the mount table. Copy-on-write: modifications after
-    /// CLONE_NEWNS only touch this Vec, never the parent's.
-    pub mounts: Spinlock<Vec<MountEntry>>,
-    /// sc98: the actual VfsMountInternal objects this namespace attached
-    /// into the SHARED dentry tree after creation. Rux attaches every
-    /// mount globally (there is one dentry tree), so without a per-ns
-    /// list a dying private namespace would leave its mounts — and their
-    /// VFS_STATE.mounts registry entries — attached forever. The OH
-    /// appspawn child CLONE_NEWNS'es and makes ~50 sandbox binds; killed
-    /// children (the launcher's LIFECYCLE_TIMEOUT restart loop) leaked
-    /// them all, the registry grew into the thousands, and every later
-    /// MS_REC bind cloned by scanning the whole registry (10-25 ms per
-    /// mount) until NO spawn could finish inside appspawn's 3 s child
-    /// watchdog. Linux unmounts a private namespace's mounts when its
-    /// last task exits; Drop below restores exactly that contract.
-    pub vfs_mounts: Spinlock<Vec<Arc<crate::fs::dentry::VfsMountInternal>>>,
 }
 
 impl Drop for MountNamespace {
@@ -236,18 +183,6 @@ pub fn in_init_mnt_ns() -> bool {
 // PID namespace — nested numbering
 // ============================================================================
 
-pub struct PidNamespace {
-    /// nsfs inode number.
-    pub inum: u64,
-    /// Parent (enclosing) namespace; None for the init namespace.
-    #[allow(dead_code)] // structural (level already derived at creation)
-    pub parent: Option<Arc<PidNamespace>>,
-    /// Depth below the init namespace (init == 0).
-    pub level: u32,
-    /// Last ns-local pid handed out.
-    pub last_pid: AtomicU32,
-}
-
 impl PidNamespace {
     fn new(inum: u64, parent: Option<Arc<PidNamespace>>) -> Self {
         let level = parent.as_ref().map_or(0, |p| p.level + 1);
@@ -284,27 +219,6 @@ impl PidNamespace {
 // ============================================================================
 // Stub namespaces — net / ipc / user
 // ============================================================================
-
-/// Net namespace stub. Network devices and addresses are GLOBAL (shared by
-/// every instance); creating one only yields a distinct /proc/[pid]/ns/net
-/// identity for setns/open purposes.
-pub struct NetNamespace {
-    pub inum: u64,
-}
-
-/// IPC namespace stub. SysV IPC objects are global.
-pub struct IpcNamespace {
-    pub inum: u64,
-}
-
-/// User namespace stub. uid/gid mapping is identity (kernel uid == ns uid);
-/// only the initial namespace is supported. A new instance exists purely so
-/// /proc shows a distinct ns and CLONE_NEWUSER does not fail.
-pub struct UserNamespace {
-    pub inum: u64,
-    #[allow(dead_code)] // structural (identity mapping stub)
-    pub parent: Option<Arc<UserNamespace>>,
-}
 
 // ============================================================================
 // Init namespaces (lazily created singletons)
@@ -902,16 +816,6 @@ fn task_mnt_table_of(task: &Task) -> Vec<MountEntry> {
 // Namespace kinds + /proc/[pid]/ns symlinks + ns fds (setns targets)
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NsKind {
-    Uts,
-    Mnt,
-    Pid,
-    Net,
-    Ipc,
-    User,
-}
-
 impl NsKind {
     /// /proc/[pid]/ns entry name.
     pub fn name(&self) -> &'static str {
@@ -983,17 +887,6 @@ impl NsKind {
             _ => None,
         }
     }
-}
-
-/// Namespace handle kept alive for open ns fds.
-#[derive(Clone)]
-pub enum NsRef {
-    Uts(Arc<UtsNamespace>),
-    Mnt(Arc<MountNamespace>),
-    Pid(Arc<PidNamespace>),
-    Net(Arc<NetNamespace>),
-    Ipc(Arc<IpcNamespace>),
-    User(Arc<UserNamespace>),
 }
 
 impl NsRef {
@@ -1132,10 +1025,6 @@ pub fn build_ns_file(
     ns_fd_register(handle);
 
     Ok(file)
-}
-
-struct NsFileContent {
-    data: Vec<u8>,
 }
 
 fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {

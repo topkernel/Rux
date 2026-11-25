@@ -7,11 +7,11 @@
 
 #![forbid(unsafe_code)]
 // FORENSIC: initial-stack zeroing ledger (see the zeroing site below).
-pub struct ZeroEntry {
-    pub pid: core::sync::atomic::AtomicU32,
-    pub base: core::sync::atomic::AtomicU64,
-    pub len: core::sync::atomic::AtomicU64,
-}
+// ZeroEntry — the definitions live in process/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `process::exec_ring::…` paths are unchanged.
+pub use super::types::{ZeroEntry};
+
 impl ZeroEntry {
     const fn new() -> Self {
         Self {

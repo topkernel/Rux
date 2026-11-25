@@ -17,38 +17,10 @@ use crate::sync::spinlock::Spinlock;
 
 use super::Task;
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum WakeUpHint {
-    /// Normal wake up
-    Normal = 0,
-    /// Async wake up (don't actually wake process, just mark)
-    Async = 1,
-    /// Synchronous wake (reference WF_SYNC): the waker and wakee are a
-    /// handoff pair — the waker is about to block. The scheduler stacks
-    /// the wakee with the waker (never dispatches it onto another busy
-    /// CPU to run in parallel). Used by binder's sync-txn/reply wakes
-    /// (wake_up_interruptible_sync in binder.c, 66th session parity).
-    Sync = 2,
-}
-
-#[repr(C)]
-pub struct WaitQueueEntry {
-    /// Associated task
-    task: *mut Task,
-    /// Exclusive flag (WQ_FLAG_EXCLUSIVE)
-    exclusive: bool,
-    /// Whether woken
-    woken: AtomicBool,
-    /// The task's pid at registration time (wake-drop fix, R127):
-    /// entries are matched by (task pointer, pid) so a Task page that
-    /// was freed and RECYCLED by a new task cannot be mistaken for the
-    /// old owner. Pids are unique per boot (monotonic until wraparound
-    /// far beyond any session's spawn volume), so the pair is a sound
-    /// incarnation discriminator; free_task_slot's TASK_POISON write
-    /// also fails the compare, catching dead-but-not-reused pages.
-    pid: u32,
-}
+// WakeUpHint, WaitQueueEntry, WaitQueueHead — the definitions live in process/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `process::wait::…` paths are unchanged.
+pub use super::types::{WakeUpHint, WaitQueueEntry, WaitQueueHead};
 
 impl WaitQueueEntry {
     /// Create new wait queue entry
@@ -118,33 +90,6 @@ impl WaitQueueEntry {
     pub fn is_exclusive(&self) -> bool {
         self.exclusive
     }
-}
-
-#[repr(C)]
-pub struct WaitQueueHead {
-    /// Wait queue list
-    /// Uses Vec to store waiting processes
-    list: Spinlock<Vec<WaitQueueEntry>>,
-    /// Entries currently on the list (leg-36 wake fast path).
-    ///
-    /// Maintained ONLY inside the list lock's critical sections
-    /// (insertions increment, retains decrement by what they removed),
-    /// so `0` is a lock-free proof that the list is empty — the same
-    /// contract as Linux's `wq_has_sleeper()` reading `head->next`
-    /// before taking the wait-queue lock. `wake_up` loads it with
-    /// Acquire FIRST and returns without touching the irqsave lock
-    /// when it reads 0: on a box where the consumer polls instead of
-    /// sleeping (hilogd's drain loops, pbench socket pairs), that
-    /// empty-wake lock was paid on every single event.
-    ///
-    /// Lost-wake safety (same argument as Linux's): a waker that
-    /// reads 0 runs strictly before the sleeper's in-lock increment
-    /// becomes visible; the sleeper's condition re-check AFTER
-    /// prepare_to_wait (every wait site in this kernel re-checks —
-    /// see wait_event and unix_wait_round) then observes the waker's
-    /// condition mutation, which precedes its wake call. Either the
-    /// waker sees the waiter, or the waiter sees the event.
-    waiters: AtomicUsize,
 }
 
 // Send/Sync impls live in unsafe.rs (wait.rs carries zero unsafe).
