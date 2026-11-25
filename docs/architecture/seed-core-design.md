@@ -587,59 +587,95 @@ Residual names that contradicted their crate are corrected in the same
 pass: `rux-sched/src/sched_policy/` (the crate dropped `-policy`; the
 directory did not), `rux-mm/src/mm_policy_*.rs`.
 
-### 2c.3 Inside the core: one unsafe.rs, one types.rs, and files the gate keeps free of unsafe
+### 2c.3 Inside the core: three files per subsystem, named for why the code is there
 
-Code stays in the core for exactly one of three reasons. The reason
-decides who audits it and with what:
+Code stays in the core for exactly one of three reasons, and the file
+it lives in is named for that reason. The reason decides who audits
+it and with what:
 
-| why it is in the core | where it lives | audited by |
+| file | why the code is in the core | audited by |
 |---|---|---|
-| it performs unsafe operations | `unsafe.rs` — one per subsystem | the INV contracts, Kani, Miri |
-| a hot path calls it by name; moving it would make that call indirect | the subsystem's topic files | the pbench gate |
-| a hot path reads its fields directly | `types.rs` | the hot-field table (§4, Rung F1) |
+| `unsafe.rs` | it performs unsafe operations | the INV contracts, Kani, Miri |
+| `hotpath.rs` | a hot path calls it by name; moving it would make that call indirect | the pbench gate, and the per-function review below |
+| `types.rs` | a hot path reads its fields directly | the hot-field table (§4, Rung F1) |
 
-An earlier draft of this section made the hot-path code one file,
-`hotpath.rs`, per subsystem. Measured on `sched`, that file would have
-held about 9,000 lines: the switch and pick paths together with the
-reclaim-drain, cgroup and scheduling-class logic, which are separate
-files today (`reapdrain.rs`, `cgroup.rs`, `class.rs`) and are found by
-those names. Merging them would have cost more in readability than the
-file name bought in clarity. So the hot-path code keeps its topic
-files, and the property that matters is checked rather than named:
-
-> **In every subsystem directory, no file other than `unsafe.rs`
-> contains `unsafe`.** A script in the build gate asserts it; a
-> violation fails the build.
+An earlier draft named the second file `hot.rs`. `hot` alone is an
+adjective and does not say what the file is; `hotpath` is the term
+this codebase already uses (`scripts/hotpath_print_check.py`, the
+hot-path print rule).
 
 A reader looking for every place memory safety can be broken opens the
-`unsafe.rs` files and nothing else. A reader of any other file in the
-directory knows, from the gate and not from its memory of the file
-list, that no unsafe is hidden in it.
+`unsafe.rs` files and nothing else. A reader optimizing the switch path
+opens `hotpath.rs` and knows no unsafe is hidden in it.
+
+**Sections inside `hotpath.rs`.** The hot-path code of a subsystem is
+ONE file, divided into sections by function, each under a banner
+comment:
+
+```
+// ═══════════════ switch ═════════════════════════════════════════
+// __schedule, pick_next_task, the context-switch tail
+// ═══════════════ enqueue / wake ═════════════════════════════════
+// ═══════════════ tick ═══════════════════════════════════════════
+// ═══════════════ cgroup ═════════════════════════════════════════
+// ═══════════════ reapdrain ══════════════════════════════════════
+```
+
+A section is the unit a reader looks for by name (the cgroup code is
+under the cgroup banner) and the unit the next stage works on. Banner
+comments, not inner modules: module paths would lengthen every
+reference for no gain, and the gate cannot check which section a
+function sits in either way. The existing topic files of a subsystem
+(`sched/reapdrain.rs`, `cgroup.rs`, `class.rs`) become sections of its
+`hotpath.rs`.
+
+**What `hotpath.rs` contains at first, and why that is not final.**
+Pass 2 puts into `hotpath.rs` everything of the subsystem that is
+neither `unsafe.rs` nor `types.rs`. At that point the file is the
+subsystem's code under the hot-path NAME, not a verified set of
+hot-path FUNCTIONS. Measured on `sched` before pass 2: the file-level
+test for "hot" marks 237 of 239 functions hot, and 51 of those (3,883
+lines) are diagnostic helpers (`pdec3`, 781 lines; `pdec`, `ph` —
+hex printers left by the hunts), which no trap, switch or fault path
+calls. The name overstates until the review below has run.
+
+User decision 2026-11-25: build the structure first with everything in
+`hotpath.rs`, then shrink. The two are not mixed — no lane decides
+whether a function is hot while it is moving files.
+
+**The shrink stage (after the structure is up).** For each
+`hotpath.rs`, function by function: is it on a path that a trap entry,
+the context switch, the page-fault handler, the timer interrupt, the
+block completion or a lock primitive calls by name? The answer comes
+from the call graph starting at those entries, not from a hand-written
+list of files, and it is checked against `syscost` samples under load.
+Functions that are not on any such path leave: to the subsystem's
+crate if nothing in the core needs them by name (§1a.2), else to
+another file of the core under a name that says why they stay. What
+remains is the subsystem's real hot-path line count, the number the
+core-size goal (§1a.4) is measured against.
 
 Three shapes, not one. A directory is filed by what it is:
 
 1. **A subsystem with all three kinds of code** (`sched`, `mm`, `fs`,
-   `process`, `sync`, `ipc`, `drivers`, `net`, `debug`): an
-   `unsafe.rs`, a `types.rs`, and the hot-path topic files.
+   `process`, `sync`, `ipc`, `drivers`, `net`, `debug`): the
+   three-file split.
 2. **A directory that is unsafe throughout** (`safety/`: eight files
    of audited wrappers — `ptr.rs`, `dma.rs`, `bytes.rs`, … — each with
    its INV contracts). It is one `unsafe.rs` already, kept as several
    files by topic because one file of 1,500 lines is harder to read
    than eight. The gate treats the directory as the subsystem's
-   `unsafe.rs`: nothing else may depend on it being a single file, and
-   no hot-path topic file is created in it.
+   `unsafe.rs`.
 3. **A single small subsystem** (`interrupt`, `io_uring`, `perf`,
-   `trace`, `timer`, `module`, `security`): one or a few files, none of
-   them hot enough to be worth naming. They are not split for the sake
-   of the pattern; pass 3 gives each an `unsafe.rs` beside its file and
-   the gate then covers it like shape 1.
+   `trace`, `timer`, `module`, `security`): one or a few files. They
+   are not split for the sake of the pattern; pass 3 gives each an
+   `unsafe.rs` beside its file.
 
 The lock primitives (`sync/spinlock.rs`, `rwlock.rs`, `percpu.rs`,
-`seqlock.rs`) are shape 2 inside a shape-1 directory: their interiors
-are unsafe throughout and are the irreducible floor. Pass 3 files them
-as `sync/unsafe/…` or leaves them and lists them in the gate's
-allowance with the reason; which one is decided when that lane reads
-them, and the decision is recorded here.
+`seqlock.rs`) are unsafe throughout: their interiors are the
+irreducible floor. Pass 3 files them under `sync/unsafe/` or leaves
+them and lists them in the gate's allowance with the reason; the lane
+that reads them decides and records it here.
 
 The arch directories are the irreducible floor (§2) and keep their
 per-architecture layout; their unsafe is collected per architecture
@@ -647,10 +683,10 @@ in pass 3.
 
 ```
 kernel/core/src/
-  sched/   unsafe.rs  types.rs  sched.rs  reapdrain.rs  cgroup.rs  class.rs
-  mm/      unsafe.rs  types.rs  <the allocator and VMA topic files>
-  sync/    unsafe.rs  types.rs  futex.rs  mutex.rs  …
-  fs/      unsafe.rs  types.rs  vfs.rs  bio.rs  page_cache.rs  …
+  sched/   unsafe.rs  hotpath.rs  types.rs
+  mm/      unsafe.rs  hotpath.rs  types.rs
+  sync/    unsafe.rs  hotpath.rs  types.rs
+  fs/      unsafe.rs  hotpath.rs  types.rs
   …        (shape 1: one directory per subsystem with code in the core)
   safety/  ptr.rs  dma.rs  bytes.rs …   (shape 2: unsafe throughout)
   api/     sched.rs  mm.rs  fs.rs  …     (§2c.4)
@@ -716,7 +752,7 @@ The collection is a rewrite, not a rename: each inline block becomes a
 function in `unsafe.rs` with an INV contract stating its precondition,
 and the call site uses the function. It is done subsystem by
 subsystem, each one its own lane with its own gates, and it does not
-move code out of the core — a topic file that used an inline
+move code out of the core — a `hotpath.rs` function that used an inline
 `unsafe { *p }` now calls an `unsafe.rs` function instead. What leaves
 the core is decided separately, by the rules in §1a.2.
 
@@ -734,10 +770,11 @@ source file.
    sizes on all three architectures). Reference counts on main
    8d7de77e8: 318 `rux::`, 84 `rux_xxx::`, 5,933 `crate::<subsystem>::`
    inside the crates.
-2. **Give each shape-1 subsystem its `types.rs`** (the type
-   definitions move there from wherever they sit; `unsafe.rs` exists
-   after pass 1; the hot-path topic files keep their names). Per
-   subsystem, its own lane.
+2. **File each shape-1 subsystem into `unsafe.rs` / `hotpath.rs` /
+   `types.rs`** (file moves only: the type definitions to `types.rs`,
+   every other file of the subsystem to `hotpath.rs` as a section;
+   `unsafe.rs` exists after pass 1). No function is judged hot or
+   cold in this pass. Per subsystem, its own lane.
 3. **Collect the scattered unsafe** (§2c.5), per subsystem, its own
    lane, with the gate assertion added as soon as the first subsystem
    is clean.
@@ -745,6 +782,13 @@ source file.
 Pass 1 and 2 are verifiable by one criterion: the compiled kernel is
 unchanged apart from symbol names. Pass 3 changes the code and takes
 the full gate chain per subsystem.
+
+After pass 3 the structure is complete and the shrink stage begins
+(§2c.3): per `hotpath.rs`, function by function, from the call graph
+rooted at the trap, switch, fault, timer, completion and lock entries,
+with `syscost` samples as the check. Its result is the real hot-path
+line count per subsystem, and the core-size goal (§1a.4) is restated
+against it.
 
 ## 3. The end-state topology
 
