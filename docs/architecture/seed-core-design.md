@@ -1194,101 +1194,13 @@ directory rename is deferred on crate-lane coordination (it rewrites
 `crate::debug::` tokens inside the six service crates), recipe current
 in the review doc §8.
 
-## 7a. The debug subsystem: general instruments, not one per hunt
+## 7a. The debug subsystem
 
-User directives of 2026-11-25:
-
-- The sweep (§2c.3) covers more than printers: obsolete features and
-  dead code, in the core AND in the subsystem crates.
-- The debug subsystem is reviewed against the reference kernel and
-  brought in line with what it provides.
-- The working method: a failure is located by reading the log, or by
-  running again under a debug build and reading the log — not by
-  adding code for that one failure and digging again.
-
-**Why the method has been the second kind.** The debug subsystem grew
-one instrument per hunt. Its files are named for the failures they
-were written against (`driftwatch`, `lostpark`, `schb`, `scmtap`,
-`spinwatch`, `mmprof`, `forkprof`, `hilogcensus`, `allocwatch`,
-`wildwatch`, `leakorigin`, `scribble`): each watches one symptom,
-each is reached by the debug event that arms it, and none answers a
-question it was not written for. A first draft of this section said the
-per-subsystem trace points were missing. They are not. Measured on
-2026-11-25: 216 trace points in 18 groups. The `sched` group has 18,
-`raw_syscalls` has `sys_enter` and `sys_exit` wired into
-`syscall/dispatch.rs`, `irq` has `irq_handler_entry` and
-`irq_handler_exit`, `block` has `block_rq_issue` and
-`block_rq_complete`; `signal`, `timer`, `kmem`, `vmscan`, `oom` and
-`printk` have theirs. Two defects remain in the trace points. One:
-`exceptions:page_fault_user` and `exceptions:page_fault_kernel` are
-declared with no call site — the page-fault event exists by name
-only. Two: the largest group is `rux`, 58 of the 216, named for the
-session that needed each point (`ams46`, `acqdiv`, `leakhunt`,
-`ohhunt`, `epollscan`). Whether the NOVMA-EXEC investigation could
-have used `sys_enter` instead of its capture code is a question
-about how that investigation was run, not about a missing point;
-it is not settled here.
-
-So the gap is not the absence of general instruments. It is that
-17,000 lines of instruments (§2c.3) were written for single failures
-while the general ones went unused, and that some general points are
-shells. The remedy is the same three the method calls for: fill the
-shells, use the general points, and turn the single-failure
-instruments into general ones or delete them.
-
-**What the reference kernel provides, and the state here.**
-
-| facility | what it is for | here |
-|---|---|---|
-| log buffer with levels (`printk`, `dmesg`) | what happened, in order | yes (`printk`); some writers bypass it (§9) |
-| trace points per subsystem (`sched_switch`, `sched_wakeup`, `block_rq_issue`, `block_rq_complete`, `page_fault`, `irq_handler_entry`, `irq_handler_exit`, `sys_enter`, `sys_exit`) | the sequence of events around a failure | yes: 216 points, 18 groups; `sched` 18. Open: the two page-fault points have no call site; 58 points in the `rux` group are hunt-specific |
-| dynamic debug (`pr_debug`, switched per file / line / format string at run time) | turn up detail in one place without a rebuild | no |
-| kprobes (a probe on any function, at run time) | answer a new question without new code | no |
-| function tracer (call sequence, call graph, per-function timing) | where the time goes, who calls whom | no (`syscost` samples syscalls) |
-| sysrq (task stacks, memory, blocked tasks, crash) | a stuck system, from the keyboard | yes — 12 commands (`b c d e f i k l m n o p`) |
-| task dump, per-task stack | who is stuck where | yes (`taskdump`) |
-| hung-task and soft-lockup detectors | a task or CPU that stopped making progress | yes (`hung_task`, `softlockup`) |
-| hard-lockup watchdog (NMI) | a CPU with interrupts off | no |
-| `WARN` / `BUG` with a stack, rate limited | a broken invariant, reported once | no macros; 15 bare `dump_stack()` calls and 51 `debug_assert!` (no stack, release-invisible) |
-| object and slab debugging (`/proc/slabinfo`, SLUB debug flags) | a corrupted or leaked object | `/proc/slabinfo` only; no object poisoning or red zones |
-| lockdep (lock-order and hold-time checking) | a deadlock before it happens | no (a "lockdep-lite" was planned, not landed) |
-| KASAN / KFENCE | out-of-bounds and use-after-free at run time | no |
-| crash dump (`kdump`, vmcore) | the state at a panic | no (`pstore` keeps the log) |
-| RCU stall detection | a grace period that does not end | yes (`sync/rcu.rs`) |
-
-**Order of work.** Each item is a lane with its own gate; the order
-is by how many investigations an item would have shortened.
-
-1. **Complete the trace points.** Wire the two page-fault points
-   (`page_fault_user`, `page_fault_kernel`) into the fault handler.
-   Then go through the `rux` group point by point: one that a
-   subsystem's general point already covers is deleted; one that
-   records something no general point records is renamed for the
-   event and moved to its subsystem's group. Compare the per-group
-   lists with the reference's to find general points not yet
-   declared (timer expiry, for one: the `timer` group holds only
-   `itimer_arm`). On a debug build an unarmed point costs one branch.
-2. **Dynamic debug**: every diagnostic print in the core and the
-   crates becomes a `pr_debug!` site switched by a control file, and
-   the raw writers go through it (closing the §9 gap). This is where
-   the hand-written printers (§2c.3) are replaced.
-3. **kprobes** on the core's functions, configured from a control
-   file — the instrument that ends "add code for this failure".
-4. **Function tracer** and **lockdep**.
-5. The rest as their own items.
-
-**How this changes the sweep.** An instrument that no general facility
-replaces is folded in (§2c.3, step 2) by turning it into one of these:
-a hunt's watch on "task X parked without being relinked" becomes a
-`sched:sched_park` trace point plus a user-space check, not a core
-file. The 2,000 lines that check one symptom are deleted; the ten
-lines that emit the event stay.
-
-**What stays true of a debug build.** Debug features are off in
-release builds (the rule of 2026-11-19). A debug build carries them
-and is the build the method above runs. The cost of an unarmed trace
-point is one branch; the cost of the debug subsystem's always-on
-detectors is measured and reported per item.
+Designed in docs/architecture/debug-design.md: the facility list
+measured against the reference kernel, the order of work, and how the
+single-failure instruments are folded into general ones or deleted.
+The sweep of §2c.3 applies its "replace, fold in, delete" rule through
+that document's facilities.
 
 ## 8. The execution ladder (order is binding; each rung = measure → design interface → flip → forbid → battery)
 
@@ -1315,12 +1227,11 @@ twice halts the ladder (no piling changes on an unstable base).
 
 ## 9. Risks and honest limits
 
-- **Release output of the sched diagnostic printers.** The raw-diagnostic
-  gate (2026-11-12) compiles `putchar_no_lock` to a no-op in release;
-  the taskdump funnel (`putc_brief` → `staged_putc`) has no such gate,
-  so the hand-written printers in `sched` (3,306 lines) print in release
-  builds. Found 2026-11-25 while measuring `hotpath.rs`; open until the
-  shrink stage replaces or folds them in (§2c.3).
+- **Debug code is not off in release builds.** The raw-diagnostic gate
+  (2026-11-12) compiles `putchar_no_lock` to a no-op in release; 34 of
+  the 35 files under `core/src/debug/` have no gate and are present in
+  the release kernel's symbol table. Found 2026-11-25. State, numbers
+  and the plan: docs/architecture/debug-design.md §3.2.
 
 - **The core is still ~3,000 lines of hand-written unsafe.** The design
  minimizes it to the reference kernel's own floor class; it does not
@@ -1342,3 +1253,7 @@ twice halts the ladder (no piling changes on an unstable base).
  rux-core (§8 step 8). Part II status board unchanged.
 - safety-and-performance.md: the INV/F-row registry becomes the core's
  audit surface; no format change.
+- debug-design.md: the debug subsystem — its facilities measured against
+ the reference kernel, the release rule, and the order in which the
+ single-failure instruments are replaced, folded in or deleted. §7a
+ and the "replace, fold in, delete" rule of §2c.3 refer to it.
