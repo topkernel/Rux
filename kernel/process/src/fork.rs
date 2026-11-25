@@ -121,7 +121,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // must observe the same FP values the parent would have.
         // (sched::current() is the typed &mut Task handle; parent_task
         // is the currently running task, distinct from the child.)
-        if let Some(parent_task) = crate::sched::current() {
+        if let Some(parent_task) = crate::sched::hotpath::current() {
             #[cfg(feature = "riscv64")]
             {
                 // save_fpu reads+stores the currently running task's live
@@ -201,7 +201,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // on its very first instructions in the child — with the base
         // left 0 the first access faults at ~(0 + slot offset).
         #[cfg(feature = "x86_64")]
-        if let Some(parent_task) = crate::sched::current() {
+        if let Some(parent_task) = crate::sched::hotpath::current() {
             // parent_task is the currently running task; we only read
             // its thread state before the child ever runs.
             let pfs = parent_task.thread().fs_base;
@@ -377,7 +377,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
     #[cfg(feature = "debug-futex-trace")]
     {
         use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
-        let pid = crate::sched::current().map(|c| c.pid() as u64).unwrap_or(0);
+        let pid = crate::sched::hotpath::current().map(|c| c.pid() as u64).unwrap_or(0);
         taskdump_raw_line(b"FTX CLONE pid=");
         taskdump_dec(pid);
         taskdump_raw_line(b" flags=");
@@ -396,7 +396,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Get current task (parent process) — the typed &'static mut
         // handle; pointer-taking APIs receive `current as *mut Task` at
         // their call sites, and no whole-body unsafe wrapper remains.
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(c) => c,
             None => return Err(enomem()),
         };
@@ -461,7 +461,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Allocate task slot from scheduler
         // Note: alloc_task_slot calls new_task_at which already allocates kernel stack
         let fp_t_alloc = if fp { crate::debug::forkprof::now() } else { 0 };
-        let task_ptr = match crate::sched::alloc_task_slot() {
+        let task_ptr = match crate::sched::hotpath::alloc_task_slot() {
             Some(p) => p,
             None => {
                 // Distinguish PID exhaustion (EAGAIN, Linux semantics) from
@@ -542,7 +542,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 crate::pid_hash::pid_hash_remove(slot_pid);
                 crate::r#unsafe::borrow_task_mut(slot).free_kernel_stack();
                 crate::pid::free_pid(slot_pid);
-                crate::sched::free_task_slot(slot);
+                crate::sched::hotpath::free_task_slot(slot);
             }
             Err(err)
         };
@@ -605,7 +605,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // controller limit is checked here (every ancestor with a limit
         // must have headroom — Linux fails fork with EAGAIN).
         if let Err(e) =
-            crate::sched::cgroup::cgroup_on_fork(current as *mut Task, child as *mut Task)
+            crate::sched::hotpath::cgroup_on_fork(current as *mut Task, child as *mut Task)
         {
             return unwind(task_ptr, e);
         }
@@ -1083,7 +1083,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         let fp_t_enq = if fp { crate::debug::forkprof::now() } else { 0 };
         // enqueue_task takes the exclusive borrow: from here the scheduler
         // owns the child (another CPU may run it immediately).
-        if !crate::sched::enqueue_task(child) {
+        if !crate::sched::hotpath::enqueue_task(child) {
             crate::pr_warn!(
                 "fork: enqueue refused for child pid={} — unwinding (R52 tripwire)",
                 pid
@@ -1098,7 +1098,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                     Task::thread_group_leave(task_ptr);
                     crate::r#unsafe::borrow_task_mut(task_ptr).free_kernel_stack();
                     crate::pid::free_pid(pid);
-                    crate::sched::free_task_slot(task_ptr);
+                    crate::sched::hotpath::free_task_slot(task_ptr);
                 }
             } else {
                 return unwind(task_ptr, enomem());
@@ -1170,9 +1170,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // on the run queue while we are in fact still executing —
                 // take ourselves back off before continuing, or a second
                 // CPU could pick and run this very task (review NEW-C2).
-                crate::sched::dequeue_if_enqueued(&*current);
+                crate::sched::hotpath::dequeue_if_enqueued(&*current);
             } else {
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
             }
             // Parent resumes here after child exec'd or exited
         }
@@ -1189,7 +1189,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         crate::fs::perf_ctr::note_fork();
         // perf FORK sideband (hiperf process tracking; no-op unless a
         // perf event is armed).
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             // cur is live here (parent side of the fork); sched::current()
             // is the typed handle.
             crate::perf::hook_fork(cur.tgid(), cur.pid(), pid as u32, pid as u32);

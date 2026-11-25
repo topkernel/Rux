@@ -20,11 +20,11 @@ pub fn test_sgid_mode() {
     // no group, no CAP_FSETID" — previously an UNGATED earlier test's
     // setgroups/cred side effects happened to establish that state by
     // accident. Own it explicitly: save, clear, restore.
-    let saved = crate::sched::current().map(|t| {
+    let saved = crate::sched::hotpath::current().map(|t| {
         let c = t.cred();
         (c.groups.clone(), c.cap_effective)
     });
-    if let Some(t) = crate::sched::current() {
+    if let Some(t) = crate::sched::hotpath::current() {
         let c = t.cred_mut();
         c.groups.clear();
         c.cap_effective = crate::security::capability::Cap::EMPTY;
@@ -69,7 +69,7 @@ pub fn test_sgid_mode() {
     // regression run: root creates in its OWN setgid dir keeps the bit.)
     let _ = (S_ISGID, S_IXGRP);
 
-    if let (Some(t), Some((groups, caps))) = (crate::sched::current(), saved) {
+    if let (Some(t), Some((groups, caps))) = (crate::sched::hotpath::current(), saved) {
         let c = t.cred_mut();
         c.groups = groups;
         c.cap_effective = caps;

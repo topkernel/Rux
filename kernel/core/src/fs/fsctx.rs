@@ -510,7 +510,7 @@ pub fn make_detached_mount(
 /// Install a prepared file into the caller's fd table at the lowest
 /// free slot; EMFILE when full. Sets FD_CLOEXEC when asked.
 pub fn install_fd_with(file: Arc<crate::fs::File>, cloexec: bool) -> Result<usize, i32> {
-    let fdtable = crate::sched::get_current_fdtable().ok_or(-crate::errno::constants::EBADF)?;
+    let fdtable = crate::sched::hotpath::get_current_fdtable().ok_or(-crate::errno::constants::EBADF)?;
     let fd = fdtable.alloc_fd().ok_or(-crate::errno::constants::EMFILE)?;
     fdtable
         .install_fd(fd, file)

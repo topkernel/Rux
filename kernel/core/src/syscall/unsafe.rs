@@ -186,7 +186,7 @@ pub fn task_park_unwind(task: *mut Task) {
     t.set_state(crate::process::task::TaskState::new(
         crate::process::task::TaskState::RUNNING,
     ));
-    crate::sched::dequeue_task(t);
+    crate::sched::hotpath::dequeue_task(t);
 }
 
 // ---------------------------------------------------------------------------

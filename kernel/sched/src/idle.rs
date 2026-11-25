@@ -19,7 +19,7 @@
 #![forbid(unsafe_code)]
 
 use crate::process::task::Task;
-use crate::sched::class::{SchedClass, RunQueueRef};
+use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 
 /// Idle scheduling class
 pub struct IdleSchedClass;
@@ -50,7 +50,7 @@ impl SchedClass for IdleSchedClass {
 
     /// Any waking task preempts idle immediately.
     fn wakeup_preempt(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
-        crate::sched::sched::resched_curr();
+        crate::sched::hotpath::resched_curr();
     }
 
     /// Actual pick happens in sched.rs::pick_next_task via PerCpuState.

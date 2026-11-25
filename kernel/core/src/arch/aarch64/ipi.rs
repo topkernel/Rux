@@ -262,7 +262,7 @@ pub fn smp_call_function(
     send_ipi_type(target, IpiType::CallFunction);
 
     while !csd.done.load(Ordering::Acquire) {
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
         core::hint::spin_loop();
     }
 }
@@ -314,7 +314,7 @@ fn ipi_reschedule_handler() {
     // Only set the flag — schedule() from hard-IRQ context could
     // deadlock on the GRQ lock with IRQs off (riscv64 twin note). The
     // trap-return / cond_resched points pick it up.
-    crate::sched::set_need_resched();
+    crate::sched::hotpath::set_need_resched();
 }
 
 fn ipi_call_function_handler() {

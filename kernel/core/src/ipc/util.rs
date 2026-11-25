@@ -135,7 +135,7 @@ pub fn caller_ipc_ns_inum() -> u64 {
 
 impl KernIpcPerm {
     pub fn new(key: i32, mode: u16) -> Self {
-        let cred = sched::current().map(|t| (t.cred().uid, t.cred().gid, t.cred().euid, t.cred().egid));
+        let cred = sched::hotpath::current().map(|t| (t.cred().uid, t.cred().gid, t.cred().euid, t.cred().egid));
         let (uid, gid, cuid, cgid) = cred.unwrap_or((0, 0, 0, 0));
         Self {
             key,
@@ -483,7 +483,7 @@ pub trait IpcObject {
 /// Check if the current process has the desired permissions on an IPC object.
 /// Follows Linux's ipcperms() logic.
 pub fn ipc_check_permissions(perm: &KernIpcPerm, desired_mode: u16) -> bool {
-    let cred = match sched::current() {
+    let cred = match sched::hotpath::current() {
         Some(t) => t.cred(),
         None => return false,
     };

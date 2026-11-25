@@ -390,7 +390,7 @@ fn nonblock(file: &File) -> bool {
 }
 
 fn send_sigpipe() {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         let _ = crate::signal::send_signal((*current).pid(), Signal::SIGPIPE as i32);
     }
 }
@@ -427,7 +427,7 @@ fn ptmx_read(file: &File, buf: &mut [u8]) -> isize {
         }
 
         // Blocking read (pipe.rs wait discipline).
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return 0,
         };
@@ -437,19 +437,19 @@ fn ptmx_read(file: &File, buf: &mut [u8]) -> isize {
         // Re-check AFTER registering (lost-wakeup guard).
         if pair.master_rx_len() > 0 || pair.slave_closed.load(Ordering::Acquire) {
             pair.master_waitq.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             continue;
         }
 
         if crate::signal::signal_pending() {
             pair.master_waitq.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return -(EINTR as isize);
         }
 
         // R54: re-arm interrupts so ticks/IPIs reach this CPU.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         pair.master_waitq.finish_wait(current);
 
@@ -599,7 +599,7 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
         }
 
         // Block for space (pipe.rs wait discipline).
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return written as isize,
         };
@@ -610,13 +610,13 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
             || pair.master_closed.load(Ordering::Acquire)
         {
             pair.master_space_waitq.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             continue;
         }
 
         if crate::signal::signal_pending() {
             pair.master_space_waitq.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             if written > 0 {
                 return written as isize;
             }
@@ -625,7 +625,7 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
 
         // R54: re-arm interrupts so ticks/IPIs reach this CPU.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         pair.master_space_waitq.finish_wait(current);
 
@@ -942,7 +942,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             match get_file_fd_install(Arc::clone(&file)) {
                 Some(fd) => {
                     if flags & O_CLOEXEC != 0 {
-                        if let Some(fdtable) = crate::sched::get_current_fdtable() {
+                        if let Some(fdtable) = crate::sched::hotpath::get_current_fdtable() {
                             fdtable.set_fd_cloexec(fd, true);
                         }
                     }

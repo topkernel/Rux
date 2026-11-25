@@ -77,14 +77,14 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         if !needs_reclaim {
             // Nothing to do — sleep.
-            if let Some(current) = crate::sched::current() {
+            if let Some(current) = crate::sched::hotpath::current() {
                 current.set_state(
                     crate::process::task::TaskState::new(
                         crate::process::task::TaskState::INTERRUPTIBLE,
                     ),
                 );
             }
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             continue;
         }
 
@@ -163,14 +163,14 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                     // dry pool returns 0 here (verified by the drain's
                     // own break-on-no-progress) and falls through to
                     // the OOM below.
-                    if let Some(current) = crate::sched::current() {
+                    if let Some(current) = crate::sched::hotpath::current() {
                         current.set_state(
                             crate::process::task::TaskState::new(
                                 crate::process::task::TaskState::INTERRUPTIBLE,
                             ),
                         );
                     }
-                    crate::sched::schedule();
+                    crate::sched::hotpath::schedule();
                     continue;
                 }
 
@@ -202,14 +202,14 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // Always yield after a reclaim pass to avoid starving user processes.
         // Without a working reclaim path (try_to_unmap), kswapd may loop
         // indefinitely if the zone remains below watermarks.
-        if let Some(current) = crate::sched::current() {
+        if let Some(current) = crate::sched::hotpath::current() {
             current.set_state(
                 crate::process::task::TaskState::new(
                     crate::process::task::TaskState::INTERRUPTIBLE,
                 ),
             );
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
 
     0

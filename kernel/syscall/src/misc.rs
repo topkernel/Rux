@@ -505,7 +505,7 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
 fn epoll_has_ready_events(epoll: &EpollFile) -> bool {
     use epoll_events::*;
     use poll_events::*;
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(f) => f,
         None => return false,
     };
@@ -722,7 +722,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     // ppoll_time64 both delegate to this core, so the bound covers all
     // three entry points. RLIM_INFINITY (u64::MAX) means uncapped.
     {
-        let nofile = rux::sched::current()
+        let nofile = rux::sched::hotpath::current()
             // irqsave: current's rlimits lock is shared with IRQ context
             // (scheduler_tick -> Task::rlimit -> lock_irqsave); a plain
             // holder interrupted by the tick self-deadlocks the CPU.
@@ -752,7 +752,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     }
 
     // Get current process fdtable
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -929,7 +929,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 }
             }
             if wired && !files.is_empty() {
-                let task = match rux::sched::current() {
+                let task = match rux::sched::hotpath::current() {
                     Some(t) => t,
                     None => return -(errno::EINTR as i64),
                 };
@@ -1095,10 +1095,10 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
 fn poll_sleep_slice(deadline_ns: Option<u64>) {
     use ::process::task::TaskState;
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => {
-            rux::sched::yield_cpu();
+            rux::sched::hotpath::yield_cpu();
             return;
         }
     };
@@ -1137,7 +1137,7 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
     if timer_id == 0 {
         // Timer pool exhausted: degrade to one scheduling round rather
         // than sleeping forever (nothing else is guaranteed to wake us).
-        rux::sched::yield_cpu();
+        rux::sched::hotpath::yield_cpu();
         return;
     }
     // current is the running task's reference.
@@ -1155,14 +1155,14 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
         // A racing wake may have enqueued us while still executing — take
         // ourselves back off.
         current.set_state(TaskState::new(TaskState::RUNNING));
-        rux::sched::dequeue_task(current);
+        rux::sched::hotpath::dequeue_task(current);
         crate::timer::del_timer(timer_id);
     } else {
         // Enable interrupts so the tick can reach us, then sleep. Syscall
         // context runs with SIE=0; __schedule must see SIE=1 (same
         // contract as wait_event! / sys_epoll_wait).
         crate::arch::cpu::restore_irq(true);
-        rux::sched::schedule();
+        rux::sched::hotpath::schedule();
         // Spurious wake before expiry: drop the timer so it cannot enqueue
         // us again while running.
         if crate::timer::timer_pending(timer_id) {
@@ -1420,7 +1420,7 @@ fn poll_event_wait_round(
     // 5. Sleep. Syscall context runs with SIE=0; __schedule must see
     // SIE=1 (same contract as wait_event! / sys_epoll_wait).
     crate::arch::cpu::restore_irq(true);
-    rux::sched::schedule();
+    rux::sched::hotpath::schedule();
 
     // 6. Cleanup: drop the timer so it cannot re-enqueue us while running,
     //    remove every registration, restore RUNNING if we are still asleep
@@ -1461,7 +1461,7 @@ impl WaitScopedMask {
     /// SIGSTOP are cleared (unblockable — same rule as rt_sigprocmask
     /// and epoll_pwait's scoped mask).
     fn install(new_mask: u64) -> Option<Self> {
-        let current = rux::sched::current()?;
+        let current = rux::sched::hotpath::current()?;
         // current is the running task; sigmask is a plain u64 field
         // written only by the task itself (syscall context).
         let saved = current.sigmask;
@@ -1476,7 +1476,7 @@ impl WaitScopedMask {
     fn defer_restore(mut self) {
         if self.live {
             self.live = false;
-            if let Some(current) = rux::sched::current() {
+            if let Some(current) = rux::sched::hotpath::current() {
                 // See install().
                 current.ext.sigmask_restore = self.saved;
                 current.ext.sigmask_restore_valid = true;
@@ -1489,7 +1489,7 @@ impl Drop for WaitScopedMask {
     fn drop(&mut self) {
         if self.live {
             self.live = false;
-            if let Some(current) = rux::sched::current() {
+            if let Some(current) = rux::sched::hotpath::current() {
                 // See install().
                 current.sigmask = self.saved;
             }
@@ -1821,7 +1821,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ns: i64, has_timeout: bool) -> i64
         v
     };
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -2000,7 +2000,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ns: i64, has_timeout: bool) -> i64
 pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     let _size = args[0] as i32;
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -2222,7 +2222,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
         static UEC_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-            if let Some(ft) = rux::sched::get_current_fdtable() {
+            if let Some(ft) = rux::sched::hotpath::get_current_fdtable() {
                 if let Some(f) = ft.get_file(args[2] as usize) {
                     if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
                         if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
@@ -2267,7 +2267,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
         if n < 400 && crate::trace::EVENT_INPUTTRACE.armed() {
             let fd = args[1] as usize;
             let op = args[2] as i32;
-            let fid = rux::sched::get_current_fdtable()
+            let fid = rux::sched::hotpath::get_current_fdtable()
                 .and_then(|t| t.get_file(fd))
                 .map(|f| f.file_id)
                 .unwrap_or(0);
@@ -2304,7 +2304,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -2565,7 +2565,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         core::sync::atomic::AtomicUsize::new(0);
                     let n = DEL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 300 {
-                        let live = rux::sched::get_current_fdtable()
+                        let live = rux::sched::hotpath::get_current_fdtable()
                             .and_then(|ft| ft.get_file(fd as usize))
                             .map(|f| f.file_id)
                             .unwrap_or(0);
@@ -2684,7 +2684,7 @@ pub fn param_stall_dump() {
             st.pop, st.fault, st.trunc, st.empty
         );
     }
-    let task = rux::sched::find_task_by_pid(1);
+    let task = rux::sched::hotpath::find_task_by_pid(1);
     if task.is_null() {
         return;
     }
@@ -2700,7 +2700,7 @@ pub fn param_stall_dump() {
     {
         let mut launcher_tgid: u32 = 0;
         let mut appspawn_tgid: u32 = 0;
-        rux::sched::for_each_task_try(|tk| {
+        rux::sched::hotpath::for_each_task_try(|tk| {
             let cb: &[u8; 16] = tk.comm();
             let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
             let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("");
@@ -2725,7 +2725,7 @@ pub fn param_stall_dump() {
         // it is dead or its reader is starved, every app's logger jams.
         {
             let mut hilog_tgid: u32 = 0;
-            rux::sched::for_each_task_try(|tk| {
+            rux::sched::hotpath::for_each_task_try(|tk| {
                 let cb: &[u8; 16] = tk.comm();
                 let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
                 let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("");
@@ -2746,7 +2746,7 @@ pub fn param_stall_dump() {
         // (segs/bytes on both ends) read directly.
         for (label, needle) in [("hilogd", "hilog"), ("launcher", "auncher")] {
             let mut tgid: u32 = 0;
-            rux::sched::for_each_task_try(|tk| {
+            rux::sched::hotpath::for_each_task_try(|tk| {
                 let cb: &[u8; 16] = tk.comm();
                 let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
                 let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("");
@@ -2758,7 +2758,7 @@ pub fn param_stall_dump() {
                 continue;
             }
             let mut leader: *mut ::process::task::Task = core::ptr::null_mut();
-            rux::sched::for_each_task_try(|task| {
+            rux::sched::hotpath::for_each_task_try(|task| {
                 if leader.is_null() && task.tgid() as u32 == tgid && task.pid() as u32 == tgid {
                     leader = task as *const ::process::task::Task
                         as *mut ::process::task::Task;
@@ -2877,7 +2877,7 @@ pub fn param_stall_dump() {
             let (pid, comm) = (watched.pid(), watched.comm());
             let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
             let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
-            let n0 = rux::sched::sched::ww_tail_fill(i);
+            let n0 = rux::sched::hotpath::ww_tail_fill(i);
             if pid == 1 {
                 p1_watched = true;
             }
@@ -2930,7 +2930,7 @@ pub fn param_stall_dump() {
             // it (W wake-ok / L link / P pick-unlink / K publish /
             // A affirm) while it sits in the never-returning pwait.
             let mut wws = alloc::string::String::new();
-            rux::sched::sched::ww_append_dump(
+            rux::sched::hotpath::ww_append_dump(
                 &mut wws,
                 t,
                 crate::drivers::timer::get_jiffies(),
@@ -2953,7 +2953,7 @@ pub fn param_stall_dump() {
 pub fn param_sender_dump() {
     use ::process::task::{SchedPolicy, Task, TaskState};
     // init's unix socket identities (Arc raw pointers), one fdtable pass.
-    let init_task = rux::sched::find_task_by_pid(1);
+    let init_task = rux::sched::hotpath::find_task_by_pid(1);
     if init_task.is_null() {
         return;
     }
@@ -3008,7 +3008,7 @@ pub fn param_sender_dump() {
                 return;
             }
             rows += 1;
-            let linked = match rux::sched::sched::grq_diag_cfs_linked(
+            let linked = match rux::sched::hotpath::grq_diag_cfs_linked(
                 t as *const ::process::task::Task as *mut ::process::task::Task,
             ) {
                 Some(true) => "1",
@@ -3047,7 +3047,7 @@ pub fn param_sender_dump() {
 pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
     // SAFETY: diagnostic lookup of the target task (find_task_by_pid
     // contract); read-only walks of its fdtable below.
-    let task = rux::sched::find_task_by_pid(pid);
+    let task = rux::sched::hotpath::find_task_by_pid(pid);
     if task.is_null() {
         return;
     }
@@ -3178,7 +3178,7 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
                 // class) vs the client sockets, the datum that identifies
                 // which registered fd never saw a connection arrive.
                 {
-                    let t1 = rux::sched::find_task_by_pid(1);
+                    let t1 = rux::sched::hotpath::find_task_by_pid(1);
                     let tk1 = if t1.is_null() { None } else { Some(::process::r#unsafe::borrow_task(t1)) };
                     let p = tk1
                         .and_then(|tk| {
@@ -3263,7 +3263,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
 fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
     use alloc::format;
     let pid = ::process::current_pid();
-    let (comm, comm16) = match rux::sched::current() {
+    let (comm, comm16) = match rux::sched::hotpath::current() {
         // Read-only comm access on the current task (t is a reference).
         Some(t) => {
             let c = t.comm();
@@ -3275,7 +3275,7 @@ fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
         }
         None => return,
     };
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(f) => f,
         None => return,
     };
@@ -3370,7 +3370,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -3740,7 +3740,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 eps_msg(b"EPSCAN[");
                 eps_u64(n);
                 eps_msg(b"] pid=");
-                if let Some(cur) = rux::sched::current() {
+                if let Some(cur) = rux::sched::hotpath::current() {
                     // Read-only pid/comm access on the current task (cur
                     // is a reference — the old wrapper was
                     // vestigial).
@@ -3783,7 +3783,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 static N: AtomicU64 = AtomicU64::new(0);
                 let n = N.fetch_add(1, Ordering::Relaxed);
                 if n < 400 || n % 2000 == 0 {
-                    if let Some(cur) = rux::sched::current() {
+                    if let Some(cur) = rux::sched::hotpath::current() {
                         // Read-only comm/pid access on the current task
                         // (reference; vestigial wrapper removed).
                         let (pid, comm) = (cur.pid(), cur.comm());
@@ -3852,7 +3852,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 static N: AtomicU64 = AtomicU64::new(0);
                 let n = N.fetch_add(1, Ordering::Relaxed);
                 if n < 200 || n % 2000 == 0 {
-                    if let Some(cur) = rux::sched::current() {
+                    if let Some(cur) = rux::sched::hotpath::current() {
                         // Read-only pid/comm/pending access on the current
                         // task (reference; vestigial wrapper removed).
                         let (pid, comm) = (cur.pid(), cur.comm());
@@ -3927,7 +3927,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 }
             }
             if wired && !watched.is_empty() {
-                let current = match rux::sched::current() {
+                let current = match rux::sched::hotpath::current() {
                     Some(t) => t,
                     None => return 0, // no task context: cannot block
                 };
@@ -3989,7 +3989,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         //     types with no producer wake path,
         //   - signal delivery (INTERRUPTIBLE + signal_wake_up → EINTR),
         //   - epoll_notify_file via EPOLL_WAKE_REGISTRY.
-        let current = match rux::sched::current() {
+        let current = match rux::sched::hotpath::current() {
             Some(t) => t,
             None => return 0, // no task context: cannot block
         };
@@ -4001,7 +4001,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             epoll.wait_queue.finish_wait(current);
             // current is the running task's reference; undo a concurrent
             // wake enqueue (NEW-C2 discipline).
-            rux::sched::dequeue_task(current);
+            rux::sched::hotpath::dequeue_task(current);
             return -(errno::EINTR as i64);
         }
         // One slice = min(remaining timeout, 10ms re-check interval) —
@@ -4039,7 +4039,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 static N: AtomicU64 = AtomicU64::new(0);
                 let n = N.fetch_add(1, Ordering::Relaxed);
                 if n < 100 || n % 5000 == 0 {
-                    if let Some(cur) = rux::sched::current() {
+                    if let Some(cur) = rux::sched::hotpath::current() {
                         // Read-only pid/comm access on the current task
                         // (reference; vestigial wrapper removed).
                         let (pid, comm) = (cur.pid(), cur.comm());
@@ -4057,15 +4057,15 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             }
             epoll.wait_queue.finish_wait(current);
             // current is the running task's reference.
-            rux::sched::dequeue_task(current);
-            rux::sched::yield_cpu();
+            rux::sched::hotpath::dequeue_task(current);
+            rux::sched::hotpath::yield_cpu();
             continue;
         }
         // Enable interrupts before schedule(): syscall context runs with
         // SIE=0; __schedule must save SIE=1 so the switched-back task has
         // interrupts enabled (same contract as wait_event!).
         crate::arch::cpu::restore_irq(true);
-        rux::sched::schedule();
+        rux::sched::hotpath::schedule();
         epoll.wait_queue.finish_wait(current);
         // Spurious/early wake (signal before expiry): drop the timer so it
         // cannot enqueue us again while running.
@@ -4124,7 +4124,7 @@ pub fn sys_epoll_pwait(args: SyscallArgs) -> i64 {
     };
     // SIGKILL/SIGSTOP are unblockable (same rule as rt_sigprocmask).
     let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -4169,7 +4169,7 @@ impl EventFd {
             if ready() {
                 return Ok(());
             }
-            let current = match rux::sched::current() {
+            let current = match rux::sched::hotpath::current() {
                 Some(t) => t,
                 None => return Ok(()), // cannot block: fall back to caller
             };
@@ -4179,17 +4179,17 @@ impl EventFd {
                 self.wait_queue.finish_wait(current);
                 // NEW-C2: undo a concurrent wake enqueue before looping
                 // (current is the running task's reference).
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 return Ok(());
             }
             if rux::signal::signal_pending() {
                 self.wait_queue.finish_wait(current);
                 // Same reference discipline as above.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 return Err(errno::EINTR);
             }
             crate::arch::cpu::restore_irq(true);
-            rux::sched::schedule();
+            rux::sched::hotpath::schedule();
             self.wait_queue.finish_wait(current);
             if rux::signal::signal_pending() {
                 return Err(errno::EINTR);
@@ -4422,7 +4422,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             return -errno::EAGAIN as isize;
         }
         loop {
-            let current = match rux::sched::current() {
+            let current = match rux::sched::hotpath::current() {
                 Some(t) => t,
                 None => return -errno::EAGAIN as isize,
             };
@@ -4430,17 +4430,17 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             if tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire) > 0 {
                 tfd.wait_queue.finish_wait(current);
                 // current is the running task's reference.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 break;
             }
             if rux::signal::signal_pending() {
                 tfd.wait_queue.finish_wait(current);
                 // Same reference discipline.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 return -(errno::EINTR) as isize;
             }
             crate::arch::cpu::restore_irq(true);
-            rux::sched::schedule();
+            rux::sched::hotpath::schedule();
             tfd.wait_queue.finish_wait(current);
             if rux::signal::signal_pending() {
                 return -(errno::EINTR) as isize;
@@ -4701,7 +4701,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         None => return -errno::EBADF as isize,
     };
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -errno::EAGAIN as isize,
     };
@@ -4761,17 +4761,17 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         if current.pending.get_all() & mask2 != 0 {
             sfd.wait_queue.finish_wait(current);
             // Undo a concurrent wake enqueue (NEW-C2 discipline).
-            rux::sched::dequeue_task(current);
+            rux::sched::hotpath::dequeue_task(current);
             continue;
         }
         if rux::signal::signal_pending() {
             sfd.wait_queue.finish_wait(current);
             // Same reference discipline as above.
-            rux::sched::dequeue_task(current);
+            rux::sched::hotpath::dequeue_task(current);
             return -(errno::EINTR) as isize;
         }
         crate::arch::cpu::restore_irq(true);
-        rux::sched::schedule();
+        rux::sched::hotpath::schedule();
         sfd.wait_queue.finish_wait(current);
         if rux::signal::signal_pending() {
             return -(errno::EINTR) as isize;
@@ -4790,7 +4790,7 @@ fn signalfd_poll(file: &crate::fs::File, events: u16) -> u16 {
         None => return POLLERR,
     };
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return 0,
     };
@@ -4861,7 +4861,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
     // from the set like Linux does.
     mask &= !((1u64 << (9 - 1)) | (1u64 << (19 - 1)));
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -4894,7 +4894,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
     }
 
     // Create path.
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::EPERM as i64),
     };
@@ -4983,7 +4983,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -5107,7 +5107,7 @@ fn read_inotify_path(ptr: *const u8, buf: &mut [u8; 4096]) -> Result<alloc::stri
         Ok(alloc::string::String::from(s))
     } else {
         // Relative: resolve against the CWD.
-        let cwd = if let Some(current) = rux::sched::current() {
+        let cwd = if let Some(current) = rux::sched::hotpath::current() {
             let cwd_bytes = current.get_cwd();
             core::str::from_utf8(&cwd_bytes)
                 .map(alloc::string::String::from)
@@ -5169,7 +5169,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
         false
     };
     if tfdc_log {
-        let comm = rux::sched::current()
+        let comm = rux::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -5207,7 +5207,7 @@ fn sys_timerfd_create_inner(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EMFILE as i64),
     };
@@ -5827,7 +5827,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
     // process's same-numbered close can never remove it; matching
     // BOTH fd and dying_file_id restores that invariant: the entry
     // dies only when the description it watches dies.
-    let fdtable = match rux::sched::current() {
+    let fdtable = match rux::sched::hotpath::current() {
         Some(t) => t.try_fdtable(),
         None => return,
     };

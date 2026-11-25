@@ -5,9 +5,9 @@
 #![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering};
 use crate::process::task::{Task, SchedPolicy};
-use crate::sched::class::{SchedClass, RunQueueRef};
+use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 use crate::list::ListHead;
-use crate::sched::entities::{RtRunQueue, SchedRtEntity, MAX_RT_PRIO, RR_TIMESLICE_TICKS};
+use crate::sched::{types::RtRunQueue, types::SchedRtEntity, types::MAX_RT_PRIO, hotpath::RR_TIMESLICE_TICKS};
 use crate::config::MAX_CPUS;
 
 impl RtSchedClass {
@@ -102,7 +102,7 @@ pub static RT_SCHED_CLASS: RtSchedClass = RtSchedClass::new();
 pub struct RtSchedClass;
 
 /// The RT pick core (S1b): a FREE fn over the framework storage.
-pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usize,
+pub fn rt_pick_next_cpu(rq: &mut crate::sched::types::RtRunQueue, cpu_id: usize,
         prev: *mut Task,
         skipped_owned_owner: &mut usize,) -> Option<*mut Task> {
         // Iterate bitmap words
@@ -142,15 +142,15 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                     // itself stays physmap-or-static too (it is the
                     // rt_run_list INSIDE the same Task allocation).
                     if pos as usize % 8 != 0
-                        || !crate::sched::sched::kernel_task_ptr_range_ok(pos as *const u8)
+                        || !crate::sched::hotpath::kernel_task_ptr_range_ok(pos as *const u8)
                     {
-                        crate::sched::sched::report_poisoned_rq_entry(cpu_id, pos as usize);
+                        crate::sched::hotpath::report_poisoned_rq_entry(cpu_id, pos as usize);
                         break;
                     }
                     // SAFETY: pos is an embedded ListHead in an enqueued Task; offset_of gives the correct back-pointer.
                     let task = crate::sched::r#unsafe::task_of_rt_list(pos);
-                    if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                        crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+                    if !crate::sched::hotpath::kernel_task_ptr_range_ok(task as *const u8) {
+                        crate::sched::hotpath::report_poisoned_rq_entry(cpu_id, task as usize);
                         break;
                     }
 
@@ -184,7 +184,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                         }
                         crate::sched::r#unsafe::task_shared(task).cpu_allowed(cpu_id)
                             && ownership_ok
-                            && !crate::sched::cgroup::task_cgroup_throttled(task)
+                            && !crate::sched::hotpath::task_cgroup_throttled(task)
                     };
 
                     // Save next before potential dequeue
@@ -229,7 +229,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::entities::RtRunQueue, cpu_id: usi
                                     .load(Ordering::Relaxed) as u64;
                                 let pk = crate::sched::r#unsafe::task_shared(task).pick_state() as u64;
                                 let throt =
-                                    crate::sched::cgroup::task_cgroup_throttled(task) as u64;
+                                    crate::sched::hotpath::task_cgroup_throttled(task) as u64;
                                 for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }
                                 ph(pid);
                                 for &b in b" jif=" { putchar(b); }

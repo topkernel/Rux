@@ -50,7 +50,7 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 /// zeroed fxsave image marked valid (fresh tasks restore deterministic
 /// FP state — ARCH-H1 parity) and fs/gs bases cleared.
 pub fn flush_thread() {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         // Typed handle — we are the only context that can touch our
         // own thread state here.
         {
@@ -112,7 +112,7 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
     let code = args[0];
     let addr = args[1];
 
-    let Some(current) = crate::sched::current() else {
+    let Some(current) = crate::sched::hotpath::current() else {
         return -crate::errno::constants::ESRCH as i64;
     };
 

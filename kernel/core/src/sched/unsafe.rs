@@ -25,8 +25,8 @@
 
 use crate::process::task::Task;
 
-use super::entities::SchedEntity;
-use super::sched::GlobalRunQueue;
+use super::types::SchedEntity;
+use super::types::GlobalRunQueue;
 
 // ---------------------------------------------------------------------------
 // INV-SCE-4: the per-CPU idle-task storages
@@ -255,7 +255,7 @@ pub fn current_trap_ip() -> u64 {
 
 /// The executing task (INV-SCE-11): the hardware tp register IS the
 /// per-CPU current-task pointer — the one derivation the whole kernel
-/// is built on ([`crate::sched::sched::current`]'s engine). Null and
+/// is built on ([`crate::sched::hotpath::current`]'s engine). Null and
 /// low-address checks mirror the register's boot states (0 before the
 /// first context switch; sub-kernel addresses name not-yet-task state).
 #[inline]
@@ -279,7 +279,7 @@ pub fn current_task_mut() -> Option<&'static mut Task> {
 /// context through its saved-thread state and resumes through next's.
 ///
 /// # Contract
-/// Called only from [`super::sched::context_switch`] with IRQs
+/// Called only from [`super::hotpath::context_switch`] with IRQs
 /// disabled on this CPU (the `__schedule` switch window) after the
 /// GRQ-published pick: `prev` is the task the hardware is executing,
 /// `next` was picked under the GRQ hold and its ownership qword
@@ -309,8 +309,8 @@ pub fn task_borrow(p: *mut Task) -> Option<crate::process::task_ref::TaskBorrow>
 /// to the node (the subtree walk). The reference is read-only.
 #[inline]
 pub fn cgroup_node_ref(
-    ptr: *mut super::cgroup::CgroupNode,
-) -> Option<&'static super::cgroup::CgroupNode> {
+    ptr: *mut super::types::CgroupNode,
+) -> Option<&'static super::types::CgroupNode> {
     if ptr.is_null() {
         return None;
     }
@@ -510,7 +510,7 @@ impl RbNode {
     }
 
     pub(crate) fn node_ok_shared(node: *mut RbNode) -> bool {
-        crate::sched::sched::kernel_task_ptr_range_ok(node as *const u8)
+        crate::sched::hotpath::kernel_task_ptr_range_ok(node as *const u8)
     }
 
     pub const fn unlinked() -> Self {
@@ -605,7 +605,7 @@ impl RbTimeline {
     /// Validate a node pointer before dereference (poison discipline).
     #[inline]
     pub fn node_ok(node: *mut RbNode) -> bool {
-        crate::sched::sched::kernel_task_ptr_range_ok(node as *const u8)
+        crate::sched::hotpath::kernel_task_ptr_range_ok(node as *const u8)
     }
 
     /// Minimum (leftmost) node of the subtree rooted at `node`.
@@ -1151,12 +1151,12 @@ pub fn grq_ptr_mut(p: *const GlobalRunQueue) -> &'static mut GlobalRunQueue {
 /// is written once at CPU bring-up; `current` is written by this CPU's
 /// own pick/heal paths (GRQ-held or the IRQs-off switch window) and
 /// read cross-Cpu by heal scans that accept mid-flight values.
-static mut PER_CPU: [super::sched::PerCpuState; crate::config::MAX_CPUS] =
-    [const { super::sched::PerCpuState::new() }; crate::config::MAX_CPUS];
+static mut PER_CPU: [super::types::PerCpuState; crate::config::MAX_CPUS] =
+    [const { super::types::PerCpuState::new() }; crate::config::MAX_CPUS];
 
 /// Shared view of cpu's slot (INV-SCE-10 read side).
 #[inline]
-pub fn per_cpu_shared(cpu: usize) -> &'static super::sched::PerCpuState {
+pub fn per_cpu_shared(cpu: usize) -> &'static super::types::PerCpuState {
     debug_assert!(cpu < crate::config::MAX_CPUS);
     // SAFETY: INV-SCE-10 — indexed by the hardware cpu id; the boot
     // path initialized every slot before scheduling began.
@@ -1166,7 +1166,7 @@ pub fn per_cpu_shared(cpu: usize) -> &'static super::sched::PerCpuState {
 /// Mutable view of cpu's slot (INV-SCE-10 write side: this CPU's own
 /// writes, or the GRQ-held heal paths).
 #[inline]
-pub fn per_cpu_mut(cpu: usize) -> &'static mut super::sched::PerCpuState {
+pub fn per_cpu_mut(cpu: usize) -> &'static mut super::types::PerCpuState {
     debug_assert!(cpu < crate::config::MAX_CPUS);
     // SAFETY: INV-SCE-10 — same init story; exclusion from the caller's
     // cpu-ownership or GRQ discipline.
@@ -1227,9 +1227,9 @@ pub fn secondary_idle_task(cpu: usize) -> usize {
 // hold the global runqueue lock for every enqueue/dequeue/pick); the
 // raw Task pointers inside the BTreeMap are guarded by the queue's
 // link/unlink protocol.
-unsafe impl Send for crate::sched::entities::DlRunQueue {}
+unsafe impl Send for crate::sched::types::DlRunQueue {}
 // SAFETY: same GRQ serialization across CPUs.
-unsafe impl Sync for crate::sched::entities::DlRunQueue {}
+unsafe impl Sync for crate::sched::types::DlRunQueue {}
 
 // ---- sched_ev.rs ----------------------------------------------------------
 

@@ -111,7 +111,7 @@ pub const STRICT_ALLOWED: [u64; 5] = [
 /// value rv. Kill actions queue SIGKILL on the current task (terminated on
 /// return to user) and report -ENOSYS — the dying task never observes it.
 pub fn seccomp_syscall_gate(nr: u64, regs: &crate::arch::pt_regs::PtRegs) -> Option<i64> {
-    let task = crate::sched::current()?;
+    let task = crate::sched::hotpath::current()?;
     match task.seccomp_mode() {
         SECCOMP_MODE_STRICT => {
             if STRICT_ALLOWED.contains(&nr) {

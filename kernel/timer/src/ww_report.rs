@@ -67,20 +67,20 @@ pub fn ww_heartbeat(now_time: u64) {
     // tp register disagreed with cpu_state.current (lying slot).
     static LAST_MM: [AtomicU64; crate::config::MAX_CPUS] =
         [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
-    let mm = crate::sched::sched::ww_slot_mismatch_counters();
+    let mm = crate::sched::hotpath::ww_slot_mismatch_counters();
     let mut mm_d = [0u64; 2];
     for c in 0..2 {
         mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
         LAST_MM[c].store(mm[c], Ordering::Relaxed);
     }
-    let phase0 = crate::sched::ww_idle_phase(0);
-    let phase1 = crate::sched::ww_idle_phase(1);
+    let phase0 = crate::sched::hotpath::ww_idle_phase(0);
+    let phase1 = crate::sched::hotpath::ww_idle_phase(1);
 
     // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
     // locks at this point). Wheel-side: len + overdue hres backlog.
     let (wheel_len, overdue) = rux::timer::wheel_census(now_time);
 
-    let sched = crate::sched::sched::ww_sched_snapshot();
+    let sched = crate::sched::hotpath::ww_sched_snapshot();
 
     // nanosleep-loss hunt: arm/fire accounting — NEXT_TIMER_ID-1 is the
     // total arms ever; fires + live entries + cancels must cover it. A
@@ -96,7 +96,7 @@ pub fn ww_heartbeat(now_time: u64) {
             for k in (0..n).rev() { p(buf[k]); }
         }
         for &b in b"NSLPARK rescued=" { putchar(b); }
-        pdec9(crate::sched::sched::NSLPARK_RESCUED.load(Ordering::Relaxed));
+        pdec9(crate::sched::hotpath::NSLPARK_RESCUED.load(Ordering::Relaxed));
         putchar(b'\n');
         for &b in b"ARMS id=" { putchar(b); }
         pdec9(NEXT_TIMER_ID.load(Ordering::Relaxed).saturating_sub(1));
@@ -138,7 +138,7 @@ pub fn ww_heartbeat(now_time: u64) {
                     as *mut crate::process::task::Task;
                 {
                 let pid = task.pid();
-                if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
+                if pid == 0 || pid == crate::sched::hotpath::TASK_POISON { return; }
                 let q = rux::timer::ww_task_on_cpu(task);
                 let st = task.state().bits();
                 let linked = match task.policy() {
@@ -147,7 +147,7 @@ pub fn ww_heartbeat(now_time: u64) {
                     _ => task.sched_entity().timeline_key().is_some(),
                 };
                 let (ptc, ptj) =
-                    match crate::sched::sched::pick_trace_peek(task_raw) {
+                    match crate::sched::hotpath::pick_trace_peek(task_raw) {
                         Some(x) => x,
                         None => (0, 0),
                     };
@@ -213,7 +213,7 @@ pub fn ww_heartbeat(now_time: u64) {
     static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
     static LAST_OH: AtomicU64 = AtomicU64::new(0);
     static LAST_CH: AtomicU64 = AtomicU64::new(0);
-    let walks_total = crate::sched::ww_pick_walks();
+    let walks_total = crate::sched::hotpath::ww_pick_walks();
     let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
     LAST_WALKS.store(walks_total, Ordering::Relaxed);
     let (oh, ch) = rux::api::sched::ww_heals();
@@ -309,7 +309,7 @@ pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
 #[inline]
 pub fn nsleep_iter_bump() {
     use rux::timer::{NSL_ITER, NSL_TASK};
-    let Some(t) = crate::sched::current() else { return };
+    let Some(t) = crate::sched::hotpath::current() else { return };
     let key = t as *mut crate::process::Task as usize;
     for k in 0..16 {
         if NSL_TASK[k].load(Ordering::Relaxed) == key {

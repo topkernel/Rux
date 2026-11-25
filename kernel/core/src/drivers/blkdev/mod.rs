@@ -361,7 +361,7 @@ pub fn blkdev_read_async(
             // geometry the submit stores in the pending entry.
             if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
                 // SAFETY: current task's comm is read for the record only.
-                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                let comm = crate::sched::hotpath::current().map(|cur| (*cur).comm());
                 if let Some(comm) = comm {
                     crate::trace::trace_block_rq_issue(
                         (major << 20) | minor,
@@ -431,7 +431,7 @@ pub fn blkdev_write_async(
             // stores in the pending entry.
             if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
                 // SAFETY: current task's comm is read for the record only.
-                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                let comm = crate::sched::hotpath::current().map(|cur| (*cur).comm());
                 if let Some(comm) = comm {
                     crate::trace::trace_block_rq_issue(
                         (major << 20) | minor,
@@ -488,7 +488,7 @@ pub fn blkdev_read_async_sg(
             let t0 = crate::drivers::timer::read_time();
             if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
                 // SAFETY: current task's comm is read for the record only.
-                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                let comm = crate::sched::hotpath::current().map(|cur| (*cur).comm());
                 if let Some(comm) = comm {
                     crate::trace::trace_block_rq_issue(
                         (major << 20) | minor,
@@ -537,7 +537,7 @@ pub fn blkdev_write_async_sg(
             let t0 = crate::drivers::timer::read_time();
             if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
                 // SAFETY: current task's comm is read for the record only.
-                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                let comm = crate::sched::hotpath::current().map(|cur| (*cur).comm());
                 if let Some(comm) = comm {
                     crate::trace::trace_block_rq_issue(
                         (major << 20) | minor,
@@ -593,7 +593,7 @@ pub fn submit_request(disk: &GenDisk, req: &mut Request) -> i32 {
     // behind the issue event's own check.
     if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
         // SAFETY: current task's comm is read for the record only.
-        let comm = crate::sched::current().map(|cur| cur.comm());
+        let comm = crate::sched::hotpath::current().map(|cur| cur.comm());
         if let Some(comm) = comm {
             crate::trace::trace_block_rq_issue(
                 (major << 20) | minor,

@@ -18,7 +18,7 @@ pub fn test_smp_schedule() {
     test_group_start("SMP scheduling");
 
     let current_cpu = crate::arch::cpu_id() as u64 as usize;
-    let max_cpus = sched::MAX_CPUS;
+    let max_cpus = sched::hotpath::MAX_CPUS;
 
     test_pass(&format!("current CPU = {}", current_cpu));
     test_pass(&format!("MAX_CPUS = {}", max_cpus));
@@ -44,7 +44,7 @@ pub fn test_smp_schedule() {
     test_skip("current CPU runqueue", "GRQ design uses global runqueue");
 
     // Verify load balance function
-    sched::load_balance();
+    sched::hotpath::load_balance();
     test_pass("load_balance()");
 
     test_println!("test: SMP scheduling testing completed.");

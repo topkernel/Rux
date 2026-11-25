@@ -26,7 +26,7 @@ pub fn test_file_open() {
 
     // Initialize current task's fdtable (for testing)
     {
-        if sched::get_current_fdtable().is_none() {
+        if sched::hotpath::get_current_fdtable().is_none() {
             test_skip("fdtable tests", "no fdtable available");
 
             // Test 1: File lookup (rootfs-row views)

@@ -193,7 +193,7 @@ impl SemArray {
 
 /// Get current process PID.
 fn get_current_pid() -> u32 {
-    crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
+    crate::sched::hotpath::current().map(|t| t.pid() as u32).unwrap_or(0)
 }
 
 // ============================================================================
@@ -279,7 +279,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             {
                 let slots = SEM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
-                    let cred = crate::sched::current().map(|t| t.cred());
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
                             c.euid == entry.inner.perm.uid
@@ -344,7 +344,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             {
                 let slots = SEM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
-                    let cred = crate::sched::current().map(|t| t.cred());
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
                             c.euid == entry.inner.perm.uid
@@ -1029,7 +1029,7 @@ fn semop_blocking_loop(
                                 }
                             }
 
-                            let current = match crate::sched::current() {
+                            let current = match crate::sched::hotpath::current() {
                                 Some(t) => t,
                                 None => return -(errno::ESRCH as i64),
                             };
@@ -1110,7 +1110,7 @@ fn semop_blocking_loop(
                                             crate::process::task::TaskState::RUNNING,
                                         ),
                                     );
-                                    crate::sched::dequeue_task(&*current);
+                                    crate::sched::hotpath::dequeue_task(&*current);
                                     return 0;
                                 }
                                 Err(_) => { /* still blocked — sleep below */ }
@@ -1138,7 +1138,7 @@ fn semop_blocking_loop(
                                     }
                                 }
                                 (*current).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
-                                crate::sched::dequeue_task(&*current);
+                                crate::sched::hotpath::dequeue_task(&*current);
                                 return -(errno::EINTR as i64);
                             }
                             // Arm a wakeup timer for the deadline so a
@@ -1146,7 +1146,7 @@ fn semop_blocking_loop(
                             // ETIMEDOUT (nothing else would wake us).
                             let timer_id = deadline
                                 .map(|dl| crate::timer::add_timer_wakeup(
-                                    dl, crate::sched::get_current_pid(),
+                                    dl, crate::sched::hotpath::get_current_pid(),
                                 ))
                                 .unwrap_or(0);
                             // R32 (NEW-3 twin): timer pool exhausted — a
@@ -1174,7 +1174,7 @@ fn semop_blocking_loop(
                                         crate::process::task::TaskState::RUNNING,
                                     ),
                                 );
-                                crate::sched::dequeue_task(&*current);
+                                crate::sched::hotpath::dequeue_task(&*current);
                                 return -(errno::ENOMEM as i64);
                             }
                             // Lost-park ring (rux:lostpark (retired debug=lostpark)): park-enter
@@ -1188,7 +1188,7 @@ fn semop_blocking_loop(
                                     crate::timer::get_jiffies(),
                                 );
                             }
-                            crate::sched::schedule();
+                            crate::sched::hotpath::schedule();
                             if crate::debug::lostpark::armed() {
                                 crate::debug::lostpark::record(
                                     2,
@@ -1374,7 +1374,7 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
 
         // Record SEM_UNDO adjustments for current process
         if wants_undo {
-            if let Some(task) = crate::sched::current() {
+            if let Some(task) = crate::sched::hotpath::current() {
                 let mut undo_table = task.sem_undo.lock();
                 for sop in sops {
                     if sop.sem_flg & super::util::SEM_UNDO != 0 {

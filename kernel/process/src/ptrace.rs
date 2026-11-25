@@ -83,7 +83,7 @@ const EINVAL: i64 = 22;
 
 /// ptrace_may_access (minimal): same-uid credentials or CAP_SYS_PTRACE.
 pub fn ptrace_may_access(target_cred: &crate::task::Cred) -> bool {
-    if let Some(cur) = crate::sched::current() {
+    if let Some(cur) = crate::sched::hotpath::current() {
         // SAFETY: current is the running task; cred() is immutable.
         let cred = crate::r#unsafe::borrow_task(cur as *mut Task).cred();
         if cred.euid == 0
@@ -264,7 +264,7 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
     let data = args[3];
 
     // SAFETY: sched::current() returns the running task or None.
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(c) => c as *mut Task,
         None => return -ESRCH,
     };

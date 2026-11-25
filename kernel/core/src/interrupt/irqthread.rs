@@ -93,7 +93,7 @@ impl ThreadedIrq {
         // never cleared or freed (kthreads are refcounted by the task
         // table for the boot's lifetime).
         let t = raw as *mut Task;
-        crate::sched::wake_up_process(t);
+        crate::sched::hotpath::wake_up_process(t);
         true
     }
 
@@ -116,7 +116,7 @@ impl ThreadedIrq {
         }
         if let Some(t) = crate::api::process::kthread_run(thread_fn, arg, name) {
             let tp = t as *mut Task;
-            crate::sched::sched::change_task_policy(tp, SchedPolicy::Fifo, 50);
+            crate::sched::hotpath::change_task_policy(tp, SchedPolicy::Fifo, 50);
             self.task.store(tp as usize, Ordering::Release);
             true
         } else {
@@ -145,13 +145,13 @@ impl ThreadedIrq {
             // This IS the kthread the pointer names (set at spawn,
             // before the thread can run thread_loop) — the scheduler's
             // current() handle is that same task.
-            let Some(t) = crate::sched::current() else { return 0 };
+            let Some(t) = crate::sched::hotpath::current() else { return 0 };
             t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             if self.pending.swap(false, Ordering::AcqRel) {
                 t.set_state(TaskState::new(TaskState::RUNNING));
                 continue;
             }
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
         }
         0
     }

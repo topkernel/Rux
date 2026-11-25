@@ -120,7 +120,7 @@ fn enabled() -> bool {
 /// no scan beyond the slot table.
 fn enter_keyed(site: u8, class: u8) -> u64 {
     let key = site as u32 | ((class as u32) << 8);
-    let (pid, tgid) = match crate::sched::current() {
+    let (pid, tgid) = match crate::sched::hotpath::current() {
         Some(t) => ((*t).pid(), (*t).tgid()),
         None => (0, 0),
     };

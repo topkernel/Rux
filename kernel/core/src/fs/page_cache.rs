@@ -3418,7 +3418,7 @@ impl PageCache {
     pub fn writeback_recover(&self, want: usize) -> usize {
         const MAX_WB_INODES: usize = 4;
         SR_CALLS.fetch_add(1, Ordering::Relaxed);
-        if crate::sched::current_is_dying() {
+        if crate::sched::hotpath::current_is_dying() {
             return self.shrink(want);
         }
         if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
@@ -3526,7 +3526,7 @@ impl PageCache {
             // holder, or LTP's timeout SIGKILL) must unwind through here
             // instead of carrying the gate through more flush I/O — the
             // wedge boots held the gate for minutes after the kill.
-            if crate::sched::current_is_dying() {
+            if crate::sched::hotpath::current_is_dying() {
                 break;
             }
             let remaining = nr_to_scan.saturating_sub(freed);

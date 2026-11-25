@@ -149,7 +149,7 @@ fn audit(now: u64) {
     // holds (self-deadlock by interrupt). Try-walk: buckets held at
     // snapshot time are skipped; a tuple missed one round simply
     // re-baselines next round (the >=8 s persistence filter is unaffected).
-    let skipped = crate::sched::for_each_task_try(|task| {
+    let skipped = crate::sched::hotpath::for_each_task_try(|task| {
         // The walk hands &Task under the bucket lock — plain reads.
         let tk = task;
         let st_bits = tk.state().bits();
@@ -194,7 +194,7 @@ fn audit(now: u64) {
                 && tk.pid() != u32::MAX
             {
                 let owned = (0..crate::config::MAX_CPUS)
-                    .any(|c| crate::sched::sched::cpu_state(c).current as usize == task as *const _ as usize);
+                    .any(|c| crate::sched::hotpath::cpu_state(c).current as usize == task as *const _ as usize);
                 if !owned {
                     notes.push(Note {
                         pid: tk.pid(),

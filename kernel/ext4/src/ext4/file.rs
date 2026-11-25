@@ -3954,7 +3954,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
     // boundary (LTP setrlimit01 case 2 sets the limit to 10, writes 26
     // and requires write() to return exactly 10).
     let mut buf = buf;
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX {
             let start = if offset == u64::MAX {
@@ -4151,7 +4151,7 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
     // ext4_file_write_vfs): at/after the soft limit EFBIG + SIGXFSZ;
     // crossing it truncates silently to the boundary.
     let mut wsrc = WriteSrc::User(src, count);
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX {
             let start = if offset == u64::MAX {
@@ -4371,7 +4371,7 @@ pub fn ext4_file_write_dio_user_vfs(file: &File, src: *const u8, count: usize) -
     } else {
         file.get_pos()
     };
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX {
             let start = if offset == u64::MAX {

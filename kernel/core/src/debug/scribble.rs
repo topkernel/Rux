@@ -393,7 +393,7 @@ pub fn task_plausible(task: *mut Task) -> bool {
     // check above keeps us inside mapped memory for both known classes.
     unsafe {
         let pid = (*task).pid();
-        if pid == crate::sched::sched::TASK_POISON || pid > (1 << 22) {
+        if pid == crate::sched::hotpath::TASK_POISON || pid > (1 << 22) {
             return false;
         }
         if !in_heap {
@@ -457,7 +457,7 @@ pub fn double_seed(task: *mut Task, me: u64, owner_slot: i32, claim: i32) {
         puts(b" slot");
         put_dec(c as u64);
         puts(b"=");
-        put_hex(crate::sched::sched::cpu_state(c).current as u64);
+        put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
         puts(b"/");
         put_hex(crate::arch::smp::PER_CPU[c].current_task.load(Ordering::Relaxed));
         puts(b"\n");
@@ -503,7 +503,7 @@ pub fn bad_switch_arg(which: u64, bad: u64, other: u64) {
         puts(b" slot");
         put_dec(c as u64);
         puts(b"=");
-        put_hex(crate::sched::sched::cpu_state(c).current as u64);
+        put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
         puts(b"/");
         put_hex(crate::arch::smp::PER_CPU[c].current_task.load(Ordering::Relaxed));
         puts(b"\n");
@@ -868,7 +868,7 @@ pub fn verify() {
     // R69: drain pending allocator audit records first — a double
     // handoff recorded seconds ago ages out of the ring otherwise.
     audit_drain();
-    let cur = crate::sched::current().map(|t| t as *mut Task);
+    let cur = crate::sched::hotpath::current().map(|t| t as *mut Task);
     for idx in 0..SCRIBBLE_SLOTS {
         let t = SLOTS[idx].task.load(Ordering::Acquire);
         if t == 0 {
@@ -886,7 +886,7 @@ pub fn verify() {
         // can be judged.
         if unsafe { (*task).on_cpu() }
             || (0..crate::config::MAX_CPUS)
-                .any(|c| crate::sched::sched::cpu_state(c).current == task)
+                .any(|c| crate::sched::hotpath::cpu_state(c).current == task)
         {
             continue;
         }
@@ -1174,10 +1174,10 @@ pub fn verify_consistency() {
         return;
     }
     // Try the GRQ lock; skip this round if the scheduler holds it.
-    let Some(_grq_guard) = crate::sched::sched::try_grq_lock() else {
+    let Some(_grq_guard) = crate::sched::hotpath::try_grq_lock() else {
         return;
     };
-    let cur = crate::sched::current().map(|t| t as *mut Task);
+    let cur = crate::sched::hotpath::current().map(|t| t as *mut Task);
     for idx in 0..SCRIBBLE_SLOTS {
         let t = SLOTS[idx].task.load(Ordering::Acquire);
         if t == 0 {
@@ -1209,9 +1209,9 @@ pub fn verify_consistency() {
         // window ONLY when the sleeper itself is current on a CPU —
         // excluded via the current-slot scan.)
         let curr_any = cur == Some(task)
-            || crate::sched::sched::task_is_mid_switch_out(task)
+            || crate::sched::hotpath::task_is_mid_switch_out(task)
             || (0..crate::config::MAX_CPUS)
-                .any(|c| crate::sched::sched::cpu_state(c).current == task);
+                .any(|c| crate::sched::hotpath::cpu_state(c).current == task);
         let anomaly: &[u8] = if curr_any {
             continue;
         } else if on_rq && on_cpu {
@@ -1275,7 +1275,7 @@ pub fn verify_consistency() {
                 puts(b" s");
                 put_dec(c as u64);
                 puts(b"=");
-                put_hex(crate::sched::sched::cpu_state(c).current as u64);
+                put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
                 puts(b"/");
                 put_hex(
                     crate::arch::smp::PER_CPU[c]
@@ -1340,7 +1340,7 @@ pub fn slot_divergence(cpu: usize, tp: *mut Task, slot_prev: *mut Task) {
         for c in 0..crate::config::MAX_CPUS {
             put_dec(c as u64);
             puts(b"=");
-            put_hex(crate::sched::sched::cpu_state(c).current as u64);
+            put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
         }
         if !tp.is_null() {
             puts(b" tponcpu=");
@@ -1533,7 +1533,7 @@ pub fn crash_report(vector: &[u8], regs: &crate::arch::pt_regs::PtRegs) {
         puts(b" c");
         put_dec(c as u64);
         puts(b"=");
-        put_hex(crate::sched::sched::cpu_state(c).current as u64);
+        put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
         puts(b"/");
         put_hex(
             crate::arch::smp::PER_CPU[c]

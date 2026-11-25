@@ -402,9 +402,9 @@ impl WaitQueueHead {
                     // (same transition, stacking dispatch — see
                     // Task::wake_up_impl).
                     let woke = if matches!(mode, WakeUpHint::Sync) {
-                        crate::sched::wake_up_process_sync(task)
+                        crate::sched::hotpath::wake_up_process_sync(task)
                     } else {
-                        crate::sched::wake_up_process(task)
+                        crate::sched::hotpath::wake_up_process(task)
                     };
                     if !woke {
                         entry.clear_woken();
@@ -457,7 +457,7 @@ impl WaitQueueHead {
                     // WP2/R15-6 guards handle stale task pointers.
                     let st = crate::process::r#unsafe::borrow_task(task).state();
                     if st.is_sleeping() || st.contains(crate::process::task::TaskState::STOPPED) {
-                        if crate::sched::wake_up_process(task) {
+                        if crate::sched::hotpath::wake_up_process(task) {
                             awakened += 1;
                         }
                     }
@@ -606,7 +606,7 @@ impl WaitQueueHead {
         let (i, _) = best?;
         let entry_task = list[i].task();
         list[i].set_woken();
-        let woke = crate::sched::wake_up_process(entry_task);
+        let woke = crate::sched::hotpath::wake_up_process(entry_task);
         if !woke {
             // W1 token discipline: a refused wake must not consume the
             // entry's one-shot flag.
@@ -748,7 +748,7 @@ macro_rules! wait_event {
             }
 
             // Condition not met, prepare to wait.
-            let current = match crate::sched::current() {
+            let current = match crate::sched::hotpath::current() {
                 Some(task) => task,
                 None => break,
             };
@@ -763,7 +763,7 @@ macro_rules! wait_event {
                 // R8-5 (NEW-C2): a concurrent wake between prepare_to_wait
                 // and here may have enqueued us while we never slept — undo
                 // (per-class on_rq guards make it a no-op otherwise).
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 break;
             }
 
@@ -774,7 +774,7 @@ macro_rules! wait_event {
             // so when the task is later switched back in, restore_irq restores
             // SIE=1 (via __schedule's unconditional restore_irq(true)).
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
 
             // After wakeup, state is RUNNING (set by enqueue_task_locked)
             // Remove from wait queue and restore state
@@ -803,7 +803,7 @@ macro_rules! wait_event_interruptible {
                 break -512i32; // -ERESTARTSYS
             }
 
-            let current = match crate::sched::current() {
+            let current = match crate::sched::hotpath::current() {
                 Some(task) => task,
                 None => break 0i32,
             };
@@ -819,7 +819,7 @@ macro_rules! wait_event_interruptible {
                 // Condition met — restore RUNNING and remove from queue
                 wq_head.finish_wait(current);
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 break 0i32;
             }
 
@@ -828,7 +828,7 @@ macro_rules! wait_event_interruptible {
                 wq_head.finish_wait(current);
                 // R9-17: R8-5 discipline for the signal path too — undo a
                 // concurrent wake enqueue before returning.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 break -512i32; // -ERESTARTSYS
             }
 
@@ -837,7 +837,7 @@ macro_rules! wait_event_interruptible {
             // so when the task is later switched back in, restore_irq restores
             // SIE=1 (via __schedule's unconditional restore_irq(true)).
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
 
             // After wakeup, state is RUNNING (set by enqueue_task_locked).
             // Remove from wait queue.

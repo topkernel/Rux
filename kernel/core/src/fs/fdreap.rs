@@ -158,7 +158,7 @@ pub fn retire_complete(file: Arc<File>) {
     // Reaper down (spawn failed / pre-init): drain inline with a bounded
     // forced grace — boot-time stdio closes only. Correctness unchanged:
     // the batch is never dropped without a grace.
-    if !LIVE.load(Ordering::Acquire) && crate::sched::current().is_some() {
+    if !LIVE.load(Ordering::Acquire) && crate::sched::hotpath::current().is_some() {
         drain_with_grace();
     }
 }

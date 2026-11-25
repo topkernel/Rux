@@ -46,7 +46,7 @@ extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
         }
         // Sleep MMPROF_DUMP_SECS of jiffies (nanosleep discipline:
         // one-shot wakeup timer + INTERRUPTIBLE schedule).
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return 0, // no task context
         };
@@ -58,7 +58,7 @@ extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
         current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         // Re-arm IRQs so the timer tick reaches this CPU (R54).
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
         }

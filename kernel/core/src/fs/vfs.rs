@@ -729,7 +729,7 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
     // SAFETY: the pid-hash walk holds the bucket lock for each task (it
     // cannot be freed mid-callback); we only take non-sleeping locks
     // (fdtable entry lock, dentry parent spinlocks, FsStruct rwlocks).
-    crate::sched::for_each_task(|t| {
+    crate::sched::hotpath::for_each_task(|t| {
         if busy.load(Ordering::Relaxed) {
             return;
         }
@@ -1792,7 +1792,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
     }
 
     // Re-root the CALLER (path + dentry, chroot discipline).
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         if let Some(fs) = task.fs_arc() {
             fs.set_root_with_dentry(from.as_bytes(), Some(mnt.root.clone()));
         }
@@ -2272,7 +2272,7 @@ pub fn init() {
 /// For example:
 /// Get current working directory
 fn get_cwd() -> String {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         // Verify alignment of the underlying pointer (fixes H62).
         let ptr = current as *const crate::process::task::Task;
         if (ptr as usize) % core::mem::align_of::<crate::process::task::Task>() != 0 {
@@ -2310,7 +2310,7 @@ fn make_absolute(path: &str) -> String {
 /// as a REAL (global-namespace) path in fs_struct; a chrooted task resolves
 /// absolute paths by prefixing it. Kernel threads / early boot see "/".
 pub fn get_process_root() -> String {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         let root = current.get_root();
         match core::str::from_utf8(&root) {
             Ok(s) if !s.is_empty() => {
@@ -2337,7 +2337,7 @@ pub fn chrooted() -> bool {
 /// with a recorded root dentry, walks the whole parent chain — ~5 heap
 /// objects per call, paid 3x per lookup before this).
 pub fn process_rooted() -> bool {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(t) => t.process_rooted_cheap(),
         None => false,
     }
@@ -2393,7 +2393,7 @@ fn path_is_normalized_fast(abs: &str) -> bool {
 /// lookup then clamps at the jail root, which is the same place ".."
 /// stops).
 pub fn get_cwd_user() -> String {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         // SAFETY: current is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
         if let Some(fs) = current.fs_arc() {
@@ -2434,7 +2434,7 @@ pub fn get_cwd_user() -> String {
 /// absent). Falls back to the global path when the dentry is not under the
 /// reader's root (display-only; Linux prints "(unreachable)" there).
 pub fn dentry_user_path(dentry: &alloc::sync::Arc<crate::fs::dentry::Dentry>) -> String {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         // SAFETY: current is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
         if let Some(fs) = current.fs_arc() {
@@ -2672,7 +2672,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // the whole walk loop; every OH service is chrooted).
     let mut fast_base: Option<Arc<Dentry>> = None;
     let rooted = if rooted && pathname.starts_with('/') {
-        match crate::sched::current()
+        match crate::sched::hotpath::current()
             .and_then(|t| t.fs_arc())
             .and_then(|fs| fs.root_dentry())
         {
@@ -2759,7 +2759,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     None => (0, false, false),
                 }
             };
-            let task_root_ptr = crate::sched::current()
+            let task_root_ptr = crate::sched::hotpath::current()
                 .and_then(|t| t.fs_arc())
                 .and_then(|fs| fs.root_dentry())
                 .map(|d| Arc::as_ptr(&d) as usize)
@@ -3753,7 +3753,7 @@ fn check_parent_write_permission(parent_inode: &Inode) -> Result<(), i32> {
     let inode_mode = parent_inode.mode.bits() as u16;
     let inode_uid = parent_inode.uid.load(core::sync::atomic::Ordering::Relaxed);
     let inode_gid = parent_inode.gid.load(core::sync::atomic::Ordering::Relaxed);
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
@@ -3775,7 +3775,7 @@ fn check_parent_exec_permission(parent_inode: &Inode) -> Result<(), i32> {
     let inode_mode = parent_inode.mode.bits() as u16;
     let inode_uid = parent_inode.uid.load(core::sync::atomic::Ordering::Relaxed);
     let inode_gid = parent_inode.gid.load(core::sync::atomic::Ordering::Relaxed);
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
@@ -3803,7 +3803,7 @@ fn check_sticky(parent_inode: &Inode, target_inode: Option<&Inode>) -> Result<()
         return Ok(());
     }
 
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
@@ -4936,7 +4936,7 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
     // Permission check: root or owner
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
@@ -4998,7 +4998,7 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
@@ -5105,7 +5105,7 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
     // before any lookup work (Linux do_truncate checks in
     // truncate_setsize's callers; LTP truncate03 sets the limit in
     // setup and expects the 32MiB truncate to fail EFBIG).
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
             return Err(errno::Errno::FileTooLarge.as_neg_i32());
@@ -5124,7 +5124,7 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
     let inode_mode = inode.mode.bits() as u16;
     let inode_uid = inode.uid.load(Ordering::Relaxed);
     let inode_gid = inode.gid.load(Ordering::Relaxed);
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
@@ -5166,7 +5166,7 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     }
 
     // RLIMIT_FSIZE parity with vfs_truncate (Linux do_ftruncate path).
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
             return Err(errno::Errno::FileTooLarge.as_neg_i32());
@@ -5276,7 +5276,7 @@ const S_IXGRP_BIT: u32 = 0o010;
 /// (or a supplementary group) matches the directory's gid, or it holds
 /// CAP_FSETID.
 fn in_group_or_capable_dir(dir_gid: u32) -> bool {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             let cred = task.cred();
             if cred.fsgid == dir_gid || cred.in_group(dir_gid) {
@@ -5316,7 +5316,7 @@ pub fn mode_strip_sgid(dir_mode_bits: u32, dir_gid: u32, mode: u32) -> u32 {
 /// (LTP creat09's umask(S_IXGRP) round).
 fn prepare_create_mode(dir_mode_bits: u32, dir_gid: u32, mode: u32) -> u32 {
     let stripped = mode_strip_sgid(dir_mode_bits, dir_gid, mode & 0o7777);
-    let umask = match crate::sched::current() {
+    let umask = match crate::sched::hotpath::current() {
         Some(task) => task.get_umask(),
         None => 0o022,
     };
@@ -5753,7 +5753,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // CAP_FOWNER — a plain unprivileged reader of another user's file
         // gets EPERM (LTP open02).
         if flags & FileFlags::O_NOATIME != 0 {
-            let fsuid = crate::sched::current()
+            let fsuid = crate::sched::hotpath::current()
                 .map(|t| t.cred().fsuid)
                 .unwrap_or(0);
             let owner = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
@@ -6210,7 +6210,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 };
 
                 // Allocate new file descriptor >= arg
-                let fdtable = crate::sched::get_current_fdtable()
+                let fdtable = crate::sched::hotpath::get_current_fdtable()
                     .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
                 let new_fd = fdtable.alloc_fd_from(arg)
                     .ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())?;
@@ -6229,7 +6229,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 };
 
                 // Allocate new file descriptor >= arg
-                let fdtable = crate::sched::get_current_fdtable()
+                let fdtable = crate::sched::hotpath::get_current_fdtable()
                     .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
                 let new_fd = fdtable.alloc_fd_from(arg)
                     .ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())?;
@@ -6247,7 +6247,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 if get_file_fd(fd).is_none() {
                     return Err(errno::Errno::BadFileNumber.as_neg_i32());
                 }
-                let ft = crate::sched::get_current_fdtable()
+                let ft = crate::sched::hotpath::get_current_fdtable()
                     .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
                 Ok(if ft.get_fd_cloexec(fd) { fcntl::FD_CLOEXEC } else { 0 })
             }
@@ -6257,7 +6257,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 if get_file_fd(fd).is_none() {
                     return Err(errno::Errno::BadFileNumber.as_neg_i32());
                 }
-                let ft = crate::sched::get_current_fdtable()
+                let ft = crate::sched::hotpath::get_current_fdtable()
                     .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
                 // Bit 0 of arg indicates FD_CLOEXEC (per-descriptor)
                 ft.set_fd_cloexec(fd, (arg & fcntl::FD_CLOEXEC) != 0);
@@ -6348,7 +6348,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let owner = if cmd == fcntl::F_OFD_GETLK {
                     crate::fs::lock_hooks::LockOwner::Ofd(file.file_id)
                 } else {
-                    let owner_pid = crate::sched::current()
+                    let owner_pid = crate::sched::hotpath::current()
                         .map(|t| t.tgid())
                         .unwrap_or(0);
                     crate::fs::lock_hooks::LockOwner::Pid(owner_pid)
@@ -6443,7 +6443,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let owner = if cmd == fcntl::F_OFD_SETLK || cmd == fcntl::F_OFD_SETLKW {
                     crate::fs::lock_hooks::LockOwner::Ofd(file.file_id)
                 } else {
-                    let owner_pid = crate::sched::current()
+                    let owner_pid = crate::sched::hotpath::current()
                         .map(|t| t.tgid())
                         .unwrap_or(0);
                     crate::fs::lock_hooks::LockOwner::Pid(owner_pid)
@@ -6473,7 +6473,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     // resolve to the global id the O_ASYNC machinery signals
                     // (reference f_setown stores a struct pid resolved in
                     // the caller's ns — LTP pidns13 F_SETOWN(getpid()==1)).
-                    let caller_ns = crate::sched::current()
+                    let caller_ns = crate::sched::hotpath::current()
                         .and_then(|t| t.ns_pid.clone());
                     let resolved = if kind == 1 {
                         crate::process::ns::resolve_local_pid_to_global(
@@ -6540,7 +6540,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let shown = if o.kind == 2 {
                     -(o.id)
                 } else if o.id > 0 {
-                    crate::sched::current()
+                    crate::sched::hotpath::current()
                         .and_then(|t| t.ns_pid.clone())
                         .map(|ns| {
                             crate::process::ns::translate_sender_pid_ns(
@@ -6611,7 +6611,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 // The pid argument is caller-ns-relative; resolve to the
                 // global id (same as F_SETOWN above).
                 let caller_ns =
-                    crate::sched::current().and_then(|t| t.ns_pid.clone());
+                    crate::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
                 let resolved = if caller_ns.is_none() {
                     Some(opid)
                 } else if kind == 2 {
@@ -6676,7 +6676,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     _ => 1i32, // no owner set: report own pid, F_OWNER_PID
                 };
                 let opid = if o.kind == 0 {
-                    crate::sched::current().map(|t| t.tgid()).unwrap_or(0) as i32
+                    crate::sched::hotpath::current().map(|t| t.tgid()).unwrap_or(0) as i32
                 } else {
                     o.id
                 };
@@ -7335,7 +7335,7 @@ pub fn vfs_utimensat_ex(
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    let cred = if let Some(task) = crate::sched::current() {
+    let cred = if let Some(task) = crate::sched::hotpath::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()

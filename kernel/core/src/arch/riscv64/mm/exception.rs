@@ -130,7 +130,7 @@ fn send_signal(sig: i32, code: i32, _addr: u64, _epc: u64, _access_type: u32, _r
     // the si_code the caller classified (SEGV_MAPERR/SEGV_ACCERR): a fatal
     // hardware-fault death then prints a real origin in SIGDEATH/KILLTRACE
     // instead of the indistinguishable 0/0 of the info-less bitmap path.
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         let pid = current.pid();
         crate::signal::send_signal_with_info_directed(
             pid,
@@ -198,7 +198,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // taken in user mode.
     crate::mm::vmstat::note_fault();
     if regs.user_mode() {
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             // SAFETY: current() returned a live task pointer; this
             // only touches a per-task atomic counter.
             unsafe {
@@ -213,7 +213,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         if regs.kernel_mode() { "kernel" } else { "user" });
 
     // Get current process's address space
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => {
             // No current process, might be early boot stage
@@ -248,7 +248,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             let mut w = crate::debug::backtrace::ConsoleWriter::new();
             let _ = write!(w,
                 "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
-                crate::sched::get_current_pid(), pc);
+                crate::sched::hotpath::get_current_pid(), pc);
             crate::interrupt::preempt::preempt_count_reset();
         } else {
             // Cannot sleep in interrupt context
@@ -460,7 +460,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             if access_type & FaultFlags::EXEC != 0 {
                 let satp_val: u64;
                 unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp_val); }
-                let exe = crate::sched::current()
+                let exe = crate::sched::hotpath::current()
                     .map(|t| unsafe { (*t).get_exe_path() })
                     .unwrap_or(&[]);
                 let exe_str = core::str::from_utf8(exe).unwrap_or("?");
@@ -468,13 +468,13 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 crate::pr_err!(
                     "NOVMA-EXEC: addr={:#x} pid={} exe={} pgd={:#x} satp_ppn={:#x}{} frame={:#x} ksp={:#x}",
                     fault_addr.bits(),
-                    crate::sched::get_current_pid(),
+                    crate::sched::hotpath::get_current_pid(),
                     exe_str,
                     pgd,
                     satp_val & 0xFFF_FFFF_FFFF,
                     if (satp_val & 0xFFF_FFFF_FFFF) == pgd { "" } else { " MISMATCH" },
                     regs as *mut _ as usize,
-                    crate::sched::current().map(|t| unsafe { (*t).ti_kernel_sp() } as usize).unwrap_or(0)
+                    crate::sched::hotpath::current().map(|t| unsafe { (*t).ti_kernel_sp() } as usize).unwrap_or(0)
                 );
                 // Dump the exec-built stack top (argv/envp/auxv area):
                 // the victim dies in ld.so's pure-memory phase, so a bad
@@ -560,7 +560,7 @@ crate::pr_err!(
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
                                 use crate::process::exec_ring::STACKZERO_RING;
-                                let me = crate::sched::get_current_pid();
+                                let me = crate::sched::hotpath::get_current_pid();
                                 for i in 0..STACKZERO_RING.len() {
                                     let zp = STACKZERO_RING[i].pid.load(Relaxed);
                                     if zp != me { continue; }
@@ -578,7 +578,7 @@ crate::pr_err!(
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
                                 use crate::process::exec_ring::STACKZERO_RING;
-                                let me = crate::sched::get_current_pid();
+                                let me = crate::sched::hotpath::get_current_pid();
                                 let pa = ppn as u64 * 4096;
                                 for i in 0..STACKZERO_RING.len() {
                                     let b = STACKZERO_RING[i].base.load(Relaxed);
@@ -663,7 +663,7 @@ crate::pr_err!(
                 if crate::trace::EVENT_SYSRING.armed() {
                     use core::sync::atomic::Ordering::Relaxed;
                     use crate::syscall::dispatch::{SYSCALL_RING, SYSCALL_CURSOR};
-                    let pid = crate::sched::get_current_pid();
+                    let pid = crate::sched::hotpath::get_current_pid();
                     let cur = SYSCALL_CURSOR.load(Relaxed);
                     let mut shown = 0;
                     for k in 0..SYSCALL_RING.len() {
@@ -686,7 +686,7 @@ crate::pr_err!(
                 {
                     use core::sync::atomic::Ordering::Relaxed;
                     use crate::syscall::support::{MMAP_RING, MMAP_CURSOR};
-                    let pid = crate::sched::get_current_pid();
+                    let pid = crate::sched::hotpath::get_current_pid();
                     let cur = MMAP_CURSOR.load(Relaxed);
                     crate::pr_err!("  MMAP ring cursor={}", cur);
                     // replay the last 8 entries regardless of pid: a mis-attributed

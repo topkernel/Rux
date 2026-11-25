@@ -97,7 +97,7 @@ impl ConditionVariable {
     /// # }
     /// ```
     pub fn wait(&self, mutex: &rux::sync::Mutex) {
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return,
         };
@@ -132,7 +132,7 @@ impl ConditionVariable {
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         // 4. After wakeup, finish_wait restores RUNNING and removes entry.
         self.wait.finish_wait(current);
@@ -157,7 +157,7 @@ impl ConditionVariable {
     /// 4. Re-acquire mutex after being woken or interrupted by signal
     /// 5. Return result
     pub fn wait_interruptible(&self, mutex: &rux::sync::Mutex) -> Result<(), ()> {
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return Ok(()),
         };
@@ -181,7 +181,7 @@ impl ConditionVariable {
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         // 4. After wakeup, finish_wait restores RUNNING and removes entry.
         self.wait.finish_wait(current);

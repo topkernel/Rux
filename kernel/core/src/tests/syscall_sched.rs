@@ -16,7 +16,7 @@ use crate::syscall::sched::{
 };
 use crate::syscall::SyscallNo;
 use crate::process;
-use crate::sched::{self, rt, fair};
+use crate::sched::{self, hotpath::rt, hotpath::fair};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_syscall_sched() {
@@ -203,7 +203,7 @@ fn test_sched_policy() {
     test_assert_eq!(core::mem::size_of::<SchedPolicy>(), 4, "SchedPolicy size == 4");
 
     // Verify default policy of current task
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(current) => {
             let policy = current.policy();
             if policy == SchedPolicy::Normal {
@@ -218,7 +218,7 @@ fn test_sched_policy() {
     }
 
     // Verify nice value
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(current) => {
             let nice = current.nice();
             if nice == 0 {
@@ -233,7 +233,7 @@ fn test_sched_policy() {
     }
 
     // Verify RT priority (should be 0 for non-RT tasks)
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(current) => {
             let rt_prio = current.rt_priority();
             if rt_prio == 0 {

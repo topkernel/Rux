@@ -679,7 +679,7 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
 
         // Pipe full.
         if pipe.is_read_closed() {
-            if let Some(current) = crate::sched::current() {
+            if let Some(current) = crate::sched::hotpath::current() {
                 let _ = crate::signal::send_signal(
                     (*current).pid(),
                     crate::signal::Signal::SIGPIPE as i32,
@@ -691,7 +691,7 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
             return -11; // EAGAIN
         }
 
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return 0,
         };
@@ -699,16 +699,16 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
         let recheck_ok = pipe.buffer.lock().available_write() > 0;
         if recheck_ok || pipe.is_read_closed() {
             pipe.write_queue().finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             continue;
         }
         if crate::signal::signal_pending() {
             pipe.write_queue().finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return -(crate::errno::constants::EINTR) as isize;
         }
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         pipe.write_queue().finish_wait(current);
         if crate::signal::signal_pending() {
             return -(crate::errno::constants::EINTR) as isize;
@@ -772,7 +772,7 @@ pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) 
         if nonblock {
             return -11; // EAGAIN
         }
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return 0,
         };
@@ -783,16 +783,16 @@ pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) 
         };
         if recheck {
             pipe.read_queue().finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             continue;
         }
         if crate::signal::signal_pending() {
             pipe.read_queue().finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return -(crate::errno::constants::EINTR) as isize;
         }
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         pipe.read_queue().finish_wait(current);
         if crate::signal::signal_pending() {
             return -(crate::errno::constants::EINTR) as isize;
@@ -884,7 +884,7 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
             // Blocking mode: use wait queue to wait for data
             // Condition: buffer has data or write end closed
             {
-                let current = match crate::sched::current() {
+                let current = match crate::sched::hotpath::current() {
                     Some(task) => task,
                     None => return 0, // Cannot get current task, return EOF
                 };
@@ -906,7 +906,7 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
                     // back off the GRQ (on_rq guards make it a no-op
                     // otherwise) or nr_running stays inflated and the
                     // idle fast path is defeated until our next switch.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     continue;
                 }
 
@@ -918,13 +918,13 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
                     pipe.read_queue().finish_wait(current);
                     // R36-B2: undo a concurrent data-arrival wake enqueue
                     // before returning (R9-17 discipline).
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     return -(crate::errno::constants::EINTR) as isize;
                 }
 
                 // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
 
                 pipe.read_queue().finish_wait(current);
 
@@ -970,7 +970,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
         // Check if read end is closed
         if pipe.is_read_closed() {
             // Write to pipe with no readers -> SIGPIPE + EPIPE
-            if let Some(current) = crate::sched::current() {
+            if let Some(current) = crate::sched::hotpath::current() {
                 let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
             }
             return -(crate::errno::constants::EPIPE) as isize;
@@ -1051,7 +1051,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
 
             // Blocking mode: use wait queue to wait for space
             {
-                let current = match crate::sched::current() {
+                let current = match crate::sched::hotpath::current() {
                     Some(task) => task,
                     None => return total_written as isize, // Cannot get current task, return bytes written
                 };
@@ -1080,7 +1080,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
                     // R36-B2 (R8-5 NEW-C2 discipline, missed here): undo a
                     // concurrent drain/close wake that enqueued us while we
                     // never slept.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     continue;
                 }
 
@@ -1089,7 +1089,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
                     pipe.write_queue().finish_wait(current);
                     // R36-B2: undo a concurrent space-available wake enqueue
                     // before returning (R9-17 discipline).
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     if total_written > 0 {
                         return total_written as isize;
                     }
@@ -1098,7 +1098,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
 
                 // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
 
                 pipe.write_queue().finish_wait(current);
 
@@ -1116,7 +1116,7 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
                     if total_written > 0 {
                         return total_written as isize;
                     }
-                    if let Some(current) = crate::sched::current() {
+                    if let Some(current) = crate::sched::hotpath::current() {
                         let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
                     }
                     return -(crate::errno::constants::EPIPE) as isize;

@@ -640,7 +640,7 @@ pub fn ashmem_mmap(
         (v, inner.size)
     };
 
-    let task = crate::sched::current().ok_or(-ENOMEM)?;
+    let task = crate::sched::hotpath::current().ok_or(-ENOMEM)?;
     let address_space = task.address_space().ok_or(-ENOMEM)?;
     let root_ppn = address_space.root_ppn();
 

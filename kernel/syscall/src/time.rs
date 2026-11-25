@@ -307,7 +307,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // is arbitrary, so the round-up added a uniform 0..slack_ns delay
     // to EVERY interval). Slack 1 ns (the well-defined floor of the
     // modulo below) = no coalescing.
-    let is_rt_task = rux::sched::current().is_some_and(|t| {
+    let is_rt_task = rux::sched::hotpath::current().is_some_and(|t| {
         matches!(
             t.policy(),
             process::task::SchedPolicy::Fifo | process::task::SchedPolicy::Rr
@@ -316,7 +316,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     let timer_slack_ns = if is_rt_task {
         1
     } else {
-        rux::sched::current()
+        rux::sched::hotpath::current()
             .and_then(|t| t.signal.as_ref())
             .map(|s| s.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed))
             .unwrap_or(50_000)
@@ -345,7 +345,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // Get current task reference + PID for timer wakeup (typed:
     // sched::current() returns &mut Task, valid for the whole syscall —
     // we are it; the loop below reborrow it for state changes).
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => {
             nsfault("sched::current()=None", 0);
@@ -471,7 +471,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
                 // while we are in fact still executing on this CPU — take
                 // ourselves back off before looping, or a second CPU could
                 // pick and run this very task.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 continue;
             }
 
@@ -518,7 +518,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // lock_irqsave in __schedule would save SIE=0 for our wake path
             // (same discipline as do_wait / wait_event).
             crate::arch::cpu::restore_irq(true);
-            rux::sched::schedule();
+            rux::sched::hotpath::schedule();
         } else {
             // Timer registration failed (timer table full): an
             // INTERRUPTIBLE sleep would have NO waker — the task would
@@ -532,7 +532,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             current.set_state(process::task::TaskState::new(
                 process::task::TaskState::RUNNING
             ));
-            rux::sched::schedule();
+            rux::sched::hotpath::schedule();
         }
     }
 }

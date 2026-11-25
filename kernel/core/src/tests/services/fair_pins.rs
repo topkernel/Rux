@@ -10,7 +10,7 @@
 //! sched::run_unit_tests; the framework's pass/fail counters are
 //! shared, so the pins land in the same suite totals).
 
-use rux::sched::{CfsRunQueue, LoadWeight, SchedEntity};
+use rux::sched::{types::CfsRunQueue, types::LoadWeight, types::SchedEntity};
 
 pub fn test_fair_pins() {
     rux::tests::test_group_start("fair_pins");

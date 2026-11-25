@@ -254,7 +254,7 @@ pub struct TimedSleepShadow;
 
 impl TimedSleepShadow {
     pub fn new(kind: u32, deadline: u64, timer_id: u64, dur_ms: u32) -> Option<Self> {
-        let t = crate::sched::current()?;
+        let t = crate::sched::hotpath::current()?;
         // t is the currently running task (we are it) — plain writes.
         t.timed_sleep_deadline.store(deadline, Ordering::Release);
         t.timed_sleep_kind.store(kind, Ordering::Release);
@@ -269,7 +269,7 @@ impl TimedSleepShadow {
     /// belt-and-braces re-arm replaces the id mid-wait; the heartbeat
     /// must name the LIVE entry).
     pub fn refresh_id(&self, timer_id: u64) {
-        if let Some(t) = crate::sched::current() {
+        if let Some(t) = crate::sched::hotpath::current() {
             t.timed_sleep_timer_id.store(timer_id, Ordering::Release);
         }
     }
@@ -277,7 +277,7 @@ impl TimedSleepShadow {
 
 impl Drop for TimedSleepShadow {
     fn drop(&mut self) {
-        if let Some(t) = crate::sched::current() {
+        if let Some(t) = crate::sched::hotpath::current() {
             // A drop on a task switch away cannot happen: the guard
             // lives in the wait function's own frame, above schedule().
             t.timed_sleep_kind.store(TSLEEP_NONE, Ordering::Release);
@@ -673,7 +673,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             if l != 0 && now_time.saturating_sub(l) > crate::config::TIMER_CLOCK_FREQ_HZ {
                 if ww_latefire_budget_ok() {
                     let tick_age_ms = ww_tick_age_ms(c);
-                    let (pid, pc, rip) = crate::sched::sched::ww_stalled_cpu_state(c);
+                    let (pid, pc, rip) = crate::sched::hotpath::ww_stalled_cpu_state(c);
                     // sc167 storm gate: a USER-space rip means the stalled
                     // CPU was running userspace with IRQs enabled — the
                     // tick simply stopped ARRIVING (KVM hrtimer delay under
@@ -682,7 +682,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                     // burns a direct-console line with IF=0 and feeds the
                     // storm. Only report stalls whose current context is
                     // kernel text.
-                    let (klo, khi) = crate::sched::sched::kernel_text_window();
+                    let (klo, khi) = crate::sched::hotpath::kernel_text_window();
                     if rip >= klo && rip < khi {
                         crate::pr_err!(
                             "WW: TIMER-SOFTIRQ-STALL cpu={} age={}ms tick_age={}ms n={} pid={} pc={:#x} rip={:#x}",
@@ -859,7 +859,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                 let mut rows: [Option<TtRow>; 16] = [None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None, None, None];
                 let mut ghost_rows = 0usize;
-                let nfound = crate::sched::for_each_task_try(|t| {
+                let nfound = crate::sched::hotpath::for_each_task_try(|t| {
                     // Diagnostic reads of a live task pinned by the
                     // pid-hash walk — plain &Task reads.
                     let (kind, sleeping) = (
@@ -1052,7 +1052,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::ClaimInject)
         && current % 50 == 0
     {
-        let n = crate::sched::sched::debug_claim_inject();
+        let n = crate::sched::hotpath::debug_claim_inject();
         if n > 0 {
             crate::pr_debug!(
                             "CLAIM-INJECT poisoned={}", n);
@@ -1069,7 +1069,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::OncpuInject)
         && current % 50 == 0
     {
-        let n = crate::sched::sched::debug_oncpu_inject();
+        let n = crate::sched::hotpath::debug_oncpu_inject();
         if n > 0 {
             crate::pr_debug!(
                             "ONCPU-INJECT poisoned={}", n);
@@ -1278,7 +1278,7 @@ fn softirq_diagnostics(current: u64) {
     // state filter; the GRQ is taken only when a candidate exists.
     if current.saturating_sub(LAST_PHANTOM_RELINK.load(Ordering::Relaxed)) >= 100 {
         LAST_PHANTOM_RELINK.store(current, Ordering::Relaxed);
-        crate::sched::sched::relink_unlinked_running_phantoms();
+        crate::sched::hotpath::relink_unlinked_running_phantoms();
     }
 
     // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
@@ -1389,7 +1389,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                                 }
                             }
                             let (cpid, cpol, cpc) =
-                                crate::sched::current()
+                                crate::sched::hotpath::current()
                                     .map(|t| (t.pid() as u64, t.policy() as u64, t.preempt_count() as u64))
                                     .unwrap_or((u64::MAX, 9, 0));
                             for &b in b"\nCYC-FIRE-LATE us=" { putchar(b); }
@@ -1506,7 +1506,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 // last unpinned cross-CPU wake path.
                 let task = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
                 if !task.is_null() {
-                    let ok = crate::sched::wake_up_process(task);
+                    let ok = crate::sched::hotpath::wake_up_process(task);
                     // nanosleep-loss conviction: fire-side direct map —
                     // every FIRED wake id + jiffies.
                     {
@@ -1856,9 +1856,9 @@ pub fn tick_trap_report(site: &str) {
     let if_self = crate::arch::cpu::get_interrupts_state();
     let snap_self = apic::lapic_timer_snapshot();
     let (idle_phase_self, pid_self) = {
-        let cur = crate::sched::current();
+        let cur = crate::sched::hotpath::current();
         let p = cur.map(|t| t.pid()).unwrap_or(0);
-        (crate::sched::ww_idle_phase(me), p)
+        (crate::sched::hotpath::ww_idle_phase(me), p)
     };
     match &snap_self {
         Some(s) => crate::println!(
@@ -1866,7 +1866,7 @@ pub fn tick_trap_report(site: &str) {
             site, me,
             s.lvt, s.tmict, s.tmcct, s.svr, s.tpr, s.irr7, s.isr7,
             if_self, pid_self, idle_phase_self,
-            crate::sched::sched_cs_phase(me),
+            crate::sched::hotpath::sched_cs_phase(me),
             apic::tick_trap_adjudicate(s),
             apic::TIMER_ARM_SEQ[me].load(Ordering::Relaxed),
             apic::TIMER_ARM_OP[me].load(Ordering::Relaxed),
@@ -1929,7 +1929,7 @@ pub fn tick_trap_report(site: &str) {
                 ww_tick_age_ms(cpu),
                 apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
                 apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
-                crate::sched::sched_cs_phase(cpu),
+                crate::sched::hotpath::sched_cs_phase(cpu),
                 match crate::debug::syscost::open_cli_segment(cpu) {
                     Some((file, line, age_raw)) => alloc::format!(
                         "{}:{} age_ms~{}",

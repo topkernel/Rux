@@ -224,7 +224,7 @@ pub fn shutdown_cascade(cmd: u32) {
     crate::debug::hilogcensus::dump();
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
-    let my_pid = crate::sched::get_current_pid();
+    let my_pid = crate::sched::hotpath::get_current_pid();
     if my_pid != 1 {
         crate::println!("reboot: sending SIGTERM to init (pid 1)");
         let _ = crate::signal::send_signal(1, crate::signal::Signal::SIGTERM as i32);
@@ -332,7 +332,7 @@ pub(crate) fn sbi_legacy_shutdown() {
 pub(crate) fn sleep_one_tick() {
     use crate::task::{Task, TaskState};
 
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return, // no task context: busy caller
     };
@@ -344,7 +344,7 @@ pub(crate) fn sleep_one_tick() {
     current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     // R54: re-arm IRQs so the timer tick reaches this CPU.
     crate::arch::cpu::restore_irq(true);
-    crate::sched::schedule();
+    crate::sched::hotpath::schedule();
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
     }

@@ -1557,7 +1557,7 @@ fn resolve_path(path: &str) -> String {
         String::from(path)
     } else {
         // Get current working directory
-        let cwd = if let Some(current) = crate::sched::current() {
+        let cwd = if let Some(current) = crate::sched::hotpath::current() {
             let cwd_bytes = { (*current).get_cwd() };
             match core::str::from_utf8(&cwd_bytes) {
                 Ok(s) => String::from(s),

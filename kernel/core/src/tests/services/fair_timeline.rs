@@ -21,7 +21,7 @@
 // driver constructs adversarial shared state deliberately (the thing
 // under test); runs only under the unit-test feature.)
 use rux::sched::r#unsafe::{RbTimeline, VruntimeKey};
-use rux::sched::SchedEntity;
+use rux::sched::types::SchedEntity;
 use alloc::vec::Vec;
 use rux::tests::{test_fail, test_group_start, test_pass};
 

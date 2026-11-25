@@ -250,7 +250,7 @@ pub fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
                     bits,
                     a.bits(),
                     root_ppn,
-                    crate::sched::get_current_pid(),
+                    crate::sched::hotpath::get_current_pid(),
                     crate::debug::backtrace::caller_return_address()
                 );
             }

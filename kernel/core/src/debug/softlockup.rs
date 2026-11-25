@@ -157,7 +157,7 @@ pub fn check() {
         // After init exits, all CPUs enter idle loop with no work to
         // do — timer ticks stop and timestamps go stale, but this is
         // not a lockup.
-        let nr_running = crate::sched::sched::GlobalRunQueue::grq_nr_running();
+        let nr_running = crate::sched::types::GlobalRunQueue::grq_nr_running();
         if nr_running == 0 {
             continue;
         }
@@ -169,7 +169,7 @@ pub fn check() {
         {
             // The pick slot's task is another CPU's CURRENT pick — a
             // possibly-stale handle read through the forensics edge.
-            let current = crate::sched::sched::cpu_state(cpu).current;
+            let current = crate::sched::hotpath::cpu_state(cpu).current;
             if current.is_null() || crate::debug::r#unsafe::t_pid(current) == 0 {
                 continue;
             }

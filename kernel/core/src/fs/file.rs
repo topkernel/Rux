@@ -1196,7 +1196,7 @@ impl FdTable {
     /// task's soft limit when lower (RLIM_INFINITY = u64::MAX is masked by
     /// the min). Tasks without a Task context (early boot) are unlimited.
     fn nofile_ceiling() -> usize {
-        let rlim = crate::sched::current()
+        let rlim = crate::sched::hotpath::current()
             .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
             .unwrap_or(u64::MAX);
         MAX_FDS.min(rlim as usize)
@@ -1715,7 +1715,7 @@ impl Drop for FdTable {
 /// Set the per-descriptor FD_CLOEXEC flag (POSIX: the flag belongs to the
 /// descriptor, never the underlying file description).
 pub fn set_cloexec_fd(fd: usize, on: bool) {
-    if let Some(ft) = crate::sched::get_current_fdtable() {
+    if let Some(ft) = crate::sched::hotpath::get_current_fdtable() {
         ft.set_fd_cloexec(fd, on);
     }
 }
@@ -1766,7 +1766,7 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
 
 pub fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
-    sched::get_current_fdtable()?.get_file(fd)
+    sched::hotpath::get_current_fdtable()?.get_file(fd)
 }
 
 /// fdget's two outcomes (the reference's struct fd): a no-refcount
@@ -1792,7 +1792,7 @@ impl FastFd {
 /// RMW); shared ⇒ get_file (fget). Safe wrapper — the raw current-task
 /// deref lives here, not in forbid(unsafe) callers.
 pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
-    let cur = crate::sched::current()?;
+    let cur = crate::sched::hotpath::current()?;
     // SAFETY: current() yields a live task pointer.
     unsafe {
         if !(*cur).fdtable_unshared() {
@@ -1826,12 +1826,12 @@ pub fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     use crate::sched;
     // (perf-path lane) single entry-lock alloc+install — see
     // install_lowest_fd.
-    sched::get_current_fdtable()?.install_lowest_fd(file)
+    sched::hotpath::get_current_fdtable()?.install_lowest_fd(file)
 }
 
 pub fn close_file_fd(fd: usize) -> Result<(), i32> {
     use crate::sched;
-    match sched::get_current_fdtable() {
+    match sched::hotpath::get_current_fdtable() {
         Some(fdtable) => fdtable.close_fd(fd).map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
         None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
     }
@@ -1843,7 +1843,7 @@ pub fn close_file_fd_report(
     fd: usize,
 ) -> Result<(u64, alloc::sync::Weak<File>), i32> {
     use crate::sched;
-    match sched::get_current_fdtable() {
+    match sched::hotpath::get_current_fdtable() {
         Some(fdtable) => fdtable
             .close_fd_report(fd)
             .map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
@@ -1938,7 +1938,7 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // only: pipes/sockets never enter reg_file_write, matching Linux
         // (only regular-file write paths check).
         let mut buf = buf;
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
             if fsz_cur != u64::MAX {
                 let start = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {

@@ -1017,7 +1017,7 @@ MAPPINGS = [
     {
         "name": "sched/sched_class_id",
         "verify": "kernel/verify/src/sched/class_test.rs",
-        "kernel": "kernel/core/src/sched/class.rs",
+        "kernel": "kernel/core/src/sched/types.rs",  # seed-core pass 2: the type definitions moved to sched/types.rs
         "type": "SchedClassId",
         "compare": [],
         "skip": [],  # enum-only, no methods to compare

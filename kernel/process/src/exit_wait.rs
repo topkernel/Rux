@@ -102,7 +102,7 @@ pub fn wait4_park_audit() {
     let mut waiters: [(u32, *mut Task, u64); 2] = [(0, core::ptr::null_mut(), 0); 2];
     let mut nwait = 0usize;
     let mut observed = [false; WL_RING];
-    crate::sched::for_each_task_try(|t| {
+    crate::sched::hotpath::for_each_task_try(|t| {
         if nwait == 2 {
             return;
         }
@@ -176,7 +176,7 @@ pub fn wait4_park_audit() {
     let mut blk = [0u64; 2];
     let mut st_bits = [0u32; 2];
     let mut nr_arg = [0u64; 2];
-    crate::sched::for_each_task_try(|t| {
+    crate::sched::hotpath::for_each_task_try(|t| {
         // Reads under the tree lock (release_task's tree detach also
         // holds it), each task pinned by the try-walk.
         {
@@ -231,7 +231,7 @@ pub fn wait4_park_audit() {
             WL_SEEN[i].reported.store(now as u32, O::Release);
         }
         let mut slots = [0i64; crate::config::MAX_CPUS];
-        crate::sched::deferred_exit_notify_slots(&mut slots);
+        crate::sched::hotpath::deferred_exit_notify_slots(&mut slots);
         let mut line: alloc::string::String = alloc::format!(
             "WAIT4-PARK pid={} age_s={} sys={} a0={:#x} st={:#x} ch=[",
             waiters[w].0,
@@ -309,7 +309,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
     // it at do_wait entry with the WAITER's comm/prio and the REQUESTED
     // pid argument (pid_nr of the wait_opts pid; -1 = any child).
     if crate::trace::EVENT_SCHED_PROCESS_WAIT.armed() {
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             // cur is the calling task, pinned by being the running context.
             {
                 let words = crate::trace::comm_to_words(cur.comm());
@@ -335,7 +335,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
     // current is the calling task, valid throughout the wait loop (the
     // task sleeps via schedule() in INTERRUPTIBLE state so it won't be
     // freed). One consolidated reference; raw uses re-derive the pointer.
-    let cur = match crate::sched::current() {
+    let cur = match crate::sched::hotpath::current() {
         Some(c) => c,
         None => return Err(errno::Errno::NoChild.as_neg_i32()),
     };
@@ -576,7 +576,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                         // prepare_to_wait and enqueued us; we are going to
                         // keep running on this CPU — take ourselves back
                         // off the queue (review NEW-C2).
-                        crate::sched::dequeue_if_enqueued(cur);
+                        crate::sched::hotpath::dequeue_if_enqueued(cur);
                         continue; // re-enter loop to report/reap
                     }
                 }
@@ -585,7 +585,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 use crate::signal;
                 if signal::signal_pending() {
                     cur.wait_chldexit.finish_wait(current);
-                    crate::sched::dequeue_if_enqueued(cur);
+                    crate::sched::hotpath::dequeue_if_enqueued(cur);
                     // ERESTARTSYS, not EINTR: the signal-delivery path
                     // restarts the wait when the handler is SA_RESTART
                     // (Linux semantics — glib's SIGCHLD handler is).
@@ -605,7 +605,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 if fp_t_ws != 0 {
                     crate::debug::forkprof::trace(crate::debug::forkprof::T_SCHED_SLEEP, current_pid);
                 }
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 if fp_t_ws != 0 {
                     crate::debug::forkprof::add(crate::debug::forkprof::P_WT_SCHED, fp_t_ws);
                     crate::debug::forkprof::trace(crate::debug::forkprof::T_SCHED_WAKE, current_pid);
@@ -638,7 +638,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
 
     // current is the calling task, valid throughout this call; one
     // consolidated reference (raw uses re-derive the pointer).
-    let cur = match crate::sched::current() {
+    let cur = match crate::sched::hotpath::current() {
         Some(c) => c,
         None => return Err(errno::Errno::NoChild.as_neg_i32()),
     };
@@ -895,7 +895,7 @@ pub fn do_waitid(
 
     // current is the calling task, valid throughout the wait loop; one
     // consolidated reference (raw uses re-derive the pointer).
-    let cur = match crate::sched::current() {
+    let cur = match crate::sched::hotpath::current() {
         Some(c) => c,
         None => return Err(errno::Errno::NoChild.as_neg_i32()),
     };
@@ -1077,7 +1077,7 @@ pub fn do_waitid(
                     });
                     if found_zombie {
                         cur.wait_chldexit.finish_wait(current);
-                        crate::sched::dequeue_if_enqueued(cur);
+                        crate::sched::hotpath::dequeue_if_enqueued(cur);
                         continue;
                     }
                 }
@@ -1085,7 +1085,7 @@ pub fn do_waitid(
                 if crate::signal::signal_pending() {
                     cur.wait_chldexit.finish_wait(current);
                     // R8-5 (NEW-C2): undo the signal's concurrent enqueue.
-                    crate::sched::dequeue_task(cur);
+                    crate::sched::hotpath::dequeue_task(cur);
                     // ERESTARTSYS, not EINTR: the signal-delivery path
                     // restarts the wait when the handler is SA_RESTART.
                     return Err(ERESTARTSYS);
@@ -1096,7 +1096,7 @@ pub fn do_waitid(
                 // the task can never be rescheduled.
                 crate::arch::cpu::restore_irq(true);
 
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
 
                 // After wakeup: state is RUNNING (set by wake_up_process).
                 cur.wait_chldexit.finish_wait(current);

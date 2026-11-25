@@ -1571,7 +1571,7 @@ fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
         if !state.test(BufferState::BH_Req) {
             return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
         }
-        if crate::sched::current().is_some() {
+        if crate::sched::hotpath::current().is_some() {
             if crate::timer::get_jiffies() >= deadline {
                 crate::pr_err!(
                     "bio: buffer io wait timeout block={} — reporting EIO (wedge fix)",
@@ -1579,12 +1579,12 @@ fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
                 );
                 return -5;
             }
-            let pid = crate::sched::get_current_pid();
+            let pid = crate::sched::hotpath::get_current_pid();
             let dl = crate::timer::get_jiffies().saturating_add(1);
             let id = crate::timer::add_timer_wakeup(dl, pid);
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             if id != 0 {
                 crate::timer::del_timer(id);
             }
@@ -3137,7 +3137,7 @@ const PUB_HIWAT_BATCHES: u32 = 2;
 
 /// Current task's publication cookie (0 when no task context exists).
 fn publication_cookie() -> u64 {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(t) => t as *mut _ as u64,
         None => 0,
     }
@@ -3244,7 +3244,7 @@ fn publication_capture_note_dirty(
         Some(d) => d,
         None => return,
     };
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return,
     };
@@ -3479,7 +3479,7 @@ fn plan_add_constraints(plan: &mut WritePlan, pend: &[Publication], dev: (u32, u
             return;
         }
         if round % 2 == 1 {
-            crate::sched::cond_resched();
+            crate::sched::hotpath::cond_resched();
         }
     }
     // Closure not converged within the round cap: the dependency chain is

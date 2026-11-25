@@ -5,18 +5,19 @@
 //! The sched subsystem's type definitions (seed-core-design §2c.3).
 //!
 //! Definitions only. Every `struct`, `enum` and type alias of the
-//! subsystem's topic files lives here, together with the constants those
-//! definitions name (array lengths, and the constants those derive from);
-//! every `impl` block stays in the topic file beside the functions that
-//! use it — an impl is code, a definition is data layout. The audited
-//! `unsafe.rs` keeps the types its own contracts are written about. The
-//! exceptions are definitions local to code: a type declared inside a
-//! function or inside a private inline module.
+//! subsystem lives here, together with the constants those definitions
+//! name (array lengths, and the constants those derive from); every
+//! `impl` block lives in `hotpath.rs` beside the functions that use it —
+//! an impl is code, a definition is data layout. The audited `unsafe.rs`
+//! keeps the types its own contracts are written about (`VruntimeKey`,
+//! `RbNode`, `RbTimeline`, `EvRing`). The exceptions are definitions
+//! local to code: a type declared inside a function or inside an inline
+//! module of `hotpath.rs`.
 //!
 //! This file holds no `unsafe`. A field that was private to its old
 //! topic file is `pub(super)` here because the code that touches it
-//! stayed in that file: the sched directory is the smallest visibility
-//! boundary Rust offers for that split.
+//! lives in the sibling module `hotpath`: the sched directory is the
+//! smallest visibility boundary Rust offers for that split.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -28,9 +29,8 @@ use crate::list::ListHead;
 use crate::process::task::Task;
 use crate::sync::spinlock::Spinlock;
 
-// the trait the two class iterators name stays with the class code (class.rs
-// in step 1, hotpath.rs after step 2)
-use super::class::SchedClass;
+// The trait the two class iterators name is code: it stays in hotpath.rs.
+use super::hotpath::SchedClass;
 use super::r#unsafe::{RbNode, RbTimeline, VruntimeKey};
 
 
@@ -422,11 +422,11 @@ pub struct GlobalRunQueue {
     /// Protects dl_rq, rt_rq, cfs_rq, nr_running
     pub(super) lock: crate::sync::spinlock::RawSpinlock,
     /// Deadline queue (EDF sorted by deadline)
-    pub dl_rq: crate::sched::entities::DlRunQueue,
+    pub dl_rq: crate::sched::types::DlRunQueue,
     /// Real-time queue (bitmap + per-priority lists)
-    pub rt_rq: crate::sched::entities::RtRunQueue,
+    pub rt_rq: crate::sched::types::RtRunQueue,
     /// CFS queue (BTreeMap sorted by vruntime)
-    pub cfs_rq: crate::sched::entities::CfsRunQueue,
+    pub cfs_rq: crate::sched::types::CfsRunQueue,
     /// Total runnable task count (read atomically for idle checks)
     pub nr_running: core::sync::atomic::AtomicUsize,
     /// Bitmap of idle CPUs: bit N = 1 means CPU N is idle
@@ -490,7 +490,7 @@ pub struct RunQueue;
 
 /// RunQueue type alias (forward declaration)
 /// The actual struct is defined in sched.rs
-pub type RunQueueRef = *mut crate::sched::sched::RunQueue;
+pub type RunQueueRef = *mut crate::sched::types::RunQueue;
 
 /// Scheduling class IDs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

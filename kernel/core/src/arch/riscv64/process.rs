@@ -88,7 +88,7 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 pub fn flush_thread() {
     // Get current task (typed handle — we are the current task, so no
     // concurrent mutation of thread state occurs).
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         {
             let thread = current.thread_mut();
 

@@ -218,7 +218,7 @@ pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
             // Only set the flag.  Calling schedule() here (IRQs off)
             // could deadlock on the runqueue lock the same way the
             // riscv64 twin documents; the trap-exit path reschedules.
-            crate::sched::set_need_resched();
+            crate::sched::hotpath::set_need_resched();
             // RT-2X item-7 hunt: prove DELIVERY of the resched IPI to
             // cpu0 (cmdline rt2xdbg=1, 200-line budget).
             if crate::arch::cpu_id() as usize == 0
@@ -542,7 +542,7 @@ pub fn smp_call_function(
     // lock at this point, and the memory stays valid until done is
     // observed (sleeping tasks keep their frames; the Box frees below).
     while !csd.done.load(Ordering::Acquire) {
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
         core::hint::spin_loop();
     }
 
@@ -636,7 +636,7 @@ pub fn smp_call_function_timeout(
         if crate::timer::get_jiffies() >= deadline {
             return false; // node stays linked + leaked; see doc comment
         }
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
         core::hint::spin_loop();
     }
     // SAFETY: done was observed; the target no longer touches the node

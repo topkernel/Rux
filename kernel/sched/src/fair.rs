@@ -4,13 +4,13 @@
 
 
 #![forbid(unsafe_code)]
-use crate::sched::entities::{CfsRunQueue, SchedEntity, LoadWeight, NICE_0_LOAD, StrandWallRow};
+use crate::sched::{types::CfsRunQueue, types::SchedEntity, types::LoadWeight, hotpath::NICE_0_LOAD, types::StrandWallRow};
 use crate::sched::r#unsafe::{node_key, node_of_task, task_of_node};
 use rux::api::sched::{CLASS_CFS_BIT, WW_EV_LINK, WW_EV_UNLINK_POISON};
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::{MAX_CPUS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
 use crate::process::task::{Task, SchedPolicy};
-use crate::sched::class::{SchedClass, RunQueueRef};
+use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 
 struct SkipHistSlot {
     task: AtomicU64,
@@ -58,7 +58,7 @@ pub fn ww_pick_walks() -> u64 {
     // trap handler re-trapped (sepc=trap_entry, silent wedge at the
     // first kswapd pick). Read the counter directly, like the
     // ww_pick_walk_inc closure row does.
-    crate::sched::entities::WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
+    crate::sched::hotpath::WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// (on_cpu-mark heals, stale-claim heals) since boot — the two R85
@@ -67,8 +67,8 @@ pub fn ww_pick_walks() -> u64 {
 /// only suggest it.
 pub fn ww_heals() -> (u64, u64) {
     (
-        crate::sched::entities::WW_ONCPU_HEALS.load(Ordering::Relaxed),
-        crate::sched::entities::WW_CLAIM_HEALS.load(Ordering::Relaxed),
+        crate::sched::hotpath::WW_ONCPU_HEALS.load(Ordering::Relaxed),
+        crate::sched::hotpath::WW_CLAIM_HEALS.load(Ordering::Relaxed),
     )
 }
 
@@ -240,8 +240,8 @@ pub(crate) static PICK_SKIP_RING_N: core::sync::atomic::AtomicUsize =
 /// grq-10ns: read the poison counters (debug census hook).
 pub fn tl_poison_counters() -> (u64, u64) {
     (
-        crate::sched::sched::tl_poison_inserts(),
-        crate::sched::sched::tl_poison_erases(),
+        crate::sched::hotpath::tl_poison_inserts(),
+        crate::sched::hotpath::tl_poison_erases(),
     )
 }
 
@@ -370,10 +370,10 @@ pub static FAIR_SCHED_CLASS: FairSchedClass = FairSchedClass::new();
 
 
 
-pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
+pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
         // s16 (WW5): one exact count per walk entry — the visits= field
         // on the strand line divides this by the strand window.
-        crate::sched::sched::ww_pick_walk_inc();
+        crate::sched::hotpath::ww_pick_walk_inc();
         // grq-10ns: cctx walk anatomy (picks entered / candidates
         // consulted — the denominator for the walk-cost evidence).
         crate::debug::cctx::bump(&crate::debug::cctx::FAIR_PICK_N);
@@ -430,9 +430,9 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
             // link fields are the garbage) — report, refuse this CPU's
             // pick, and keep the kernel alive; the counters stay paired
             // with the still-linked entry (the census names the wedge).
-            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                crate::sched::sched::tl_poison_erase_inc();
-                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+            if !crate::sched::hotpath::kernel_task_ptr_range_ok(task as *const u8) {
+                crate::sched::hotpath::tl_poison_erase_inc();
+                crate::sched::hotpath::report_poisoned_rq_entry(cpu_id, task as usize);
                 rux::api::sched::ww_record(task, rux::api::sched::WW_EV_UNLINK_POISON);
                 break;
             }
@@ -548,7 +548,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                     // each is swept in <=50 jiffies and the soak completes
                     // all phases.
                     let owner_live =
-                        crate::sched::sched::pick_owner_live(task);
+                        crate::sched::hotpath::pick_owner_live(task);
                     if !split_oncpu
                         && claim != -1
                         && claim as usize != cpu_id
@@ -632,7 +632,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                         // is re-recorded, then release the FULL qword —
                         // the exact store __switch_to would have made.
                         if !owner_live
-                            && crate::sched::sched::stale_mark_confirm(
+                            && crate::sched::hotpath::stale_mark_confirm(
                                 task,
                                 crate::sched::r#unsafe::task_shared(task).pid(),
                                 50,
@@ -704,7 +704,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                             {
                                 static WHY1_N: core::sync::atomic::AtomicU32 =
                                     core::sync::atomic::AtomicU32::new(0);
-                                let stale_task = crate::sched::sched::pick_trace_peek(task)
+                                let stale_task = crate::sched::hotpath::pick_trace_peek(task)
                                     .is_some_and(|(_, ago)| ago > 30);
                                 if crate::trace::EVENT_SCHEDTRACE.armed()
                                     && stale_task
@@ -746,11 +746,11 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     for &b in b" slot=0x" {
                                         putchar(b);
                                     }
-                                    ph(crate::sched::sched::owner_slot_mask(task) as u64);
+                                    ph(crate::sched::hotpath::owner_slot_mask(task) as u64);
                                     for &b in b" swout=0x" {
                                         putchar(b);
                                     }
-                                    ph(crate::sched::sched::switching_out_mask(task) as u64);
+                                    ph(crate::sched::hotpath::switching_out_mask(task) as u64);
                                     for &b in b" pk=" {
                                         putchar(b);
                                     }
@@ -761,7 +761,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                         p9 <<= 4;
                                     }
                                     if let Some((ptc, ptj)) =
-                                        crate::sched::sched::pick_trace_peek(task)
+                                        crate::sched::hotpath::pick_trace_peek(task)
                                     {
                                         for &b in b" pt=" {
                                             putchar(b);
@@ -792,7 +792,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                                     // intact entry names the CPU whose pick
                                     // never reached its switch.
                                     if let Some((pc, ppk, pj)) =
-                                        crate::sched::sched::psledger_peek(task)
+                                        crate::sched::hotpath::psledger_peek(task)
                                     {
                                         for &b in b" psl=(cpu:" {
                                             putchar(b);
@@ -838,7 +838,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                 if !affinity_ok {
                     skip_reason = 3;
                 }
-                let throttled = crate::sched::cgroup::task_cgroup_throttled(task);
+                let throttled = crate::sched::hotpath::task_cgroup_throttled(task);
                 if throttled {
                     skip_reason = 4;
                 }
@@ -864,7 +864,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
 
                 result = Some(task);
                 rux::api::sched::ww_record(task, rux::api::sched::WW_EV_UNLINK_PICK);
-                crate::sched::sched::pick_trace(task, 1);
+                crate::sched::hotpath::pick_trace(task, 1);
                 break;
             }
 
@@ -887,8 +887,8 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
             // too — RUNQ-STRAND's burst sample missed the wheel
             // thread's input on ohw29/30 precisely because this only
             // armed under schedtrace.
-            if crate::sched::sched::sched_hist_armed() {
-                crate::sched::sched::sched_hist_refuse(task, skip_reason, cpu_id);
+            if crate::sched::hotpath::sched_hist_armed() {
+                crate::sched::hotpath::sched_hist_refuse(task, skip_reason, cpu_id);
             }
             // Not allowed — count the refusal into the walk ring
             // (decision-time evidence for the PICK-SKIP-ALL report
@@ -1029,16 +1029,16 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::entities::CfsRunQueue, cpu_id: u
                             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                         }
                         ps(b" slot=");
-                        pd(crate::sched::sched::owner_slot_mask(task) as u64);
+                        pd(crate::sched::hotpath::owner_slot_mask(task) as u64);
                         ps(b" swout=");
-                        pd(crate::sched::sched::switching_out_mask(task) as u64);
+                        pd(crate::sched::hotpath::switching_out_mask(task) as u64);
                         ps(b" aff=0x");
                         let mut v = crate::sched::r#unsafe::task_shared(task).cpus_allowed() as u64;
                         for sh in (0..8u32).rev() {
                             let nb = ((v >> (sh * 4)) & 0xF) as u8;
                             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                         }
-                        if crate::sched::cgroup::task_cgroup_throttled(task) {
+                        if crate::sched::hotpath::task_cgroup_throttled(task) {
                             ps(b" THROTTLED");
                         }
                         putchar(b'\n');
@@ -1127,11 +1127,11 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
     pub fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
-        crate::sched::entities::WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::hotpath::WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
         // 63rd: the heal event goes on the task's ring BEFORE the print
         // budget can swallow the line (a budgeted-out heal must still
         // appear in the victim's history).
-        if crate::sched::sched::sched_hist_armed() && !task.is_null() {
+        if crate::sched::hotpath::sched_hist_armed() && !task.is_null() {
             rux::api::sched::sched_hist_ring(
                 crate::sched::r#unsafe::task_shared(task),
                 5,
@@ -1139,7 +1139,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
                 (cpu_id as u64 & 0xF) | (((claim as u64) & 0xF) << 4) | (((pk as u64) & 0xF) << 8),
             );
         }
-        if !crate::sched::entities::CfsRunQueue::heal_report_budget_ok() {
+        if !crate::sched::types::CfsRunQueue::heal_report_budget_ok() {
             return;
         }
         // SAFETY: diagnostic reads of stable Task fields; the task is
@@ -1149,9 +1149,9 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             let pid = tr.pid();
             let st = tr.state().bits();
             let tcpu = tr.ti_cpu() as i64;
-            let slot = crate::sched::sched::owner_slot_mask(task);
-            let swout = crate::sched::sched::switching_out_mask(task);
-            crate::sched::entities::CfsRunQueue::stale_heal_line(tag, cpu_id, pid, claim, pk);
+            let slot = crate::sched::hotpath::owner_slot_mask(task);
+            let swout = crate::sched::hotpath::switching_out_mask(task);
+            crate::sched::types::CfsRunQueue::stale_heal_line(tag, cpu_id, pid, claim, pk);
             // Context tail: st= state word, tcpu= ti_cpu, slot=/swout=
             // owner masks at heal time (both must be 0 — that is the
             // adjudication's precondition; a nonzero mask here names a
@@ -1173,17 +1173,17 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             if tcpu < 0 {
                 putchar(b'-');
             }
-            crate::sched::entities::CfsRunQueue::put_dec(tcpu.unsigned_abs());
+            crate::sched::types::CfsRunQueue::put_dec(tcpu.unsigned_abs());
             const M3: &[u8] = b" slot=";
             for &b in M3 {
                 putchar(b);
             }
-            crate::sched::entities::CfsRunQueue::put_dec(slot as u64);
+            crate::sched::types::CfsRunQueue::put_dec(slot as u64);
             const M4: &[u8] = b" swout=";
             for &b in M4 {
                 putchar(b);
             }
-            crate::sched::entities::CfsRunQueue::put_dec(swout as u64);
+            crate::sched::types::CfsRunQueue::put_dec(swout as u64);
             putchar(b'\n');
         }
     }
@@ -1193,8 +1193,8 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
-        crate::sched::entities::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
-        if crate::sched::sched::sched_hist_armed() && !task.is_null() {
+        crate::sched::hotpath::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+        if crate::sched::hotpath::sched_hist_armed() && !task.is_null() {
             rux::api::sched::sched_hist_ring(
                 crate::sched::r#unsafe::task_shared(task),
                 4,
@@ -1202,10 +1202,10 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
                 (cpu_id as u64 & 0xF) | (((was as u64) & 0xF) << 4),
             );
         }
-        if !crate::sched::entities::CfsRunQueue::heal_report_budget_ok() {
+        if !crate::sched::types::CfsRunQueue::heal_report_budget_ok() {
             return;
         }
-        crate::sched::entities::CfsRunQueue::stale_heal_line(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
+        crate::sched::types::CfsRunQueue::stale_heal_line(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
         // wake-fastrepro correlation: the victim's runtime so far (0 =
         // never scheduled: recycle-residue class) and the jiffy stamp —
         // pairs with ENQ-CLAIMED-SLOTBK jif= lines (same pid+claim).
@@ -1244,7 +1244,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             // affirmed (switched to) NOR aborted — the switchless pick,
             // named with its publisher and age.
             if let Some((pcpu, ppk, pjif)) =
-                crate::sched::sched::psledger_peek(task)
+                crate::sched::hotpath::psledger_peek(task)
             {
                 const A: &[u8] = b" PSLEDGER=SWITCHLESS pub_cpu=";
                 for &b in A {
@@ -1277,8 +1277,8 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// to localize the write). Armed on rux:fuxstuck (retired debug=fuxstuck)|schedtrace (same gate
     /// as the pick/wake history); zero cost otherwise (one switch load).
     /// GRQ-held callers only; prints via the taskdump brief-budget funnel (R34 discipline, obs-hygiene: staged line-atomic writes).
-    pub fn vr_canary(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut crate::process::Task, site: &[u8; 3], vr: u64) {
-        if !crate::sched::sched::sched_hist_armed() {
+    pub fn vr_canary(rq: &mut crate::sched::types::CfsRunQueue, task: *mut crate::process::Task, site: &[u8; 3], vr: u64) {
+        if !crate::sched::hotpath::sched_hist_armed() {
             return;
         }
         let min_vr = rq.get_min_vruntime();
@@ -1411,7 +1411,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 
 // WW_PICK_WALKS / WW_ONCPU_HEALS / WW_CLAIM_HEALS moved FRAMEWORK-side
 // (devirt lane; sched/entities.rs) — same counters, same stores; this
-// file reaches them through crate::sched::entities.
+// file reaches them through crate::sched::hotpath::entities.
 
 /// 64th: vruntime sanity canary state (VRTRIP rate limiting).
 static VR_TRIPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

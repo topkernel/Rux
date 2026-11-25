@@ -28,7 +28,7 @@ pub fn report(cpu: usize, elapsed_secs: u64, timer_cnt: u64) {
     );
 
     // Print the stuck CPU's current task
-    let stuck_task = crate::sched::sched::cpu_state(cpu).current;
+    let stuck_task = crate::sched::hotpath::cpu_state(cpu).current;
     if !stuck_task.is_null() {
         let pid = crate::debug::r#unsafe::t_pid(stuck_task);
         let pc = crate::debug::r#unsafe::t_preempt_count(stuck_task);

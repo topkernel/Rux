@@ -194,7 +194,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
         let wp = FUXPARK_WORD.load(core::sync::atomic::Ordering::Relaxed);
         let wp_tgid = FUXPARK_TGID.load(core::sync::atomic::Ordering::Relaxed);
         let w1_tgid = FUXWATCH1_TGID.load(core::sync::atomic::Ordering::Relaxed);
-        let cur0 = crate::sched::current();
+        let cur0 = crate::sched::hotpath::current();
         let cur0_tgid = match cur0 {
             Some(t) => crate::sched::r#unsafe::task_shared(t).tgid() as u32,
             None => 0,
@@ -206,7 +206,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
             static FWW_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if FWW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
-                let cur = crate::sched::current();
+                let cur = crate::sched::hotpath::current();
                 let (tid2, tgid2, comm) = match cur {
                     Some(t) => {
                         (
@@ -232,7 +232,7 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
             }
         }
     }
-    let (tid, tgid) = match crate::sched::current() {
+    let (tid, tgid) = match crate::sched::hotpath::current() {
         Some(t) => { (t.pid(), t.tgid() as u32) },
         None => (0, 0),
     };
@@ -363,7 +363,7 @@ pub struct FutexKey {
 /// never sees the phys-bucketed waiter (FXK hunt r23: parent
 /// phys=0x7ffaa01c vs child phys=0, 10s of 1ms retry wakes, all lost).
 fn resolve_futex_phys(uaddr: usize) -> usize {
-    let Some(task) = crate::sched::current() else {
+    let Some(task) = crate::sched::hotpath::current() else {
         return 0;
     };
 
@@ -428,7 +428,7 @@ impl FutexKey {
     /// lookup failure — the fallback keys (mm, uaddr), which is
     /// self-consistent on both sides of a wake.
     fn vma_is_shared(uaddr: usize) -> bool {
-        let task = match crate::sched::current() {
+        let task = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return false,
         };
@@ -468,10 +468,10 @@ impl FutexKey {
                 core::sync::atomic::AtomicUsize::new(0);
             let n = FXK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 400 {
-                let pid = crate::sched::current()
+                let pid = crate::sched::hotpath::current()
                     .map(|t| t.pid())
                     .unwrap_or(0);
-                let comm = crate::sched::current()
+                let comm = crate::sched::hotpath::current()
                     .map(|t| {
                         alloc::string::String::from(t.comm_str())
                     })
@@ -536,7 +536,7 @@ pub fn task_futex_mm_id(task: *const Task) -> usize {
 }
 
 fn current_futex_mm_id() -> usize {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         // SAFETY: sched::current() returns the current task's raw pointer,
         // valid for the duration of this syscall.
         Some(t) => task_futex_mm_id(t),
@@ -548,7 +548,7 @@ fn current_futex_mm_id() -> usize {
 #[cfg(feature = "debug-futex-trace")]
 fn ftx_trace(tag: &[u8], uaddr: usize, a: u64, b: u64) {
     use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
-    let pid = crate::sched::current().map(|t| crate::sched::r#unsafe::task_shared(t).pid() as u64).unwrap_or(0);
+    let pid = crate::sched::hotpath::current().map(|t| crate::sched::r#unsafe::task_shared(t).pid() as u64).unwrap_or(0);
     taskdump_raw_line(b"FTX ");
     taskdump_raw_line(tag);
     taskdump_raw_line(b" pid=");
@@ -870,7 +870,7 @@ pub fn fuxwatch_arm_round() {
     {
         return;
     }
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
         let tk = crate::sched::r#unsafe::task_shared(task);
         // 81st: a park-latched slot-1 word is watched in its OWN tgid
@@ -1084,7 +1084,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     // traces N processes' objects at once and tid alone cannot
     // attribute a write (ohw115: param_watcher's counter and samgr's
     // mutex shared 0x7ff000499a50).
-    let wtgid = crate::sched::current()
+    let wtgid = crate::sched::hotpath::current()
         .map(|t| crate::sched::r#unsafe::task_shared(t).tgid() as u32)
         .unwrap_or(0);
     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
@@ -1323,7 +1323,7 @@ pub fn oh68_latch_owner_task(tid: u32) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let Some(tsk) = crate::sched::current() else {
+        let Some(tsk) = crate::sched::hotpath::current() else {
             return;
         };
         // SAFETY: current-task accessor in the FW fault path (the same
@@ -1393,16 +1393,16 @@ pub fn futex_stuck_census() {
     // 59th session: run-queue strand census rides the same burst —
     // pickable-shaped runnable tasks with a frozen exec clock (the
     // ohc74 close() strand class: linked, claim=-1, unexecuted 290 s).
-    crate::sched::sched::runq_strand_census(now as u64);
+    crate::sched::hotpath::runq_strand_census(now as u64);
 
     // runq-strand lane (121st): the culprits' side — per-CPU incumbents
     // holding their slot >= 2 s with the last tick's interrupted RIP and
     // mode (kernel loop vs user spin vs halted CPU).
-    crate::sched::sched::monopolist_census(now as u64);
+    crate::sched::hotpath::monopolist_census(now as u64);
 
     // 63rd session (mission lever 2): the FFRT group's wake→pick
     // latency profile per burst — quiet-phase vs wedge-phase cost.
-    crate::sched::sched::ffrt_wait_census();
+    crate::sched::hotpath::ffrt_wait_census();
 
     // lb343: 3 s bar (was 10 s). The OH boot cascade's decisive parks are
     // 4-5 s class — init's param-service thread sat 5.06 s between
@@ -1643,7 +1643,7 @@ pub fn futex_stuck_census() {
     // by an interrupted task-context writer. Try-walk (skipped buckets just
     // leave that stuck entry's tgid/tid fields at their phase-A defaults —
     // the uaddr/park-span data from phase A is already in hand).
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         for s in stuck.iter_mut() {
             // SAFETY: pointer identity comparison only (no deref of the
             // stored pointer).
@@ -2244,7 +2244,7 @@ pub fn futex_stuck_census() {
     let mut histos: Vec<Histo> = Vec::new();
     // Same lb325 discipline as phase B1: try-walk from the heartbeat —
     // a skipped bucket only under-counts that tgid's histogram this burst.
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = crate::sched::r#unsafe::task_shared(task);
         let tgid = tk.tgid() as u32;
@@ -2967,7 +2967,7 @@ pub fn futex_stuck_census() {
             && samgr_pid != 0
         {
             let mut maps_n = 0usize;
-            crate::sched::for_each_task_try(|task| {
+            crate::sched::hotpath::for_each_task_try(|task| {
                 // SAFETY: diagnostic reads under the for_each_task
                 // contract.
                 let tk = crate::sched::r#unsafe::task_shared(task);
@@ -3018,7 +3018,7 @@ pub fn futex_stuck_census() {
                 let mut run_s = alloc::string::String::new();
                 let mut nf = 0u32;
                 let mut ni = 0u32;
-                crate::sched::for_each_task_try(|task| {
+                crate::sched::hotpath::for_each_task_try(|task| {
                     // SAFETY: diagnostic reads under the for_each_task
                     // contract.
                     let tk = crate::sched::r#unsafe::task_shared(task);
@@ -3217,7 +3217,7 @@ fn free_waiter(index: usize) {
 fn pool_full_backoff() {
     use crate::process::task::{Task, TaskState};
 
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(c) => c as *mut Task,
         None => return,
     };
@@ -3242,11 +3242,11 @@ fn pool_full_backoff() {
             // A racing wake may have enqueued us while still executing —
             // take ourselves back off (NEW-C2 discipline).
             // SAFETY: current is the running task's pointer.
-            crate::sched::dequeue_task(crate::sched::r#unsafe::task_shared(current));
+            crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(current));
             break;
         }
         // SAFETY: schedule() operates on the current task.
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
     drop(wake);
 }
@@ -3551,7 +3551,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             core::sync::atomic::AtomicU32::new(0);
         let n = MISS0_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 240 {
-            let waker = crate::sched::current().map(|t| {
+            let waker = crate::sched::hotpath::current().map(|t| {
                 (t.pid(), t.tgid() as u32)
             });
             // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
@@ -3580,7 +3580,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         static MISS_REPORTS: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let mut waker_pid = 0u32;
-        if let Some(t) = crate::sched::current() {
+        if let Some(t) = crate::sched::hotpath::current() {
             // SAFETY: sched::current() yields the current task for the
             // duration of this syscall.
             waker_pid = crate::sched::r#unsafe::task_shared(t).pid();
@@ -3676,7 +3676,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         return -EINVAL as i64;
     }
 
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return -EFAULT as i64,
     };
@@ -3883,7 +3883,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             let id = crate::timer::add_timer_wakeup_hres(
                 crate::syscall::support::jiffies_covering_deadline(dl),
                 crate::syscall::support::deadline_ns_to_hres_ticks(dl),
-                crate::sched::get_current_pid(),
+                crate::sched::hotpath::get_current_pid(),
             );
             crate::drivers::timer::rearm_for_hres();
             id
@@ -3896,7 +3896,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             remove_waiter(bucket_idx, waiter_idx);
             return -ENOMEM as i64;
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         if let Some(id) = wake {
             if id != 0 {
                 crate::timer::del_timer(id);
@@ -4860,12 +4860,12 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             && RWFRZ_EXIT_WATCH_TGID.load(Relaxed) == 0
             && crate::trace::EVENT_FUTEX_MISS.armed()
         {
-            if let Some(t) = crate::sched::current() {
+            if let Some(t) = crate::sched::hotpath::current() {
                 // SAFETY: read-only tgid of the current task.
                 let tgid = crate::sched::r#unsafe::task_shared(t).tgid() as u32;
                 // SAFETY: pid-hash lookup of the tgid leader; read-only
                 // comm read.
-                let lead = crate::sched::find_task_by_pid(tgid);
+                let lead = crate::sched::hotpath::find_task_by_pid(tgid);
                 if !lead.is_null()
                     && crate::sched::r#unsafe::task_shared(lead).comm().starts_with(b"udisksd")
                 {
@@ -4918,7 +4918,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 [const { core::sync::atomic::AtomicU32::new(0) }; CTDE_SLOTS];
             static CTDE_FIRED: [core::sync::atomic::AtomicBool; CTDE_SLOTS] =
                 [const { core::sync::atomic::AtomicBool::new(false) }; CTDE_SLOTS];
-            if let Some(t) = crate::sched::current() {
+            if let Some(t) = crate::sched::hotpath::current() {
                 // SAFETY: read-only pid/tgid of the current task.
                 let (tid, tgid) = { (t.pid() as u32, t.tgid() as u32) };
                 let now = crate::timer::get_jiffies() as u32;
@@ -4973,7 +4973,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             if wa != 0 && wa == uaddr {
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
                 if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
-                    let (tid, tgid) = match crate::sched::current() {
+                    let (tid, tgid) = match crate::sched::hotpath::current() {
                         Some(t) => { (t.pid(), t.tgid()) },
                         None => (0, 0),
                     };
@@ -5027,13 +5027,13 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     {
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
-            crate::sched::current().map(|t| crate::sched::r#unsafe::task_shared(t).tgid() as u32);
+            crate::sched::hotpath::current().map(|t| crate::sched::r#unsafe::task_shared(t).tgid() as u32);
         // sc185: the SA-5100 parcel latch never fired in sc184 (zero FXDV
         // lines), so also latch by process name — the first futex from any
         // thread of "hdf_devmgr" latches its tgid. The parcel matcher stays
         // (earlier latch = earlier coverage), this is the backstop.
         if FXDV_PID.load(Relaxed) == 0 {
-            if let Some(t) = crate::sched::current() {
+            if let Some(t) = crate::sched::hotpath::current() {
                 let comm = crate::sched::r#unsafe::task_shared(t).comm();
                 let name = core::str::from_utf8(&comm[..])
                     .unwrap_or("")
@@ -5093,7 +5093,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 // any wait armed the page watch) and print each CHANGE.
                 // The final 0->0x10 transition's timestamp brackets the
                 // founder to the second, before any watch can arm.
-                if let Some(t) = crate::sched::current() {
+                if let Some(t) = crate::sched::hotpath::current() {
                     let base = FUXWATCH_ADDR.load(Relaxed) as usize;
                     if base != 0 {
                         static LAST1: [core::sync::atomic::AtomicU32; 2] =
@@ -5121,7 +5121,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 // the formation curve (0x10 -> 0x80000010 -> stuck) with
                 // the waiter's own expected val beside it decides
                 // stale-marker vs racing-writer vs kernel stomp.
-                if let Some(t) = crate::sched::current() {
+                if let Some(t) = crate::sched::hotpath::current() {
                     if let Some(w) = crate::sync::r#unsafe::read_u32_via_task(t, uaddr) {
                         let c = if addr_idx == usize::MAX {
                             0
@@ -5159,7 +5159,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         crate::pr_warn!(
                             "FXDV #{} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                             n,
-                            crate::sched::current()
+                            crate::sched::hotpath::current()
                                 .map(|t| t.pid())
                                 .unwrap_or(0),
                             match cmd {
@@ -5209,8 +5209,8 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 crate::pr_warn!(
                     "FXDV2 #{} tgid={} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                     n,
-                    crate::sched::current().map(|t| t.tgid()).unwrap_or(0),
-                    crate::sched::current().map(|t| t.pid()).unwrap_or(0),
+                    crate::sched::hotpath::current().map(|t| t.tgid()).unwrap_or(0),
+                    crate::sched::hotpath::current().map(|t| t.pid()).unwrap_or(0),
                     match cmd {
                         FUTEX_WAIT => "WAIT",
                         FUTEX_WAIT_BITSET => "WAITB",
@@ -5228,7 +5228,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
 
     #[cfg(feature = "debug-futex-trace")]
     {
-        let pid = crate::sched::current().map(|t| crate::sched::r#unsafe::task_shared(t).pid() as u64).unwrap_or(0);
+        let pid = crate::sched::hotpath::current().map(|t| crate::sched::r#unsafe::task_shared(t).pid() as u64).unwrap_or(0);
         use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ENTER pid=");
         taskdump_dec(pid);
@@ -5349,7 +5349,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             if wa != 0 && wa == uaddr {
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
                 if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
-                    let (tid, tgid) = match crate::sched::current() {
+                    let (tid, tgid) = match crate::sched::hotpath::current() {
                         Some(t) => { (t.pid(), t.tgid()) },
                         None => (0, 0),
                     };
@@ -5405,7 +5405,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     ) {
         let sp = crate::ipc::binder::binder_sareg_samgr_pid();
         if sp != 0 {
-            let mine = crate::sched::current()
+            let mine = crate::sched::hotpath::current()
                 .map(|t| crate::sched::r#unsafe::task_shared(t).tgid() == sp)
                 .unwrap_or(false);
             if mine
@@ -5415,10 +5415,10 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 static SMW_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if SMW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3000 {
-                    let tid = crate::sched::current()
+                    let tid = crate::sched::hotpath::current()
                         .map(|t| t.pid())
                         .unwrap_or(0);
-                    let comm = crate::sched::current()
+                    let comm = crate::sched::hotpath::current()
                         .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
@@ -5482,7 +5482,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             // Per-tgid accounting: find this tgid's slot (or the first
             // free one) and take one unit of its 3-dump budget.
             use core::sync::atomic::Ordering::Relaxed;
-            let cur_tgid = crate::sched::current()
+            let cur_tgid = crate::sched::hotpath::current()
                 .map(|t| crate::sched::r#unsafe::task_shared(t).tgid() as u32)
                 .unwrap_or(0);
             let mut tslot = usize::MAX;
@@ -5514,7 +5514,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 && tgid_ok
                 && crate::trace::EVENT_PARKDUMP.armed()
             {
-                if let Some(t) = crate::sched::current() {
+                if let Some(t) = crate::sched::hotpath::current() {
                     let tk = crate::sched::r#unsafe::task_shared(t);
                     let comm = tk.comm();
                     let name = core::str::from_utf8(&comm[..])
@@ -5568,7 +5568,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // first dump already carries the chain.
     if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
         if uaddr >= 0x7ffffffd0000 && uaddr < 0x7ffffffff000 {
-            if let Some(t) = crate::sched::current() {
+            if let Some(t) = crate::sched::hotpath::current() {
                 let tk = crate::sched::r#unsafe::task_shared(t);
                 let comm = core::str::from_utf8(&tk.comm()[..])
                     .unwrap_or("")
@@ -6016,12 +6016,12 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 core::sync::atomic::AtomicUsize::new(0);
             if NS.load(core::sync::atomic::Ordering::Relaxed) < 400 {
                 NS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                let comm = crate::sched::current()
+                let comm = crate::sched::hotpath::current()
                     .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let tid = crate::sched::current()
+                let tid = crate::sched::hotpath::current()
                     .map(|t| t.pid())
                     .unwrap_or(0);
                 // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
@@ -6060,19 +6060,19 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     | FUTEX_CMP_REQUEUE
             )
         {
-            let mine = crate::sched::current()
+            let mine = crate::sched::hotpath::current()
                 .map(|t| crate::sched::r#unsafe::task_shared(t).tgid() == lt)
                 .unwrap_or(false);
             if mine || word_hit {
                 let n = FXRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < FXRS_BUDGET {
-                    let tid = crate::sched::current()
+                    let tid = crate::sched::hotpath::current()
                         .map(|t| t.pid())
                         .unwrap_or(0);
-                    let tgid = crate::sched::current()
+                    let tgid = crate::sched::hotpath::current()
                         .map(|t| t.tgid())
                         .unwrap_or(0);
-                    let comm = crate::sched::current()
+                    let comm = crate::sched::hotpath::current()
                         .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
@@ -6129,7 +6129,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
         && timeout != 0
         && crate::trace::EVENT_FUTEX_MISS.armed()
     {
-        if let Some(t) = crate::sched::current() {
+        if let Some(t) = crate::sched::hotpath::current() {
             let tk = crate::sched::r#unsafe::task_shared(t);
             let comm = core::str::from_utf8(&tk.comm()[..])
                 .unwrap_or("")
@@ -6261,7 +6261,7 @@ fn rwfz_op_log(uaddr: usize, op: i32, val: u32, result: i64) {
         FUTEX_CMP_REQUEUE => "CMP-REQ",
         _ => "other",
     };
-    let tid = crate::sched::current()
+    let tid = crate::sched::hotpath::current()
         .map(|t| t.pid() as u64)
         .unwrap_or(0);
     // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).

@@ -154,7 +154,7 @@ fn dump_all_cpu_stacks() {
     // The calling CPU's own backtrace, symbolized (Linux's 'l' prints
     // a backtrace per CPU; the other CPUs' stacks are scanned below).
     crate::debug::backtrace::dump_stack();
-    let currents = crate::sched::sched::grq_diag_cpu_currents();
+    let currents = crate::sched::hotpath::grq_diag_cpu_currents();
     for (cpu, (pid, is_idle, task)) in currents.iter().enumerate() {
         if task.is_null() {
             crate::println!("CPU{}: no current task", cpu);

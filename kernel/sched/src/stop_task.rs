@@ -16,7 +16,7 @@
 #![forbid(unsafe_code)]
 
 use crate::process::task::Task;
-use crate::sched::class::{SchedClass, RunQueueRef};
+use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 
 /// Stop task scheduling class
 pub struct StopSchedClass;

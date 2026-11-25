@@ -246,7 +246,7 @@ pub fn kill_other_threads(current: &Task) {
                         core::ptr::addr_of!(m.ti_on_cpu) as *const u64,
                     );
                     let (ph, ph_ago) =
-                        crate::sched::sched::pick_trace_peek(m_raw).unwrap_or((0, 0));
+                        crate::sched::hotpath::pick_trace_peek(m_raw).unwrap_or((0, 0));
                     let tid = m
                         .timed_sleep_timer_id
                         .load(core::sync::atomic::Ordering::Relaxed);
@@ -454,7 +454,7 @@ pub fn wait_for_thread_group_death(current: &Task, killable: bool) -> bool {
         current.set_state(crate::task::TaskState::new(
             crate::task::TaskState::INTERRUPTIBLE,
         ));
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         current.set_state(crate::task::TaskState::new(
             crate::task::TaskState::RUNNING,
         ));
@@ -510,7 +510,7 @@ pub fn de_thread(current: &Task) -> bool {
 /// exactly-once take). Exits: `None` = burned (the free ran; the claim
 /// was consumed), `Some(claim)` = re-park (the R87/R86 adjudication
 /// deferred; the caller pushes `claim.into_parked()` back on the list).
-fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::sched::reapdrain::ReapClaim> {
+fn free_dead_member(claim: crate::sched::types::ReapClaim) -> Option<crate::sched::types::ReapClaim> {
     // The caller parked `member` DEAD on the dead list; nothing else can
     // reach it while we hold the list's discipline (INV-PROC-BORROW-1's
     // dead-list arm). The claim owns the free — this body is its burn
@@ -583,13 +583,13 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
         // round — {flag set AND on_cpu false AND no marker} is the full
         // no-references condition.
         while m.on_cpu()
-            || crate::sched::sched::switching_out_names(member)
+            || crate::sched::hotpath::switching_out_names(member)
             || !m
                 .terminal_switch_done
                 .load(core::sync::atomic::Ordering::Acquire)
         {
             if spins == 0 {
-                let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
+                let cur_pid = crate::sched::hotpath::current().map(|c| c.pid()).unwrap_or(0);
                 crate::debug::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
                 crate::debug::taskdump::taskdump_dec(cur_pid as u64);
                 crate::debug::taskdump::taskdump_raw_line(b" member=");
@@ -613,7 +613,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
                 // on_cpu false and exits the loop; anything else is a
                 // live or ambiguous owner — DEFER to the next sweep,
                 // never free what a live owner claims.
-                if !crate::sched::sched::member_release_stale_ownership(member) {
+                if !crate::sched::hotpath::member_release_stale_ownership(member) {
                     deferred = true;
                     break;
                 }
@@ -621,7 +621,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
             }
             spins = spins.wrapping_add(1);
             if spins % FDM_SPIN_BATCH == 0 {
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
             } else {
                 core::hint::spin_loop();
             }
@@ -732,7 +732,7 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         // final switch-out completed). The take-out above (under the
         // list lock) is the mint point — the exactly-once free is typed
         // from here to the burn.
-        let freed = match crate::sched::reapdrain::ReapClaim::mint(m) {
+        let freed = match crate::sched::types::ReapClaim::mint(m) {
             Some(c) => free_dead_member(c).is_none(),
             None => false,
         };
@@ -751,7 +751,7 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         // references per member under the OH thread-churn load; without
         // a yield point a long sweep monopolizes this CPU (steady
         // WAKE-STRANDED family). Safe point: no locks held here.
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
     }
     // 69th (105-family fix) — deferred-release finisher. When this
     // group's leader was reaped while a member (possibly the caller
@@ -766,7 +766,7 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         .release_deferred
         .load(core::sync::atomic::Ordering::Acquire)
     {
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             let cur = cur;
             // SAFETY: leader is a valid task (its storage free is
             // exactly what this finisher arbitrates); cur is the
@@ -798,7 +798,7 @@ pub fn sweep_dead_threads(leader: *mut Task) {
                 // lock above is the mint point — the population-
                 // selected handoff is lock-arbitrated exactly-once, so
                 // the post-take obligation is linear like every other.
-                if let Some(c) = crate::sched::reapdrain::ReapClaim::mint(leader) {
+                if let Some(c) = crate::sched::types::ReapClaim::mint(leader) {
                     release_task_storage(c);
                 }
             }
@@ -904,7 +904,7 @@ pub fn release_task(task: *mut Task) {
                     // SAFETY: m was parked DEAD with its final switch-out
                     // complete; the list no longer references it (the
                     // retain above was the take-out — the mint point).
-                    let freed = match crate::sched::reapdrain::ReapClaim::mint(m) {
+                    let freed = match crate::sched::types::ReapClaim::mint(m) {
                         Some(c) => free_dead_member(c).is_none(),
                         None => false,
                     };
@@ -972,7 +972,7 @@ pub fn release_task(task: *mut Task) {
         // hot spin: the stragglers need CPU to finish dying, and the
         // reaper's CPU must stay available to the rest of the system.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
 
     // ===== RUSAGE_CHILDREN fold at reap (reference wait_task_zombie) =====
@@ -992,7 +992,7 @@ pub fn release_task(task: *mut Task) {
         // context (do_wait/do_waitid, including init reaping orphans);
         // the child's own parent pointer is already None here (the
         // E8-REPAR claim), so the fold targets the caller.
-        if let Some(parent) = crate::sched::current() {
+        if let Some(parent) = crate::sched::hotpath::current() {
             (*parent).ext.cutime_ticks.fetch_add(u + cu, Relaxed);
             (*parent).ext.cstime_ticks.fetch_add(s + cs, Relaxed);
             let _ = (*parent).ext.cmaxrss_kb.fetch_max(rss.max(crss), Relaxed);
@@ -1029,7 +1029,7 @@ pub fn release_task(task: *mut Task) {
         let mut stranded: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
         t.collect_children_pinned(&mut stranded);
         if !stranded.is_empty() {
-            let init = crate::sched::find_task_by_pid(1);
+            let init = crate::sched::hotpath::find_task_by_pid(1);
             if !init.is_null() {
                 static HEAL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
@@ -1095,11 +1095,11 @@ pub fn release_task(task: *mut Task) {
     // single-threaded shape), so 1000 reaps = 3000 s and P4 could
     // never finish. Over cap (wedged drainer) the old bounded
     // synchronous path stands as the fallback.
-    if !crate::sched::reapdrain::defer_reap_storage(task, t.parent_ptr().map(|p: *const Task| crate::r#unsafe::borrow_task(p as *mut Task).pid()).unwrap_or(0)) {
+    if !crate::sched::hotpath::defer_reap_storage(task, t.parent_ptr().map(|p: *const Task| crate::r#unsafe::borrow_task(p as *mut Task).pid()).unwrap_or(0)) {
         // Over-cap fallback: the obligation the drainer could not take
         // is minted here and burned synchronously (the cold path's
         // exactly-once, typed the same way).
-        if let Some(c) = crate::sched::reapdrain::ReapClaim::mint(task) {
+        if let Some(c) = crate::sched::types::ReapClaim::mint(task) {
             release_task_storage(c);
         }
     }
@@ -1130,7 +1130,7 @@ pub fn release_task(task: *mut Task) {
 /// consumed), or the RTS-DEFER early return (the obligation re-parks
 /// on the reaper's dead_threads via the channel boundary — the raw
 /// pointer the early-return pushes IS the un-minted claim).
-fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
+fn release_task_storage(claim: crate::sched::types::ReapClaim) {
     let task = claim.as_ptr();
     // SAFETY: unreachable through the pid hash / process tree (the
     // release contract); this call owns the storage.
@@ -1180,7 +1180,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
     const RTS_SWITCH_WAIT_JIFFIES: u64 = 300;
     let rts_armed_at = crate::timer::get_jiffies();
     while t.on_cpu()
-        || crate::sched::sched::switching_out_names(task)
+        || crate::sched::hotpath::switching_out_names(task)
         || !t
             .terminal_switch_done
             .load(core::sync::atomic::Ordering::Acquire)
@@ -1223,7 +1223,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
                 crate::debug::taskdump::taskdump_dec(t.on_cpu() as u64);
                 crate::debug::taskdump::taskdump_raw_line(b" swout=");
                 crate::debug::taskdump::taskdump_dec(
-                    crate::sched::sched::switching_out_names(task) as u64,
+                    crate::sched::hotpath::switching_out_names(task) as u64,
                 );
                 crate::debug::taskdump::taskdump_raw_line(b" tsd=");
                 crate::debug::taskdump::taskdump_dec(
@@ -1234,7 +1234,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
                 crate::debug::taskdump::taskdump_raw_line(b" slot=");
                 let mut slot_pid = u32::MAX;
                 for c in 0..crate::config::MAX_CPUS {
-                    let cur = crate::sched::sched::cpu_state(c).current;
+                    let cur = crate::sched::hotpath::cpu_state(c).current;
                     if cur == task {
                         slot_pid = c as u32;
                         break;
@@ -1251,7 +1251,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
             // (the one this call was about to drop via the final
             // task_put) is transferred to the list — the count is
             // unchanged and the page outlives the owner's switch.
-            if let Some(reaper) = crate::sched::current() {
+            if let Some(reaper) = crate::sched::hotpath::current() {
                 let rp = reaper as *mut Task as *mut Task;
                 if rp != task {
                     crate::r#unsafe::borrow_task_mut(rp)
@@ -1304,7 +1304,7 @@ pub fn reparent_children_to_init(dying: &Task) {
 
     // init task (PID 1); falls back to no-op when absent (early boot).
     // SAFETY: pid 1's Task lives until system shutdown.
-    let init = crate::sched::find_task_by_pid(1);
+    let init = crate::sched::hotpath::find_task_by_pid(1);
     if init.is_null() {
         return;
     }

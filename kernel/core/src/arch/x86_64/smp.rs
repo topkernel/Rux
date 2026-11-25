@@ -615,7 +615,7 @@ pub extern "C" fn ap_entry64() -> ! {
     // can arrive right after STI) finds a valid task on this CPU, and
     // touch this CPU's watchdog so the boot-time gap (idle task created
     // on the BSP seconds ago under TCG) cannot read as a lockup.
-    crate::arch::cpu::set_thread_id(crate::sched::idle_task_ptr(cpu) as u64);
+    crate::arch::cpu::set_thread_id(crate::sched::hotpath::idle_task_ptr(cpu) as u64);
     crate::debug::softlockup::touch(cpu);
 
     PER_CPU[cpu].cpu_online.store(1, Ordering::Release);
@@ -636,6 +636,6 @@ pub extern "C" fn ap_entry64() -> ! {
 
     // Join the scheduler (registers this CPU's idle task in the
     // per-CPU scheduler state, then never returns).
-    crate::sched::init_secondary(cpu);
-    crate::sched::cpu_idle_loop();
+    crate::sched::hotpath::init_secondary(cpu);
+    crate::sched::hotpath::cpu_idle_loop();
 }

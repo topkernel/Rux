@@ -86,7 +86,7 @@ fn bmsscan_watch_open(path: &str, flags: u32) {
         2 => "RDWR",
         _ => "?",
     };
-    let (pid, comm) = rux::sched::current()
+    let (pid, comm) = rux::sched::hotpath::current()
         .map(|t| (::process::current_pid(), t.comm_str().into_owned()))
         .unwrap_or((0, alloc::string::String::new()));
     // Parent-dir state: a CREAT open whose parent is missing WILL fail
@@ -128,7 +128,7 @@ pub fn bmsscan_watch_mkdir(path: &str) {
     if n >= 128 {
         return;
     }
-    let comm = rux::sched::current()
+    let comm = rux::sched::hotpath::current()
         .map(|t| t.comm_str().into_owned())
         .unwrap_or_default();
     // HOTPATH-PRINT: bmscan hunt tap; fn-entry budget N<128 (BMSSCAN family)
@@ -535,7 +535,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // path_lookup + String formatting per /dev open, ~227 lines/boot)
     // arms only via rux:ohhunt (retired debug=ohhunt) (or legacy sprobe=1).
     if full_path.starts_with("/dev/") && crate::debug::switches::oh_hunt_prints_on() {
-        let root = rux::sched::current()
+        let root = rux::sched::hotpath::current()
             .and_then(|t| t.fs_arc())
             .map(|fs| fs.get_root())
             .unwrap_or_default();
@@ -704,7 +704,7 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     // process fd table FIRST: an ordinary fd in [512, fdtable_max) must be
     // closed as a regular file, not hijacked by the MQ namespace.
     if fd >= 512 {
-        let in_fdtable = rux::sched::get_current_fdtable()
+        let in_fdtable = rux::sched::hotpath::get_current_fdtable()
             .map(|ft| ft.get_file(fd).is_some())
             .unwrap_or(false);
         if !in_fdtable {
@@ -1158,7 +1158,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     // scanned directory issues a handful of getdents calls; the FIRST
     // result per fd decides empty (0 bytes = no entries) vs walked.
     if bmsscan_on() {
-        let wpath = rux::sched::get_current_fdtable()
+        let wpath = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(fd))
             .and_then(|f| {
                 let p = f.path();
@@ -1186,7 +1186,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
                             Ok(b) => alloc::format!("{}", b),
                             Err(e) => alloc::format!("errno {}", -e),
                         };
-                        let comm = rux::sched::current()
+                        let comm = rux::sched::hotpath::current()
                             .map(|t| t.comm_str().into_owned())
                             .unwrap_or_default();
                         // HOTPATH-PRINT: bmscan dents tap; budget DN<500 + first-slot filter
@@ -1207,7 +1207,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     // ioctl ever issued. Name the /dev/dri getdents result directly.
     // 110th: rides the ohhunt gate with the drm census.
     if crate::debug::switches::oh_hunt_prints_on() {
-        let path = rux::sched::get_current_fdtable()
+        let path = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(fd))
             .and_then(|f| {
                 let p = f.path();
@@ -1676,7 +1676,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         let empty = crate::arch::uaccess_safe::copy_in(&mut pbuf, pathname_ptr as usize) == 0
             && pbuf[0] == 0;
         if empty && dirfd >= 0 {
-            let file = rux::sched::get_current_fdtable()
+            let file = rux::sched::hotpath::get_current_fdtable()
                 .and_then(|ft| ft.get_file(dirfd as usize));
             if let Some(file) = file {
                 // file comes from the fd table; inode accessed
@@ -1724,7 +1724,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     // /proc/self/exe - return program path (P1 chroot: global-namespace
     // shortcut, non-chrooted tasks only).
     if !crate::fs::vfs::process_rooted() && pathname == "/proc/self/exe" {
-        if let Some(current) = rux::sched::current() {
+        if let Some(current) = rux::sched::hotpath::current() {
             let exe_path = current.get_exe_path();
 
             // Linux readlink NEVER fails with ENAMETOOLONG — it truncates
@@ -1840,7 +1840,7 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
     // (LTP acct01's ro_mntpoint TINFO; any realpath() from a non-root
     // cwd on an absolute path).
     if !pathname.starts_with('/') && dirfd == AT_FDCWD {
-        if let Some(current) = rux::sched::current() {
+        if let Some(current) = rux::sched::hotpath::current() {
             let cwd = current.get_cwd();
             let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
             let mut full = if cwd_str.ends_with('/') {
@@ -1986,7 +1986,7 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
                 .map(|d| d.build_path())
                 .unwrap_or_else(|| alloc::string::String::from(pathname));
             let cwd_dentry = vpath.dentry.clone();
-            if let Some(current) = rux::sched::current() {
+            if let Some(current) = rux::sched::hotpath::current() {
                 // SAFETY: current is the running task's Task pointer from
                 // sched::current(); fs_arc() only clones the Arc out of it.
                 if let Some(fs) = current.fs_arc() {
@@ -2049,7 +2049,7 @@ pub fn sys_fchdir(args: SyscallArgs) -> i64 {
     let physical = dentry.build_path();
     let cwd_dentry = dentry.clone();
 
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
         if let Some(fs) = task.fs_arc() {
@@ -2072,7 +2072,7 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
         return -(errno::ERANGE as i64);
     }
 
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // SAFETY: current is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
         let fs = current.fs_arc();
@@ -2178,7 +2178,7 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
 /// sys_umask - Set file mode creation mask
 pub fn sys_umask(args: SyscallArgs) -> i64 {
     let new_mask = (args[0] & 0o777) as u32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         task.set_umask(new_mask) as i64
     } else {
         0o022i64
@@ -2305,7 +2305,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
             static N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                let comm = rux::sched::current()
+                let comm = rux::sched::hotpath::current()
                     .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
@@ -2378,7 +2378,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // unmounted ext4 dir instead.
     let target_owned = ph.t(3, || {
         if !target.starts_with('/') {
-            match rux::sched::current() {
+            match rux::sched::hotpath::current() {
                 Some(t) => {
                     let cwd = t.get_cwd();
                     let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
@@ -2514,7 +2514,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             if source.starts_with('/') {
                 return alloc::string::String::from(source);
             }
-            match rux::sched::current() {
+            match rux::sched::hotpath::current() {
                 Some(t) => {
                     let cwd = t.get_cwd();
                     let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + source.len());
@@ -2916,7 +2916,7 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     // Same CWD resolution as sys_mount — umount(2) takes the same kind
     // of path and must unmount the mount the caller sees.
     let target_owned = if !target.starts_with('/') {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => {
                 let cwd = t.get_cwd();
                 let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
@@ -2978,7 +2978,7 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     // consume the marker and report success so the sandbox setup
     // proceeds — the jail root itself is untouched.
     if flags & MNT_DETACH != 0 {
-        if let Some(t) = rux::sched::current() {
+        if let Some(t) = rux::sched::hotpath::current() {
             // SAFETY: sched::current() yields a valid task reference.
             if let Some(fs) = t.fs_arc() {
                 if let Some(po) = fs.pivot_put_old() {
@@ -3139,7 +3139,7 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
             } else {
                 alloc::format!("{}B", size)
             };
-            let comm = rux::sched::current()
+            let comm = rux::sched::hotpath::current()
                 .map(|t| t.comm_str().into_owned())
                 .unwrap_or_default();
             // HOTPATH-PRINT: bmscan access tap; fn-entry budget (BMSSCAN family, N<800)
@@ -3165,7 +3165,7 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     // the euid is only used when AT_EACCESS is passed — and faccessat on
     // riscv64 has no flags argument, so the real id is always correct
     // here). The old code used the entire cred (which resolves by euid).
-    let mut cred = if let Some(task) = rux::sched::current() {
+    let mut cred = if let Some(task) = rux::sched::hotpath::current() {
         task.cred().clone()
     } else {
         ::process::task::Cred::new_init()
@@ -3279,7 +3279,7 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
         };
         // Times setter permission: owner or CAP_FOWNER (same rule as the
         // path form).
-        let cred = match rux::sched::current() {
+        let cred = match rux::sched::hotpath::current() {
             Some(t) => t.cred().clone(),
             None => return -(errno::EPERM as i64),
         };
@@ -3531,7 +3531,7 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
     } else {
         // Relative path resolved against the directory referenced by dirfd.
         // The fd must exist and be a directory (Linux: EBADF / ENOTDIR).
-        let file = rux::sched::get_current_fdtable()
+        let file = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(dirfd as usize))
             .ok_or((-errno::EBADF as i64) as u64)?;
         // file comes from the fd table; inode accessed read-only
@@ -3727,7 +3727,7 @@ pub fn sys_ftruncate(args: SyscallArgs) -> i64 {
     // resolved in this task's own context — the audit cannot walk a
     // foreign fd table from timer context.
     {
-        let p = rux::sched::get_current_fdtable()
+        let p = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(fd))
             .map(|f| f.path())
             .unwrap_or_default();
@@ -4512,7 +4512,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
 
     // Resolve the base: dirfd's path (AT_FDCWD → cwd).
     let base: alloc::string::String = if dirfd == -100 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => {
                 let cwd = (*t).get_cwd();
                 alloc::string::String::from_utf8_lossy(&cwd).into_owned()
@@ -4783,7 +4783,7 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
             // S_IFSOCK: create the node on the owning filesystem (Linux
             // do_mknodat → vfs_mknod; no capability required). AF_UNIX
             // bind(2) can later claim the name.
-            let umask = match rux::sched::current() {
+            let umask = match rux::sched::hotpath::current() {
                 Some(task) => {
                     // SAFETY: sched::current() yields a valid task reference.
                     task.get_umask()
@@ -4858,7 +4858,7 @@ fn mkfifo_at(path: &str, perm: u32) -> i64 {
 fn mknod_device(path: &str, ftype: u32, dev: u32, perm: u32) -> i64 {
     let type_bits = if ftype == 0o020000 { 0o020000 } else { 0o060000 };
     // do_mknodat applies the umask before handing the mode down.
-    let umask = match rux::sched::current() {
+    let umask = match rux::sched::hotpath::current() {
         Some(task) => {
             // SAFETY: sched::current() yields a valid task reference.
             task.get_umask()
@@ -4958,7 +4958,7 @@ fn fchmod_file_core(file: &alloc::sync::Arc<crate::fs::file::File>, mode: u32) -
     match inode_opt.as_ref() {
         Some(inode) => {
             // Permission check: require CAP_FOWNER or be the file owner
-            let cred = match rux::sched::current() {
+            let cred = match rux::sched::hotpath::current() {
                 Some(t) => t.cred().clone(),
                 None => return -(errno::EPERM as i64),
             };
@@ -5696,7 +5696,7 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
         Some(d) => d.build_path(),
         None => crate::fs::path::path_normalize(&full_path),
     };
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // SAFETY: current is the running task's Task pointer from
         // sched::current(); fs_arc() only clones the Arc out of it.
         if let Some(fs) = current.fs_arc() {
@@ -5748,7 +5748,7 @@ fn fchown_file_core(file: &alloc::sync::Arc<crate::fs::file::File>, uid: u32, gi
             // own uid and any gid it belongs to; anything else EPERMs
             // (LTP fchown03: nobody chgrps its own file to its own
             // group and expects success).
-            let cred = match rux::sched::current() {
+            let cred = match rux::sched::hotpath::current() {
                 Some(t) => t.cred().clone(),
                 None => return -(errno::EPERM as i64),
             };
@@ -6087,7 +6087,7 @@ pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
                     Err(e) => return -(e as i64),
                 }
             } else {
-                let fdtable = match rux::sched::get_current_fdtable() {
+                let fdtable = match rux::sched::hotpath::get_current_fdtable() {
                     Some(ft) => ft,
                     None => return -(errno::EBADF as i64),
                 };
@@ -6219,7 +6219,7 @@ pub fn sys_open_by_handle_at(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -7627,7 +7627,7 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         };
         let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
-        if let Some(current) = rux::sched::current() {
+        if let Some(current) = rux::sched::hotpath::current() {
             // sigmask is a plain u64 on the running task.
             saved_mask_cell.set(current.sigmask);
             current.sigmask = new_mask;
@@ -7635,7 +7635,7 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
     }
     let ret = crate::misc::sys_epoll_wait([args[0], args[1], args[2], timeout_ms as u64, 0, 0]);
     if mask_applied {
-        if let Some(current) = rux::sched::current() {
+        if let Some(current) = rux::sched::hotpath::current() {
             current.sigmask = saved_mask_cell.get();
         }
     }

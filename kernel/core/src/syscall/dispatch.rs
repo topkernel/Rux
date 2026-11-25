@@ -257,7 +257,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // cost on the fast path when no dump has been requested — saves a
     // per-CPU load + 3 stores per syscall).
     if LASTSYS_LATCH_ON.load(core::sync::atomic::Ordering::Relaxed) {
-        let cur = crate::sched::current();
+        let cur = crate::sched::hotpath::current();
         if let Some(cur) = cur {
             use core::sync::atomic::Ordering::Relaxed;
             cur.ext.last_syscall_nr.store(syscall_no as u32, Relaxed);
@@ -506,7 +506,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     if crate::trace::EVENT_SYSFORENSIC.armed() {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             use core::sync::atomic::Ordering::Relaxed;
             cur.ext.last_syscall_nr.store(syscall_no as u32, Relaxed);
             cur.ext.last_syscall_a0.store(args[0], Relaxed);
@@ -566,7 +566,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 && UNK_N[slot].fetch_add(1, Relaxed) < 8
                 && UNK_TOTAL.fetch_add(1, Relaxed) < 400;
             if budget_ok {
-                let comm = match crate::sched::current() {
+                let comm = match crate::sched::hotpath::current() {
                     Some(t) => {
                         // SAFETY: sched::current() returns the running task;
                         // comm_str is the lossy NUL-aware decoder.
@@ -661,7 +661,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // forensics — see Task::did_exec and the do_exit printer). One
     // integer compare on the exec numbers only.
     if syscall_no == 59 || syscall_no == 322 {
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             cur.ext.did_exec.store(true, core::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -678,7 +678,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // syscalls; the fault printer must see these on quiet boots.
     match syscall_no {
         9 | 10 | 11 | 12 | 25 | 28 => {
-            if let Some(cur) = crate::sched::current() {
+            if let Some(cur) = crate::sched::hotpath::current() {
                 use core::sync::atomic::Ordering::Relaxed;
                 let op: u64 = match syscall_no {
                     9 => 1,
@@ -737,7 +737,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // action sequence, not just its failures. sc135 (Session Q): ring
     // deepened 12 -> LAST_CALLS_LEN (96) — sc129's 12-deep ring saw only
     // the clock_gettime retry loop masking the real pre-park sequence.
-    if let Some(cur) = crate::sched::current() {
+    if let Some(cur) = crate::sched::hotpath::current() {
         use core::sync::atomic::Ordering::Relaxed;
         let idx = cur.ext.last_calls_cur.fetch_add(1, Relaxed)
             % crate::process::task::LAST_CALLS_LEN;
@@ -770,7 +770,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             _ => false,
         };
         if !skip {
-            if let Some(cur) = crate::sched::current() {
+            if let Some(cur) = crate::sched::hotpath::current() {
                 use core::sync::atomic::Ordering::Relaxed;
                 let n = cur.ext.init_calls_cur.fetch_add(1, Relaxed);
                 let idx = n % crate::process::task::INIT_CALLS_LEN;
@@ -794,7 +794,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // sc135 (Session Q): a0/a1 stored alongside — the nr167=-22 entries
     // need the prctl OPTION named.
     if result < 0 && result > -4096 {
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
             let idx = cur.ext.last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 8;
             cur.ext.last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
@@ -814,7 +814,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // BINDER_WRITE_READ? /dev/xpm? a param-area ioctl?). The fd set at
     // park time has no xpm/dec fd, so the loop polls an open service fd.
     if syscall_no == 29 {
-        let comm = crate::sched::current()
+        let comm = crate::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -848,7 +848,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // runtime phase writes SUCCEED and need printing too (print every
     // result, budget 700).
     if syscall_no == 66 && args[0] == 3 {
-        let comm = crate::sched::current()
+        let comm = crate::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -969,7 +969,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // forked children carry the same comm but a different pid), and
     // hex-dump the first 16 sockaddr bytes for abstract sockets.
     if syscall_no == 203 {
-        let cur_task = crate::sched::current();
+        let cur_task = crate::sched::hotpath::current();
         let comm = cur_task
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -1064,7 +1064,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // print nothing. Catch every prctl-EINVAL at dispatch exit with all
     // five args, scoped to the app family, budget 40.
     if syscall_no == 167 && result == -22 {
-        let comm = crate::sched::current()
+        let comm = crate::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -1144,7 +1144,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     if result == -2
         && (syscall_no as u64 == 2 || syscall_no as u64 == 56 || syscall_no as u64 == 257)
     {
-        let comm_ok = crate::sched::current()
+        let comm_ok = crate::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| {
                 let s = core::str::from_utf8(&c[..]).unwrap_or("").trim_end_matches('\0');
@@ -1167,7 +1167,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                         .unwrap_or("<efault>")
                 } else { "-" };
                 // Root context: a pivoted child resolves against its jail.
-                let root = crate::sched::current()
+                let root = crate::sched::hotpath::current()
                     .and_then(|t| t.fs_arc())
                     .map(|fs| fs.get_root())
                     .unwrap_or_default();
@@ -1641,7 +1641,7 @@ pub mod fixbl {
         let n = HITS[idx].fetch_add(1, Ordering::Relaxed);
         if n == 0 && !SEEN[idx].swap(true, Ordering::AcqRel) {
             let pid = crate::process::current_pid();
-            let comm = match crate::sched::current() {
+            let comm = match crate::sched::hotpath::current() {
                 Some(t) => t.comm_str(),
                 None => alloc::borrow::Cow::Borrowed("?"),
             };

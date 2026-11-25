@@ -202,7 +202,7 @@ pub fn synchronize_rcu() {
         // Check every online CPU has reported a QS at or after `gen`.
         let mut all_qs = true;
         for i in 0..MAX_CPUS {
-            if !crate::sched::sched::cpu_online(i) {
+            if !crate::sched::hotpath::cpu_online(i) {
                 continue;
             }
             if !cpu_quiescent(i, gen) {
@@ -218,7 +218,7 @@ pub fn synchronize_rcu() {
         // deadlocks on UP (no other task can produce quiescent states)
         // and wastes CPU time on SMP.  schedule() lets other tasks run
         // so they can context-switch and report their quiescent states.
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
 }
 
@@ -413,10 +413,10 @@ pub fn rcu_gen_now() -> u32 {
 pub fn rcu_grace_watermark() -> u32 {
     let mut wm = u32::MAX;
     for i in 0..MAX_CPUS {
-        if !crate::sched::sched::cpu_online(i) {
+        if !crate::sched::hotpath::cpu_online(i) {
             continue;
         }
-        if crate::sched::sched::cpu_running_idle(i) {
+        if crate::sched::hotpath::cpu_running_idle(i) {
             continue;
         }
         let g = RCU_QS_GEN[i].load(Ordering::Acquire);
@@ -457,7 +457,7 @@ pub fn grace_waiter_release() {
 pub fn grace_lagging_cpus(target: u32) -> alloc::vec::Vec<usize> {
     let mut v = alloc::vec::Vec::new();
     for i in 0..MAX_CPUS {
-        if !crate::sched::sched::cpu_online(i) {
+        if !crate::sched::hotpath::cpu_online(i) {
             continue;
         }
         if cpu_quiescent(i, target) {
@@ -556,8 +556,8 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                 let mut qs_desc = alloc::string::String::new();
                 let mut stuck = usize::MAX;
                 for i in 0..MAX_CPUS {
-                    let on = crate::sched::sched::cpu_online(i);
-                    let idle = crate::sched::sched::cpu_running_idle(i);
+                    let on = crate::sched::hotpath::cpu_online(i);
+                    let idle = crate::sched::hotpath::cpu_running_idle(i);
                     let q = RCU_QS_GEN[i].load(Ordering::Acquire);
                     use core::fmt::Write as _;
                     let _ = write!(
@@ -571,7 +571,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                 }
                 let mut victim = alloc::string::String::new();
                 if stuck != usize::MAX {
-                    let cur = crate::sched::sched::grq_diag_cpu_currents();
+                    let cur = crate::sched::hotpath::grq_diag_cpu_currents();
                     let t = cur[stuck].2 as *mut crate::process::task::Task;
                     if !t.is_null() {
                         // SAFETY: diagnostic read of stable fields on the
@@ -669,7 +669,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                 // floods the log.
                 let mut stuck = usize::MAX;
                 for i in 0..MAX_CPUS {
-                    if crate::sched::sched::cpu_online(i) && !cpu_quiescent(i, gen) {
+                    if crate::sched::hotpath::cpu_online(i) && !cpu_quiescent(i, gen) {
                         stuck = i;
                         break;
                     }
@@ -682,12 +682,12 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             return false;
         }
 
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => {
                 // Early-boot / no-task context: no sleep possible —
                 // plain yield rounds keep the wait alive.
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 continue;
             }
         };
@@ -738,7 +738,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             // and lets peers run; the loop top re-checks completion and
             // the deadline on every return.
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             continue;
         }
         let target = crate::timer::get_jiffies() + 1;
@@ -764,7 +764,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     (*current).set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while
                     // still executing — take ourselves back off.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                 }
                 crate::timer::del_timer(timer_id);
                 continue;
@@ -777,12 +777,12 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     (*current).set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while
                     // still executing — take ourselves back off.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                 }
                 crate::timer::del_timer(timer_id);
             } else {
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 // Spurious wake before the deadline: drop the timer and
                 // loop (re-armed next iteration).
                 if crate::timer::timer_pending(timer_id) {
@@ -791,7 +791,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             }
         } else {
             // Timer table full — stay runnable, yield one round.
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
         }
     }
 }
@@ -807,7 +807,7 @@ pub fn all_online_cpus_reported_pub(gen: u32) -> bool {
 
 fn all_online_cpus_reported(gen: u32) -> bool {
     for i in 0..MAX_CPUS {
-        if !crate::sched::sched::cpu_online(i) {
+        if !crate::sched::hotpath::cpu_online(i) {
             continue;
         }
         if !cpu_quiescent(i, gen) {
@@ -830,7 +830,7 @@ fn all_online_cpus_reported(gen: u32) -> bool {
 #[inline]
 fn cpu_quiescent(i: usize, gen: u32) -> bool {
     RCU_QS_GEN[i].load(Ordering::Acquire) >= gen
-        || crate::sched::sched::cpu_running_idle(i)
+        || crate::sched::hotpath::cpu_running_idle(i)
 }
 
 /// Shared body of both bounded waits: announce a waiter, report our own
@@ -847,7 +847,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
         let mut all_qs = true;
         let mut stuck_cpu = 0usize;
         for i in 0..MAX_CPUS {
-            if !crate::sched::sched::cpu_online(i) {
+            if !crate::sched::hotpath::cpu_online(i) {
                 continue;
             }
             if !cpu_quiescent(i, gen) {
@@ -875,7 +875,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
             }
             return false;
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
 }
 

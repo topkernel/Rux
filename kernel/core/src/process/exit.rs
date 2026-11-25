@@ -19,7 +19,7 @@ use crate::errno;
 use crate::process::task::{Pid, Task, TaskState};
 
 pub fn do_exit(exit_code: i32) -> ! {
-    let cur: &mut Task = match crate::sched::current() {
+    let cur: &mut Task = match crate::sched::hotpath::current() {
         Some(c) => c,
         None => {
             loop {
@@ -876,7 +876,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // uncharges the task's mmap(2) memory ledger — see
         // sched::cgroup::cgroup_exit for why the ledger, not total_vm,
         // is the uncharge unit.
-        crate::sched::cgroup::cgroup_exit(cur);
+        crate::sched::hotpath::cgroup_exit(cur);
 
         // ===== exit_mm: drop THIS task's mm reference =====
         // Linux exit_mm discipline:
@@ -1028,7 +1028,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::interrupt::preempt::preempt_count_add(1);
             // Final state: DEAD (not ZOMBIE — wait4 never sees threads).
             cur.set_state(TaskState::new(TaskState::DEAD));
-            crate::sched::dequeue_task(cur);
+            crate::sched::hotpath::dequeue_task(cur);
             crate::interrupt::preempt::preempt_count_sub(1);
 
             // ===== do_task_dead: Final schedule, never returns =====
@@ -1041,7 +1041,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             // pc=0x10000 rip=wfi+5, 10+ min, twice reproduced).
             // schedule_dead_never_returns() re-asserts DEAD + unlinks +
             // clears leaked preempt bits until a real context switch.
-            crate::sched::schedule_dead_never_returns();
+            crate::sched::hotpath::schedule_dead_never_returns();
 
             loop {
                 // SAFETY: `wfi` is a plain hint instruction with no side effects.
@@ -1151,7 +1151,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         cur.set_state(TaskState::new(TaskState::ZOMBIE));
 
         // Dequeue from global run queue
-        crate::sched::dequeue_task(cur);
+        crate::sched::hotpath::dequeue_task(cur);
 
         // pidfd exit notification: every pidfd poller targeting this
         // thread group must observe EPOLLIN now (the reference wakes the
@@ -1194,7 +1194,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             _ => 0,
         };
         if notify_parent != 0 {
-            crate::sched::defer_exit_notify(notify_parent, current_pid);
+            crate::sched::hotpath::defer_exit_notify(notify_parent, current_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);
         // 125th waitid leg: reaper forensics — record + print every
@@ -1224,7 +1224,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // deschedule re-asserts ZOMBIE/DEAD + unlink + preempt-bit clear
         // until a real context switch happens (the plain schedule() could
         // be repicked/refused and strand this CPU in the wfi loop).
-        crate::sched::schedule_dead_never_returns();
+        crate::sched::hotpath::schedule_dead_never_returns();
 
         loop {
             // SAFETY: `wfi` is a plain hint instruction with no side effects.
@@ -1241,7 +1241,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 /// - fatal default signal actions (Linux do_group_exit semantics: a fatal
 ///   signal in ANY thread kills the process)
 pub fn do_exit_group(exit_code: i32) -> ! {
-    let cur = match crate::sched::current() {
+    let cur = match crate::sched::hotpath::current() {
         Some(c) => c,
         None => do_exit(exit_code),
     };

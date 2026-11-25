@@ -188,7 +188,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
 
         // ---- context line: show_regs_print_info ----
         let cpu = crate::arch::cpu_id();
-        let (pid, comm): (u64, &[u8]) = match crate::sched::current() {
+        let (pid, comm): (u64, &[u8]) = match crate::sched::hotpath::current() {
             Some(t) => {
                 // SAFETY: current() returned a live task pointer; pid()
                 // and comm() are plain reads.
@@ -228,15 +228,15 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     // grq-lock-1st: the GRQ crime scene BEFORE the release — the site
     // stamp and the holder's own stack name the operation the fault
     // struck. IPI-free by construction (the holder has IRQs off).
-    crate::sched::sched::grq_dump_holder("oops");
-    crate::sched::sched::terminal_release_grq_if_held();
+    crate::sched::hotpath::grq_dump_holder("oops");
+    crate::sched::hotpath::terminal_release_grq_if_held();
     if crate::interrupt::preempt::in_interrupt() {
         panic!("Fatal exception in interrupt");
     }
     if panic_on_oops() {
         panic!("Fatal exception");
     }
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         // No current task (early boot) or the idle task: there is no
         // task to kill — the machine dies (make_task_dead's guards).
         None => panic!("Attempted to kill the idle task!"),

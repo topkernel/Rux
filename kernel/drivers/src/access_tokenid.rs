@@ -101,7 +101,7 @@ fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
         }
     }
 
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return -EINVAL,
     };
@@ -158,7 +158,7 @@ fn set_allowed() -> bool {
     if crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return true;
     }
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .map(|t| t.cred().euid == 0)
         .unwrap_or(false)
 }

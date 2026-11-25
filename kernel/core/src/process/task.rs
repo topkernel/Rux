@@ -500,7 +500,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
             }
             const M2: &[u8] = b" pid=";
             for &b in M2 { putchar(b); }
-            if let Some(t) = crate::sched::current() {
+            if let Some(t) = crate::sched::hotpath::current() {
                 let pid = t.pid();
                 let mut vv = pid as usize;
                 if vv == 0 { putchar(b'0'); }
@@ -1172,17 +1172,17 @@ pub struct Task {
     /// Contains vruntime, weight and other CFS scheduling info.
     /// pub(crate) so fair.rs can compute the entity-embedded timeline
     /// node's container-of offset (grq-10ns intrusive rbtree).
-    pub(crate) sched_entity: crate::sched::entities::SchedEntity,
+    pub(crate) sched_entity: crate::sched::types::SchedEntity,
 
     /// RT scheduling entity
     ///
     /// Contains time slice and other RT-specific scheduling info
-    rt_entity: crate::sched::entities::SchedRtEntity,
+    rt_entity: crate::sched::types::SchedRtEntity,
 
     /// Deadline scheduling entity
     ///
     /// Contains deadline, runtime, period and other DL-specific info
-    dl_entity: crate::sched::entities::SchedDlEntity,
+    dl_entity: crate::sched::types::SchedDlEntity,
 
     /// RT run list node (for linking into RT priority queues)
     ///
@@ -1563,7 +1563,7 @@ pub struct Task {
     /// limits (Linux kthreads bypass cgroup limits too). The pointee is
     /// a `CgroupNode` inside an Arc allocation that is NEVER freed
     /// (rmdir only unlinks it), so the raw pointer needs no refcount.
-    cgroup_ptr: *mut crate::sched::cgroup::CgroupNode,
+    cgroup_ptr: *mut crate::sched::types::CgroupNode,
 
     /// cgroup v2 memory controller: bytes this task has charged to its
     /// cgroup chain via mmap(2). Charges and uncharges (munmap / exit /
@@ -1810,11 +1810,11 @@ impl Task {
             static_prio,
             normal_prio,
             time_slice: DEFAULT_TIME_SLICE, // Default time slice (10 clock ticks = 100ms)
-            sched_entity: crate::sched::entities::SchedEntity::new(),
+            sched_entity: crate::sched::types::SchedEntity::new(),
             rt_priority: 0,
             rt_run_list: ListHead::new(),
-            rt_entity: crate::sched::entities::SchedRtEntity::new(),
-            dl_entity: crate::sched::entities::SchedDlEntity::new(),
+            rt_entity: crate::sched::types::SchedRtEntity::new(),
+            dl_entity: crate::sched::types::SchedDlEntity::new(),
             sched_reset_on_fork: core::sync::atomic::AtomicBool::new(false),
             kernel_stack: None,
             kernel_stack_bottom: 0,
@@ -1950,7 +1950,7 @@ impl Task {
         // is a blocking pipe, preventing timer interrupt delivery.
         crate::process::thread_set_entry(
             &mut task.thread,
-            crate::sched::cpu_idle_loop as u64,
+            crate::sched::hotpath::cpu_idle_loop as u64,
             0, // set when the kernel stack is allocated
         );
         Self::register_slot_deferred_sizes();
@@ -2101,7 +2101,7 @@ impl Task {
     #[inline(never)]
     pub fn sleep(state: TaskState) {
         // Set current process to sleep state
-        if let Some(current) = crate::sched::current() {
+        if let Some(current) = crate::sched::hotpath::current() {
             // SAFETY: current() returns the currently running task's pointer, which is
             // guaranteed valid for the calling task.
 
@@ -2112,7 +2112,7 @@ impl Task {
         // Trigger scheduling, select other process to run
         // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
 
     /// Wake up process
@@ -2184,7 +2184,7 @@ impl Task {
             crate::process::r#unsafe::slot_ptr(slot as *mut u8, task_offsets::TASK_PID)
                 as *const u32,
         );
-        state != crate::sched::sched::TASK_POISON && pid != crate::sched::sched::TASK_POISON
+        state != crate::sched::hotpath::TASK_POISON && pid != crate::sched::hotpath::TASK_POISON
     }
 
     #[inline(never)]
@@ -2289,7 +2289,7 @@ impl Task {
         // enqueue_task_locked.
         {
             let pid = crate::process::r#unsafe::borrow_task(task).pid();
-            if pid == crate::sched::sched::TASK_POISON {
+            if pid == crate::sched::hotpath::TASK_POISON {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
                 for &b in MSG { putchar(b); }
@@ -2362,7 +2362,7 @@ impl Task {
                 let cc_t_sel = if cc { crate::debug::cctx::now() } else { 0 };
                 crate::debug::cctx::bump(&crate::debug::cctx::WK_N);
                 // Select best CPU for this task (wake-affine / least-loaded)
-                let sched_class = crate::sched::class::task_sched_class(t);
+                let sched_class = crate::sched::hotpath::task_sched_class(t);
                 let prev_cpu = t.ti_cpu();
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
                 crate::debug::cctx::add(&crate::debug::cctx::WK_SEL_NS, cc_t_sel);
@@ -2386,7 +2386,7 @@ impl Task {
                 // The on_cpu re-check now runs under the GRQ lock, which
                 // excludes every concurrent pick.
                 if target_cpu != prev_cpu {
-                    crate::sched::steer_task_cpu(task, target_cpu);
+                    crate::sched::hotpath::steer_task_cpu(task, target_cpu);
                 }
 
                 // The sched:sched_waking / sched:sched_wakeup tracepoints
@@ -2424,7 +2424,7 @@ impl Task {
                 // stack (__switch_to loads thread.sp into sp) — the observed
                 // trap-with-sp-on-heap-address full-system wedge. The locked
                 // re-check refuses ZOMBIE/DEAD/RUNNING.
-                if !crate::sched::wake_up_enqueue_opt(task, bucket) {
+                if !crate::sched::hotpath::wake_up_enqueue_opt(task, bucket) {
                     // W2 (sc78): a SLEEPING target's enqueue+heal both
                     // refused — per the R39/R41/R42 design this is
                     // unreachable, yet the binder ring proves replies sit
@@ -2460,7 +2460,7 @@ impl Task {
                         let mid_pick = t.on_cpu() && {
                             let mut backed = false;
                             for c in 0..crate::config::MAX_CPUS {
-                                if crate::sched::sched::cpu_state(c).current
+                                if crate::sched::hotpath::cpu_state(c).current
                                     == task
                                 {
                                     backed = true;
@@ -2479,9 +2479,9 @@ impl Task {
                         // below); only a refused retry is a real W2.
                         if !mid_pick {
                             let retry_n =
-                                crate::sched::wake_up_enqueue_opt(task, bucket);
+                                crate::sched::hotpath::wake_up_enqueue_opt(task, bucket);
                             if retry_n {
-                                crate::sched::resched_cpu(t.ti_cpu() as usize);
+                                crate::sched::hotpath::resched_cpu(t.ti_cpu() as usize);
                                 crate::pr_debug!(
                                     "W2-RETRY-LINKED pid={} (transient guard window)",
                                     pid
@@ -2499,7 +2499,7 @@ impl Task {
                             && !mid_pick
                             && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
                         {
-                            let w2 = crate::sched::w2_refusal_census(task);
+                            let w2 = crate::sched::hotpath::w2_refusal_census(task);
                             // 118th: name the target (the pk=1 monopolist
                             // census lines were anonymous).
                             let cb = t.comm();
@@ -2596,7 +2596,7 @@ impl Task {
                 // 105th wake-dispatch census (see sched::WAKE_DISP): the
                 // dispatch outcome + idle mask at wake entry, read back by
                 // the binder QPICK hunt. Relaxed stores; diagnostic only.
-                crate::sched::wake_idle_mask_set(crate::sched::grq_idle_mask());
+                crate::sched::hotpath::wake_idle_mask_set(crate::sched::hotpath::grq_idle_mask());
                 // R3 (rt-r3 lane): RT/DL wakes steer the idle claim to the
                 // wakee's PLACEMENT cpu (the reference's select_task_rq_rt
                 // + check_preempt_curr both operate on the placement rq; a
@@ -2611,10 +2611,10 @@ impl Task {
                     | crate::process::task::SchedPolicy::Deadline => t.ti_cpu(),
                     _ => -1,
                 };
-                match crate::sched::claim_idle_cpu_for_prefer(allowed, rt_prefer) {
+                match crate::sched::hotpath::claim_idle_cpu_for_prefer(allowed, rt_prefer) {
                     Some(idle_cpu) => {
-                        crate::sched::wake_disp_set(1);
-                        crate::sched::resched_cpu(idle_cpu);
+                        crate::sched::hotpath::wake_disp_set(1);
+                        crate::sched::hotpath::resched_cpu(idle_cpu);
                     }
                     None => {
                         // No idle CPU: poke a busy CPU only when the wakee
@@ -2637,11 +2637,11 @@ impl Task {
                         // windows (FFRT mutex unlock→waiter-recheck) the
                         // reference keeps closed for sync handoffs.
                         if sync {
-                            crate::sched::wake_disp_set(2);
-                            crate::sched::preempt_check_wake_sync(task);
+                            crate::sched::hotpath::wake_disp_set(2);
+                            crate::sched::hotpath::preempt_check_wake_sync(task);
                         } else {
-                            crate::sched::wake_disp_set(3);
-                            crate::sched::preempt_check_wake(task);
+                            crate::sched::hotpath::wake_disp_set(3);
+                            crate::sched::hotpath::preempt_check_wake(task);
                         }
                     }
                 }
@@ -2714,11 +2714,11 @@ impl Task {
                     // sleep_wakeup suite hit it deterministically once
                     // the first wake's enqueue had been picked+dequeued
                     // elsewhere, leaving the heal as the only arm.
-                    if crate::sched::wake_up_enqueue_opt(task, bucket) {
+                    if crate::sched::hotpath::wake_up_enqueue_opt(task, bucket) {
                         // Linked again — nudge its last CPU so it is
                         // picked promptly instead of waiting for the
                         // next idle tick.
-                        crate::sched::resched_cpu(t.ti_cpu() as usize);
+                        crate::sched::hotpath::resched_cpu(t.ti_cpu() as usize);
                     }
                     // WAKE-REFUSE-PT5 — RETIRED (probe-retire): this is
                     // the loudest refusal-point arm (a benign scheduler
@@ -2818,13 +2818,13 @@ impl Task {
 
     /// Get CFS scheduling entity
     #[inline]
-    pub fn sched_entity(&self) -> &crate::sched::entities::SchedEntity {
+    pub fn sched_entity(&self) -> &crate::sched::types::SchedEntity {
         &self.sched_entity
     }
 
     /// Get CFS scheduling entity (mutable reference)
     #[inline]
-    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::entities::SchedEntity {
+    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::types::SchedEntity {
         &mut self.sched_entity
     }
 
@@ -2872,25 +2872,25 @@ impl Task {
 
     /// Get RT scheduling entity
     #[inline]
-    pub fn rt_entity(&self) -> &crate::sched::entities::SchedRtEntity {
+    pub fn rt_entity(&self) -> &crate::sched::types::SchedRtEntity {
         &self.rt_entity
     }
 
     /// Get RT scheduling entity (mutable reference)
     #[inline]
-    pub fn rt_entity_mut(&mut self) -> &mut crate::sched::entities::SchedRtEntity {
+    pub fn rt_entity_mut(&mut self) -> &mut crate::sched::types::SchedRtEntity {
         &mut self.rt_entity
     }
 
     /// Get Deadline scheduling entity
     #[inline]
-    pub fn dl_entity(&self) -> &crate::sched::entities::SchedDlEntity {
+    pub fn dl_entity(&self) -> &crate::sched::types::SchedDlEntity {
         &self.dl_entity
     }
 
     /// Get Deadline scheduling entity (mutable reference)
     #[inline]
-    pub fn dl_entity_mut(&mut self) -> &mut crate::sched::entities::SchedDlEntity {
+    pub fn dl_entity_mut(&mut self) -> &mut crate::sched::types::SchedDlEntity {
         &mut self.dl_entity
     }
 
@@ -3316,7 +3316,7 @@ pub fn vfork_wake_parent(task: *mut Task) {
     let t = crate::process::r#unsafe::borrow_task_mut(task);
     if let Some(parent) = t.vfork_parent_ptr() {
         t.clear_vfork_parent();
-        crate::sched::wake_up_process(parent);
+        crate::sched::hotpath::wake_up_process(parent);
     }
 }
 
@@ -3396,7 +3396,7 @@ fn preempt_underflow_report(
     // (a guard held across a scheduler point); for a booking split it is
     // the phantom's home site. Rate-gate already passed above.
     if crate::trace::EVENT_LEAKHUNT.armed() {
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             crate::debug::leakorigin::report_outermost(
                 b"UNDERFLOW-ORIGIN",
                 task as *mut Task,
@@ -3884,7 +3884,7 @@ impl Task {
         let online = Self::default_cpus_allowed();
         let mut visited = 0usize;
         let mut widened = 0usize;
-        crate::sched::for_each_task(|task| {
+        crate::sched::hotpath::for_each_task(|task| {
             // for_each_task yields live &Task borrows (walk-pinned).
             let cur = task.cpus_allowed.load(core::sync::atomic::Ordering::Relaxed);
             if cur == 1 || cur == u32::MAX {
@@ -3913,7 +3913,7 @@ impl Task {
             .task_refcnt
             .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
         if prev == 1 {
-            crate::sched::free_task_slot(task);
+            crate::sched::hotpath::free_task_slot(task);
         }
     }
 
@@ -4025,22 +4025,22 @@ impl Task {
             core::sync::atomic::Ordering::Acquire,
         ) {
             Ok(_) => {
-                crate::sched::sched::pick_trace(self as *const Task as *mut Task, 6);
+                crate::sched::hotpath::pick_trace(self as *const Task as *mut Task, 6);
                 // Wakewatch (rux:schedtrace (retired debug=schedtrace)): the switch-in affirm — the
                 // pick materialized into a register restore.
-                crate::sched::sched::ww_record(
+                crate::sched::hotpath::ww_record(
                     self as *const Task as *mut Task,
                     crate::api::sched::WW_EV_AFFIRM,
                 );
                 // pick→switch ledger (wake-fastrepro): the pick
                 // terminated — consume its publication record.
-                crate::sched::sched::psledger_consume(
+                crate::sched::hotpath::psledger_consume(
                     self as *const Task as *mut Task,
                 );
                 Ok(())
             }
             Err(observed) => {
-                crate::sched::sched::pick_trace(self as *const Task as *mut Task, 7);
+                crate::sched::hotpath::pick_trace(self as *const Task as *mut Task, 7);
                 Err(observed)
             }
         }
@@ -5492,7 +5492,7 @@ impl Task {
 
     /// cgroup v2: membership pointer (NULL = implicit root, no limits).
     #[inline]
-    pub fn cgroup_ptr(&self) -> *mut crate::sched::cgroup::CgroupNode {
+    pub fn cgroup_ptr(&self) -> *mut crate::sched::types::CgroupNode {
         self.cgroup_ptr
     }
 
@@ -5500,7 +5500,7 @@ impl Task {
     /// migration). The pointee must come from a never-freed
     /// `Arc<CgroupNode>` allocation.
     #[inline]
-    pub fn set_cgroup_ptr(&mut self, ptr: *mut crate::sched::cgroup::CgroupNode) {
+    pub fn set_cgroup_ptr(&mut self, ptr: *mut crate::sched::types::CgroupNode) {
         self.cgroup_ptr = ptr;
     }
 
@@ -5628,7 +5628,7 @@ pub use task_offsets::*;
 ///
 /// Returns None if no current task is set or task has no fdtable.
 pub fn get_current_fdtable() -> Option<&'static crate::fs::FdTable> {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(c) => c.try_fdtable(),
         None => None,
     }

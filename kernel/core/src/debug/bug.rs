@@ -35,7 +35,7 @@ pub fn warn(file: &str, line: u32, condition: &str) {
 
     // CPU/PID info
     let cpu = crate::arch::cpu_id() as u32;
-    let pid = crate::sched::get_current_pid();
+    let pid = crate::sched::hotpath::get_current_pid();
     let _ = write!(w, "CPU: {} PID: {}\n", cpu, pid);
 
     // Stack trace
@@ -72,7 +72,7 @@ pub fn bug(file: &str, line: u32) {
 
     // CPU/PID info
     let cpu = crate::arch::cpu_id() as u32;
-    let pid = crate::sched::get_current_pid();
+    let pid = crate::sched::hotpath::get_current_pid();
     let _ = write!(w, "CPU: {} PID: {}\n", cpu, pid);
 
     // Stack trace

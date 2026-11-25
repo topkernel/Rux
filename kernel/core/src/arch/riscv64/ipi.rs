@@ -285,7 +285,7 @@ pub fn smp_call_function(target: usize, func: fn(*mut core::ffi::c_void), info: 
     // lock at this point, and the memory stays valid until done is
     // observed (sleeping tasks keep their frames; the Box frees below).
     while !csd.done.load(Ordering::Acquire) {
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
         core::hint::spin_loop();
     }
 
@@ -352,7 +352,7 @@ fn ipi_reschedule_handler() {
     //
     // The return-from-trap path checks need_resched and calls
     // schedule() at a safe point.
-    crate::sched::set_need_resched();
+    crate::sched::hotpath::set_need_resched();
 }
 
 fn ipi_call_function_handler() {

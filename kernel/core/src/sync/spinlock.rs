@@ -141,7 +141,7 @@ pub fn note_acquire_evidence() {
     // Same-CPU plain read of the scheduler's published current pointer
     // (the spinner cannot be migrated or preempted mid-loop, so this
     // is stable for the whole contended wait).
-    let t = crate::sched::sched::cpu_state(cpu).current as usize;
+    let t = crate::sched::hotpath::cpu_state(cpu).current as usize;
     if t == 0 {
         return;
     }
@@ -380,10 +380,10 @@ impl RawSpinlock {
     // the count) — a nested holder stops yielding until it releases, the
     // reference's raw_spin_lock semantic.
     fn spin_may_preempt() -> bool {
-        crate::sched::need_resched()
+        crate::sched::hotpath::need_resched()
             && crate::interrupt::preempt::preempt_count() == 0
             && crate::arch::cpu::get_interrupts_state()
-            && crate::sched::current()
+            && crate::sched::hotpath::current()
                 .map(|t| {
                     t.state().bits() == crate::process::task::TaskState::RUNNING
                 })
@@ -429,7 +429,7 @@ impl RawSpinlock {
                     // only; the fast path never reaches here.
                     note_acquire_evidence();
                     if Self::spin_may_preempt() {
-                        crate::sched::schedule();
+                        crate::sched::hotpath::schedule();
                         spins = 0;
                         continue; // re-observe the lock word in the loop head
                     }
@@ -549,7 +549,7 @@ impl RawSpinlock {
         // on a GRQ wedge — that is why every GRQ wedge so far ended with
         // the holder UNNAMED. The GRQ site stamp is published BY the
         // holder, so this dump reads it without any interrupt.
-        crate::sched::sched::grq_dump_holder("deadlock");
+        crate::sched::hotpath::grq_dump_holder("deadlock");
 
         #[cfg(feature = "debug-lock-owner")]
         {
@@ -578,7 +578,7 @@ impl RawSpinlock {
                 // what the CPU runs NOW and the pid names the victim).
                 // SAFETY: cpu_state(h).current is the scheduler's own
                 // published pointer; read-only access.
-                let cur = unsafe { crate::sched::sched::cpu_state(h).current };
+                let cur = unsafe { crate::sched::hotpath::cpu_state(h).current };
                 if !cur.is_null() {
                     // SAFETY: read-only access to a live Task.
                     let pid = unsafe { (*cur).pid() };

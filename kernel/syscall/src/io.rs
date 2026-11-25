@@ -1269,7 +1269,7 @@ pub fn sys_dup(args: SyscallArgs) -> i64 {
 
     // get_current_fdtable returns a valid fdtable reference for the
     // current task (a safe fn — the old unsafe wrapper was vestigial).
-    match rux::sched::get_current_fdtable() {
+    match rux::sched::hotpath::get_current_fdtable() {
         Some(fdtable) => match fdtable.dup_fd_strict(oldfd) {
             Ok(newfd) => newfd as i64,
             Err(e) => e as i64,
@@ -1285,7 +1285,7 @@ pub fn sys_dup2(args: SyscallArgs) -> i64 {
 
     // get_current_fdtable returns a valid fdtable reference for the
     // current task (a safe fn — the old unsafe wrapper was vestigial).
-    match rux::sched::get_current_fdtable() {
+    match rux::sched::hotpath::get_current_fdtable() {
         Some(fdtable) => {
             match fdtable.dup2_fd(oldfd, newfd) {
                 Some(fd) => fd as i64,
@@ -1315,7 +1315,7 @@ pub fn sys_dup3(args: SyscallArgs) -> i64 {
 
     // get_current_fdtable returns a valid fdtable reference for the
     // current task (a safe fn — the old unsafe wrapper was vestigial).
-    match rux::sched::get_current_fdtable() {
+    match rux::sched::hotpath::get_current_fdtable() {
         Some(fdtable) => {
             match fdtable.dup2_fd(oldfd, newfd) {
                 Some(fd) => {
@@ -1610,7 +1610,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             return -errno::EOPNOTSUPP as i64;
         }
         // Owner or CAP_FOWNER (Linux ioctl_setflags).
-        let owner_ok = rux::sched::current().map(|t| {
+        let owner_ok = rux::sched::hotpath::current().map(|t| {
             t.cred().fsuid == inode.uid.load(core::sync::atomic::Ordering::Acquire)
                 || crate::security::capable(crate::security::CAP_FOWNER)
         }).unwrap_or(false);
@@ -2393,7 +2393,7 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
     }
 
     // Get current process fdtable
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => {
             // The pipe ends were never installed: run their close op or
@@ -3046,7 +3046,7 @@ pub fn syscall_eio_line(nr: usize, args: [u64; 6]) {
     }
     pdec(pid as u64);
     let mut comm = [0u8; 16];
-    if let Some(t) = rux::sched::current() {
+    if let Some(t) = rux::sched::hotpath::current() {
         let c: &[u8; 16] = (*t).comm();
         comm.copy_from_slice(c);
     }
@@ -3115,7 +3115,7 @@ fn eio_report(fd: usize, file: &crate::fs::file::File, head: &[u8]) {
             putchar(d[n]);
         }
         let mut comm = [0u8; 16];
-        if let Some(t) = rux::sched::current() {
+        if let Some(t) = rux::sched::hotpath::current() {
             let c: &[u8; 16] = (*t).comm();
             comm.copy_from_slice(c);
         }

@@ -1870,7 +1870,7 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     if !crate::trace::EVENT_BINDERTRACE.armed() {
         return;
     }
-    let comm = crate::sched::current()
+    let comm = crate::sched::hotpath::current()
         .map(|t| t.comm())
         .map(|c| core::str::from_utf8(c).unwrap_or(""))
         .unwrap_or("")
@@ -2415,7 +2415,7 @@ fn wait_for_context_manager(ctx: BinderCtx) {
         // set_context_mgr wake cannot strand the caller for the full
         // budget (khungtaskd discipline). sched::current() is the safe
         // accessor; the raw twin feeds only the wait-queue API.
-        let cur_ref = match crate::sched::current() {
+        let cur_ref = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return,
         };
@@ -2435,10 +2435,10 @@ fn wait_for_context_manager(ctx: BinderCtx) {
             cur_ref.set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::RUNNING,
             ));
-            crate::sched::dequeue_task(cur_ref);
+            crate::sched::hotpath::dequeue_task(cur_ref);
         } else {
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             MANAGER_WAIT.finish_wait(current);
             if timer_id != 0 && crate::timer::timer_pending(timer_id) {
                 crate::timer::del_timer(timer_id);
@@ -3161,7 +3161,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // tid there, samgr would see a synthetic token for a tid ATM never
     // allocated (same failure family as the tid-keyed access_token
     // ioctl, b5).
-    let pid = crate::sched::current()
+    let pid = crate::sched::hotpath::current()
         .map(|t| { (*t).tgid() as u32 })
         .unwrap_or_else(crate::process::current_pid);
     let id = NEXT_PROC_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -3914,7 +3914,7 @@ pub fn binder_mmap_handler(
         return Err(-6); // ENXIO
     };
 
-    let task = crate::sched::current().ok_or(-12)?;
+    let task = crate::sched::hotpath::current().ok_or(-12)?;
     let addr_space = task.address_space().ok_or(-12)?;
 
     // Double-mmap check FIRST, before any allocation or VMA surgery: a
@@ -4385,7 +4385,7 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
                 // so its readiness is exactly "proc todo has work this
                 // tid may read".
                 None => {
-                    let tgid = crate::sched::current()
+                    let tgid = crate::sched::hotpath::current()
                         .map(|t| (*t).tgid() as u32)
                         .unwrap_or(0);
                     let t = Arc::new(BinderThread::new(tid, tgid));
@@ -4427,7 +4427,7 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
     };
     // task is the parking poller == current (poll core contract); the
     // safe accessor reads it, the raw pointer is the queue identity.
-    let tid = crate::sched::current()
+    let tid = crate::sched::hotpath::current()
         .map(|t| t.ns_pid_local())
         .unwrap_or_else(|| unsafe { (*task).ns_pid_local() });
     let w = world_lock();
@@ -4441,7 +4441,7 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
         let thread = match inner.threads.iter().find(|t| t.tid == tid) {
             Some(t) => t.clone(),
             None => {
-                let tgid = crate::sched::current()
+                let tgid = crate::sched::hotpath::current()
                     .map(|t| (*t).tgid() as u32)
                     .unwrap_or(0);
                 let t = Arc::new(BinderThread::new(tid, tgid));
@@ -4467,7 +4467,7 @@ pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::tas
     };
     // SAFETY: task is the same parking poller that registered.
     // task is the parking poller == current (poll core contract).
-    let tid = crate::sched::current()
+    let tid = crate::sched::hotpath::current()
         .map(|t| t.ns_pid_local())
         .unwrap_or_else(|| unsafe { (*task).ns_pid_local() });
     let w = world_lock();
@@ -4496,7 +4496,7 @@ pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 // ============================================================================
 
 fn current_tid() -> u32 {
-    crate::sched::current().map(|t| t.ns_pid_local()).unwrap_or(0)
+    crate::sched::hotpath::current().map(|t| t.ns_pid_local()).unwrap_or(0)
 }
 
 /// Returns Some(ret) when the file is a binder fd, None otherwise.
@@ -4695,7 +4695,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                     // returns the per-TASK pid (a worker thread's tid) —
                     // stamping that as this thread's tgid made the sc161
                     // ownership gate reject the daemon's own work.
-                    let tgid = crate::sched::current()
+                    let tgid = crate::sched::hotpath::current()
                         .map(|t| { (*t).tgid() } as u32)
                         .unwrap_or(0);
                     let t = Arc::new(BinderThread::new(tid, tgid));
@@ -5251,7 +5251,7 @@ fn bc_corruption_snapshot(
         }
     }
 
-    let Some(task) = crate::sched::current() else { return };
+    let Some(task) = crate::sched::hotpath::current() else { return };
     let Some(aspace) = task.address_space() else { return };
     let root = aspace.root_ppn();
     let page_va = bad_va & !((PAGE_SIZE - 1) as u64);
@@ -5942,7 +5942,7 @@ fn binder_thread_write(
                     // thread's OWN node at this ptr ((ptr, reg_tgid) key;
                     // see translate_object) — forked siblings in this
                     // shared proc can each own a stub at the same VA.
-                    let my_tgid = crate::sched::current()
+                    let my_tgid = crate::sched::hotpath::current()
                         .map(|t| (*t).tgid() as u32)
                         .unwrap_or(0);
                     let nodes = &pm(world, proc).im(world).nodes;
@@ -7396,7 +7396,7 @@ fn binder_transaction(
     // nodeId[<tgid><<32|n>] pid[<tid>]" — the bootanimation could never
     // create its surface (r10). [rs-egl: BINDER LANE — route to
     // coordinator for ownership; one-line, verified live]
-    let (sender_pid, sender_euid) = match crate::sched::current() {
+    let (sender_pid, sender_euid) = match crate::sched::hotpath::current() {
         // SAFETY: current task is valid; a cred read here races at most
         // with a setuid on the same task, which is benign for IPC labels.
         Some(t) => ((*t).tgid() as i32, (*t).cred().euid),
@@ -7604,7 +7604,7 @@ fn binder_transaction(
                 "SACSA txn{} from pid={} comm-check={} -> samgr pid={} dlen={} parcel={}",
                         txn.id,
                         proc.pid,
-                        crate::sched::current()
+                        crate::sched::hotpath::current()
                             .map(|t| t.comm())
                             .map(|c| {
                                 alloc::string::String::from(
@@ -7629,7 +7629,7 @@ fn binder_transaction(
                 // leg-25: the enqueued txn's id, so the send line pairs
                 // 1:1 with the SLRD read line (offline delivery audit).
                 let t_id = txn.id;
-                let comm = crate::sched::current()
+                let comm = crate::sched::hotpath::current()
                     .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
@@ -7720,7 +7720,7 @@ fn binder_transaction(
             // callback reports (the ohw106 accountmgr gate: only ONE
             // of the two subscribe-time notifies ever fired).
             if SACB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
-                let comm = crate::sched::current()
+                let comm = crate::sched::hotpath::current()
                     .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
@@ -7774,7 +7774,7 @@ fn binder_transaction(
         static INST_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if INST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800 {
-            let comm = crate::sched::current()
+            let comm = crate::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
@@ -7848,7 +7848,7 @@ fn binder_transaction(
             if tr.code == 46 {
                 ams46_txns_push(txn.id);
                 if AMS46_ENQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                    let comm = crate::sched::current()
+                    let comm = crate::sched::hotpath::current()
                         .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
@@ -7857,7 +7857,7 @@ fn binder_transaction(
                     // rejects the call unless GetCallingUid() reads
                     // 3058 (accountmgr); this prints the kernel-side
                     // truth at enqueue.
-                    let euid = crate::sched::current()
+                    let euid = crate::sched::hotpath::current()
                         .map(|t| { (*t).cred().euid })
                         .unwrap_or(0);
                     let hex: alloc::string::String = hb[..48]
@@ -7895,7 +7895,7 @@ fn binder_transaction(
                 let sp = AMS46_SENDER.load(Relaxed);
                 if proc.pid == tp || proc.pid == sp || target.pid == tp || target.pid == sp {
                     if AMS46_RIP_N.fetch_add(1, Relaxed) < 640 {
-                        let rcomm = crate::sched::current()
+                        let rcomm = crate::sched::hotpath::current()
                             .map(|t| t.comm())
                             .map(|c| core::str::from_utf8(c).unwrap_or(""))
                             .unwrap_or("")
@@ -7980,7 +7980,7 @@ fn binder_transaction(
                 || name.starts_with("com.")
                 || name.starts_with("tonelibrarydata")
         }
-        let sender_tgid = crate::sched::current()
+        let sender_tgid = crate::sched::hotpath::current()
             .map(|t| { (*t).tgid() as u32 })
             .unwrap_or(0);
         let sender_is_app = sltx_app_child(sender_tgid);
@@ -8049,7 +8049,7 @@ fn binder_transaction(
             [const { core::sync::atomic::AtomicU64::new(0) }; 32];
 
         if !reply {
-            let comm_now = crate::sched::current()
+            let comm_now = crate::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
@@ -8176,7 +8176,7 @@ fn binder_transaction(
                 }
             }
             if SACMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
-                let comm2 = crate::sched::current()
+                let comm2 = crate::sched::hotpath::current()
                     .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
@@ -8570,7 +8570,7 @@ fn binder_transaction(
                     // rux:bindertrace (retired debug=bindertrace) gate like the rest of the tracer.
                     if crate::trace::EVENT_BINDERTRACE.armed()
                     {
-                        let comm = crate::sched::current()
+                        let comm = crate::sched::hotpath::current()
                             .map(|t| t.comm())
                             .map(|c| core::str::from_utf8(c).unwrap_or(""))
                             .unwrap_or("")
@@ -8743,7 +8743,7 @@ fn binder_transaction(
                 // rux:bindertrace (retired debug=bindertrace) gate with the oneway half above.
                 if crate::trace::EVENT_BINDERTRACE.armed()
                 {
-                    let comm = crate::sched::current()
+                    let comm = crate::sched::hotpath::current()
                         .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
@@ -8855,9 +8855,9 @@ fn binder_transaction(
         // Relaxed atomics now — the latch is a plain store, no unsafe and
         // no single-writer trust.
         txn.enq_disp.store(
-            (crate::sched::wake_disp() & 0xF)
-                | (crate::sched::wake_idle_mask() << 4)
-                | (((crate::sched::grq_nr_running_now() as u32).min(0xFF)) << 12),
+            (crate::sched::hotpath::wake_disp() & 0xF)
+                | (crate::sched::hotpath::wake_idle_mask() << 4)
+                | (((crate::sched::hotpath::grq_nr_running_now() as u32).min(0xFF)) << 12),
             core::sync::atomic::Ordering::Relaxed,
         );
         txn.wake_ns
@@ -8971,7 +8971,7 @@ impl Drop for PinnedTask {
 /// — fd-table locks and file close ops may nest back into binder code.
 /// Returns the new target fd, or None (invalid fd / target gone / full).
 fn translate_fd_into(sender_fd: u32, target: &Arc<BinderProc>) -> Option<usize> {
-    let cur = crate::sched::current()?;
+    let cur = crate::sched::hotpath::current()?;
     let sender_fdt = cur.try_fdtable()?;
     let file = sender_fdt.get_file(sender_fd as usize)?;
     let ttask = PinnedTask::lookup(target.pid)?;
@@ -9023,7 +9023,7 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                     // (sc161 bug: current_pid() is the per-task tid, so
                     // worker-registered nodes got reg_tgid=worker_tid and
                     // the ownership gate rejected every reader).
-                    let reg_tgid = crate::sched::current()
+                    let reg_tgid = crate::sched::hotpath::current()
                         .map(|t| { (*t).tgid() } as u32)
                         .unwrap_or(0);
                     // sc167 node-identity parity: on Linux every forked
@@ -9821,7 +9821,7 @@ fn binder_thread_read(
                             // kernel-delivery-COMPLETE marker: everything
                             // lost past it is foundation userspace.
                             if ams46_on() && ams46_txns_contains(t.id) {
-                                let name = crate::sched::current()
+                                let name = crate::sched::hotpath::current()
                                     .map(|ct| ct.comm())
                                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                     .unwrap_or("")
@@ -9884,7 +9884,7 @@ fn binder_thread_read(
                             // Add/Remove (SAREG code 3/4) delivery
                             // record on samgr's side. Gate on the
                             // SAREG-known samgr pid too.
-                            if let Some(cur) = crate::sched::current() {
+                            if let Some(cur) = crate::sched::hotpath::current() {
                                 let tg = { (*cur).tgid() as u32 };
                                 if tg != 0 {
                                     let lt = crate::process::find_task_by_pid(tg);

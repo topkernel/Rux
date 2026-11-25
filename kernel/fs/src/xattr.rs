@@ -98,7 +98,7 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
     match ns {
         b"user" => Ok(()),
         b"trusted" => {
-            let cred = if let Some(task) = crate::sched::current() {
+            let cred = if let Some(task) = crate::sched::hotpath::current() {
                 task.cred().clone()
             } else {
                 crate::process::task::Cred::new_init()
@@ -115,7 +115,7 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
             } else {
                 crate::security::CAP_SYS_ADMIN
             };
-            let cred = if let Some(task) = crate::sched::current() {
+            let cred = if let Some(task) = crate::sched::hotpath::current() {
                 task.cred().clone()
             } else {
                 crate::process::task::Cred::new_init()
@@ -138,7 +138,7 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
         // ub2404 serial-getty restart loop. Accept for owner/CAP_FOWNER;
         // the value is stored like any xattr (no ACL enforcement yet).
         b"system" => {
-            let cred = if let Some(task) = crate::sched::current() {
+            let cred = if let Some(task) = crate::sched::hotpath::current() {
                 task.cred().clone()
             } else {
                 crate::process::task::Cred::new_init()
@@ -232,7 +232,7 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
 
     // Read gate (minimal): trusted.* readable only with CAP_SYS_ADMIN.
     if name.starts_with(b"trusted.") {
-        let cred = if let Some(task) = crate::sched::current() {
+        let cred = if let Some(task) = crate::sched::hotpath::current() {
             task.cred().clone()
         } else {
             crate::process::task::Cred::new_init()

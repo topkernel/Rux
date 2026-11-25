@@ -631,7 +631,7 @@ fn context_switch_body(prev: &mut Task, next: &mut Task) {
     // inherited whatever FP registers the previous task left in the FPU —
     // silent numeric corruption across tasks plus cross-task information
     // leakage.
-    if let Some(cur) = crate::sched::current() {
+    if let Some(cur) = crate::sched::hotpath::current() {
         // cur is the task now running on this hart.
         // SAFETY: cur is the task now running on this hart.
         unsafe {
@@ -678,8 +678,8 @@ pub unsafe extern "C" fn riscv_switch_abort(prev: *mut Task, next: *mut Task) {
 
     // 2. Sched slot + tripwire.
     let cpu = crate::arch::cpu_id() as usize;
-    crate::sched::sched::republish_current_after_abort(cpu, prev);
-    crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+    crate::sched::hotpath::republish_current_after_abort(cpu, prev);
+    crate::sched::hotpath::r56_report_switch_abort(cpu, (*prev).pid());
 
     // 3. `next` (smp8 orphan-race): the "the steal already re-linked it"
     // assumption holds only for REVOKED aborts. A LIVE-published pick
@@ -687,5 +687,5 @@ pub unsafe extern "C" fn riscv_switch_abort(prev: *mut Task, next: *mut Task) {
     // owner anywhere — adjudicate and re-link it (no-op when a steal or
     // a racing wake already handled it). Its context was never touched
     // by us.
-    crate::sched::sched::abort_next_release_orphans(cpu, next);
+    crate::sched::hotpath::abort_next_release_orphans(cpu, next);
 }

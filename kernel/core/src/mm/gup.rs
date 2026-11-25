@@ -287,7 +287,7 @@ pub fn pin_user_pages(va: usize, len: usize, write: bool) -> Option<PinnedUserPa
     use crate::arch::mm::mm_ops::PageTableWalker;
 
     debug_assert!(len > 0);
-    let task = crate::sched::current()?;
+    let task = crate::sched::hotpath::current()?;
     let mm = task.address_space_arc()?;
 
     let first_page = va & !(PAGE_SIZE - 1);

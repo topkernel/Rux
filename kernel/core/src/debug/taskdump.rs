@@ -448,7 +448,7 @@ pub fn dump_all_tasks(reason: &str) {
     }
     // R56-diag: per-CPU slot currents (who each slot thinks is running).
     {
-        let cs = crate::sched::sched::grq_diag_cpu_currents();
+        let cs = crate::sched::hotpath::grq_diag_cpu_currents();
         puts("cpu slots:");
         for c in 0..crate::config::MAX_CPUS {
             putc(b' ');
@@ -471,7 +471,7 @@ pub fn dump_all_tasks(reason: &str) {
     // the per-CPU current slots so a counter/queue divergence is visible in
     // one snapshot.
     {
-        let (nr, cfs, rt, dl) = crate::sched::sched::grq_diag_counts();
+        let (nr, cfs, rt, dl) = crate::sched::hotpath::grq_diag_counts();
         puts("grq: nr_running=");
         put_dec(nr as u64);
         puts(" cfs=");
@@ -480,7 +480,7 @@ pub fn dump_all_tasks(reason: &str) {
         put_dec(rt);
         puts(" dl=");
         put_dec(dl);
-        let cur = crate::sched::sched::grq_diag_cpu_currents();
+        let cur = crate::sched::hotpath::grq_diag_cpu_currents();
         puts(" cpu[pid/idle]:");
         for c in 0..crate::config::MAX_CPUS {
             putc(b' ');
@@ -660,7 +660,7 @@ pub fn dump_all_tasks(reason: &str) {
             // runs under the GRQ try-lock; a busy lock reports '?' (counted
             // below) — never a lockless tree walk, which races structural
             // mutation on other CPUs and corrupts the iterator.
-            let linked = crate::sched::sched::grq_diag_cfs_linked(
+            let linked = crate::sched::hotpath::grq_diag_cfs_linked(
                 task_ptr as *const crate::process::task::Task as *mut crate::process::task::Task);
             match linked {
                 Some(b) => {
@@ -1030,7 +1030,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
         put_dec(stuck as u64);
         puts(") ===\n");
         for c in 0..crate::config::MAX_CPUS {
-            if !crate::sched::sched::cpu_online(c) {
+            if !crate::sched::hotpath::cpu_online(c) {
                 continue;
             }
             puts("FROZEN-CPU ticks cpu");
@@ -1051,7 +1051,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
         }
 
         if stuck >= crate::config::MAX_CPUS
-            || !crate::sched::sched::cpu_online(stuck)
+            || !crate::sched::hotpath::cpu_online(stuck)
         {
             return;
         }
@@ -1074,7 +1074,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             // kernel-text words: names the spin loop and, via the frames
             // above it, the lock's owner path. Read-side only, from this
             // CPU; races cost at worst a torn-but-bounded word.
-            let cur = crate::sched::sched::grq_diag_cpu_currents();
+            let cur = crate::sched::hotpath::grq_diag_cpu_currents();
             let t = cur[stuck].2 as *mut crate::process::task::Task;
             if !t.is_null() {
                 // SAFETY (one adopt edge): as the per-CPU walk — the
@@ -1608,16 +1608,16 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
             }
         }
         // Sleep 250 ms (jiffies discipline as mmprofd).
-        let pid = match crate::sched::current() {
+        let pid = match crate::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return 0,
         };
         let wake_at = crate::timer::get_jiffies() + 25;
         let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
         // Re-derived borrow (never held across schedule() below).
-        crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
+        crate::sched::hotpath::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
         }

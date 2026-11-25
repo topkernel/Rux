@@ -221,7 +221,7 @@ impl IoCompletion {
                 break;
             }
 
-            let current = match crate::sched::current() {
+            let current = match crate::sched::hotpath::current() {
                 Some(task) => task,
                 None => {
                     core::hint::spin_loop();
@@ -254,7 +254,7 @@ impl IoCompletion {
                 // would sleep forever — unkillable, and with no timeout
                 // print: exactly the silent-strand shape behind the freed
                 // kernel-stack completion fires (the r2/r4 rounds).
-                let pid = crate::sched::get_current_pid();
+                let pid = crate::sched::hotpath::get_current_pid();
                 deadline_timer = crate::timer::add_timer_wakeup(deadline, pid);
                 if deadline_timer != 0 {
                     deadline_armed = true;
@@ -282,7 +282,7 @@ impl IoCompletion {
                 // and enqueued us while we never slept — take ourselves
                 // back off the GRQ (no-op via on_rq guards otherwise) or
                 // nr_running stays inflated until our next context switch.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 result = self.status.load(Ordering::Acquire);
                 break;
             }
@@ -298,7 +298,7 @@ impl IoCompletion {
                 self.wait_queue.finish_wait(current);
                 // Same R36-B2 compensation as the recheck exit: a racing
                 // fire may have enqueued us between prepare and finish.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 // Final chance (GSD fix): kick the queue and drain
                 // completions once — recovers lost-kick stalls.
                 crate::drivers::virtio::vw_report("async-deadline");
@@ -332,7 +332,7 @@ impl IoCompletion {
             if poll_fallback {
                 // Re-arm a 1-jiffy wake so the deadline check above runs
                 // every jiffy even without a completion wake.
-                let pid = crate::sched::get_current_pid();
+                let pid = crate::sched::hotpath::get_current_pid();
                 let dl = crate::timer::get_jiffies().saturating_add(1);
                 let id = crate::timer::add_timer_wakeup(dl, pid);
                 if id != 0 {
@@ -341,7 +341,7 @@ impl IoCompletion {
                     // discipline) so ticks/IPIs reach this CPU across the
                     // wait loop.
                     crate::arch::cpu::restore_irq(true);
-                    crate::sched::schedule();
+                    crate::sched::hotpath::schedule();
                     crate::timer::del_timer(id);
                 } else {
                     // Timer table STILL exhausted: never schedule() without
@@ -371,7 +371,7 @@ impl IoCompletion {
                 // degrades to the old wake-dependent behavior.
                 const ASYNC_RECOVER_MS: u64 = 250;
                 let rid = {
-                    let pid = crate::sched::get_current_pid();
+                    let pid = crate::sched::hotpath::get_current_pid();
                     let at = crate::timer::get_jiffies()
                         .saturating_add(msecs_to_jiffies(ASYNC_RECOVER_MS));
                     crate::timer::add_timer_wakeup(at, pid)
@@ -381,7 +381,7 @@ impl IoCompletion {
                 // discipline) so ticks/IPIs reach this CPU across the wait
                 // loop.
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 if rid != 0 {
                     crate::timer::del_timer(rid);
                 }

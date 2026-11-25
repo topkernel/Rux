@@ -36,7 +36,7 @@ pub use lsm::{security_capable, security_hook_call, security_signal_send, HookAr
 // growth outweigh the call overhead.
 #[inline(never)]
 pub fn capable(cap: u32) -> bool {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             let cred = task.cred();
             security_capable(cred, cap) == 0
@@ -61,7 +61,7 @@ pub fn has_capability(cred: &crate::process::task::Cred, cap: u32) -> bool {
 /// `kernel/signal.c`.
 #[inline]
 pub fn can_send_signal(target_cred: &crate::process::task::Cred) -> bool {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             let cred = task.cred();
             // Linux: uid_eq(cred->euid, tcred->suid) ||

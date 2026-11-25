@@ -190,7 +190,7 @@ pub fn note_acquire(
             // the GRQ; this is a racy diagnostic read.
             let slot_task = unsafe {
                 core::ptr::read_volatile(
-                    &crate::sched::sched::cpu_state(cpu as usize).current
+                    &crate::sched::hotpath::cpu_state(cpu as usize).current
                         as *const *mut crate::process::Task
                 ) as usize
             };
@@ -235,7 +235,7 @@ pub fn note_acquire(
         // and locks held.
         if !unsafe { (*task).state().is_dead() }
             && unsafe { (*task).pid() } != 0
-            && !crate::sched::sched::pick_owner_live(task)
+            && !crate::sched::hotpath::pick_owner_live(task)
         {
             static PB_N: AtomicU32 = AtomicU32::new(120);
             let b = PB_N.load(Ordering::Acquire);
@@ -592,11 +592,11 @@ pub fn note_release(task: *mut crate::process::Task) {
             // cpu is switching it out right now.
             let mut rown: u64 = 0;
             for c in 0..crate::config::MAX_CPUS {
-                if crate::sched::sched::cpu_state(c).current == rt {
+                if crate::sched::hotpath::cpu_state(c).current == rt {
                     rown |= 1;
                 }
             }
-            if crate::sched::sched::task_is_mid_switch_out(rt) {
+            if crate::sched::hotpath::task_is_mid_switch_out(rt) {
                 rown |= 2;
             }
             for &c in b" rown=" {
@@ -664,7 +664,7 @@ pub fn note_softirq_acquire(
         // Volatile racy diagnostic read (same discipline as note_acquire).
         let slot_task = unsafe {
             core::ptr::read_volatile(
-                &crate::sched::sched::cpu_state(cpu as usize).current
+                &crate::sched::hotpath::cpu_state(cpu as usize).current
                     as *const *mut crate::process::Task
             ) as usize
         };
@@ -853,7 +853,7 @@ pub fn check_user_return() {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
-    let Some(task) = crate::sched::current() else {
+    let Some(task) = crate::sched::hotpath::current() else {
         return;
     };
     // SAFETY: current() pins a live task; scalar field reads.

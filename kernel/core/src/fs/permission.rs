@@ -101,7 +101,7 @@ pub fn generic_permission(
 /// Returns `true` when there is no current task (early boot / kernel-thread
 /// context) so internal lookups keep working.
 pub fn inode_permission(inode: &crate::fs::inode::Inode, mask: u32) -> bool {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             // SAFETY: `task` is the current task pointer from sched::current();
             // its cred is immutable for the duration of this check.

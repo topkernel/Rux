@@ -477,7 +477,7 @@ pub fn test_seccomp_nnp() {
     use crate::sched;
 
     // --- PR_GET_NO_NEW_PRIVS default 0 ---
-    let cur = match sched::current() {
+    let cur = match sched::hotpath::current() {
         Some(t) => t,
         None => {
             test_skip("seccomp-nnp", "no current task in test context");

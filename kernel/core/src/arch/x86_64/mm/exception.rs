@@ -71,7 +71,7 @@ pub fn exception_table_count() -> usize {
 /// - `regs`: PtRegs pointer, used to get the current task
 fn send_signal(sig: i32, _code: i32, _addr: u64, _rip: u64, _regs: &PtRegs) {
     // Send signal using the real signal mechanism
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         let pid = current.pid();
         crate::signal::send_signal(pid, sig).ok();
 
@@ -170,7 +170,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // taken in user mode.
     crate::mm::vmstat::note_fault();
     if regs.user_mode() {
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             // Typed handle — per-task atomic counter only.
             task.min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
@@ -202,7 +202,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // demand-fill had its chance.
 
     // Get current process's address space
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => {
             // No current process, might be early boot stage
@@ -440,7 +440,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 ptag(b"\nKSO-CENSUS cpu=");
                 phex(crate::arch::cpu_id() as u64);
                 for c in 0..crate::config::MAX_CPUS {
-                    let cur = crate::sched::sched::cpu_state(c).current as usize as u64;
+                    let cur = crate::sched::hotpath::cpu_state(c).current as usize as u64;
                     if cur != 0 {
                         ptag(b" slot");
                         phex(c as u64);
@@ -552,7 +552,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             "pagefault: kernel fault addr={:#x} rip={:#x} pid={} (no fixup)",
             fault_addr.bits(),
             regs.rip,
-            crate::sched::get_current_pid()
+            crate::sched::hotpath::get_current_pid()
         );
         // rux:wildwatch (retired debug=wildwatch) (wildwrite-hunt): a write fault inside a guarded
         // region IS the wild writer caught in the act — banner it so the
@@ -566,7 +566,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
                 fault_addr.bits(),
                 regs.rip,
-                crate::sched::get_current_pid()
+                crate::sched::hotpath::get_current_pid()
             );
         }
         // OH bring-up forensics: walk the frame-pointer chain so the
@@ -654,14 +654,14 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 // satp_to_ppn masks the PCID/NOFLUSH bits a live CR3
                 // carries with PCID on.
                 let cr3_ppn = crate::arch::mm::asid::satp_to_ppn(crate::arch::cpu::read_cr3());
-                let exe = crate::sched::current()
+                let exe = crate::sched::hotpath::current()
                     .map(|t| t.get_exe_path())
                     .unwrap_or(&[]);
                 let exe_str = core::str::from_utf8(exe).unwrap_or("?");
                 crate::pr_err!(
                     "NOVMA-EXEC: addr={:#x} pid={} exe={} pgd={:#x} cr3_ppn={:#x}{} rip={:#x}",
                     fault_addr.bits(),
-                    crate::sched::get_current_pid(),
+                    crate::sched::hotpath::get_current_pid(),
                     exe_str,
                     addr_space.pgd() as u64,
                     cr3_ppn,

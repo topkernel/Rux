@@ -4,12 +4,13 @@
 //!
 //! Scheduling class ID and flags invariant tests.
 //!
-//! Types copied from: kernel/core/src/sched/class.rs
+//! Types copied from: kernel/core/src/sched/hotpath.rs (the flags) and
+//! kernel/core/src/sched/types.rs (SchedClassId)
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/core/src/sched/class.rs
+// Copied types from kernel/core/src/sched/hotpath.rs and kernel/core/src/sched/types.rs
 // ============================================================================
 
 pub const ENQUEUE_WAKEUP: i32 = 0x0001;

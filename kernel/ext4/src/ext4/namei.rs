@@ -38,7 +38,7 @@ use super::Ext4FileSystem;
 // clear/get/take_pre_capture rows all run task-local; no cross-task
 // aliasing exists by construction.)
 pub(crate) fn set_current_handle(handle: *mut crate::jbd2::Handle) {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         // The task slot is type-erased (rung-5); the raw-pointer cast
         // between pointer types is safe — only the crate dereferences
         // it typed (see process::unsafe::journal_handle).
@@ -48,14 +48,14 @@ pub(crate) fn set_current_handle(handle: *mut crate::jbd2::Handle) {
 
 /// Clear the current journal handle
 pub(crate) fn clear_current_handle() {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         task.journal_handle.set(core::ptr::null_mut());
     }
 }
 
 /// Get the current journal handle, if any
 pub(crate) fn get_current_handle() -> Option<*mut crate::jbd2::Handle> {
-    let task = crate::sched::current()?;
+    let task = crate::sched::hotpath::current()?;
     let ptr = task.journal_handle.get() as *mut crate::jbd2::Handle;
     if ptr.is_null() { None } else { Some(ptr) }
 }
@@ -255,7 +255,7 @@ pub fn ext4_new_inode(
     // open(O_CREAT|O_RDWR) with EACCES against the other-permission bits
     // (chmod03/utimes01 TBROK, and root-owned stale files that broke
     // tst_rmdir cleanup for later tests).
-    let (uid, gid) = if let Some(task) = crate::sched::current() {
+    let (uid, gid) = if let Some(task) = crate::sched::hotpath::current() {
         let cred = { (*task).cred() };
         (cred.fsuid as u16, cred.fsgid as u16)
     } else {

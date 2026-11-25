@@ -19,7 +19,7 @@ pub fn get_core_id() -> u64 {
 #[inline]
 pub fn get_thread_id_of(cpu: usize) -> u64 {
     if cpu < crate::arch::aarch64::MAX_CPUS {
-        crate::sched::sched::cpu_state(cpu).current as u64
+        crate::sched::hotpath::cpu_state(cpu).current as u64
     } else {
         0
     }

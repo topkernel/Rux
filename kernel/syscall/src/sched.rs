@@ -50,7 +50,7 @@ pub fn sys_sched_yield(_args: SyscallArgs) -> i64 {
     // Linux's schedstat yld_count: incremented in the sched_yield paths
     // only (kernel/sched/syscalls.c schedstat_inc(rq->yld_count)).
     crate::fs::procfs::schedstat::note_yield(crate::arch::cpu_id() as usize);
-    rux::sched::yield_cpu();
+    rux::sched::hotpath::yield_cpu();
     0
 }
 
@@ -71,7 +71,7 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
         PRIO_PROCESS => {
             let target_pid = if who == 0 {
                 // who = 0 means current process
-                match rux::sched::current() {
+                match rux::sched::hotpath::current() {
                     Some(t) => t.pid(),
                     None => return -(errno::ESRCH as i64),
                 }
@@ -95,7 +95,7 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
         // priority (lowest nice) among all matching tasks.
         PRIO_PGRP | PRIO_USER => {
             let key = if who == 0 {
-                match rux::sched::current() {
+                match rux::sched::hotpath::current() {
                     Some(t) => {
                         if which == PRIO_PGRP { t.pgid() } else { t.cred().uid }
                     }
@@ -150,7 +150,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
     match which {
         PRIO_PROCESS => {
             target_pids.push(if who == 0 {
-                match rux::sched::current() {
+                match rux::sched::hotpath::current() {
                     Some(t) => t.pid(),
                     None => return -(errno::ESRCH as i64),
                     }
@@ -160,7 +160,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         }
         PRIO_PGRP | PRIO_USER => {
             let key = if who == 0 {
-                match rux::sched::current() {
+                match rux::sched::hotpath::current() {
                     Some(t) => {
                         if which == PRIO_PGRP { t.pgid() } else { t.cred().uid }
                     }
@@ -221,7 +221,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         // R25-6: renice under the GRQ lock with load_weight rebalance — the
         // plain write let CFS enqueue/dequeue fetch_add/sub mismatched weights
         // (load_weight wrapped -> garbage sched_slice) and raced the runqueue.
-        rux::sched::sched::sched_renice_locked(&mut *task, niceval);
+        rux::sched::hotpath::sched_renice_locked(&mut *task, niceval);
         applied += 1;
     }
 
@@ -313,7 +313,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
 
     // Find target task
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
         }
@@ -360,7 +360,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     };
     // change_task_policy takes the GRQ lock internally (still raw-ptr
     // typed: it also serves pinned/raw callers).
-    rux::sched::change_task_policy(
+    rux::sched::hotpath::change_task_policy(
         task as *mut ::process::task::Task,
         new_policy,
         param.sched_priority as u32,
@@ -385,7 +385,7 @@ pub fn sys_sched_getscheduler(args: SyscallArgs) -> i64 {
     }
 
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
         }
@@ -439,7 +439,7 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     }
 
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
             }
@@ -474,7 +474,7 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
         }
         // change_task_policy takes the GRQ lock internally and
         // re-positions the task in the RT priority lists.
-        rux::sched::change_task_policy(task, policy, param.sched_priority as u32);
+        rux::sched::hotpath::change_task_policy(task, policy, param.sched_priority as u32);
     } else if param.sched_priority != 0 {
         // Non-RT policies must carry priority 0 (review PROC-P06).
         return -(errno::EINVAL as i64);
@@ -508,7 +508,7 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
     }
 
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
             }
@@ -570,7 +570,7 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
     }
 
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
             }
@@ -701,7 +701,7 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         });
 
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
         }
@@ -792,7 +792,7 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
 
     // Apply the policy switch with run-queue migration under the GRQ lock
     // (review PROC-P07). change_task_policy takes the GRQ lock internally.
-    rux::sched::change_task_policy(
+    rux::sched::hotpath::change_task_policy(
         task as *mut ::process::task::Task,
         new_policy,
         attr.sched_priority,
@@ -801,7 +801,7 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     // Set nice for normal tasks: route through the locked renice helper
     // (R31-3c: bare set_nice raced the CFS accounting).
     if matches!(new_policy, ::process::task::SchedPolicy::Normal | ::process::task::SchedPolicy::Batch) {
-        rux::sched::sched::sched_renice_locked(
+        rux::sched::hotpath::sched_renice_locked(
             task,
             attr.sched_nice.clamp(MIN_NICE, MAX_NICE),
         );
@@ -842,7 +842,7 @@ struct TimeSpec {
     }
 
     let target_pid = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
             }
@@ -897,7 +897,7 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     // task's affinity without CAP_SYS_NICE is EPERM (case 4, run as an
     // unprivileged user against a root child).
     // SAFETY: sched::current() returns the running task's pointer.
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -1000,18 +1000,18 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
                 // TASK_TI_PREEMPT check reads a straddled 8-byte load and
                 // effectively never preempts — see trap.S.)
                 if target < crate::config::MAX_CPUS && target != this {
-                    rux::sched::resched_cpu(target);
+                    rux::sched::hotpath::resched_cpu(target);
                 }
-                rux::sched::schedule();
+                rux::sched::hotpath::schedule();
                 // Post-conditions don't matter: whether we ran on an
                 // allowed CPU before or after this point, getcpu() now
                 // reports an allowed CPU.
             } else {
                 let ti_cpu = task.ti_cpu() as usize;
                 if ti_cpu < crate::config::MAX_CPUS && ti_cpu != this {
-                    rux::sched::resched_cpu(ti_cpu);
+                    rux::sched::hotpath::resched_cpu(ti_cpu);
                 } else if target < crate::config::MAX_CPUS {
-                    rux::sched::resched_cpu(target);
+                    rux::sched::hotpath::resched_cpu(target);
                 }
             }
         }
@@ -1052,7 +1052,7 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
     // Resolve the target task (self, or an existing pid).
     // SAFETY: sched::current() returns the running task's pointer.
     let task = if pid == 0 || pid == ::process::current_pid() {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t,
             None => return -(errno::ESRCH as i64),
         }

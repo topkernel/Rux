@@ -195,7 +195,7 @@ fn file_lock_key(file: &File) -> (u64, u64) {
 /// tgid of the current task (record-lock owner). Falls back to pid, and
 /// to 0 in non-task context (kernel threads never hold user record locks).
 fn current_tgid() -> u32 {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => task.tgid(),
         None => 0,
     }
@@ -244,7 +244,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
     let nonblock = operation & LOCK_NB != 0;
     let key = file_lock_key(file);
     let file_id = file.file_id;
-    let owner_pid = match crate::sched::current() {
+    let owner_pid = match crate::sched::hotpath::current() {
         Some(task) => task.pid(),
         None => 0,
     };

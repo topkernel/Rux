@@ -517,7 +517,7 @@ impl NetlinkSocket {
         Self {
             protocol,
             portid: core::sync::atomic::AtomicU32::new(
-                crate::sched::get_current_pid(),
+                crate::sched::hotpath::get_current_pid(),
             ),
             groups: core::sync::atomic::AtomicU32::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
@@ -574,7 +574,7 @@ fn netlink_wait_round(
     sock: &Arc<NetlinkSocket>,
     deadline: Option<u64>,
 ) -> Result<(), i32> {
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return Err(-11),
     };
@@ -582,26 +582,26 @@ fn netlink_wait_round(
 
     if sock.recv_ready() {
         sock.wait_queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Ok(());
     }
     if crate::signal::signal_pending() {
         sock.wait_queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-4); // EINTR
     }
 
     let timer_id = deadline
-        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::hotpath::get_current_pid()))
         .unwrap_or(0);
     if deadline.is_some() && timer_id == 0 {
         sock.wait_queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-12); // ENOMEM
     }
 
     crate::arch::cpu::restore_irq(true);
-    crate::sched::schedule();
+    crate::sched::hotpath::schedule();
 
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
@@ -1366,7 +1366,7 @@ fn netlink_socket_install(
     file.set_ops(&NETLINK_OPS);
     file.set_private_data(Arc::into_raw(socket.clone()) as *mut u8);
 
-    let fdtable = match crate::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => {
             unwind_netlink_file(&file);
@@ -1436,7 +1436,7 @@ pub fn netlink_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
 
 /// Resolve a process fd to its NetlinkSocket (identity-checked).
 pub fn netlink_socket_from_fd(fd: usize) -> Option<Arc<NetlinkSocket>> {
-    let fdtable = crate::sched::get_current_fdtable()?;
+    let fdtable = crate::sched::hotpath::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     {
         let ops = file.get_ops();
@@ -1451,7 +1451,7 @@ pub fn netlink_socket_from_fd(fd: usize) -> Option<Arc<NetlinkSocket>> {
 
 /// (NetlinkSocket, file O_NONBLOCK) for a fd.
 pub fn netlink_file_of(fd: usize) -> Option<(Arc<NetlinkSocket>, bool)> {
-    let fdtable = crate::sched::get_current_fdtable()?;
+    let fdtable = crate::sched::hotpath::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     netlink_file_of_file(&file)
 }

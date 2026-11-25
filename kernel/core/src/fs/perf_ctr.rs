@@ -120,7 +120,7 @@ pub fn charge_tick(user_mode: bool) {
     if cpu >= MAX_CPUS {
         return;
     }
-    let idle = match crate::sched::current() {
+    let idle = match crate::sched::hotpath::current() {
         Some(task) => task.pid() == 0,
         None => true,
     };
@@ -229,7 +229,7 @@ pub fn update_load_avg() {
 
     // Runnable+running tasks across all scheduling classes — lock-free
     // atomic reads (per-class nr_running counters), safe in IRQ context.
-    let running = crate::sched::sched::GlobalRunQueue::grq_nr_running() as u64;
+    let running = crate::sched::types::GlobalRunQueue::grq_nr_running() as u64;
 
     LAST_RUNNING.store(running as u32, Ordering::Relaxed);
     LAST_TOTAL.store(running as u32, Ordering::Relaxed);

@@ -43,23 +43,23 @@ pub mod sched_ev;
 pub mod wakewatch;
 
 
-fn fair_class_fn() -> &'static dyn crate::sched::class::SchedClass {
+fn fair_class_fn() -> &'static dyn crate::sched::hotpath::SchedClass {
     &fair::FAIR_SCHED_CLASS
 }
 
-fn rt_class_fn() -> &'static dyn crate::sched::class::SchedClass {
+fn rt_class_fn() -> &'static dyn crate::sched::hotpath::SchedClass {
     &rt::RT_SCHED_CLASS
 }
 
-fn dl_class_fn() -> &'static dyn crate::sched::class::SchedClass {
+fn dl_class_fn() -> &'static dyn crate::sched::hotpath::SchedClass {
     &deadline::DL_SCHED_CLASS
 }
 
-fn idle_class_fn() -> &'static dyn crate::sched::class::SchedClass {
+fn idle_class_fn() -> &'static dyn crate::sched::hotpath::SchedClass {
     &idle::IDLE_SCHED_CLASS
 }
 
-fn stop_class_fn() -> &'static dyn crate::sched::class::SchedClass {
+fn stop_class_fn() -> &'static dyn crate::sched::hotpath::SchedClass {
     &stop_task::STOP_SCHED_CLASS
 }
 
@@ -108,7 +108,7 @@ pub fn register_all() {
             preempt_check_wake: sched_policy::preempt_check_wake,
             preempt_check_wake_sync: sched_policy::preempt_check_wake_sync,
             w2_refusal_census: sched_policy::w2_refusal_census,
-            task_sched_class: crate::sched::class::task_sched_class,
+            task_sched_class: crate::sched::hotpath::task_sched_class,
             ww_note_slot_mismatch: sched_policy::ww_note_slot_mismatch,
             monopolist_census: sched_policy::monopolist_census,
             runq_strand_census: sched_policy::runq_strand_census,
@@ -152,8 +152,8 @@ pub fn register_all() {
             dl_sched_class: dl_class_fn,
             idle_sched_class: idle_class_fn,
             stop_sched_class: stop_class_fn,            vr_canary: |rq, task, site, vr| fair::vr_canary(rq, task, site, vr),
-            sched_clock: || crate::sched::entities::sched_clock(),
-            sched_slice_to_ms: |ns| crate::sched::entities::sched_slice_to_ms(ns),
+            sched_clock: || crate::sched::hotpath::sched_clock(),
+            sched_slice_to_ms: |ns| crate::sched::hotpath::sched_slice_to_ms(ns),
     });
 }
 

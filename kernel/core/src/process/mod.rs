@@ -78,25 +78,25 @@ pub fn thread_set_entry(
 
 /// Get current process ID
 pub fn current_pid() -> u32 {
-    crate::sched::get_current_pid()
+    crate::sched::hotpath::get_current_pid()
 }
 
 /// Get current parent process ID
 pub fn current_ppid() -> u32 {
-    crate::sched::get_current_ppid()
+    crate::sched::hotpath::get_current_ppid()
 }
 
 /// Get current process group ID
 pub fn current_pgid() -> u32 {
     // SAFETY: sched::current() returns a valid pointer to the currently running task.
-    crate::sched::current().map_or(0, |t| unsafe { (*t).pgid() })
+    crate::sched::hotpath::current().map_or(0, |t| unsafe { (*t).pgid() })
 }
 
 /// Get current task reference
 ///
 /// Returns None if no current task is set (e.g., during early boot)
 pub fn current_task() -> Option<&'static mut Task> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
 }
 
 /// Find task by PID

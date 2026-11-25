@@ -1888,7 +1888,7 @@ fn handle_swap_fault(
             // Drop the guard BEFORE yielding: the write lock must never
             // be held across schedule().
             drop(vma_mgr);
-            crate::sched::cond_resched();
+            crate::sched::hotpath::cond_resched();
             // Face-A cursor: advance past the piece just processed so a
             // fresh mmap landing in its (now fully consistent) hole is
             // never revisited by this munmap.

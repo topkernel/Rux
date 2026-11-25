@@ -34,7 +34,7 @@ pub fn generate() -> Vec<u8> {
 /// /proc/self/task/<tid> fallback); without the link every open fails
 /// ENOENT and OH's init aborts the service child before exec.
 pub fn get_thread_self_link() -> Vec<u8> {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(t) => {
             // SAFETY: current returns the running task's pointer.
             let tid = t.pid();

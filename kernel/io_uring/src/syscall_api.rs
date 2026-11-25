@@ -34,7 +34,7 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
         Err(e) => return (e as i64) as u64,
     };
 
-    let fdtable = match crate::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(12i64) as u64, // ENOMEM
     };
