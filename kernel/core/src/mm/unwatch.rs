@@ -35,23 +35,10 @@ pub const KIND_LEAF_REPLACE: u8 = 4;
 
 const RING_LEN: usize = 256;
 
-/// One event: plain atomics (the Task::mm_ops shape) — a concurrent
-/// reader may see a partially-updated event under contention, which is
-/// acceptable for forensics (LOCK still serializes writers).
-struct UnEvent {
-    /// KIND_* (0 = never written).
-    kind: AtomicU64,
-    /// Acting pid.
-    pid: AtomicU64,
-    /// Kind-specific: start VA (1), root ppn (2), target pfn (3/4).
-    a: AtomicU64,
-    /// End VA (1), count (2/3), new_bits (4).
-    b: AtomicU64,
-    /// Leaves cleared / PTEs replaced.
-    cnt: AtomicU64,
-    /// jiffies at record time.
-    j: AtomicU64,
-}
+// The ring's record UnEvent is defined in mm/types.rs (plain atomics: a
+// concurrent reader may see a partially-updated event under contention,
+// which is acceptable for forensics — LOCK still serializes writers).
+use super::types::UnEvent;
 
 static RING: [UnEvent; RING_LEN] = [const {
     UnEvent {

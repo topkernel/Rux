@@ -16,11 +16,11 @@
 //!
 //! Additionally:
 //!
-//! - **INV-HEAP-1**: `BlockMeta.prev`/`next` are valid page indices (< MAX_PAGES)
+//! - **INV-HEAP-1**: `BlockMeta.prev`/`next` are valid page indices (< BUDDY_MAX_PAGES)
 //!   or `u32::MAX` (null sentinel). No truncation occurs — fields are `u32`.
 //!
 //! - **INV-HEAP-2**: `free_lists[order]` is either `EMPTY_LIST` or a valid
-//!   page index within `[0, MAX_PAGES)`.
+//!   page index within `[0, BUDDY_MAX_PAGES)`.
 //!
 //! - **INV-HEAP-3** (session 5, wedge fix): the per-page FREE bit lives in
 //!   `free_bits`, a word-strided bitmap; `BlockMeta.free` is authoritative
@@ -48,8 +48,13 @@ use crate::sync::spinlock::Spinlock;
 
 const PAGE_SIZE: usize = 4096;
 
-// Use config value for max order
-const MAX_ORDER: usize = crate::config::BUDDY_MAX_ORDER;
+// BUDDY_MAX_ORDER, HEAP_SIZE, BUDDY_MAX_PAGES, FREE_BITMAP_WORDS, BlockMeta, MetaArray and
+// BuddyAllocator — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::buddy_allocator::…` paths are unchanged.
+pub use super::types::{BuddyAllocator};
+pub(super) use super::types::{BUDDY_MAX_ORDER, FREE_BITMAP_WORDS};
+use super::types::{HEAP_SIZE, BUDDY_MAX_PAGES, BlockMeta, MetaArray};
 
 const MIN_ORDER: usize = 0;
 
@@ -78,16 +83,8 @@ const VA_PA_OFFSET: usize = 0xffff_c000_0000_0000;
 const HEAP_START: usize = KERNEL_HEAP_PHYS + VA_PA_OFFSET;
 
 // Heap size - read from configuration file
-const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
-
-/// Maximum number of pages (for metadata array size)
-const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
-
-/// Words in the per-page free bitmap (INV-HEAP-3).
-const FREE_BITMAP_WORDS: usize = (MAX_PAGES + 63) / 64;
-
 /// Empty list marker (use out-of-range value)
-const EMPTY_LIST: usize = MAX_PAGES + 1;
+const EMPTY_LIST: usize = BUDDY_MAX_PAGES + 1;
 
 // ---------------------------------------------------------------------------
 // alloc-crash r12-16 forensics: exact page-flow accounting for the
@@ -106,8 +103,8 @@ const EMPTY_LIST: usize = MAX_PAGES + 1;
 // returns to a free list). A refused-free count that grows with uptime IS
 // the leak when the live table is clean.
 // ---------------------------------------------------------------------------
-pub static NET_PAGES: [AtomicUsize; MAX_ORDER + 1] =
-    [const { AtomicUsize::new(0) }; MAX_ORDER + 1];
+pub static NET_PAGES: [AtomicUsize; BUDDY_MAX_ORDER + 1] =
+    [const { AtomicUsize::new(0) }; BUDDY_MAX_ORDER + 1];
 
 /// Free-refusal breakdown, indexed by FreeRefuse kind.
 pub static FREE_REFUSED: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
@@ -135,20 +132,6 @@ fn refused_free_note(kind: usize, addr: usize, order: usize, meta_order: u8, met
 }
 
 
-/// Block metadata (stored separately, not mixed with user data)
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BlockMeta {
-    /// Block size order (2^order * PAGE_SIZE)
-    order: u8,
-    /// Whether the block is free
-    free: u8,
-    /// Previous index (index in metadata array, u32::MAX means null)
-    prev: u32,
-    /// Next index (index in metadata array, u32::MAX means null)
-    next: u32,
-}
-
 impl BlockMeta {
     const fn new() -> Self {
         Self {
@@ -160,11 +143,6 @@ impl BlockMeta {
     }
 }
 
-/// Metadata array wrapper (uses UnsafeCell for interior mutability)
-struct MetaArray {
-    data: UnsafeCell<[BlockMeta; MAX_PAGES]>,
-}
-
 // SAFETY: MetaArray is only accessed through BuddyAllocator, which holds a
 // Spinlock.  All get/get_mut calls happen under that lock, preventing
 // concurrent mutable access to the underlying array.
@@ -174,46 +152,23 @@ unsafe impl Sync for MetaArray {}
 impl MetaArray {
     const fn new() -> Self {
         Self {
-            data: UnsafeCell::new([const { BlockMeta::new() }; MAX_PAGES]),
+            data: UnsafeCell::new([const { BlockMeta::new() }; BUDDY_MAX_PAGES]),
         }
     }
 
     /// Get metadata reference
     fn get(&self, idx: usize) -> &BlockMeta {
-        assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
+        assert!(idx < BUDDY_MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, BUDDY_MAX_PAGES);
         // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
         unsafe { &(*self.data.get())[idx] }
     }
 
     /// Get mutable metadata reference
     fn get_mut(&self, idx: usize) -> &mut BlockMeta {
-        assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
+        assert!(idx < BUDDY_MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, BUDDY_MAX_PAGES);
         // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
         unsafe { &mut (*self.data.get())[idx] }
     }
-}
-
-pub struct BuddyAllocator {
-    /// Magic number (for corruption detection)
-    magic: AtomicUsize,
-    /// Heap start address (user data area)
-    heap_start: AtomicUsize,
-    /// Heap end address
-    heap_end: AtomicUsize,
-    /// Free block lists (one list per order, stores page indices)
-    free_lists: [AtomicUsize; MAX_ORDER + 1],
-    /// Whether initialized
-    initialized: AtomicUsize,
-    /// Metadata area (stores metadata for each page)
-    meta: MetaArray,
-    /// Per-page free bitmap (INV-HEAP-3): bit (page_idx % 64) of word
-    /// (page_idx / 64). Maintained by the same locked paths that used to
-    /// fill the per-page `BlockMeta.free` bytes; word-strided so an
-    /// order-scale fill costs 2^order/64 word RMWs instead of 2^order
-    /// per-page `get_mut` iterations under the irqsave lock.
-    free_bits: [AtomicU64; FREE_BITMAP_WORDS],
-    /// Lock for buddy operations
-    lock: Spinlock<()>,
 }
 
 // SAFETY: BuddyAllocator uses internal Spinlock for all mutable operations
@@ -245,7 +200,7 @@ impl BuddyAllocator {
             return None;
         }
         let idx = (addr - heap_start) / PAGE_SIZE;
-        if idx >= MAX_PAGES {
+        if idx >= BUDDY_MAX_PAGES {
             return None;
         }
         // SAFETY: read-only diagnostic access to the metadata array;
@@ -255,7 +210,7 @@ impl BuddyAllocator {
         if m.free != 0 {
             return None; // free block: no containing allocation
         }
-        let order = (m.order as u32).min(MAX_ORDER as u32);
+        let order = (m.order as u32).min(BUDDY_MAX_ORDER as u32);
         let block = idx & !((1usize << order) - 1);
         Some((heap_start + block * PAGE_SIZE, order, m.free))
     }
@@ -265,7 +220,7 @@ impl BuddyAllocator {
             magic: AtomicUsize::new(0xDEADBEEF),
             heap_start: AtomicUsize::new(0),
             heap_end: AtomicUsize::new(0),
-            free_lists: [const { AtomicUsize::new(0) }; MAX_ORDER + 1],
+            free_lists: [const { AtomicUsize::new(0) }; BUDDY_MAX_ORDER + 1],
             initialized: AtomicUsize::new(0),
             meta: MetaArray::new(),
             free_bits: [const { AtomicU64::new(0) }; FREE_BITMAP_WORDS],
@@ -309,7 +264,7 @@ impl BuddyAllocator {
             self.heap_end.store(HEAP_START + size, Ordering::Release);
 
             // Initialize all free lists to empty
-            for i in 0..=MAX_ORDER {
+            for i in 0..=BUDDY_MAX_ORDER {
                 self.free_lists[i].store(EMPTY_LIST, Ordering::Release);
             }
 
@@ -323,7 +278,7 @@ impl BuddyAllocator {
             let mut idx = 0usize;
             while remaining > 0 {
                 let mut order = 0usize;
-                for o in (0..=MAX_ORDER).rev() {
+                for o in (0..=BUDDY_MAX_ORDER).rev() {
                     let block = 1usize << o;
                     if idx % block == 0 && remaining >= block {
                         order = o;
@@ -342,7 +297,7 @@ impl BuddyAllocator {
     /// the heap window. Callers either hold the allocator lock or tolerate
     /// a torn watermark (same discipline as the lock-free census).
     fn page_is_free(&self, page_idx: usize) -> bool {
-        debug_assert!(page_idx < MAX_PAGES);
+        debug_assert!(page_idx < BUDDY_MAX_PAGES);
         (self.free_bits[page_idx / 64].load(Ordering::Relaxed) >> (page_idx % 64)) & 1 == 1
     }
 
@@ -355,11 +310,11 @@ impl BuddyAllocator {
             return;
         }
         assert!(
-            page_idx + npages <= MAX_PAGES,
+            page_idx + npages <= BUDDY_MAX_PAGES,
             "buddy fill_free_bits out of range ({}+{} > MAX_PAGES={})",
             page_idx,
             npages,
-            MAX_PAGES
+            BUDDY_MAX_PAGES
         );
         let last = page_idx + npages; // exclusive
         let mut w = page_idx / 64;
@@ -394,11 +349,11 @@ impl BuddyAllocator {
         }
         let last = page_idx + (1usize << order); // exclusive
         assert!(
-            last <= MAX_PAGES,
+            last <= BUDDY_MAX_PAGES,
             "buddy fill_interior_order out of range ({}+2^{} > MAX_PAGES={})",
             page_idx,
             order,
-            MAX_PAGES
+            BUDDY_MAX_PAGES
         );
         // SAFETY: indices bounds-checked above; callers hold the allocator
         // lock (or are the single-threaded init_sized seeder); only the
@@ -436,7 +391,7 @@ impl BuddyAllocator {
     /// Add block to free list
     fn add_to_free_list(&self, page_idx: usize, order: usize) {
         // Boundary check
-        if order > MAX_ORDER {
+        if order > BUDDY_MAX_ORDER {
             return;  // Cannot handle blocks exceeding maximum order
         }
 
@@ -457,7 +412,7 @@ impl BuddyAllocator {
         let list_head = self.free_lists[order].load(Ordering::Acquire);
 
         // Insert block at list head
-        if list_head != EMPTY_LIST && list_head < MAX_PAGES {
+        if list_head != EMPTY_LIST && list_head < BUDDY_MAX_PAGES {
             self.meta.get_mut(list_head).prev = page_idx as u32;
         }
         {
@@ -473,7 +428,7 @@ impl BuddyAllocator {
     /// Remove block from free list
     fn remove_from_free_list(&self, page_idx: usize, order: usize) {
         // Boundary check
-        if order > MAX_ORDER {
+        if order > BUDDY_MAX_ORDER {
             return;  // Cannot handle blocks exceeding maximum order
         }
 
@@ -488,7 +443,7 @@ impl BuddyAllocator {
         let prev_idx = self.meta.get(page_idx).prev as usize;
         let next_idx = self.meta.get(page_idx).next as usize;
 
-        if prev_idx != u32::MAX as usize && prev_idx < MAX_PAGES {
+        if prev_idx != u32::MAX as usize && prev_idx < BUDDY_MAX_PAGES {
             self.meta.get_mut(prev_idx).next = next_idx as u32;
         } else {
             // This is the list head, update global list head
@@ -496,7 +451,7 @@ impl BuddyAllocator {
             self.free_lists[order].store(new_head, Ordering::Release);
         }
 
-        if next_idx != u32::MAX as usize && next_idx < MAX_PAGES {
+        if next_idx != u32::MAX as usize && next_idx < BUDDY_MAX_PAGES {
             self.meta.get_mut(next_idx).prev = prev_idx as u32;
         }
 
@@ -510,14 +465,14 @@ impl BuddyAllocator {
         }
         let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         let order = (usize::BITS - (pages - 1).leading_zeros()) as usize;
-        if order > MAX_ORDER { MAX_ORDER } else { order }
+        if order > BUDDY_MAX_ORDER { BUDDY_MAX_ORDER } else { order }
     }
 
     /// Convert size to order (O(1) bit manipulation)
     ///
-    /// R75 (GNOME scribbles): the old clamp `order > MAX_ORDER → MAX_ORDER`
+    /// R75 (GNOME scribbles): the old clamp `order > BUDDY_MAX_ORDER → BUDDY_MAX_ORDER`
     /// made every allocation larger than the largest buddy block
-    /// (PAGE_SIZE << MAX_ORDER, 16 MB) come back as a MAX_ORDER block — a
+    /// (PAGE_SIZE << BUDDY_MAX_ORDER, 16 MB) come back as a BUDDY_MAX_ORDER block — a
     /// 64 MB Vec growth received 16 MB and then overwrote the following
     /// 48 MB of kernel heap (the R57 pick-state garbage / R46 phantoms /
     /// R74 slotless-TP / PREEMPT-UNDERFLOW family all match that
@@ -554,7 +509,7 @@ impl BuddyAllocator {
             return None;
         }
         let idx = (addr - heap_start) / PAGE_SIZE;
-        if idx >= MAX_PAGES {
+        if idx >= BUDDY_MAX_PAGES {
             return None;
         }
         Some(idx)
@@ -563,10 +518,10 @@ impl BuddyAllocator {
     /// Allocate memory
     fn alloc_blocks(&self, order: usize) -> *mut u8 {
         // Search starting from specified order
-        for mut current_order in order..=MAX_ORDER {
+        for mut current_order in order..=BUDDY_MAX_ORDER {
             let list_head = self.free_lists[current_order].load(Ordering::Acquire);
 
-            if list_head != EMPTY_LIST && list_head < MAX_PAGES {
+            if list_head != EMPTY_LIST && list_head < BUDDY_MAX_PAGES {
                 // Found free block
                 self.remove_from_free_list(list_head, current_order);
 
@@ -577,7 +532,7 @@ impl BuddyAllocator {
                     let buddy_idx = page_idx + (block_size_pages / 2);
 
                     // Safety check: buddy must be within valid range
-                    if buddy_idx >= MAX_PAGES {
+                    if buddy_idx >= BUDDY_MAX_PAGES {
                         break;
                     }
 
@@ -689,24 +644,24 @@ impl BuddyAllocator {
 
         loop {
             // Merge ceiling (page-buddy parity): stop coalescing AT the
-            // maximum order. The old `> MAX_ORDER` guard let two
-            // MAX_ORDER buddies merge first and only then registered the
-            // oversized block at MAX_ORDER — the buddy half's free bits
+            // maximum order. The old `> BUDDY_MAX_ORDER` guard let two
+            // BUDDY_MAX_ORDER buddies merge first and only then registered the
+            // oversized block at BUDDY_MAX_ORDER — the buddy half's free bits
             // were cleared by remove_from_free_list but its pages were on
-            // no list: 2^MAX_ORDER pages orphaned per event, invisible to
+            // no list: 2^BUDDY_MAX_ORDER pages orphaned per event, invisible to
             // both the allocator and the census. Unreachable with the
             // shipped config (BUDDY_MAX_ORDER=20 covers the whole heap),
             // but latent for any smaller max order.
-            if current_order >= MAX_ORDER {
-                // At the ceiling already: add directly to MAX_ORDER list.
-                self.add_to_free_list(page_idx, MAX_ORDER);
+            if current_order >= BUDDY_MAX_ORDER {
+                // At the ceiling already: add directly to BUDDY_MAX_ORDER list.
+                self.add_to_free_list(page_idx, BUDDY_MAX_ORDER);
                 break;
             }
 
             let buddy_idx = self.get_buddy_idx(page_idx, current_order);
 
             // Check if buddy is in valid range
-            if buddy_idx >= MAX_PAGES {
+            if buddy_idx >= BUDDY_MAX_PAGES {
                 // Buddy out of range, cannot merge
                 self.add_to_free_list(page_idx, current_order);
                 break;
@@ -761,13 +716,13 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let order = self.size_to_order(size.max(align));
 
         // R75: requests larger than the biggest buddy block must FAIL, not
-        // come back as an undersized MAX_ORDER block (see size_to_order).
-        if order > MAX_ORDER {
+        // come back as an undersized BUDDY_MAX_ORDER block (see size_to_order).
+        if order > BUDDY_MAX_ORDER {
             if size > 4 * 1024 * 1024 {
                 crate::pr_err!(
                     "bigalloc: REJECTED size={:#x} (> max block {:#x})",
                     size,
-                    PAGE_SIZE << MAX_ORDER
+                    PAGE_SIZE << BUDDY_MAX_ORDER
                 );
             }
             return core::ptr::null_mut();
@@ -1060,8 +1015,8 @@ impl BuddyAllocator {
             return;
         }
 
-        // Check if order exceeds MAX_ORDER
-        if order > MAX_ORDER {
+        // Check if order exceeds BUDDY_MAX_ORDER
+        if order > BUDDY_MAX_ORDER {
             crate::debug::memwatch::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_ORDER_TOO_BIG, ptr_addr, order, 0, 0);
             return;
@@ -1128,27 +1083,6 @@ pub fn init_heap_sized(size: usize) {
     GLOBAL_ALLOCATOR.init_sized(size);
 }
 
-/// Buddy allocator statistics
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BuddyStats {
-    /// Heap start address
-    pub heap_start: usize,
-    /// Heap end address
-    pub heap_end: usize,
-    /// Heap total size (bytes)
-    pub heap_size: usize,
-    /// Used size (bytes)
-    pub used_bytes: usize,
-    /// Free size (bytes)
-    pub free_bytes: usize,
-    /// Number of free blocks per order
-    pub free_blocks: [usize; MAX_ORDER + 1],
-    /// Total allocation count
-    pub alloc_count: usize,
-    /// Total free count
-    pub free_count: usize,
-}
-
 /// LOCK-FREE rough heap census for the alloc-failure (ALLOCTHROW) print.
 ///
 /// `buddy_stats()` takes the allocator irqsave lock, which is exactly
@@ -1162,8 +1096,8 @@ pub struct BuddyStats {
 /// Returns (heap_size, free_bytes, blocks_at_order_0..=BUDDY_MAX_ORDER
 /// truncated to u32 counts) — kept as a plain tuple to avoid any
 /// formatting on the hot path.
-pub fn buddy_free_census_lockfree() -> (usize, usize, [u32; MAX_ORDER + 1]) {
-    let mut blocks = [0u32; MAX_ORDER + 1];
+pub fn buddy_free_census_lockfree() -> (usize, usize, [u32; BUDDY_MAX_ORDER + 1]) {
+    let mut blocks = [0u32; BUDDY_MAX_ORDER + 1];
     if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
         return (0, 0, blocks);
     }
@@ -1171,14 +1105,14 @@ pub fn buddy_free_census_lockfree() -> (usize, usize, [u32; MAX_ORDER + 1]) {
     let end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
     let heap_size = end.saturating_sub(start);
     let mut free_pages = 0usize;
-    for order in 0..=MAX_ORDER {
+    for order in 0..=BUDDY_MAX_ORDER {
         let mut page_idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
         let mut hops = 0usize;
-        while page_idx != EMPTY_LIST && page_idx < MAX_PAGES && hops < MAX_PAGES {
+        while page_idx != EMPTY_LIST && page_idx < BUDDY_MAX_PAGES && hops < BUDDY_MAX_PAGES {
             blocks[order] = blocks[order].saturating_add(1);
             free_pages += 1usize << order;
             let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
-            if next == u32::MAX as usize || next >= MAX_PAGES {
+            if next == u32::MAX as usize || next >= BUDDY_MAX_PAGES {
                 break;
             }
             page_idx = next;
@@ -1203,15 +1137,15 @@ pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
 
     // Count free blocks per order
     let mut total_free_pages = 0usize;
-    for order in 0..=MAX_ORDER {
+    for order in 0..=BUDDY_MAX_ORDER {
         let mut count = 0usize;
         let mut page_idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
 
-        while page_idx != EMPTY_LIST && page_idx < MAX_PAGES {
+        while page_idx != EMPTY_LIST && page_idx < BUDDY_MAX_PAGES {
             count += 1;
             total_free_pages += 1usize << order;
             let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
-            if next == u32::MAX as usize || next >= MAX_PAGES {
+            if next == u32::MAX as usize || next >= BUDDY_MAX_PAGES {
                 break;
             }
             page_idx = next;
@@ -1247,22 +1181,16 @@ pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
 // UNDER the heap irqsave lock before being reported — only a persistent
 // mismatch is corruption. Callers never print on pass-1 evidence alone.
 // ============================================================================
-
-/// One shadow-audit mismatch. `kind` classifies it; `idx`/`prev`/`next`
-/// carry the offending block's leader meta, `word`/`bits`/`derived` the
-/// offending free_bits word and the audit-derived shadow value for the
-/// bitmap kinds.
-#[derive(Clone, Copy, PartialEq)]
-pub struct MetaFinding {
-    pub kind: MetaFindKind,
-    pub order: usize,
-    pub idx: usize,
-    pub prev: u32,
-    pub next: u32,
-    pub word: usize,
-    pub bits: u64,
-    pub derived: u64,
-}
+//
+// The audit's own types (MetaFinding, MetaFindKind, AuditScratch,
+// MetaScanOutcome), the BuddyStats snapshot and the CombinedAllocator
+// front are defined in mm/types.rs; BuddyAllocator and its metadata
+// stay here. Re-exported so the `mm::buddy_allocator::…` paths are
+// unchanged.
+pub use super::types::{
+    BuddyStats, CombinedAllocator, MetaFindKind, MetaFinding, MetaScanOutcome,
+};
+use super::types::AuditScratch;
 
 /// The audit's empty finding (const constructor for stack buffers).
 pub const EMPTY_FINDING: MetaFinding = MetaFinding {
@@ -1276,40 +1204,10 @@ pub const EMPTY_FINDING: MetaFinding = MetaFinding {
     derived: 0,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MetaFindKind {
-    /// A list head or next-link escaped [0, MAX_PAGES), or a block's
-    /// span ran past the end of the page array.
-    LinkOob,
-    /// Listed block's leader order byte disagrees with the list order.
-    OrderMismatch,
-    /// Listed block's leader free byte is not 1.
-    FreeByteClear,
-    /// Listed block leader is not 2^order-aligned.
-    Unaligned,
-    /// prev link does not mirror the walk position.
-    PrevBroken,
-    /// free_bits has set bits where the lists say nothing is free.
-    BitmapSetUnlisted,
-    /// A listed free block's span has clear bits in free_bits.
-    BitmapClearListed,
-    /// The same page is reachable from two list positions.
-    DoubleListed,
-    /// Walk exceeded the page-count budget (list cycle / mega-list).
-    HopOverflow,
-}
-
 /// Scratch shadow bitmap for the audit, plus the single-CPU claim that
 /// makes it safe: pass 1 and its under-lock confirmation run inside one
 /// claim, so the scratch is never shared by two concurrent audits.
 static META_AUDIT_BUSY: AtomicU64 = AtomicU64::new(0);
-
-/// MetaArray-style interior-mutable scratch (see MetaArray's SAFETY
-/// comments): only touched by `meta_audit_inner`, which every caller
-/// reaches while holding the META_AUDIT_BUSY claim.
-struct AuditScratch {
-    data: UnsafeCell<[u64; FREE_BITMAP_WORDS]>,
-}
 
 // SAFETY: see `AuditScratch` doc — all access is claim-serialized.
 unsafe impl Send for AuditScratch {}
@@ -1347,8 +1245,8 @@ fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
         *w = 0;
     }
 
-    let mut hop_budget = MAX_PAGES + MAX_ORDER + 1;
-    'orders: for order in 0..=MAX_ORDER {
+    let mut hop_budget = BUDDY_MAX_PAGES + BUDDY_MAX_ORDER + 1;
+    'orders: for order in 0..=BUDDY_MAX_ORDER {
         let npages = 1usize << order;
         let mut idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
         let mut prev_link = u32::MAX as usize; // head's prev must be null
@@ -1356,7 +1254,7 @@ fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
             if idx == EMPTY_LIST {
                 break;
             }
-            if idx >= MAX_PAGES || idx + npages > MAX_PAGES {
+            if idx >= BUDDY_MAX_PAGES || idx + npages > BUDDY_MAX_PAGES {
                 record(
                     findings,
                     &mut total,
@@ -1515,7 +1413,7 @@ fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
                 &mut total,
                 MetaFinding {
                     kind: MetaFindKind::BitmapSetUnlisted,
-                    order: MAX_ORDER + 1,
+                    order: BUDDY_MAX_ORDER + 1,
                     idx: 0,
                     prev: 0,
                     next: 0,
@@ -1531,7 +1429,7 @@ fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
                 &mut total,
                 MetaFinding {
                     kind: MetaFindKind::BitmapClearListed,
-                    order: MAX_ORDER + 1,
+                    order: BUDDY_MAX_ORDER + 1,
                     idx: 0,
                     prev: 0,
                     next: 0,
@@ -1544,14 +1442,6 @@ fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
     }
 
     total
-}
-
-/// Outcome of one shadow scan: what pass 1 (lock-free) saw and what the
-/// under-lock confirmation made of it. `confirmed > 0` is corruption.
-#[derive(Clone, Copy)]
-pub struct MetaScanOutcome {
-    pub lockfree_findings: usize,
-    pub confirmed_findings: usize,
 }
 
 /// One shadow scan: lock-free pass, then — only if pass 1 was dirty —
@@ -1609,9 +1499,9 @@ pub fn buddy_meta_selftest() -> bool {
 
     // Find any listed block to corrupt.
     let mut victim: Option<(usize, usize)> = None; // (order, idx)
-    for order in 0..=MAX_ORDER {
+    for order in 0..=BUDDY_MAX_ORDER {
         let head = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
-        if head != EMPTY_LIST && head < MAX_PAGES {
+        if head != EMPTY_LIST && head < BUDDY_MAX_PAGES {
             victim = Some((order, head));
             break;
         }
@@ -1642,11 +1532,6 @@ pub fn buddy_meta_selftest() -> bool {
     META_AUDIT_BUSY.store(0, Ordering::Release);
     saw_kind && clean
 }
-
-/// Combined allocator - prioritizes Slab for small objects, falls back to Buddy for large objects
-///
-/// This design can reduce memory fragmentation and improve small object allocation efficiency
-pub struct CombinedAllocator;
 
 /// The real (unintercepted) free path: slab-region or buddy-heap by
 /// pointer range. `CombinedAllocator::dealloc` routes here after the

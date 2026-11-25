@@ -22,18 +22,10 @@ pub use crate::mm::page::{VirtAddr, PhysAddr, PAGE_SIZE};
 // VMA related types
 pub use crate::mm::vma::{Vma, VmaFlags, VmaManager, VmaType, VmaError};
 
-// Map error types (public interface)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MapError {
-    /// Already mapped
-    AlreadyMapped,
-    /// Not mapped
-    NotMapped,
-    /// Out of memory
-    OutOfMemory,
-    /// Invalid parameter
-    Invalid,
-}
+// MapError, Perm and PageTableType are defined in mm/types.rs; the
+// From<VmaError> conversion stays here. Re-exported so the
+// `mm::pagemap::…` paths are unchanged.
+pub use super::types::{MapError, PageTableType, Perm};
 
 // Implement From<VmaError> to support ? operator
 impl From<VmaError> for MapError {
@@ -47,30 +39,3 @@ impl From<VmaError> for MapError {
     }
 }
 
-// Page permissions (public interface)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Perm {
-    /// No access
-    None = 0,
-    /// Read only
-    Read = 1,
-    /// Read and write
-    ReadWrite = 2,
-    /// Read, write and execute
-    ReadWriteExec = 3,
-    /// Read and execute (R=1, W=0, X=1)
-    ReadExec = 4,
-    /// Execute only (R=0, W=0, X=1) — valid on Sv39
-    Exec = 5,
-}
-
-// Page table types (public interface)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum PageTableType {
-    /// Kernel page table
-    Kernel = 0,
-    /// User page table
-    User = 1,
-}

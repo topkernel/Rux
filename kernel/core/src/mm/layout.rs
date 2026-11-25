@@ -37,37 +37,10 @@ pub const KERNEL_ENTRY: usize = 0x80200000;
 /// `effective_static_regions` drops the slab to 0 on machines without room.
 pub const DEFAULT_SLAB_SIZE: usize = 16 * 1024 * 1024;
 
-/// Effective static-region sizing for machines smaller than the config
-/// assumes (the -m 512M boot panic family).
-///
-/// `KERNEL_HEAP_PHYS` (+ `KERNEL_HEAP_SIZE`) and the slab window that
-/// follows it are COMPILE-TIME addresses: on a machine whose discovered
-/// RAM ends before `heap_start + heap_size` the old code (a) reserved a
-/// heap range extending past RAM in memblock, (b) underflowed in
-/// `init_from_memblock` (`phys_base + phys_size - slab_start - slab_size`
-/// panics "attempt to subtract with overflow" at boot), and (c) let the
-/// heap buddy cover nonexistent DRAM — its single MAX_ORDER seed block
-/// made allocations past the RAM end fault (KERNPANIC on first touch).
-///
-/// This helper is the ONE place the static regions are clamped to the
-/// discovered memory map:
-///  - the heap NEVER extends past `phys_end`, and always leaves room for
-///    the slab plus a minimum user zone (`MIN_USER_ZONE`), shrinking the
-///    heap (config size is a CAP, not an entitlement);
-///  - the slab follows the (possibly shrunk) heap end, clamped to RAM;
-///  - when RAM is too small even for that, regions come back empty
-///    rather than wrapped — boot fails with a clear "no memory" instead
-///    of an arithmetic panic.
-///
-/// Machines with RAM ≥ KERNEL_HEAP_PHYS-base + KERNEL_HEAP_SIZE +
-/// slab + MIN_USER_ZONE get EXACTLY the historical layout (the clamp is
-/// a no-op) — 2G/4G boots are unchanged.
-pub struct EffectiveStaticRegions {
-    pub heap_start: usize,
-    pub heap_size: usize,
-    pub slab_start: usize,
-    pub slab_size: usize,
-}
+// EffectiveStaticRegions (the clamped carve this file's functions
+// compute; KernelMemoryLayout itself stays here — this file is its own)
+// is defined in mm/types.rs. Re-exported so the path is unchanged.
+pub use super::types::EffectiveStaticRegions;
 
 /// End of the CONTIGUOUS USABLE region containing `heap_start`, or 0 when
 /// the base sits in no usable region.
@@ -96,6 +69,31 @@ pub fn heap_region_end(regions: &[crate::cmdline::MemoryRegion], heap_start: usi
         .unwrap_or(0)
 }
 
+/// Effective static-region sizing for machines smaller than the config
+/// assumes (the -m 512M boot panic family).
+///
+/// `KERNEL_HEAP_PHYS` (+ `KERNEL_HEAP_SIZE`) and the slab window that
+/// follows it are COMPILE-TIME addresses: on a machine whose discovered
+/// RAM ends before `heap_start + heap_size` the old code (a) reserved a
+/// heap range extending past RAM in memblock, (b) underflowed in
+/// `init_from_memblock` (`phys_base + phys_size - slab_start - slab_size`
+/// panics "attempt to subtract with overflow" at boot), and (c) let the
+/// heap buddy cover nonexistent DRAM — its single MAX_ORDER seed block
+/// made allocations past the RAM end fault (KERNPANIC on first touch).
+///
+/// This helper is the ONE place the static regions are clamped to the
+/// discovered memory map:
+///  - the heap NEVER extends past `phys_end`, and always leaves room for
+///    the slab plus a minimum user zone (`MIN_USER_ZONE`), shrinking the
+///    heap (config size is a CAP, not an entitlement);
+///  - the slab follows the (possibly shrunk) heap end, clamped to RAM;
+///  - when RAM is too small even for that, regions come back empty
+///    rather than wrapped — boot fails with a clear "no memory" instead
+///    of an arithmetic panic.
+///
+/// Machines with RAM ≥ KERNEL_HEAP_PHYS-base + KERNEL_HEAP_SIZE +
+/// slab + MIN_USER_ZONE get EXACTLY the historical layout (the clamp is
+/// a no-op) — 2G/4G boots are unchanged.
 pub fn effective_static_regions(
     phys_base: usize,
     phys_size: usize,
@@ -163,37 +161,10 @@ pub fn effective_static_regions(
     }
 }
 
-/// Kernel memory layout
-///
-/// This structure holds all the dynamically computed memory regions.
-/// It layout is determined at memblock and initialization time.
-#[derive(Clone, Copy)]
-pub struct KernelMemoryLayout {
-    /// Physical memory base address (from device tree)
-    pub phys_base: usize,
-    /// Total physical memory size (from device tree)
-    pub phys_size: usize,
-    /// Kernel code start address (from linker symbols)
-    pub kernel_start: usize,
-    /// Kernel code end address (from linker symbols)
-    pub kernel_end: usize,
-    /// Kernel heap start address
-    pub heap_start: usize,
-    /// Kernel heap size
-    pub heap_size: usize,
-    /// Slab allocator start address
-    pub slab_start: usize,
-    /// Slab allocator size
-    pub slab_size: usize,
-    /// User physical memory start address (dynamically calculated)
-    pub user_phys_start: usize,
-    /// User physical memory size (dynamically calculated)
-    pub user_phys_size: usize,
-    /// Frame allocator start address (from memblock)
-    pub frame_alloc_start: usize,
-    /// Frame Allocator size
-    pub frame_alloc_size: usize,
-}
+// KernelMemoryLayout — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::layout::…` paths are unchanged.
+pub use super::types::{KernelMemoryLayout};
 
 impl KernelMemoryLayout {
     /// Create a new empty layout

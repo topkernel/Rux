@@ -72,6 +72,10 @@
 // seqlock write discipline.)
 use core::sync::atomic::{AtomicU32, Ordering};
 
+// The two page types are defined in mm/types.rs; the pages themselves
+// (the statics below) are this primitive's own state.
+use super::types::{VdsoCodePage, VdsoDataPage};
+
 /// Fixed user mapping address (INTERP_BASE - 4 MiB, clear of the dynamic
 /// linker's base).
 pub const VDSO_BASE: u64 = 0x3FBE_C000_00;
@@ -84,11 +88,6 @@ pub fn vdso_ehdr() -> u64 {
 // ============================================================================
 // Data page
 // ============================================================================
-
-/// The shared vDSO data page (4 KiB aligned), refreshed by
-/// `vdso_data_tick()`.
-#[repr(align(4096))]
-struct VdsoDataPage([u8; 4096]);
 
 static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);
 
@@ -535,10 +534,6 @@ pub fn is_vdso_phys(phys: u64) -> bool {
 // ============================================================================
 // Code page — mini RV64 assembler
 // ============================================================================
-
-/// The vDSO ELF page (4 KiB aligned), built once by `vdso_init()`.
-#[repr(align(4096))]
-struct VdsoCodePage([u8; 4096]);
 
 static mut VDSO_CODE_PAGE: VdsoCodePage = VdsoCodePage([0; 4096]);
 

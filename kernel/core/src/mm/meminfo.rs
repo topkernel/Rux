@@ -23,56 +23,10 @@ use super::slab::slab_stats;
 use super::page_desc::page_desc_stats;
 use super::PAGE_SIZE;
 
-/// Memory statistics info (similar to /proc/meminfo)
-#[derive(Debug, Clone, Copy)]
-pub struct MemoryInfo {
-    // ========== Physical Memory ==========
-    /// Total physical memory (bytes)
-    pub mem_total: usize,
-    /// Free physical memory (bytes)
-    pub mem_free: usize,
-    /// Available physical memory (bytes) = mem_free + reclaimable memory
-    pub mem_available: usize,
-    /// Used physical memory (bytes)
-    pub mem_used: usize,
-
-    // ========== Heap Memory (Buddy Allocator) ==========
-    /// Heap total size (bytes)
-    pub heap_total: usize,
-    /// Heap used (bytes)
-    pub heap_used: usize,
-    /// Heap free (bytes)
-    pub heap_free: usize,
-
-    // ========== Slab Allocator ==========
-    /// Slab page count
-    pub slab_pages: usize,
-    /// Slab allocation count
-    pub slab_allocs: usize,
-    /// Slab free count
-    pub slab_frees: usize,
-
-    // ========== Per-CPU Pages ==========
-    /// PCP page count for each CPU — frames cached in that CPU's
-    /// per-CPU pageset (mm/pcp.rs); counted free by zone.free_pages.
-    pub pcp_pages: [usize; crate::config::MAX_CPUS],
-
-    // ========== Page Descriptor Statistics ==========
-    /// Free page count
-    pub pages_free: usize,
-    /// In-use page count
-    pub pages_used: usize,
-    /// Reserved page count
-    pub pages_reserved: usize,
-    /// Mapped page count
-    pub pages_mapped: usize,
-    /// Dirty page count
-    pub pages_dirty: usize,
-    /// COW page count
-    pub pages_cow: usize,
-    /// Anonymous page count
-    pub pages_anon: usize,
-}
+// MemoryInfo — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::meminfo::…` paths are unchanged.
+pub use super::types::{MemoryInfo};
 
 impl Default for MemoryInfo {
     fn default() -> Self {
@@ -106,10 +60,10 @@ impl MemoryInfo {
     }
 }
 
-/// Memory info formatter
-pub struct MemoryInfoFormatter<'a> {
-    info: &'a MemoryInfo,
-}
+// The MemorySummary snapshot and the Display helper are defined in
+// mm/types.rs (MemoryInfo itself stays here — this file is its own).
+// Re-exported so the `mm::meminfo::…` paths are unchanged.
+pub use super::types::{MemoryInfoFormatter, MemorySummary};
 
 impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -209,19 +163,6 @@ pub fn get_memory_info() -> MemoryInfo {
 pub fn print_memory_info() {
     let info = get_memory_info();
     crate::println!("{}", info.format());
-}
-
-/// Memory usage summary (for quick checking)
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MemorySummary {
-    /// Total physical memory (MB)
-    pub total_mb: usize,
-    /// Used physical memory (MB)
-    pub used_mb: usize,
-    /// Free physical memory (MB)
-    pub free_mb: usize,
-    /// Heap usage percentage
-    pub heap_usage_percent: usize,
 }
 
 /// Get memory usage summary

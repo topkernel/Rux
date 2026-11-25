@@ -13,6 +13,8 @@
 
 pub use crate::mm::buddy_allocator::{BuddyAllocator, init_heap, init_heap_sized, HEAP_ALLOCATOR};
 
-// The old BumpAllocator has been deprecated, but the type alias is kept to avoid breaking changes
-#[deprecated(note = "Use BuddyAllocator instead")]
-pub type BumpAllocator = BuddyAllocator;
+// The old BumpAllocator has been deprecated, but the type alias is kept
+// to avoid breaking changes. Its definition lives in mm/types.rs;
+// re-exported so the `mm::allocator::BumpAllocator` path is unchanged.
+#[allow(deprecated)]
+pub use super::types::BumpAllocator;

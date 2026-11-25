@@ -214,12 +214,7 @@ pub fn vmemmap_stats() -> VmemmapStats {
     super::r#unsafe::vmemmap_stats_read()
 }
 
-/// vmemmap statistics
-#[derive(Debug, Clone, Copy)]
-pub struct VmemmapStats {
-    pub initialized: bool,
-    pub vmemmap_base: usize,
-    pub start_pfn: usize,
-    pub nr_pages: usize,
-    pub vmemmap_pages: usize,
-}
+// The VmemmapStats snapshot is defined in mm/types.rs. Re-exported so
+// the `mm::vmemmap::VmemmapStats` path (the stats edges in mm::unsafe
+// name it) is unchanged.
+pub use super::types::VmemmapStats;

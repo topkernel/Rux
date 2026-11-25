@@ -39,63 +39,10 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use super::page::{PhysAddr, PhysFrame, PhysFrameNr, VirtAddr, PAGE_SIZE};
 
-/// Page flags
-///
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum PageFlag {
-    /// Page is locked, not accessible
-    Locked = 1 << 0,
-    /// Page is being written back
-    Writeback = 1 << 1,
-    /// Page has been accessed (for LRU)
-    Referenced = 1 << 2,
-    /// Page data is valid (read from disk)
-    UpToDate = 1 << 3,
-    /// Page has been modified (needs writeback)
-    Dirty = 1 << 4,
-    /// Page is in LRU list
-    Lru = 1 << 5,
-    /// Head page of compound page
-    Head = 1 << 6,
-    /// Page has waiters
-    Waiters = 1 << 7,
-    /// Page is in active LRU list
-    Active = 1 << 8,
-    /// Reserved page (kernel use, not swappable)
-    Reserved = 1 << 9,
-    /// Page has private data (stored in private field)
-    Private = 1 << 10,
-    /// Page will be reclaimed
-    Reclaim = 1 << 11,
-    /// Page is backed by swap space
-    SwapBacked = 1 << 12,
-    /// Page is unevictable
-    Unevictable = 1 << 13,
-    /// Copy-on-write page (Rux extension)
-    Cow = 1 << 14,
-    /// Anonymous page (Rux extension)
-    Anonymous = 1 << 15,
-    /// Page is currently a free-list LEADER in its zone (R15-6: the
-    /// authoritative linked-state bit — next_free is NOT reliable, it
-    /// survives both power-on-0 and historical-leader residue).
-    OnFreelist = 1 << 16,
-    /// The page has more distinct (mm, vaddr) mappings than the fixed rmap
-    /// slot array can record; reverse mapping falls back to slot 0 plus a
-    /// full task scan (review 4.10).
-    RmapOverflow = 1 << 17,
-    /// Page is in the middle of a compaction migration (review 4.16): its
-    /// PTEs hold migration-entry markers and the fault path must wait for
-    /// the migration to finish instead of installing a zero page.
-    Migrating = 1 << 21,
-    /// Page sits in a per-CPU pageset (pcp) cache: refcount 0, NOT on any
-    /// buddy freelist. Together with OnFreelist this keeps every order-0
-    /// frame in one of three mutually exclusive states — buddy freelist
-    /// (OnFreelist), pcp cache (OnPcp), or in use (neither). The pcp
-    /// free path uses this bit as its double-free tripwire, exactly the
-    /// role OnFreelist plays for the buddy (R15-3).
-    OnPcp = 1 << 22,
-}
+// PageFlag, PageFlags, PageType, Page — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::page_desc::…` paths are unchanged.
+pub use super::types::{PageFlag, PageFlags, PageType, Page};
 
 /// Flag-bit window [18:20] storing the LRU list index (0..NR_LRU_LISTS)
 /// of a page carrying `PageFlag::Lru`. Storing the index on the page makes
@@ -103,10 +50,6 @@ pub enum PageFlag {
 /// 4.11) — no list walk to find which of the 5 lists owns the page.
 pub const LRU_LIST_SHIFT: u32 = 18;
 pub const LRU_LIST_MASK: u32 = 0x7 << LRU_LIST_SHIFT;
-
-/// Page flags collection
-#[derive(Debug, Default)]
-pub struct PageFlags(AtomicU32);
 
 impl PageFlags {
     /// Create empty flags collection
@@ -155,107 +98,6 @@ impl PageFlags {
     pub fn clear_all(&self) {
         self.0.store(0, Ordering::Release);
     }
-}
-
-/// Page type
-///
-/// Used for special page identification
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum PageType {
-    /// Normal page
-    Normal = 0,
-    /// Buddy system free page
-    Buddy = 1,
-    /// Slab allocator page
-    Slab = 2,
-    /// Page cache page
-    PageCache = 3,
-    /// Anonymous page
-    Anonymous = 4,
-}
-
-/// Page descriptor
-///
-/// Each physical page frame corresponds to a Page structure, used to track page usage.
-///
-/// Memory layout (128 bytes, 64-byte aligned):
-/// - flags: 4 bytes (atomic flags)
-/// - _mapcount: 4 bytes (map count, -1 means unmapped)
-/// - _refcount: 4 bytes (reference count)
-/// - private: 8 bytes (private data)
-/// - mapping: 8 bytes (page-cache eviction key for cache frames)
-/// - index: 8 bytes (rmap slot 0: virtual page number)
-/// - rmap_alt: 48 bytes (rmap slots 1..3: (mm ptr, vpn) pairs)
-/// - _type: 4 bytes (page type)
-/// - next_free: 8 bytes (free list pointer, for allocator)
-/// - lru_next: 8 bytes (LRU next PFN)
-/// - lru_prev: 8 bytes (LRU prev PFN — doubly-linked LRU, O(1) unlink)
-///
-#[repr(C, align(64))]
-pub struct Page {
-    /// Atomic flags
-    flags: PageFlags,
-
-    /// Map count: how many page table entries directly reference this page
-    /// -1 means unmapped, 0 means mapped once, etc.
-    /// Note: initial value is -1 (PAGE_MAPCOUNT_BIAS)
-    _mapcount: AtomicI32,
-
-    /// Reference count: number of references to this page
-    /// 0 means free, > 0 means in use
-    ///
-    /// NOTE (compound convention, review 4.4): unlike Linux, Rux keeps a
-    /// per-member refcount on every page of a high-order allocation — the
-    /// arch teardown path put_page()s each member individually via its
-    /// PTE.  Do not free an order>0 block while members are still mapped.
-    _refcount: AtomicI32,
-
-    /// Private data
-    /// - Buddy system: stores order
-    /// - Slab: stores slab management structure
-    /// - File system: stores buffer_head
-    private: AtomicUsize,
-
-    /// Page-cache eviction key for cache-owned frames (the combined
-    /// (fs_id, ino) cache_key from fs::page_cache; set by insert/
-    /// insert_batch, cleared by release_page_frame). NOT an rmap slot:
-    /// page_record_mapping deliberately never writes this field — the
-    /// mm-side release path (release_cache_mapping_pin) and eviction
-    /// reverse-resolve the cache entry through it. Zero for non-cache
-    /// frames. (The legacy page_add_file_rmap would clobber it, but has
-    /// no live callers — fault paths set their fields directly.)
-    mapping: AtomicUsize,
-
-    /// rmap slot 0: virtual page number in the owning mm. (rmap's slot-0
-    /// record writes ONLY this field; see rmap.rs page_record_mapping.
-    /// The page cache uses the `mapping` field above as its eviction key —
-    /// cache-owned frames therefore take no rmap slot-0 record, see the
-    /// PCACHE arms in the fault paths.)
-    index: AtomicUsize,
-
-    /// rmap slots 1..3: (mm pointer, virtual page number) pairs for
-    /// additional mappings (MAP_FIXED / shared anon).  `rmap_alt[2*k]` is
-    /// the mm pointer, `rmap_alt[2*k+1]` the virtual page number.  All
-    /// zero = unused slot.  When a 4th distinct mapping arrives the slots
-    /// are flushed and the `RmapOverflow` flag is set — reverse-map
-    /// lookups then fall back to the slot-0 + full-task-scan path.
-    rmap_alt: [AtomicUsize; 6],
-
-    /// Page type (for special pages)
-    _type: AtomicU32,
-
-    /// Free list pointer (for allocator internal use)
-    next_free: AtomicUsize,
-
-    /// LRU next pointer (PFN of next page in LRU list, 0 = end of list)
-    /// Used for doubly-linked LRU lists; separate from mapping/index (rmap).
-    lru_next: AtomicUsize,
-
-    /// LRU prev pointer (PFN of previous page in LRU list, 0 = head/end)
-    /// Companion to lru_next — makes unlink O(1) instead of a full list
-    /// walk per reclaim (review 4.11).
-    lru_prev: AtomicUsize,
 }
 
 /// Map count initial offset value (-1 means unmapped)
@@ -347,18 +189,13 @@ pub fn text_stamp_remove_if_owner(pfn: usize, pid: u32) {
     }
 }
 
-/// Lifecycle event ring for STAMPED frames (gnome-sigill hunt): one entry
-/// per interesting event on a stamped frame, so the report printed when a
-/// foreign free fires can replay the frame's whole history — who filled
-/// it, which forks took references, and every put that dropped one.
-/// Site chars: 'F' fault-fill, 'K' fork get, 'T' teardown put,
-/// 'U' unmap put, 'C' cow put, 'R' refused(leak), 'S' stale-stamp freed.
-pub struct TextFrameEvent {
-    pub pfn: AtomicU64,
-    pub pid: AtomicU32,
-    pub site: AtomicU64,
-    pub refc: AtomicI32,
-}
+// TextFrameEvent (the ring's record) and the PageDescStats snapshot are
+// defined in mm/types.rs (Page itself, its flags and its type enum stay
+// here — this file is Page's own). Re-exported so the
+// `mm::page_desc::…` paths are unchanged.
+pub use super::types::{PageDescStats, TextFrameEvent};
+
+// The record's constructor (the record's doc sits on the type).
 impl TextFrameEvent {
     const fn new() -> Self {
         Self {
@@ -1235,27 +1072,6 @@ pub fn total_pages() -> usize {
 #[inline]
 pub fn page_size() -> usize {
     core::mem::size_of::<Page>()
-}
-
-/// Page descriptor statistics
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PageDescStats {
-    /// Total page count
-    pub total_pages: usize,
-    /// Free page count (refcount == 0)
-    pub free_pages: usize,
-    /// In-use page count (refcount > 0)
-    pub used_pages: usize,
-    /// Reserved page count (Reserved flag)
-    pub reserved_pages: usize,
-    /// Mapped page count (mapcount > PAGE_MAPCOUNT_BIAS)
-    pub mapped_pages: usize,
-    /// Dirty page count (Dirty flag)
-    pub dirty_pages: usize,
-    /// COW page count (Cow flag)
-    pub cow_pages: usize,
-    /// Anonymous page count (Anonymous flag)
-    pub anonymous_pages: usize,
 }
 
 /// Get page descriptor statistics

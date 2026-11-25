@@ -30,14 +30,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::PAGE_SIZE;
 
-/// Maximum number of memory regions
-/// Need enough slots for all reserved regions plus individual page allocations
-/// during early boot (device mappings, linear mapping page tables, vmemmap)
-const MAX_MEMBLOCK_REGIONS: usize = 128;
-
-/// Memory region flags
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemBlockFlags(u32);
+// MAX_MEMBLOCK_REGIONS, MemBlockFlags, MemBlockRegion, MemBlockType, MemBlock — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::memblock::…` paths are unchanged.
+pub use super::types::{MemBlockFlags, MemBlockRegion, MemBlockType, MemBlock};
+use super::types::{MAX_MEMBLOCK_REGIONS};
 
 impl MemBlockFlags {
     /// No special flags
@@ -46,19 +43,6 @@ impl MemBlockFlags {
     pub const NOMAP: MemBlockFlags = MemBlockFlags(1 << 0);
     /// Region is mirror of another region
     pub const MIRROR: MemBlockFlags = MemBlockFlags(1 << 1);
-}
-
-/// A memory region descriptor
-#[derive(Debug, Clone, Copy)]
-pub struct MemBlockRegion {
-    /// Physical start address
-    pub base: usize,
-    /// Region size in bytes
-    pub size: usize,
-    /// Region flags
-    pub flags: MemBlockFlags,
-    /// NUMA node ID (0 for UMA systems)
-    pub nid: u32,
 }
 
 impl MemBlockRegion {
@@ -109,17 +93,6 @@ impl MemBlockRegion {
     pub fn page_count(&self) -> usize {
         self.size / PAGE_SIZE
     }
-}
-
-/// A collection of memory regions
-#[derive(Debug)]
-pub struct MemBlockType {
-    /// Array of regions
-    regions: [MemBlockRegion; MAX_MEMBLOCK_REGIONS],
-    /// Number of valid regions
-    cnt: usize,
-    /// Total size of all regions
-    total_size: usize,
 }
 
 impl MemBlockType {
@@ -282,22 +255,6 @@ impl MemBlockType {
     pub fn find_first_available(&self) -> Option<&MemBlockRegion> {
         self.iter().find(|r| r.flags == MemBlockFlags::NONE)
     }
-}
-
-/// Global memblock state
-pub struct MemBlock {
-    /// Available memory regions
-    memory: MemBlockType,
-    /// Reserved memory regions
-    reserved: MemBlockType,
-    /// Whether memblock is initialized
-    initialized: AtomicBool,
-    /// Bottom of available memory (after kernel + reserved)
-    bottom: usize,
-    /// Top of available memory
-    top: usize,
-    /// Current allocation pointer
-    current: usize,
 }
 
 impl MemBlock {

@@ -46,23 +46,9 @@
 use crate::mm::page_desc::{pfn_to_page, pfn_to_page_mut};
 use crate::mm::PAGE_SIZE;
 
-/// Pin of the user pages backing one byte range `[va, va+len)`.
-///
-/// `pages[i]` covers the i-th page of the range (page 0 starts at
-/// `va & !(PAGE_SIZE-1)`); `None` marks a page that could not be pinned
-/// — bytes of the range in such pages MUST be served through the
-/// caller's staged fallback, never DMA'd.
-pub struct PinnedUserPages {
-    /// User VA of the first byte of the range.
-    va: usize,
-    /// Byte length of the range (>= 1; may end mid-page).
-    len: usize,
-    /// Per covered page: physical frame base (page-aligned), or None
-    /// for an unpinnable page.
-    pages: alloc::vec::Vec<Option<u64>>,
-    /// Number of pages actually pinned (for accounting/asserts).
-    pinned: usize,
-}
+// The pin handle is defined in mm/types.rs; its impl and Drop stay here.
+// Re-exported so the `mm::gup::PinnedUserPages` path is unchanged.
+pub use super::types::PinnedUserPages;
 
 impl PinnedUserPages {
     /// User VA of the first byte.

@@ -19,7 +19,6 @@ extern crate alloc;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
 use alloc::vec::Vec;
-use alloc::sync::Arc;
 use crate::sync::rwlock::RwSpinlock;
 
 use super::page_desc::Page;
@@ -27,24 +26,10 @@ use super::vma::Vma;
 
 // ==================== AnonVma ====================
 
-/// Anonymous VMA
-///
-/// Represents a group of VMAs that share anonymous pages.
-/// When a page is shared (e.g., after fork), all processes
-/// mapping that page are linked through anon_vma.
-pub struct AnonVma {
-    /// Reference count
-    refcount: AtomicUsize,
-
-    /// Root anon_vma (for hierarchical anon_vmas)
-    root: AtomicPtr<AnonVma>,
-
-    /// List of child anon_vmas
-    children: RwSpinlock<Vec<Arc<AnonVma>>>,
-
-    /// Associated VMA
-    vma: AtomicUsize,
-}
+// AnonVma, its chain alias and the RmapStats snapshot are defined in
+// mm/types.rs; every impl and the rmap operations stay here.
+// Re-exported so the `mm::rmap::…` paths are unchanged.
+pub use super::types::{AnonVma, AnonVmaChain, RmapStats};
 
 impl AnonVma {
     /// Create a new anon_vma
@@ -90,9 +75,6 @@ impl AnonVma {
         }
     }
 }
-
-/// Anonymous VMA chain entry
-pub type AnonVmaChain = AnonVma;
 
 // ==================== Page Rmap Operations ====================
 
@@ -504,17 +486,6 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
 }
 
 // ==================== Rmap Statistics ====================
-
-/// Reverse mapping statistics
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RmapStats {
-    /// Number of anon_vmas allocated
-    pub anon_vma_count: usize,
-    /// Number of pages with reverse mappings
-    pub mapped_pages: usize,
-    /// Number of pages currently being migrated
-    pub migrating_pages: usize,
-}
 
 /// Get rmap statistics
 pub fn rmap_stats() -> RmapStats {

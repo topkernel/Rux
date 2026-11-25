@@ -16,15 +16,9 @@ pub const PAGE_SIZE: usize = 4096;
 
 pub const PAGE_MASK: usize = PAGE_SIZE - 1;
 
-pub type PhysFrameNr = usize;
-
-pub type VirtPageNr = usize;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhysAddr(pub usize);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct VirtAddr(pub usize);
+// The page and address types are defined in mm/types.rs; their impls
+// stay here. Re-exported so every `mm::page::…` path is unchanged.
+pub use super::types::{PhysAddr, VirtAddr, PhysFrame, VirtPage, PhysFrameNr, VirtPageNr};
 
 impl PhysAddr {
     pub fn new(addr: usize) -> Self {
@@ -83,11 +77,6 @@ impl VirtAddr {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct PhysFrame {
-    pub number: PhysFrameNr,
-}
-
 impl PhysFrame {
     pub const fn new(number: PhysFrameNr) -> Self {
         Self { number }
@@ -106,11 +95,6 @@ impl PhysFrame {
         let end = PhysAddr(start.as_usize() + PAGE_SIZE);
         start..end
     }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct VirtPage {
-    pub number: VirtPageNr,
 }
 
 impl VirtPage {

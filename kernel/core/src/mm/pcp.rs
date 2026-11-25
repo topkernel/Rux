@@ -50,18 +50,16 @@ use super::zone::Zone;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Frames moved to/from the zone per refill/drain round trip.
-pub const PCP_BATCH: usize = 16;
-/// Row high-water mark: at this many cached frames a drain returns
-/// PCP_BATCH frames to the buddy.
-const PCP_HIGH: usize = 2 * PCP_BATCH;
+// PCP_BATCH — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::pcp::…` paths are unchanged.
+pub use super::types::{PCP_BATCH};
 
-#[repr(C, align(64))]
-pub(super) struct PcpPageset {
-    /// Cached order-0 PFNs. Slots [0..count) are live.
-    list: [usize; PCP_HIGH],
-    pub(super) count: usize,
-}
+// PcpPageset, its storage row PcpRow and the row high-water mark are
+// defined in mm/types.rs; the pageset's impl and the refill/drain
+// functions stay here. Re-exported so the `mm::pcp::…` paths (the
+// raw-row edges in mm::unsafe among them) are unchanged.
+pub(super) use super::types::{PCP_HIGH, PcpPageset, PcpRow};
 
 impl PcpPageset {
     const fn new() -> Self {
@@ -72,12 +70,6 @@ impl PcpPageset {
     }
 }
 
-/// Storage row. `UnsafeCell` + manual `Sync`: cross-CPU access never
-/// forms a reference (counts are peeked through raw pointers only);
-/// mutable access is confined to the owning CPU inside its irq-off
-/// window (INV-PCP-3), which serializes nested entry on the same CPU.
-#[repr(C, align(64))]
-pub(super) struct PcpRow(pub(super) UnsafeCell<PcpPageset>);
 /// Sync proof + raw-row edges live in mm::unsafe (INV-MM-5).
 
 pub(super) static PCP_ROWS: [PcpRow; MAX_CPUS] = {

@@ -28,52 +28,12 @@ const MIN_OBJECT_SIZE: usize = 8;
 /// Maximum object size (one page)
 const MAX_OBJECT_SIZE: usize = PAGE_SIZE;
 
-/// Number of slab caches - derived from object size array
-const NUM_CACHES: usize = OBJECT_SIZES.len();
-
-/// Object size array
-const OBJECT_SIZES: [usize; 10] = [
-    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
-];
-
-/// Slab state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlabState {
-    /// Completely free
-    Free,
-    /// Partially used
-    Partial,
-    /// Completely used
-    Full,
-}
-
-/// Slab header (stored at the beginning of each slab page)
-///
-/// `repr(align(8))` + explicit padding pin the header at exactly 16 bytes:
-/// objects start at `header_size + i * object_size`, and with a 16-byte
-/// header and 8-multiple object sizes every handed-out pointer is at least
-/// 8-aligned. The unpadded 14-byte layout left odd-index 8-byte objects on
-/// a 2-mod-8 address — fine for the old u16 free-list writes, fatal once
-/// arbitrary GlobalAlloc layouts (Box<u64>, ArcInner<...>) flow through.
-#[repr(C, align(8))]
-pub(super) struct SlabHeader {
-    /// Cache index this slab belongs to
-    pub(crate) cache_idx: u8,
-    /// Object size
-    object_size: u16,
-    /// Total object count
-    total_objects: u16,
-    /// Free object count
-    free_objects: u16,
-    /// First free object index
-    free_index: u16,
-    /// Next slab page index (in slab_pages array)
-    next: u16,
-    /// Previous slab page index (in slab_pages array)
-    prev: u16,
-    /// Pad to 16 bytes (see the struct comment)
-    _pad: u16,
-}
+// The allocator's structures are defined in mm/types.rs (the class
+// table and its derived cache count with them); every impl and the
+// kmalloc/kfree entry points stay here. Re-exported so the
+// `mm::slab::…` paths are unchanged.
+pub(super) use super::types::{NUM_CACHES, OBJECT_SIZES, SlabHeader};
+pub use super::types::{CacheStats, SlabAllocator, SlabCache, SlabPages, SlabStats};
 
 impl SlabHeader {
     const fn new() -> Self {
@@ -88,24 +48,6 @@ impl SlabHeader {
             _pad: 0,
         }
     }
-}
-
-/// Slab cache
-pub struct SlabCache {
-    /// Object size
-    object_size: usize,
-    /// Objects per slab
-    objects_per_slab: usize,
-    /// Free slab list head (page index)
-    free_list: u16,
-    /// Partially used slab list head
-    partial_list: u16,
-    /// Fully used slab list head
-    full_list: u16,
-    /// Statistics: allocation count
-    alloc_count: AtomicUsize,
-    /// Statistics: free count
-    free_count: AtomicUsize,
 }
 
 impl SlabCache {
@@ -410,30 +352,8 @@ impl SlabCache {
     }
 }
 
-/// Slab page management
-///
-/// All methods take `&self` (not `&mut self`). Interior mutability is
-/// achieved through:
-///   - `allocated_pages`: AtomicUsize for lock-free page allocation
-///   - `get_header_mut()`: returns raw `&mut SlabHeader` via pointer
-///     arithmetic — each slab header lives at a unique page address,
-///     and concurrent access to *different* pages is safe because the
-///     underlying memory regions don't overlap.
-///
-/// This design allows `SlabPages` to be shared (`&self`) across CPUs
-/// without a global lock, while per-cache spinlocks serialize access
-/// to each cache's slab lists.
-pub struct SlabPages {
-    /// Slab page base address (immutable after init)
-    base_addr: usize,
-    /// Allocated page count (atomic for lock-free concurrent page allocation)
-    allocated_pages: AtomicUsize,
-    /// Maximum page count (immutable after init)
-    max_pages: usize,
-}
-
-
 impl SlabPages {
+    /// Create new slab pages manager
     pub const fn new(base_addr: usize, max_pages: usize) -> Self {
         Self {
             base_addr,
@@ -513,30 +433,13 @@ impl SlabPages {
     }
 }
 
-/// Slab allocator global state.
-///
-/// All fields are `Sync`:
-///   - `caches`: per-cache `Spinlock` — only one CPU can hold a given cache lock
-///   - `pages`: `SlabPages` (Sync proof in mm::unsafe, atomic page counter)
-///   - `initialized`: `AtomicUsize` — lock-free read
-///
-/// This allows `SLAB_ALLOCATOR` to be a plain `static` (no `mut`), eliminating
-/// the `&mut` aliasing UB that existed when multiple CPUs simultaneously called
-/// `kmalloc` for different cache indices.
+/// The allocator's `pages` cell. The state doc (which fields are `Sync`
+/// and why `SLAB_ALLOCATOR` can be a plain `static`) sits on
+/// `SlabAllocator` in mm/types.rs.
 pub(super) fn slab_pages_cell(
 ) -> &'static core::cell::UnsafeCell<SlabPages> {
     &SLAB_ALLOCATOR.pages
 }
-
-pub struct SlabAllocator {
-    /// Slab cache array
-    caches: [Spinlock<SlabCache>; NUM_CACHES],
-    /// Slab page management (UnsafeCell for one-time init write through &self)
-    pages: core::cell::UnsafeCell<SlabPages>,
-    /// Whether initialized
-    initialized: AtomicUsize,
-}
-
 
 /// Static Slab allocator instance.
 static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
@@ -764,20 +667,5 @@ pub fn slab_stats() -> SlabStats {
     stats.total_pages = SlabAllocator::pages().allocated_pages.load(Ordering::Relaxed);
 
     stats
-}
-
-/// Cache statistics
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CacheStats {
-    pub object_size: usize,
-    pub alloc_count: usize,
-    pub free_count: usize,
-}
-
-/// Slab statistics
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SlabStats {
-    pub cache_stats: [CacheStats; NUM_CACHES],
-    pub total_pages: usize,
 }
 

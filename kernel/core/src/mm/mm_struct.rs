@@ -36,36 +36,21 @@ extern crate alloc;
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
 use crate::sync::rwlock::RwSpinlock;
 use crate::sync::rwsem::Rwsem;
-use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
+use crate::sync::spinlock::Spinlock;
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
 use crate::mm::page::VirtAddr;
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
 
-/// Capacity of the saved auxv, in u64 words (Linux AT_VECTOR_SIZE = 22
-/// (type, value) pairs = 44 words).
-pub const AT_VECTOR_SIZE: usize = 44;
+// AT_VECTOR_SIZE, GlobalPteLock, PteLock, PteGuard, PteIrqGuard, MmStruct,
+// MmFlags and AddressSpace — the definitions live in mm/types.rs; every
+// impl and function that uses them stays in this file. Re-exported so the
+// existing `mm::mm_struct::…` paths are unchanged.
+pub use super::types::{AT_VECTOR_SIZE, GlobalPteLock, PteLock, PteGuard, PteIrqGuard, MmStruct, MmFlags, AddressSpace};
 
 // ============================================================================
 // Leaf-PTE exclusion (INV-LOCK-7 — see docs/architecture/lock-ordering.md)
 // ============================================================================
-
-/// The global PTE epoch — the type of each arch's `PTE_MODIFY_LOCK`
-/// static (arch/*/mm/mm_ops.rs).
-///
-/// * Exclusive holders (`lock` / `lock_irqsave`) get the OLD single-lock
-///   semantics: they exclude against every leaf-PTE writer on the system.
-///   On riscv64 (global mode) ALL PTE sections go through here; on x86_64
-///   the remaining direct users are the ipc install paths (binder /
-///   sysv_shm — IPC line's files), `map_user_region` and kernel-root /
-///   unpublished-tree maps, none of which can reach the owning mm.
-/// * Shared holders are per-mm PTE sections (x86_64 split mode, `PteLock`)
-///   — they exclude against exclusive holders and against each other only
-///   through the per-mm spinlock, so PTE writers on DIFFERENT mms run
-///   concurrently.
-pub struct GlobalPteLock {
-    pub(crate) raw: RwSpinlock<()>,
-}
 
 impl GlobalPteLock {
     pub const fn new() -> Self {
@@ -83,14 +68,6 @@ impl GlobalPteLock {
     pub fn lock_irqsave(&self) -> crate::sync::rwlock::RwSpinlockIrqWriteGuard<'_, ()> {
         self.raw.write_irqsave()
     }
-}
-
-/// Per-mm leaf-PTE exclusion lock (x86_64 split mode; see `GlobalPteLock`).
-///
-/// On non-x86_64 builds (`pte_lock_for` global mode) `lock*()` degrade to
-/// the global exclusive section — the per-mm spin field is unused there.
-pub struct PteLock {
-    spin: Spinlock<()>,
 }
 
 impl PteLock {
@@ -127,20 +104,6 @@ impl PteLock {
     }
 }
 
-/// Guard of a `PteLock::lock()` section. Fields drop innermost-first
-/// (declaration order): the mm spin releases before the epoch.
-/// Split mode on all architectures (see PteLock::lock).
-pub struct PteGuard<'a> {
-    _spin: SpinlockGuard<'a, ()>,
-    _epoch: crate::sync::rwlock::RwSpinlockReadGuard<'a, ()>,
-}
-
-/// Guard of a `PteLock::lock_irqsave()` section.
-pub struct PteIrqGuard<'a> {
-    _spin: SpinlockIrqGuard<'a, ()>,
-    _epoch: crate::sync::rwlock::RwSpinlockIrqReadGuard<'a, ()>,
-}
-
 /// PTE-section handle for page-table trees that have NO owning MmStruct:
 /// exec's not-yet-published error-path guard tree and the synthetic test
 /// trees. Those trees have no concurrent mm-side writers by construction;
@@ -148,213 +111,6 @@ pub struct PteIrqGuard<'a> {
 /// non-x86_64, the full global exclusion).
 pub static FRESH_TREE_PTE_LOCK: PteLock = PteLock::new();
 
-/// Memory Descriptor
-///
-/// Structure describing a process's complete address space.
-pub struct MmStruct {
-    // ==================== Page Table Management ====================
-    /// Page table root PPN (Page Global Directory)
-    pub pgd: u64,
-
-    /// Address Space ID for TLB management
-    /// 0 means not allocated or kernel ASID
-    asid: AtomicU16,
-
-    /// Leaf-PTE exclusion lock for THIS address space (INV-LOCK-7; the
-    /// vestigial RwSpinlock `pgd_lock` that never had a caller, replaced
-    /// by the per-mm PTE lock). Acquired only through `pte_lock()` /
-    /// the arch hook `arch::mm::mm_ops::pte_lock_for(&mm)`.
-    pte_lock: PteLock,
-
-    /// Whole-syscall surgery lock for THIS address space (hp89 hunt, the
-    /// mremap-move race): mm syscalls that run as MULTI-STEP sequences
-    /// with dropped internal guards (mremap's mmap-new -> copy -> munmap-
-    /// old move; munmap's multi-piece cursor walk; brk's shrink; madvise's
-    /// zap; mmap's MAP_FIXED teardown+install) take this for the WHOLE
-    /// call, so sibling CLONE_VM threads can never interleave their own
-    /// surgery into the gaps. This is the reference kernel's mmap_lock
-    /// (write) role, scoped to the syscall layer; the internal vma/pte
-    /// guards stay as they are (the copy loop's pte section already
-    /// excludes same-mm leaf writers — the residual hole was the gap
-    /// BEFORE the copy, where a sibling munmap/mremap cleared the move
-    /// SOURCE and copy_old_to_new_pages then silently installed NOTHING
-    /// at the destination, fault-filling ZERO pages: the mallocng
-    /// zeroed-metadata signature).
-    mm_surgery: Rwsem<()>,
-
-    /// VMA manager. SLEEPABLE rwsem (the mmap_lock shape, linux-6.6
-    /// kernel/locking/rwsem.c — see sync/rwsem.rs): mm paths hold
-    /// this across slow work (pagefault COW under a read guard while
-    /// page allocation crawls; VmaManager::add under the write
-    /// guard), and the former pure spinner monopolized CPUs whenever
-    /// a slow reader met a pending writer (the 52nd's §6b evidence).
-    /// Waiters now SLEEP; held sections are preemptible. Position in
-    /// the lock graph is unchanged (INV-LOCK-7: vma lock above the
-    /// PTE section, above page_desc).
-    vma_manager: Rwsem<VmaManager>,
-
-    /// Pinned file references for file-backed VMAs, keyed by VMA start
-    /// address. Linux's VMA holds vm_file (a refcounted struct file) that
-    /// keeps the file alive after the mapping fd is closed; Rux VMAs only
-    /// store the fd NUMBER, and demand faults resolved it through the
-    /// process fd table — after the dynamic linker maps a DSO and closes
-    /// its fd, every later demand fill silently produced ZERO pages (the
-    /// get_file_fd lookup failed) and ld.so died parsing zero ELF data.
-    /// This pin table is the vm_file equivalent.
-    vma_files: RwSpinlock<alloc::collections::BTreeMap<usize, alloc::sync::Arc<crate::fs::file::File>>>,
-
-    /// Address space type
-    space_type: PageTableType,
-
-    // ==================== Segment Ranges ====================
-    /// Code segment start address
-    start_code: AtomicUsize,
-
-    /// Code segment end address
-    end_code: AtomicUsize,
-
-    /// Data segment start address
-    start_data: AtomicUsize,
-
-    /// Data segment end address
-    end_data: AtomicUsize,
-
-    // ==================== Heap Management ====================
-    /// Heap start address (minimum brk value)
-    start_brk: AtomicUsize,
-
-    /// Current heap pointer (current brk value) — the SINGLE authority
-    /// for the break (GNOME trim face, 2026-11-07/c127e4bc1): one break
-    /// per address space, shared by every thread, like the reference's
-    /// mm->brk. Task::brk is only a synced copy for fork/exec readers.
-    brk: AtomicUsize,
-
-    /// Per-mm break lock (GNOME trim face, 2026-11-07): serializes the
-    /// whole sys_brk read-modify-write (break value + VMA surgery).
-    /// The reference kernel does the same under mmap_lock. Without it
-    /// two threads of one process could interleave a grow and a shrink:
-    /// the shrink's value store could land AFTER the grow's, leaving
-    /// the break value behind the heap VMA's end — the next shrink
-    /// would then release live pages. Lock order: brk_lock is the
-    /// OUTERMOST (taken before the mm-surgery section and the VMA write
-    /// lock); nothing takes it while holding those.
-    brk_lock: Spinlock<()>,
-
-    // ==================== Stack Management ====================
-    /// Stack start address (stack top)
-    start_stack: AtomicUsize,
-
-    /// Stack limit (minimum stack address, stack can grow down to this)
-    /// This is the maximum size limit for stack expansion
-    stack_limit: AtomicUsize,
-
-    // ==================== Arguments and Environment Variables ====================
-    /// Command line arguments start address
-    arg_start: AtomicUsize,
-
-    /// Command line arguments end address
-    arg_end: AtomicUsize,
-
-    /// Environment variables start address
-    env_start: AtomicUsize,
-
-    /// Environment variables end address
-    env_end: AtomicUsize,
-
-    /// Saved auxiliary vector (core dump NT_AUXV source).
-    ///
-    /// Linux keeps the exec-time auxv in mm->saved_auxv so a later core
-    /// dump can emit NT_AUXV without walking the (possibly clobbered)
-    /// user stack. AT_VECTOR_SIZE-sized word array: (type, value) pairs,
-    /// terminated by the AT_NULL pair written by copy_strings; entries
-    /// past the terminator stay zero.
-    saved_auxv: RwSpinlock<[u64; AT_VECTOR_SIZE]>,
-
-    // ==================== Virtual Memory Statistics ====================
-    /// Total virtual memory page count
-    total_vm: AtomicU64,
-
-    /// Locked memory page count
-    locked_vm: AtomicU64,
-
-    /// Pinned memory page count
-    pinned_vm: AtomicU64,
-
-    /// Data segment page count
-    data_vm: AtomicU64,
-
-    /// Executable segment page count
-    exec_vm: AtomicU64,
-
-    /// Stack page count
-    stack_vm: AtomicU64,
-
-    /// Resident set size in pages (review 4.14: OOM badness input).
-    /// Incremented when a page is installed into this address space by a
-    /// fault, decremented per zapped PTE in unmap_pages. COW-fork shared
-    /// pages are counted only in the mm that faults them in after the
-    /// break (approximation — no per-PTE accounting).
-    rss: AtomicU64,
-
-    // ==================== mmap Region Management ====================
-    /// mmap region base address
-    mmap_base: AtomicUsize,
-
-    /// mmap region legacy base address
-    mmap_legacy_base: AtomicUsize,
-
-    /// Highest virtual memory end address
-    highest_vm_end: AtomicUsize,
-
-    // ==================== Reference Counting ====================
-    /// User count: number of threads sharing this mm
-    mm_users: AtomicI32,
-
-    /// Reference count: lifetime reference of mm_struct
-    mm_count: AtomicI32,
-
-    // ==================== Other Fields ====================
-    /// Flags
-    flags: AtomicU64,
-
-    /// Owning task (optional)
-    owner_pid: AtomicI32,
-
-    /// Inode key of the exec'd image this mm holds a text denial on
-    /// (the mm->exe_file stand-in: reference deny_write_access at exec,
-    /// allow at the last mm's death). None until this mm's first exec
-    /// commit; fork's copy_mm duplicates it with one more hold. Written
-    /// once by the owning task at exec commit (or by fork before the
-    /// child is published), read at Drop (single, last-Arc) — the lock
-    /// only provides interior mutability through the Arc, never
-    /// contends.
-    exe_text_key: Spinlock<Option<(u64, u64)>>,
-
-    /// CPUs that may hold cached user translations of this mm (Linux
-    /// mm_cpumask shape, OH boot lane 2026-11-12) — the exact predicate
-    /// a TLB shootdown needs.
-    ///
-    /// Set in context_switch/exec BEFORE the incoming CR3 write. On
-    /// x86_64 with PCID OFF (every plain CR3 write fully flushes the
-    /// TLB), the bit is CLEARED on switching away (lazy mask): the mask
-    /// tracks "CPUs currently running this mm", so a single-threaded
-    /// process's shootdown sends ZERO IPIs. With PCID on (NOFLUSH
-    /// tagged writes keep entries alive across switches) the mask is
-    /// grow-only — over-IPIs, never under-IPIs.
-    ///
-    /// Correctness: a CPU's stale entries can only be created by an
-    /// incoming CR3 write, which is preceded by its bit-set and — MOV
-    /// to CR3 being serializing — the bit-set is globally performed
-    /// before any cached entry exists; a sender that has already
-    /// cleared the PTEs and then reads the mask with Acquire sees every
-    /// CPU that can hold old entries (single-variable coherence). The
-    /// clear runs with IRQs off before the outgoing flush-on-write, so
-    /// no translation window straddles the clear.
-    cpu_mask: AtomicU64,
-}
-
-/// MmStruct flags
-pub struct MmFlags;
 impl MmFlags {
     /// Core dump in progress
     pub const MMF_DUMP_CORE: u64 = 0x00000001;
@@ -1482,8 +1238,3 @@ impl Drop for MmStruct {
 // ============================================================================
 // Helper type aliases (backward compatibility)
 // ============================================================================
-
-/// Address space type alias (backward compatibility)
-///
-/// Recommend using MmStruct directly
-pub type AddressSpace = MmStruct;

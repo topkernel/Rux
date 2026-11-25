@@ -45,13 +45,10 @@ pub(super) const POOL_CAP: usize = 16384;
 /// How long a matched free is held back (ms of jiffies).
 const DEFER_MS: u64 = 1500;
 
-#[derive(Clone, Copy)]
-pub(super) struct Entry {
-    ptr: usize,
-    size: usize,
-    align: usize,
-    deadline: u64,
-}
+// The pool's Entry is defined in mm/types.rs. Re-exported so the
+// `mm::deferred_free::Entry` path (the raw-pool edge in mm::unsafe uses
+// it) is unchanged.
+pub(super) use super::types::Entry;
 
 /// Registered size classes whose frees are deferred (first writer wins
 /// per slot). Two live classes: the MmStruct ArcInner block and the Task

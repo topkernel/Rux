@@ -38,33 +38,10 @@ use super::page_desc::{pfn_to_page, pfn_to_page_mut, PageFlag, page_desc};
 
 // ==================== Zone Type Definitions ====================
 
-/// Zone types
-///
-/// On RISC-V, we typically only need ZONE_NORMAL since there are no
-/// DMA constraints like on x86. However, we define all zones for
-/// completeness and future compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(usize)]
-pub enum ZoneType {
-    /// Zone for DMA-constrained devices (0-16MB on x86)
-    /// Not typically needed on RISC-V, but included for compatibility
-    ZoneDma = 0,
-
-    /// Zone for 32-bit DMA devices (0-4GB on 64-bit systems)
-    /// May be needed for some RISC-V SoCs with 32-bit DMA limitations
-    ZoneDma32 = 1,
-
-    /// Normal zone for all general-purpose memory
-    /// This is the primary zone used for most allocations on RISC-V
-    ZoneNormal = 2,
-
-    /// Zone for movable pages (can be migrated/compacted)
-    /// Used for memory hotplug and compaction
-    ZoneMovable = 3,
-
-    /// Number of zone types
-    ZoneCount = 4,
-}
+// ZoneType, MAX_ORDER, FreeArea, WMARK_MIN, WMARK_LOW, WMARK_HIGH, NR_WMARK, Zone — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::zone::…` paths are unchanged.
+pub use super::types::{ZoneType, MAX_ORDER, FreeArea, WMARK_MIN, WMARK_LOW, WMARK_HIGH, NR_WMARK, Zone};
 
 impl ZoneType {
     /// Get zone name as string
@@ -86,19 +63,8 @@ impl ZoneType {
 
 // ==================== Free Area (Buddy System) ====================
 
-/// Maximum order for buddy allocator (2^MAX_ORDER pages = 4MB with 4KB pages)
-pub const MAX_ORDER: usize = 10;
-
 /// Null pointer for free list
 pub const FREE_LIST_NULL: usize = usize::MAX;
-
-/// Free area for one order level
-pub struct FreeArea {
-    /// Head of free list (stores PFN of first free block)
-    free_list: AtomicUsize,
-    /// Number of free blocks at this order
-    nr_free: AtomicUsize,
-}
 
 impl FreeArea {
     pub const fn new() -> Self {
@@ -131,59 +97,7 @@ impl FreeArea {
 
 // ==================== Watermark Constants ====================
 
-/// Watermark indices
-pub const WMARK_MIN: usize = 0;
-pub const WMARK_LOW: usize = 1;
-pub const WMARK_HIGH: usize = 2;
-pub const NR_WMARK: usize = 3;
-
 // ==================== Zone Structure ====================
-
-/// Memory zone
-///
-/// Represents a contiguous range of physical memory pages with
-/// similar characteristics. Each zone has its own buddy allocator.
-pub struct Zone {
-    /// Zone type
-    zone_type: ZoneType,
-
-    /// Zone ID (index in node's zone array)
-    zone_id: usize,
-
-    /// Node ID (NUMA node this zone belongs to)
-    node_id: usize,
-
-    /// Start page frame number (PFN)
-    zone_start_pfn: AtomicUsize,
-
-    /// End page frame number (exclusive)
-    zone_end_pfn: AtomicUsize,
-
-    /// Total number of pages in the zone
-    spanned_pages: AtomicUsize,
-
-    /// Number of present pages (excluding holes)
-    present_pages: AtomicUsize,
-
-    /// Number of managed pages (available for allocation)
-    managed_pages: AtomicUsize,
-
-    /// Number of currently free pages
-    free_pages: AtomicUsize,
-
-    /// Free areas for each order (buddy allocator)
-    free_area: [FreeArea; MAX_ORDER + 1],
-
-    /// Zone lock for buddy operations
-    lock: Spinlock<()>,
-
-    /// Zone initialized flag
-    initialized: AtomicBool,
-
-    /// Watermark levels: [WMARK_MIN, WMARK_LOW, WMARK_HIGH]
-    /// Set once during init by setup_per_zone_wmarks().
-    _watermark: [AtomicUsize; NR_WMARK],
-}
 
 // Static array of free areas
 const fn new_free_areas() -> [FreeArea; MAX_ORDER + 1] {
@@ -1099,28 +1013,12 @@ impl Zone {
     }
 }
 
-/// Zone statistics
-#[derive(Debug, Clone, Copy)]
-pub struct ZoneStats {
-    pub zone_type: ZoneType,
-    pub zone_id: usize,
-    pub node_id: usize,
-    pub start_pfn: usize,
-    pub end_pfn: usize,
-    pub spanned_pages: usize,
-    pub present_pages: usize,
-    pub managed_pages: usize,
-    pub free_pages: usize,
-    pub free_blocks: [usize; MAX_ORDER + 1],
-}
+// ZoneStats and GfpFlags are defined in mm/types.rs (Zone and its free
+// areas stay here); the GfpFlags impl is below. Re-exported so the
+// `mm::zone::…` paths are unchanged.
+pub use super::types::{GfpFlags, ZoneStats};
 
 // ==================== GFP Flags ====================
-
-/// GFP (Get Free Pages) flags
-///
-/// These flags control allocation behavior and zone selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GfpFlags(pub u32);
 
 impl GfpFlags {
     /// Normal kernel allocation

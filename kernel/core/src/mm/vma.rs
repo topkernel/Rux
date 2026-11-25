@@ -33,8 +33,10 @@
 pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
 use alloc::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VmaFlags(u32);
+// VmaFlags, Vma, VmaType, VmaOrigin, VmaError — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::vma::…` paths are unchanged.
+pub use super::types::{VmaFlags, Vma, VmaType, VmaOrigin, VmaError};
 
 impl VmaFlags {
     /// Readable (VM_READ)
@@ -164,72 +166,6 @@ impl Default for VmaFlags {
         Self::new()
     }
 }
-
-#[derive(Clone, Copy)]
-pub struct Vma {
-    /// Start virtual address (inclusive)
-    start: VirtAddr,
-
-    /// End virtual address (exclusive)
-    end: VirtAddr,
-
-    /// Access permissions and attributes
-    flags: VmaFlags,
-
-    /// VMA offset (for file mapping)
-    offset: usize,
-
-    /// VMA type
-    vma_type: VmaType,
-
-    /// File descriptor for file-backed mappings (-1 for anonymous)
-    file_fd: i32,
-
-    /// File size for file-backed mappings (0 for anonymous)
-    file_size: u64,
-
-    /// Origin stamp — which kernel path created this record (see
-    /// [`VmaOrigin`). Forensic-only; fits existing struct padding.
-    origin: VmaOrigin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmaType {
-    /// Anonymous mapping (heap, stack, private data)
-    Anonymous,
-    /// File mapping
-    FileBacked,
-    /// Device mapping (MMIO)
-    Device,
-    /// Shared memory
-    SharedMemory,
-}
-
-/// Origin stamp: which kernel path CREATED this Vma record.
-///
-/// Forensic attribute for fault-path VMA dumps (leg-31B render_service
-/// adjudication). A fault into an unexpected permission shape — e.g. a
-/// PROT_NONE piece sitting on top of a thread's RW stack — has exactly two
-/// possible owners: the image itself established the shape (its own
-/// mprotect guard, its own PROT_NONE mmap reserve) or a kernel-side
-/// split/copy produced it (fork snapshot, mprotect surgery bug). The
-/// origin names the establishing path in one line at the dump site, with
-/// no new print traffic — it rides the existing fault-only dump lines.
-///
-/// Semantics: the stamp records the path that created THIS Vma node —
-/// after mprotect splits a mapping, the covered piece carries `Mprotect`
-/// while head/tail pieces inherit the original stamp (splits never
-/// change permissions of the pieces they preserve). On fork the child's
-/// copies inherit the parent's stamp plus the `FORKED` modifier bit, so
-/// "mprotect+FORK" reads as "an mprotect established the shape, fork
-/// carried it into this process" — the stamp survives inheritance
-/// without erasing its creator. VMA merges keep the left survivor's
-/// stamp (a merge only extends `end`), so a stamp can under-report the
-/// newest contributor of a merged range — acceptable for adjudication:
-/// permission *changes* always split first, so the changed piece's stamp
-/// is exact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VmaOrigin(u8);
 
 impl VmaOrigin {
     /// Unstamped (default for paths not yet annotated).
@@ -532,18 +468,10 @@ impl core::fmt::Debug for Vma {
     }
 }
 
-/// VMA Manager
-///
-/// Uses BTreeMap to store VMAs, sorted by start address
-/// - O(log n) lookup, insert, delete
-/// - Dynamic expansion, no limit on count
-pub struct VmaManager {
-    /// VMA map (sorted by start address)
-    vmas: BTreeMap<VirtAddr, Vma>,
-
-    /// Cached maximum end address (for fast overlap detection)
-    max_end: VirtAddr,
-}
+// VmaManager and the KernelAddressSpaceLayout names are defined in
+// mm/types.rs (the Vma record and its flag/origin types stay here).
+// Re-exported so the `mm::vma::…` paths are unchanged.
+pub use super::types::{KernelAddressSpaceLayout, RiscVAddressSpaceLayout, VmaManager};
 
 impl VmaManager {
     /// Create new VMA manager
@@ -920,18 +848,6 @@ impl Default for VmaManager {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmaError {
-    /// VMA overlap
-    Overlap,
-    /// No space (reserved for compatibility)
-    NoSpace,
-    /// Not found
-    NotFound,
-    /// Invalid parameter
-    Invalid,
-}
-
 // Send/Sync proofs live in mm::unsafe (same contracts the inline impls
 // documented).
 
@@ -967,21 +883,6 @@ pub trait AddressSpaceLayout {
 // ============================================================================
 // Address Space Layout Implementation
 // ============================================================================
-
-/// Address space layout driven by the arch interface's `user_addr`
-/// constants (riscv64: Sv39 256GB user space; x86_64: 128TB 4-level user
-/// space — each backend publishes the same constant set).
-///
-/// User space layout:
-/// - 0x0 ~ 0x1000: Null page (unmapped, null pointer guard)
-/// - 0x1000+: ELF code/data segments
-/// - brk area: follows ELF segments, grows up to TASK_SIZE/3
-/// - mmap area: TASK_SIZE/3 ~ TASK_SIZE (top-down allocation)
-/// - Stack: TASK_SIZE - stack_size, grows down
-pub struct KernelAddressSpaceLayout;
-
-/// Historical name (Sv39 era) — same layout source.
-pub type RiscVAddressSpaceLayout = KernelAddressSpaceLayout;
 
 impl AddressSpaceLayout for KernelAddressSpaceLayout {
     /// User space start address (0, but null page protected)

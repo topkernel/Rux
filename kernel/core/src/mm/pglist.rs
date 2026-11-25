@@ -13,86 +13,23 @@ use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 
-use super::zone::{Zone, ZoneType, ZoneStats, MAX_ORDER};
+use super::zone::{Zone, ZoneType, MAX_ORDER};
 use super::PAGE_SIZE;
 
 // ==================== Pglist Data (NUMA Node) ====================
 
-/// Maximum number of zones per node
-pub const MAX_NR_ZONES: usize = ZoneType::ZoneCount as usize;
+// MAX_NR_ZONES, LRU_INACTIVE_ANON, LRU_ACTIVE_ANON, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE, LRU_UNEVICTABLE, NR_LRU_LISTS, PglistData — the definitions live in mm/types.rs; every impl and
+// function that uses them stays in this file. Re-exported so the
+// existing `mm::pglist::…` paths are unchanged.
+pub use super::types::{MAX_NR_ZONES, LRU_INACTIVE_ANON, LRU_ACTIVE_ANON, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE, LRU_UNEVICTABLE, NR_LRU_LISTS, PglistData};
 
 /// Maximum number of NUMA nodes
 pub const MAX_NUMNODES: usize = 1;  // UMA system, single node
 
 // ==================== LRU Constants ====================
 
-/// LRU list type indices (following mm/vmscan.c enum lru_list).
-pub const LRU_INACTIVE_ANON: usize = 0;
-pub const LRU_ACTIVE_ANON: usize = 1;
-pub const LRU_INACTIVE_FILE: usize = 2;
-pub const LRU_ACTIVE_FILE: usize = 3;
-pub const LRU_UNEVICTABLE: usize = 4;
-/// Number of LRU lists.
-pub const NR_LRU_LISTS: usize = 5;
-
 /// DEF_PRIORITY — starting priority for kswapd reclaim loop.
 pub const DEF_PRIORITY: i32 = 12;
-
-/// Page list data structure (represents a NUMA node)
-///
-/// On UMA systems (like our current RISC-V QEMU), there is only one node
-/// containing all zones. On NUMA systems, each node has its own memory
-/// and possibly its own zones.
-pub struct PglistData {
-    /// Node ID
-    node_id: usize,
-
-    /// Zones in this node
-    zones: [Option<Zone>; MAX_NR_ZONES],
-
-    /// Number of zones in this node
-    nr_zones: AtomicUsize,
-
-    /// Node start PFN
-    node_start_pfn: AtomicUsize,
-
-    /// Node spanned pages (total pages including holes)
-    node_spanned_pages: AtomicUsize,
-
-    /// Node present pages (excluding holes)
-    node_present_pages: AtomicUsize,
-
-    /// Total reserved pages
-    total_reserved_pages: AtomicUsize,
-
-    /// Initialized flag
-    initialized: AtomicBool,
-
-    // ---- LRU list infrastructure ----
-
-    /// LRU list heads: PFN of the first page (most-recently used end).
-    /// 0 means the list is empty.  Protected by `lru_lock`.
-    // Published for the mm policy crate (M1b): all-atomic PFN
-    // links under lru_lock — the link/unlink loops are crate-side lru
-    // policy, safe to operate under forbid.
-    pub lru_heads: [AtomicUsize; NR_LRU_LISTS],
-
-    /// LRU list tails: PFN of the last page (least-recently used end,
-    /// where kswapd scans from).  0 means the list is empty.
-    pub lru_tails: [AtomicUsize; NR_LRU_LISTS],
-
-    /// Number of pages on each LRU list.
-    // Published for the mm policy crate (M1b): all-atomic interior
-    // mutability — safe to operate under forbid; the LRU size CAS/fetch
-    // loops live in the crate-side lru/vmscan policy.
-    pub lru_sizes: [AtomicUsize; NR_LRU_LISTS],
-
-    /// Spinlock protecting all LRU list mutations.
-    // Published for the mm policy crate (M1b): the LRU list lock —
-    // lock-and-link discipline is crate-side lru policy (INV under the
-    // lru_lock ordering rule, docs/architecture/lock-ordering.md).
-    pub lru_lock: Spinlock<()>,
-}
 
 impl PglistData {
     /// Create a new uninitialized pglist_data
@@ -228,16 +165,9 @@ impl PglistData {
     }
 }
 
-/// Node statistics
-#[derive(Debug, Clone)]
-pub struct NodeStats {
-    pub node_id: usize,
-    pub start_pfn: usize,
-    pub spanned_pages: usize,
-    pub present_pages: usize,
-    pub total_free_pages: usize,
-    pub zones: Vec<ZoneStats>,
-}
+// NodeStats is defined in mm/types.rs (PglistData stays here).
+// Re-exported so the `mm::pglist::NodeStats` path is unchanged.
+pub use super::types::NodeStats;
 
 // ==================== Global Node Management ====================
 

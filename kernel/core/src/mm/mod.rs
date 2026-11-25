@@ -7,6 +7,10 @@
 
 pub mod buddy_allocator;
 pub mod r#unsafe;
+/// The subsystem's type definitions (seed-core-design §2c.3): every
+/// struct/enum/alias that has no file of its own; impls stay in the
+/// topic files, which re-export their types from here.
+pub mod types;
 pub mod allocator;
 pub mod layout;
 // The mm-policy hook tables (MmHooks, MmPolicyHooks) are crate::api::mm.

@@ -70,17 +70,11 @@ const STATE_FULL: u8 = 2; // no free objects (or being reclaimed), unlinked
 
 const HDR_MAGIC: u16 = 0x5142;
 
-/// In-page header (16 bytes) at the start of every slab page.
-#[repr(C)]
-pub(super) struct PageHdr {
-    magic: u16,
-    cls: u8,
-    state: u8,
-    free_head: u16, // first free object index, 0xFFFF = none
-    free_count: u16,
-    next_page: u32, // page INDEX of the next active page, 0 = end
-    _pad: u32,
-}
+// The allocator's structures are defined in mm/types.rs; every impl and
+// the alloc/free entry points stay here. Re-exported so the
+// `mm::small_alloc::…` paths are unchanged.
+pub(super) use super::types::PageHdr;
+use super::types::{MAG_DEPTH, Magazine, SmallCache};
 
 #[inline]
 fn hdr_of(page: usize) -> &'static mut PageHdr {
@@ -184,30 +178,6 @@ pub fn object_span(addr: usize) -> Option<(usize, usize)> {
     Some((base, s))
 }
 
-struct SmallCache {
-    lock: Spinlock<()>,
-    /// Page INDEX of the first ACTIVE page (0 = none). Under lock.
-    head: AtomicUsize,
-    /// Forensics.
-    pages_created: AtomicUsize,
-    pages_reclaimed: AtomicUsize,
-    obj_allocs: AtomicUsize,
-    obj_frees: AtomicUsize,
-    /// Class-lock acquisitions (slow paths only — one per magazine
-    /// refill/flush batch, pre-magazine one per operation). Printed by
-    /// the census so a boot's lock-traffic win is directly readable
-    /// against obj_allocs+obj_frees on the same line.
-    lock_holds: AtomicUsize,
-    /// Page-list walks that hit the corruption cap (cycle defense,
-    /// lb260/lb261 OH allocator-freeze) — nonzero means the wild-write
-    /// producer struck this class's list.
-    walk_cycles: AtomicUsize,
-    /// rux:allocwatch (retired debug=allocwatch) section meter: max slow-path section duration
-    /// (TSC cycles) and count of sections >10 ms (25M cycles @2.5GHz).
-    slow_max_cyc: AtomicU64,
-    slow_over_10ms: AtomicU64,
-}
-
 impl SmallCache {
     const fn new() -> Self {
         SmallCache {
@@ -280,13 +250,8 @@ static CACHES: [SmallCache; 8] = [
 //   counted exactly once per lifecycle; magazine-resident objects skew
 //   the live estimate by at most MAX_CPUS*8*MAG_DEPTH (bounded).
 // ---------------------------------------------------------------------------
-const MAG_DEPTH: usize = 16;
-
-#[derive(Clone, Copy)]
-struct Magazine {
-    buf: [usize; MAG_DEPTH],
-    len: usize,
-}
+// The row depth MAG_DEPTH and the Magazine struct are defined in
+// mm/types.rs.
 
 // D-7 (rust-design-headroom §3): the magazine bank is the first
 // CpuLocal conversion. The raw `static mut` + review-enforced "caller
