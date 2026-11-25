@@ -1194,6 +1194,89 @@ directory rename is deferred on crate-lane coordination (it rewrites
 `crate::debug::` tokens inside the six service crates), recipe current
 in the review doc §8.
 
+## 7a. The debug subsystem: general instruments, not one per hunt
+
+User directives of 2026-11-25:
+
+- The sweep (§2c.3) covers more than printers: obsolete features and
+  dead code, in the core AND in the subsystem crates.
+- The debug subsystem is reviewed against the reference kernel and
+  brought in line with what it provides.
+- The working method: a failure is located by reading the log, or by
+  running again under a debug build and reading the log — not by
+  adding code for that one failure and digging again.
+
+**Why the method has been the second kind.** The debug subsystem grew
+one instrument per hunt. Its files are named for the failures they
+were written against (`driftwatch`, `lostpark`, `schb`, `scmtap`,
+`spinwatch`, `mmprof`, `forkprof`, `hilogcensus`, `allocwatch`,
+`wildwatch`, `leakorigin`, `scribble`): each watches one symptom,
+each is reached by the debug event that arms it, and none answers a
+question it was not written for. The trace points follow the same
+pattern — `AMS46`, `ACQDIV`, `EPOLLSCAN`, `BINDERTRACE` are named for
+the session that needed them, while the per-subsystem events every
+investigation starts from (task switch, wake-up, block request
+issued and completed, page fault, IRQ enter and exit, timer expiry)
+are missing or partial. So the NOVMA-EXEC investigation of 2026-11-23
+needed seven commits of capture code to answer one question — which
+process issued a given system call — that a syscall trace point
+would have answered from the log. Those 17,000 lines of scattered
+instruments (§2c.3) and the missing general ones are the same fact
+seen twice.
+
+**What the reference kernel provides, and the state here.**
+
+| facility | what it is for | here |
+|---|---|---|
+| log buffer with levels (`printk`, `dmesg`) | what happened, in order | yes (`printk`); some writers bypass it (§9) |
+| trace points per subsystem (`sched_switch`, `sched_wakeup`, `block_rq_issue`, `block_rq_complete`, `page_fault`, `irq_handler_entry`, `irq_handler_exit`, `timer_expire_entry`, `sys_enter`, `sys_exit`) | the sequence of events around a failure | framework exists; few general points, many hunt-specific ones |
+| dynamic debug (`pr_debug`, switched per file / line / format string at run time) | turn up detail in one place without a rebuild | no |
+| kprobes (a probe on any function, at run time) | answer a new question without new code | no |
+| function tracer (call sequence, call graph, per-function timing) | where the time goes, who calls whom | no (`syscost` samples syscalls) |
+| sysrq (task stacks, memory, blocked tasks, crash) | a stuck system, from the keyboard | yes — 12 commands (`b c d e f i k l m n o p`) |
+| task dump, per-task stack | who is stuck where | yes (`taskdump`) |
+| hung-task and soft-lockup detectors | a task or CPU that stopped making progress | yes (`hung_task`, `softlockup`) |
+| hard-lockup watchdog (NMI) | a CPU with interrupts off | no |
+| `WARN` / `BUG` with a stack, rate limited | a broken invariant, reported once | no macros; 15 bare `dump_stack()` calls and 51 `debug_assert!` (no stack, release-invisible) |
+| object and slab debugging (`/proc/slabinfo`, SLUB debug flags) | a corrupted or leaked object | `/proc/slabinfo` only; no object poisoning or red zones |
+| lockdep (lock-order and hold-time checking) | a deadlock before it happens | no (a "lockdep-lite" was planned, not landed) |
+| KASAN / KFENCE | out-of-bounds and use-after-free at run time | no |
+| crash dump (`kdump`, vmcore) | the state at a panic | no (`pstore` keeps the log) |
+| RCU stall detection | a grace period that does not end | yes (`sync/rcu.rs`) |
+
+**Order of work.** Each item is a lane with its own gate; the order
+is by how many investigations an item would have shortened.
+
+1. **General trace points** in every subsystem, named for the event
+   (`sched:sched_switch`, `sched:sched_wakeup`, `block:block_rq_issue`,
+   `mm:mm_page_fault`, `irq:irq_handler_entry`, `sys:sys_enter`), in
+   the reference's shape so the same tooling reads them. On a debug
+   build they cost nothing until armed (the existing trace-event
+   framework). This is what makes "run again under a debug build and
+   read the log" possible, and it retires the hunt-specific points as
+   it lands.
+2. **Dynamic debug**: every diagnostic print in the core and the
+   crates becomes a `pr_debug!` site switched by a control file, and
+   the raw writers go through it (closing the §9 gap). This is where
+   the hand-written printers (§2c.3) are replaced.
+3. **kprobes** on the core's functions, configured from a control
+   file — the instrument that ends "add code for this failure".
+4. **Function tracer** and **lockdep**.
+5. The rest as their own items.
+
+**How this changes the sweep.** An instrument that no general facility
+replaces is folded in (§2c.3, step 2) by turning it into one of these:
+a hunt's watch on "task X parked without being relinked" becomes a
+`sched:sched_park` trace point plus a user-space check, not a core
+file. The 2,000 lines that check one symptom are deleted; the ten
+lines that emit the event stay.
+
+**What stays true of a debug build.** Debug features are off in
+release builds (the rule of 2026-11-19). A debug build carries them
+and is the build the method above runs. The cost of an unarmed trace
+point is one branch; the cost of the debug subsystem's always-on
+detectors is measured and reported per item.
+
 ## 8. The execution ladder (order is binding; each rung = measure → design interface → flip → forbid → battery)
 
 1. **R1 close** (in flight): syscall State B — delete in-lib files, full
