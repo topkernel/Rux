@@ -1277,48 +1277,48 @@ bb11b5259331	kernel/core/src/io_uring/mod.rs	pin_ring	516		INV:INV-IOURING-RING-
 b7593b1708d7	kernel/core/src/io_uring/mod.rs	io_uring_mmap_handler	640		INV:INV-FS-FILEPRIV-1
 b1a05451fd7c	kernel/core/src/io_uring/mod.rs	sqe_at	741	volatile,ptr-ops	INV:INV-IOURING-RING-1
 cd3e37126991	kernel/core/src/io_uring/mod.rs	cqe_write	749	volatile,ptr-ops	INV:INV-IOURING-RING-1
-d3482acb5609	kernel/core/src/ipc/binder.rs	block_window	475		INV:INV-BINDER-BLOCKVIEW
-b6f1618b094b	kernel/core/src/ipc/binder.rs	data_u32	485	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-20fbb5017745	kernel/core/src/ipc/binder.rs	write_data_u32	495	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-53476f5486da	kernel/core/src/ipc/binder.rs	data_obj	512	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-aaab4adfbb80	kernel/core/src/ipc/binder.rs	write_data_obj	525	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-44de54534f72	kernel/core/src/ipc/binder.rs	data_obj_mut	542	ptr-ops	INV:INV-BINDER-BLOCKVIEW
-730a200ac15b	kernel/core/src/ipc/binder.rs	offsets_entry	553	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-8c21b29f69ac	kernel/core/src/ipc/binder.rs	extra_write_bytes	568	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-0954740163ea	kernel/core/src/ipc/binder.rs	extra_window	583		INV:INV-BINDER-BLOCKVIEW
-1684aa02255a	kernel/core/src/ipc/binder.rs	pod_bytes	665	raw-construct,ptr-ops	INV:INV-BINDER-STAGE-POD
-d271d207de4c	kernel/core/src/ipc/binder.rs	u32_at	677	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-1e401e1bff91	kernel/core/src/ipc/binder.rs	set_u32	687	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-895945f48f80	kernel/core/src/ipc/binder.rs	write_u64_at	699	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
-4f4ebbb3ad0f	kernel/core/src/ipc/binder.rs	st	779		INV:INV-BINDER-HELD
-45e6f765f419	kernel/core/src/ipc/binder.rs	st	2263		INV:INV-BINDER-HELD
-032f3da414b4	kernel/core/src/ipc/binder.rs	im	2325		INV:INV-BINDER-HELD
-2863646f15cd	kernel/core/src/ipc/binder.rs	<module>	2455		INV:INV-FRAME-1
-eb846f229766	kernel/core/src/ipc/binder.rs	<module>	2456		INV:INV-FRAME-1
-fd993f5a5377	kernel/core/src/ipc/binder.rs	<module>	2457		INV:INV-FRAME-1
-791021854aae	kernel/core/src/ipc/binder.rs	<module>	2458		INV:INV-FRAME-1
-eca2a42f1c0c	kernel/core/src/ipc/binder.rs	<module>	2459		INV:INV-FRAME-1
-2dd595e6bf1d	kernel/core/src/ipc/binder.rs	<module>	2460		INV:INV-FRAME-1
-5d620ac752e6	kernel/core/src/ipc/binder.rs	<module>	2461		INV:INV-FRAME-1
-390da5f7b4f5	kernel/core/src/ipc/binder.rs	<module>	2462		INV:INV-FRAME-1
-0029d7c34fcd	kernel/core/src/ipc/binder.rs	<module>	2463		INV:INV-FRAME-1
-04716afddebb	kernel/core/src/ipc/binder.rs	<module>	2464		INV:INV-FRAME-1
-70ed4e1c1fe8	kernel/core/src/ipc/binder.rs	world_section_report	2623	ptr-ops	INV:INV-BINDER-WORLDSEC
-02d2fa6f9875	kernel/core/src/ipc/binder.rs	pm	2725	ptr-ops	GAP
-220914e8a4d1	kernel/core/src/ipc/binder.rs	proc_of_file	3138	ptr-ops	INV:INV-BINDER-PRIV
-7d3a6f189f05	kernel/core/src/ipc/binder.rs	proc_of_file	3142		INV:INV-BINDER-PRIV
-82b9525823c6	kernel/core/src/ipc/binder.rs	proc_ref	3151	ptr-ops	INV:INV-BINDER-PRIV
-54d91a68fa2c	kernel/core/src/ipc/binder.rs	proc_ref	3152		INV:INV-BINDER-PRIV
-9bdd1c99adda	kernel/core/src/ipc/binder.rs	binder_close	3241		INV:INV-BINDER-PRIV
-983e58b0ab4d	kernel/core/src/ipc/binder.rs	binder_close	3245		INV:INV-BINDER-PRIV
-952e1411bbf4	kernel/core/src/ipc/binder.rs	binder_close	3246		INV:INV-BINDER-PRIV
-ea4b19858089	kernel/core/src/ipc/binder.rs	binder_mmap_handler	3940	ptr-ops	INV:INV-BINDER-HELD
-239f465f16ff	kernel/core/src/ipc/binder.rs	binder_mmap_handler	4089		INV:INV-BINDER-HELD
-21334f1feeab	kernel/core/src/ipc/binder.rs	binder_mmap_handler	4106		INV:INV-FRAME-1
-009e5034d327	kernel/core/src/ipc/binder.rs	binder_poll_wait	4432		INV:INV-KTASK-1
-b4313b2ac691	kernel/core/src/ipc/binder.rs	binder_poll_unwait	4472		INV:INV-KTASK-1
-507fb4845a38	kernel/core/src/ipc/binder.rs	bc_corruption_snapshot	5347	raw-construct	INV:INV-BINDER-PROBE
-3300c4b802f2	kernel/core/src/ipc/binder.rs	get	8962		INV:INV-BINDER-PINTASK
+0fbad79c4e69	kernel/core/src/ipc/hotpath.rs	block_window	473		INV:INV-BINDER-BLOCKVIEW
+75e243a59d6a	kernel/core/src/ipc/hotpath.rs	data_u32	483	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+c2fc39c9e231	kernel/core/src/ipc/hotpath.rs	write_data_u32	493	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+4738b904ab58	kernel/core/src/ipc/hotpath.rs	data_obj	510	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+d5168059b9f2	kernel/core/src/ipc/hotpath.rs	write_data_obj	523	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+3d7e2e8c0cfa	kernel/core/src/ipc/hotpath.rs	data_obj_mut	540	ptr-ops	INV:INV-BINDER-BLOCKVIEW
+711d1c4bf3f3	kernel/core/src/ipc/hotpath.rs	offsets_entry	551	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+f07def4feebe	kernel/core/src/ipc/hotpath.rs	extra_write_bytes	566	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+b96e2114e64b	kernel/core/src/ipc/hotpath.rs	extra_window	581		INV:INV-BINDER-BLOCKVIEW
+73474c739de0	kernel/core/src/ipc/hotpath.rs	pod_bytes	654	raw-construct,ptr-ops	INV:INV-BINDER-STAGE-POD
+3a65dc5cadb2	kernel/core/src/ipc/hotpath.rs	u32_at	666	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+d09fe1e693ac	kernel/core/src/ipc/hotpath.rs	set_u32	676	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+bdc4deed4c5d	kernel/core/src/ipc/hotpath.rs	write_u64_at	688	volatile,ptr-ops	INV:INV-BINDER-BLOCKVIEW
+8bcf8d0a7275	kernel/core/src/ipc/hotpath.rs	st	728		INV:INV-BINDER-HELD
+d99f844bcf90	kernel/core/src/ipc/hotpath.rs	st	1911		INV:INV-BINDER-HELD
+eabf7d55179c	kernel/core/src/ipc/hotpath.rs	im	1950		INV:INV-BINDER-HELD
+113fec1b2cf7	kernel/core/src/ipc/hotpath.rs	<module>	2074		INV:INV-FRAME-1
+17f7915246a1	kernel/core/src/ipc/hotpath.rs	<module>	2075		INV:INV-FRAME-1
+db7a48ced405	kernel/core/src/ipc/hotpath.rs	<module>	2076		INV:INV-FRAME-1
+003f535b4b11	kernel/core/src/ipc/hotpath.rs	<module>	2077		INV:INV-FRAME-1
+f3c786c4dc0e	kernel/core/src/ipc/hotpath.rs	<module>	2078		INV:INV-FRAME-1
+2c231247fc10	kernel/core/src/ipc/hotpath.rs	<module>	2079		INV:INV-FRAME-1
+03d752320ec0	kernel/core/src/ipc/hotpath.rs	<module>	2080		INV:INV-FRAME-1
+c0b5186d9302	kernel/core/src/ipc/hotpath.rs	<module>	2081		INV:INV-FRAME-1
+8bf4f6b08582	kernel/core/src/ipc/hotpath.rs	<module>	2082		INV:INV-FRAME-1
+2a5870ae421c	kernel/core/src/ipc/hotpath.rs	<module>	2083		INV:INV-FRAME-1
+6b3c2b210b8a	kernel/core/src/ipc/hotpath.rs	world_section_report	2219	ptr-ops	INV:INV-BINDER-WORLDSEC
+a6e9d854f7fe	kernel/core/src/ipc/hotpath.rs	pm	2321	ptr-ops	GAP
+bf33dee24a8a	kernel/core/src/ipc/hotpath.rs	proc_of_file	2734	ptr-ops	INV:INV-BINDER-PRIV
+18a2ce22de4f	kernel/core/src/ipc/hotpath.rs	proc_of_file	2738		INV:INV-BINDER-PRIV
+5f690d8fb98f	kernel/core/src/ipc/hotpath.rs	proc_ref	2747	ptr-ops	INV:INV-BINDER-PRIV
+f731ba86df05	kernel/core/src/ipc/hotpath.rs	proc_ref	2748		INV:INV-BINDER-PRIV
+8fd27ad860db	kernel/core/src/ipc/hotpath.rs	binder_close	2837		INV:INV-BINDER-PRIV
+e5da0e00e5c0	kernel/core/src/ipc/hotpath.rs	binder_close	2841		INV:INV-BINDER-PRIV
+83bbf1c71b9d	kernel/core/src/ipc/hotpath.rs	binder_close	2842		INV:INV-BINDER-PRIV
+8cdc503711b0	kernel/core/src/ipc/hotpath.rs	binder_mmap_handler	3536	ptr-ops	INV:INV-BINDER-HELD
+a4600a49df71	kernel/core/src/ipc/hotpath.rs	binder_mmap_handler	3685		INV:INV-BINDER-HELD
+61123e4e3989	kernel/core/src/ipc/hotpath.rs	binder_mmap_handler	3702		INV:INV-FRAME-1
+6388ab504946	kernel/core/src/ipc/hotpath.rs	binder_poll_wait	4028		INV:INV-KTASK-1
+d9d112a7f8f8	kernel/core/src/ipc/hotpath.rs	binder_poll_unwait	4068		INV:INV-KTASK-1
+999225b795c6	kernel/core/src/ipc/hotpath.rs	bc_corruption_snapshot	4943	raw-construct	INV:INV-BINDER-PROBE
+76b63f8415e7	kernel/core/src/ipc/hotpath.rs	get	8549		INV:INV-BINDER-PINTASK
 54fc5e5416f4	kernel/core/src/ipc/unsafe.rs	shm_page_get	24		GAP
 bab1edcf8b66	kernel/core/src/ipc/unsafe.rs	shm_page_put	39		GAP
 bde10459150a	kernel/core/src/ipc/unsafe.rs	entry_frame	84		INV:INV-SAFECALL-1

@@ -19,6 +19,8 @@
 //! the code that touches it stayed in that file: the ipc directory is
 //! the smallest visibility boundary Rust offers for that split.
 
+#![forbid(unsafe_code)]
+
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
