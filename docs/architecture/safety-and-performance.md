@@ -1476,6 +1476,19 @@ Mechanics and evidence, all in the lane worktree `run/`:
 - the hot-path print ratchet improved (un-annotated sites 8 -> 6 in
   sync/hotpath.rs; the 61 annotated futex print sites all moved
   verbatim with their annotations — behavior unchanged);
+- compiled-kernel identity: pair vs the pass-2 baseline ELFs (all
+  merged subsystems normalized) pairs 1:1 at equal size with 473/478/474
+  recorded exceptions per arch (rv/x86/a64) — the guard
+  deref/deref_mut/drop monomorphizations whose inline block became an
+  always-inlined contract fn (debug instruction selection shifts a few
+  bytes: RwSpinlockReadGuard<bool>::deref 29->33, SleepMutex::release
+  437->455, call_rcu 147->155, init 204->206,
+  rcu_softirq_handler 418->386), the five pre-existing
+  SeqLock<HugePageStats> zero-reference monomorphizations, the four
+  p3sched drift symbols, and 11 stale-base inline-jitter vanishings
+  (FdSet methods + interrupt::domain fns, no sync touch) — recorded in
+  docs/development/pass3-pair-exceptions.txt; release-codegen equality
+  is pinned by the pbench gate below;
 - pass-3 tool fixes (separate commit, reported to the coordinator):
   generic `unsafe impl<K: ..>` regions were unlocatable by apply, and
   an `unsafe fn`'s own signature keyword found no enclosing fn span.
