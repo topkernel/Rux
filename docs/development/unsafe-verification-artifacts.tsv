@@ -1444,42 +1444,42 @@ d1edc10526ee	kernel/core/src/module/mod.rs	sys_init_module_impl	341	ptr-ops	INV:
 f39fd3a4203f	kernel/core/src/module/mod.rs	sys_finit_module_impl	378		INV:INV-STATIC-CELL-1
 3604254d9ff8	kernel/core/src/module/mod.rs	sys_finit_module_impl	391		INV:INV-STATIC-CELL-1
 534814add596	kernel/core/src/module/mod.rs	sys_delete_module_impl	424	ptr-ops	INV:INV-STATIC-CELL-1
-a6853241bd52	kernel/core/src/net/hotpath.rs	mod_file_arc	62		INV:INV-NETARC-1
-d76eb278ec4c	kernel/core/src/net/hotpath.rs	reclaim_file_arc	77		INV:INV-NETARC-1
-bc4ff69848d0	kernel/core/src/net/hotpath.rs	mod_take_file_arc	86		INV:INV-NETARC-1
-6ff3c31a8ea6	kernel/core/src/net/hotpath.rs	file_arc	104	ptr-ops	INV:INV-NETARC-1
-703a0a4aff7d	kernel/core/src/net/hotpath.rs	take_file_arc	119	ptr-ops	INV:INV-NETARC-1
-477dadbb8e7f	kernel/core/src/net/hotpath.rs	<module>	177		INV:INV-SKB-1
-8ac72914d975	kernel/core/src/net/hotpath.rs	<module>	178		INV:INV-SKB-1
-c51aa4e6d6d2	kernel/core/src/net/hotpath.rs	alloc	225		INV:INV-SKB-1
-7940f72c1dc6	kernel/core/src/net/hotpath.rs	alloc	231		INV:INV-SKB-1
-e8acf40976c1	kernel/core/src/net/hotpath.rs	alloc	234		INV:INV-SKB-1
-2c7ba241e553	kernel/core/src/net/hotpath.rs	release	274		INV:INV-SKB-1
-efdd253da5fb	kernel/core/src/net/hotpath.rs	skb_put	306		INV:INV-SKB-1
-ca1ff39daebe	kernel/core/src/net/hotpath.rs	skb_push	329		INV:INV-SKB-1
-81c050f4e3dd	kernel/core/src/net/hotpath.rs	skb_pull	351		INV:INV-SKB-1
-38cecb2ff28a	kernel/core/src/net/hotpath.rs	skb_reserve	377		INV:INV-SKB-1
-177faefdaa25	kernel/core/src/net/hotpath.rs	skb_put_data	398	ptr-ops	INV:INV-SKB-1
-1a6ffa529800	kernel/core/src/net/hotpath.rs	data_slice	473	raw-construct	INV:INV-SKB-1
-0c4cc659addc	kernel/core/src/net/hotpath.rs	data_slice_at	485	raw-construct	INV:INV-SKB-1
-7a14f96b6b74	kernel/core/src/net/hotpath.rs	data_slice_at	485	raw-construct	INV:INV-SKB-1
-30792356601a	kernel/core/src/net/hotpath.rs	hdr	498	ptr-ops	INV:INV-SKB-1
-8a1ad6f54dbc	kernel/core/src/net/hotpath.rs	hdr_mut	510	ptr-ops	INV:INV-SKB-1
-1633269a707b	kernel/core/src/net/hotpath.rs	hdr_and_tail	525	raw-construct,ptr-ops	INV:INV-SKB-1
-55696175ce13	kernel/core/src/net/hotpath.rs	push_hdr	547		INV:INV-SKB-1
-2348574df33f	kernel/core/src/net/hotpath.rs	put_hdr	559		INV:INV-SKB-1
-350bfcf09952	kernel/core/src/net/hotpath.rs	push_bytes	570	ptr-ops	INV:INV-SKB-1
-7014a909c311	kernel/core/src/net/hotpath.rs	push_hdr_val	580	ptr-ops	INV:INV-SKB-1
-27cd46e4a865	kernel/core/src/net/hotpath.rs	skb_copy_bits	610	ptr-ops	INV:INV-SKB-1
-26654c0fbee6	kernel/core/src/net/hotpath.rs	hdr_view	662	ptr-ops	INV:INV-SKB-1
-2717e8ebfa20	kernel/core/src/net/hotpath.rs	hdr_view_mut	672	ptr-ops	INV:INV-SKB-1
 a46c2cbbce14	kernel/core/src/net/unsafe.rs	static_table_ref	24		INV:INV-NET-SOCKTAB-1
 b5f2d3ec2015	kernel/core/src/net/unsafe.rs	static_table_mut	31		INV:INV-NET-SOCKTAB-1
 00af9763df47	kernel/core/src/net/unsafe.rs	arc_refcount_probe	43	volatile,ptr-ops	INV:INV-NET-ARCREF-1
 4b11b2bb8fdf	kernel/core/src/net/unsafe.rs	audited_deref	56		INV:INV-NET-ARCREF-1
 787413fd22dd	kernel/core/src/net/unsafe.rs	container_of	66	ptr-ops	INV:INV-NET-CONTAINEROF-1
 2b0364adb962	kernel/core/src/net/unsafe.rs	pod_view	83	ptr-ops	INV:INV-NET-HDRVIEW-1
-81558ac80871	kernel/core/src/net/unsafe.rs	pod_view_mut	97	ptr-ops	INV:INV-NET-HDRVIEW-1
+20af4874a52f	kernel/core/src/net/unsafe.rs	pod_view_mut	97	ptr-ops	INV:INV-NET-HDRVIEW-1
+256071bb0934	kernel/core/src/net/unsafe.rs	hdr_view	123	ptr-ops	INV:INV-SKB-1
+3dd4d5f1133b	kernel/core/src/net/unsafe.rs	hdr_view_mut	133	ptr-ops	INV:INV-SKB-1
+564e7a17bad5	kernel/core/src/net/unsafe.rs	alloc	172		INV:INV-SKB-1
+2e87e9d6677f	kernel/core/src/net/unsafe.rs	alloc	178		INV:INV-SKB-1
+2d844d093ef0	kernel/core/src/net/unsafe.rs	alloc	181		INV:INV-SKB-1
+83ae6b924f15	kernel/core/src/net/unsafe.rs	release	214		INV:INV-SKB-1
+2620e6e1dea4	kernel/core/src/net/unsafe.rs	skb_put	248		INV:INV-SKB-1
+331dc3d05431	kernel/core/src/net/unsafe.rs	skb_push	273		INV:INV-SKB-1
+66b25af33933	kernel/core/src/net/unsafe.rs	skb_pull	297		INV:INV-SKB-1
+080a3fbdb2e6	kernel/core/src/net/unsafe.rs	skb_reserve	325		INV:INV-SKB-1
+e2cf94dc5eae	kernel/core/src/net/unsafe.rs	skb_put_data	348	ptr-ops	INV:INV-SKB-1
+46d27ae2f361	kernel/core/src/net/unsafe.rs	data_slice	365	raw-construct	INV:INV-SKB-1
+296b0b1ad576	kernel/core/src/net/unsafe.rs	data_slice_at	379	raw-construct	INV:INV-SKB-1
+d47e582d1e9c	kernel/core/src/net/unsafe.rs	data_slice_at	379	raw-construct	INV:INV-SKB-1
+fd8426c5416d	kernel/core/src/net/unsafe.rs	hdr	394	ptr-ops	INV:INV-SKB-1
+7721b14036cb	kernel/core/src/net/unsafe.rs	hdr_mut	408	ptr-ops	INV:INV-SKB-1
+dc6e11124960	kernel/core/src/net/unsafe.rs	hdr_and_tail	425	raw-construct,ptr-ops	INV:INV-SKB-1
+5e44dd362d51	kernel/core/src/net/unsafe.rs	push_hdr	449		INV:INV-SKB-1
+b42e2b0d63a8	kernel/core/src/net/unsafe.rs	put_hdr	463		INV:INV-SKB-1
+66ce917d5820	kernel/core/src/net/unsafe.rs	push_bytes	476	ptr-ops	INV:INV-SKB-1
+c7f052fee604	kernel/core/src/net/unsafe.rs	push_hdr_val	488	ptr-ops	INV:INV-SKB-1
+4cfef1f660bc	kernel/core/src/net/unsafe.rs	skb_copy_bits	520	ptr-ops	INV:INV-SKB-1
+ae904a4262f9	kernel/core/src/net/unsafe.rs	<module>	532		INV:INV-SKB-1
+919d9b6065a6	kernel/core/src/net/unsafe.rs	<module>	534		INV:INV-SKB-1
+4fe08c6babe2	kernel/core/src/net/unsafe.rs	mod_file_arc	554		INV:INV-NETARC-1
+6463f99c3108	kernel/core/src/net/unsafe.rs	reclaim_file_arc	570		INV:INV-NETARC-1
+f383b4a9914c	kernel/core/src/net/unsafe.rs	mod_take_file_arc	580		INV:INV-NETARC-1
+840f75ae6a44	kernel/core/src/net/unsafe.rs	file_arc	592	ptr-ops	INV:INV-NETARC-1
+ec03c1210757	kernel/core/src/net/unsafe.rs	take_file_arc	607	ptr-ops	INV:INV-NETARC-1
 42c28d551f9a	kernel/core/src/perf/mod.rs	refresh_wanted_bits	317	ptr-ops	INV:INV-PERF-EV-1
 ae6c75064c64	kernel/core/src/perf/mod.rs	ring_covers	434	ptr-ops	INV:INV-PERF-EV-1
 6904ce513deb	kernel/core/src/perf/mod.rs	register	485		INV:INV-PERF-EV-1
