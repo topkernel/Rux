@@ -49,7 +49,7 @@ pub fn test_epoll() {
 fn test_epoll_et_rearm() {
     use crate::syscall::io::{sys_read, sys_write};
 
-    let (a, b) = match crate::net::unix::unix_socketpair(1 /* SOCK_STREAM */) {
+    let (a, b) = match crate::net::hotpath::unix::unix_socketpair(1 /* SOCK_STREAM */) {
         Ok(pair) => pair,
         Err(_) => {
             test_skip("epoll et rearm", "socketpair unavailable");

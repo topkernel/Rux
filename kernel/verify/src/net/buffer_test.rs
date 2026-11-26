@@ -4,12 +4,13 @@
 //!
 //! Network protocol type round-trip invariant tests.
 //!
-//! Types copied from: kernel/core/src/net/buffer.rs
+//! Types copied from: kernel/core/src/net/types.rs (the conversions
+//! from kernel/core/src/net/hotpath.rs)
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/core/src/net/buffer.rs
+// Copied types from kernel/core/src/net/types.rs
 // ============================================================================
 
 #[repr(C)]

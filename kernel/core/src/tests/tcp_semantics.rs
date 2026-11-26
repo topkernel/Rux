@@ -24,7 +24,7 @@
 //! this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::net::tcp::{
+use crate::net::hotpath::tcp::{
     TcpCongState, TcpHdr, TcpSocket, TcpState, TcpTxBatch, TCP_DEFAULT_MSS, TCP_MAX_WINDOW,
     TCP_MIN_HLEN, tcp_parse_mss, tcp_parse_tsval, tcp_parse_wscale,
 };
@@ -72,10 +72,10 @@ fn established() -> TcpSocket {
 }
 
 /// One retransmit-queue segment filled with pattern bytes.
-fn rseg(seq: u32, len: usize, retries: u32, tx_time: u64) -> crate::net::tcp::TcpSendSeg {
+fn rseg(seq: u32, len: usize, retries: u32, tx_time: u64) -> crate::net::hotpath::tcp::TcpSendSeg {
     let mut data = alloc::vec::Vec::new();
     data.resize(len, 0xA5);
-    crate::net::tcp::TcpSendSeg { seq, len, data, tx_time, retries }
+    crate::net::hotpath::tcp::TcpSendSeg { seq, len, data, tx_time, retries }
 }
 
 pub fn test_tcp_semantics() {

@@ -144,6 +144,7 @@ kernel/process/src/pid.rs
 kernel/core/src/process/types.rs
 kernel/core/src/sched/types.rs
 kernel/net/src/lib.rs
+kernel/core/src/net/types.rs
 kernel/process/src/exit_teardown.rs
 kernel/process/src/exit_wait.rs
 kernel/process/src/lib.rs

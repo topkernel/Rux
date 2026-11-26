@@ -1,0 +1,36 @@
+{
+ "modules": [
+  "file_arc",
+  "buffer"
+ ],
+ "root_items": [
+  "EthProtocol",
+  "IpProtocol",
+  "PacketType",
+  "SkBuff",
+  "alloc_skb",
+  "file_arc",
+  "kfree_skb",
+  "reclaim_file_arc",
+  "take_file_arc"
+ ],
+ "renames": {},
+ "keep": [],
+ "inline": [],
+ "exports": {
+  "buffer": [
+   "EthProtocol",
+   "IpProtocol",
+   "PacketType",
+   "SkBuff",
+   "alloc_skb",
+   "kfree_skb",
+   "hdr_view",
+   "hdr_view_mut"
+  ],
+  "file_arc": [
+   "file_arc",
+   "take_file_arc"
+  ]
+ }
+}

@@ -5,7 +5,7 @@
 //! Ethernet Layer
 
 #![forbid(unsafe_code)]
-use crate::buffer::{SkBuff, EthProtocol};
+use rux::net::types::{SkBuff, EthProtocol};
 
 /// Ethernet header length
 pub const ETH_HLEN: usize = 14;
@@ -50,7 +50,7 @@ impl EthHdr {
             return None;
         }
 
-        crate::buffer::hdr_view::<EthHdr>(data)
+        rux::net::hotpath::hdr_view::<EthHdr>(data)
     }
 
     /// Get protocol type. Unknown ethertypes map to None at the dispatch

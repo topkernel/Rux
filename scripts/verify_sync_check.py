@@ -980,7 +980,7 @@ MAPPINGS = [
     {
         "name": "net/eth_protocol",
         "verify": "kernel/verify/src/net/buffer_test.rs",
-        "kernel": "kernel/core/src/net/buffer.rs",
+        "kernel": "kernel/core/src/net/hotpath.rs",
         "type": "EthProtocol",
         "compare": ["from_u16", "to_u16"],
         "skip": [],
@@ -990,7 +990,7 @@ MAPPINGS = [
     {
         "name": "net/ip_protocol",
         "verify": "kernel/verify/src/net/buffer_test.rs",
-        "kernel": "kernel/core/src/net/buffer.rs",
+        "kernel": "kernel/core/src/net/hotpath.rs",
         "type": "IpProtocol",
         "compare": ["from_u8", "to_u8"],
         "skip": [],

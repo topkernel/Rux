@@ -5,7 +5,7 @@
 
 //! Network subsystem test
 
-use crate::net::buffer::{alloc_skb, kfree_skb};
+use crate::net::hotpath::{alloc_skb, kfree_skb};
 use crate::drivers::net::{loopback_init, loopback_send, loopback};
 use super::{test_pass, test_fail, test_group_start};
 
@@ -196,7 +196,7 @@ fn test_loopback() {
 /// computed value for the stated values that matter (identity,
 /// complement, escape, zero).
 fn test_udp_csum_zero_escape() {
-    use crate::net::udp::{udp_csum_accepts, udp_checksum, UdpHdr, UDP_HLEN};
+    use crate::net::hotpath::udp::{udp_csum_accepts, udp_checksum, UdpHdr, UDP_HLEN};
 
     let shdr = 0x7F000001u32; // 127.0.0.1 (network order at the call)
     let dhdr = 0x7F000001u32;

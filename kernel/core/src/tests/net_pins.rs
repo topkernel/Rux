@@ -15,20 +15,20 @@
 //! groups that run before it.
 
 use crate::drivers::net::loopback::{loopback_init, loopback_poll, loopback_send, LO_STATS};
-use crate::net::arp::{arp_lookup, ARP_CACHE};
-use crate::net::buffer::SkBuff;
-use crate::net::ethernet::{eth_is_broadcast_addr, EthHdr};
-use crate::net::icmp::IcmpHdr;
-use crate::net::ipv4::checksum::{ip_checksum, pseudo_header_checksum};
-use crate::net::ipv4::route::{route_add, route_lookup, RouteEntry};
-use crate::net::ipv6::icmpv6::{ndp_option, parse_ll_option};
-use crate::net::ipv6::next_header;
-use crate::net::ipv6::{
+use crate::net::hotpath::arp::{arp_lookup, ARP_CACHE};
+use crate::net::types::SkBuff;
+use crate::net::hotpath::ethernet::{eth_is_broadcast_addr, EthHdr};
+use crate::net::hotpath::icmp::IcmpHdr;
+use crate::net::hotpath::ipv4::checksum::{ip_checksum, pseudo_header_checksum};
+use crate::net::hotpath::ipv4::route::{route_add, route_lookup, RouteEntry};
+use crate::net::hotpath::ipv6::icmpv6::{ndp_option, parse_ll_option};
+use crate::net::hotpath::ipv6::next_header;
+use crate::net::hotpath::ipv6::{
     eui64_link_local, is_link_local, is_multicast, solicited_node_multicast, transport_checksum6,
     v4_to_mapped, v6_to_v4_mapped, IPV6_ADDR_ALL_NODES, IPV6_ADDR_LOOPBACK,
 };
-use crate::net::tcp::{tcp_socket_alloc, tcp_socket_free, TcpHdr, TcpSocket, TcpState};
-use crate::net::udp::{udp_socket_alloc, udp_socket_free, UdpHdr, UdpSocket, UDP_HLEN};
+use crate::net::hotpath::tcp::{tcp_socket_alloc, tcp_socket_free, TcpHdr, TcpSocket, TcpState};
+use crate::net::hotpath::udp::{udp_socket_alloc, udp_socket_free, UdpHdr, UdpSocket, UDP_HLEN};
 
 pub fn test_net_pins() {
     crate::tests::test_group_start("net_pins");
@@ -115,7 +115,7 @@ pub fn test_net_pins() {
     uhdr.dest = 80u16.to_be();
     uhdr.len = ((UDP_HLEN + data.len()) as u16).to_be();
     uhdr.check = 0;
-    let csum = crate::net::udp::udp_checksum(shdr, dhdr, &uhdr, data);
+    let csum = crate::net::hotpath::udp::udp_checksum(shdr, dhdr, &uhdr, data);
     crate::test_assert!(csum != 0 || csum == 0xFFFF, "udp checksum non-degenerate");
     crate::tests::test_pass("udp-checksum");
 
@@ -160,7 +160,7 @@ pub fn test_net_pins() {
     crate::tests::test_pass("tcp-flags");
 
     // ---- ARP (net/arp.rs) -------------------------------------------------
-    crate::test_assert_eq!(core::mem::size_of::<crate::net::arp::ArpPacket>(), 28, "ArpPacket 28");
+    crate::test_assert_eq!(core::mem::size_of::<crate::net::hotpath::arp::ArpPacket>(), 28, "ArpPacket 28");
     let ip = 0xC0A80101u32;
     let mac = [0x52u8, 0x54, 0x00, 0x12, 0x34, 0x56];
     unsafe {
@@ -203,7 +203,7 @@ pub fn test_net_pins() {
     crate::tests::test_pass("route-entry");
 
     // ---- IPv6 (net/ipv6/mod.rs, icmpv6.rs) ---------------------------------
-    crate::test_assert_eq!(core::mem::size_of::<crate::net::ipv6::Ipv6Hdr>(), 40, "Ipv6Hdr 40");
+    crate::test_assert_eq!(core::mem::size_of::<crate::net::hotpath::ipv6::Ipv6Hdr>(), 40, "Ipv6Hdr 40");
     let mac = [0x52u8, 0x54, 0x00, 0x12, 0x34, 0x56];
     let ll = eui64_link_local(&mac);
     crate::test_assert!(is_link_local(&ll), "eui64 is link-local");

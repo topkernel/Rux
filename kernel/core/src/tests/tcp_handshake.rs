@@ -15,7 +15,7 @@
 //! - State transitions
 //! - Sequence number and acknowledgment number handling
 
-use crate::net::tcp::{TcpSocket, TcpState, tcp_socket_alloc, tcp_bind, tcp_socket_free};
+use crate::net::hotpath::tcp::{TcpSocket, TcpState, tcp_socket_alloc, tcp_bind, tcp_socket_free};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_tcp_handshake() {

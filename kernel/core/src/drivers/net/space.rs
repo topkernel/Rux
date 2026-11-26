@@ -4,7 +4,7 @@
 //!
 //! Network device base class
 
-use crate::net::buffer::SkBuff;
+use crate::net::types::SkBuff;
 use crate::sync::types::Spinlock;
 
 /// Maximum device name length

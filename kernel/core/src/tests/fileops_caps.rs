@@ -362,22 +362,22 @@ pub fn test_fileops_caps() {
     // without write; tokenid is a plain write-control pair.
     check(
         "socket caps",
-        &crate::net::socket::SOCKET_OPS,
+        &crate::net::hotpath::socket::SOCKET_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
     check(
         "unix socket caps",
-        &crate::net::unix::UNIX_SOCKET_OPS,
+        &crate::net::hotpath::unix::UNIX_SOCKET_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
     check(
         "raw socket caps",
-        &crate::net::raw::RAW_OPS,
+        &crate::net::hotpath::raw::RAW_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
     check(
         "netlink socket caps",
-        &crate::net::netlink::NETLINK_OPS,
+        &crate::net::hotpath::netlink::NETLINK_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
     check(
