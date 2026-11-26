@@ -945,6 +945,23 @@ regression points at brought back. Its result is the real hot-path
 line count per subsystem, and the target (§1a.4) is measured against
 it.
 
+Two binding constraints on the shrink stage (user orders of
+2026-11-26):
+
+- **Performance is measured on x86_64 + KVM only.** Every A/B and
+  threshold decision reads pbench/syscost numbers from that machine
+  class; riscv64/aarch64 stay build + suite regression gates and
+  carry no performance duty (the stage-b `pbench-rv` line is
+  report-only and gates nothing).
+
+- **Code moved out of the core is split into per-function files in
+  the service crate** (e.g. mm out to `kernel/mm/src/vma.rs`,
+  `page_alloc.rs`, `slab.rs`, ...). The hotpath.rs banners are the
+  ready-made split blueprint: one section ≈ one file. Moving the
+  monolith verbatim into a crate is rejected in review. When the
+  subsystem's shrink finishes, its core-side hotpath.rs holds only
+  the functions a measurement brought back.
+
 ## 3. The end-state topology
 
 ```
