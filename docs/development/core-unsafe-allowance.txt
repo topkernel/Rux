@@ -108,7 +108,6 @@ kernel/core/src/ipc/hotpath.rs	pre-collection state at baseline f8e6eb94d: 42 un
 kernel/core/src/lib.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/list.rs	pre-collection state at baseline f8e6eb94d: 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/module/mod.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/net/hotpath.rs	pre-collection state at baseline f8e6eb94d: 29 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/perf/mod.rs	pre-collection state at baseline f8e6eb94d: 40 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/printk.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/process/hotpath.rs	pre-collection state at baseline f8e6eb94d: 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
