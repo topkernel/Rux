@@ -63,3 +63,5 @@ kernel/core/src/sync/rwlock.rs	18	0	regions moved to sync/hotpath.rs by the pass
 kernel/core/src/sync/rwsem.rs	9	0	regions moved to sync/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/sync/seqlock.rs	7	0	regions moved to sync/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/sync/spinlock.rs	28	0	regions moved to sync/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
+kernel/core/src/debug/hung_task.rs	1	0	seed-core pass 2: the file folded into debug/hotpath.rs as a section; its annotated region moved with it and is counted under the new path (git attributes the many-sources fold to another section's file, so the monotonicity fold cannot credit this path)
+kernel/core/src/debug/wildwatch.rs	10	0	seed-core pass 2: the file folded into debug/hotpath.rs as a section; its annotated regions moved with it and are counted under the new path (git attributes the many-sources fold to another section's file, so the monotonicity fold cannot credit this path)
