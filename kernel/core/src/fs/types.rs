@@ -21,6 +21,7 @@
 //! One section per topic file, in the order the old module declarations
 //! had; inside a section the definitions keep their original order.
 
+#![forbid(unsafe_code)]
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;

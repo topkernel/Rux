@@ -937,225 +937,264 @@ e5db755a13c9	kernel/core/src/drivers/virtio/queue.rs	notify	456	asm	INV:INV-DMA-
 1b358f2f8e1d	kernel/core/src/drivers/virtio/queue.rs	notify	463	asm	INV:INV-DMA-3
 5c5732a89c23	kernel/core/src/drivers/virtio/queue.rs	desc_mut	1448		INV:INV-DMA-2
 abae60840f9a	kernel/core/src/drivers/virtio/queue.rs	avail_header_mut	1461		INV:INV-DMA-2
-585ef5710007	kernel/core/src/fs/bio.rs	<module>	91		INV:INV-BLKDEV-1
-3bbef2174a07	kernel/core/src/fs/bio.rs	<module>	94		INV:INV-BLKDEV-1
-4eb3fd298473	kernel/core/src/fs/bio.rs	new_uninit	123		INV:INV-BLKDEV-1
-e412427f5a5a	kernel/core/src/fs/bio.rs	bh	281		INV:F11
-18ee766bd8dd	kernel/core/src/fs/bio.rs	bh_mut	298		INV:F11
-7c0da350cd03	kernel/core/src/fs/bio.rs	entry_ref	313		INV:F11
-976b366d743c	kernel/core/src/fs/bio.rs	drop	321		INV:F11
-52ddcb826843	kernel/core/src/fs/bio.rs	<module>	373		INV:F11
-0b408f418d15	kernel/core/src/fs/bio.rs	<module>	376		INV:F11
-b55a2aa2af04	kernel/core/src/fs/bio.rs	move_to_lru_head	447		INV:F11
-65b0f980f800	kernel/core/src/fs/bio.rs	push_lru_head	497		INV:F11
-3d550668accd	kernel/core/src/fs/bio.rs	remove_from_lru	516		INV:F11
-245e8cebcf14	kernel/core/src/fs/bio.rs	evict_one	597		INV:F11
-49d177b3538e	kernel/core/src/fs/bio.rs	evict_one	622		INV:F11
-bb4a8bb47fdc	kernel/core/src/fs/bio.rs	evict_one	629		INV:F11
-746da1832b20	kernel/core/src/fs/bio.rs	evict_one	686		INV:F11
-8d577e60e199	kernel/core/src/fs/bio.rs	drop_block	757		INV:F11
-43a9d6f3ea1d	kernel/core/src/fs/bio.rs	drop_block	775		INV:F11
-305456bc5c76	kernel/core/src/fs/bio.rs	get	901		INV:F11
-81d69bd3c1da	kernel/core/src/fs/bio.rs	get	989		INV:F11
-d66ebbc257fb	kernel/core/src/fs/bio.rs	get	998		INV:F11
-35568eaacd65	kernel/core/src/fs/bio.rs	get	1010		INV:F11
-6fdf3c2d6201	kernel/core/src/fs/bio.rs	get_zero_impl	1137		INV:F11
-af9b12e2b444	kernel/core/src/fs/bio.rs	get_zero_impl	1144		INV:F11
-686753bbed21	kernel/core/src/fs/bio.rs	get_zero_impl	1154		INV:F11
-b3e75c84a4e1	kernel/core/src/fs/bio.rs	put	1162		INV:F11
-a107ffddccd5	kernel/core/src/fs/bio.rs	invalidate	1287		INV:F11
-961ca01ee17e	kernel/core/src/fs/bio.rs	invalidate_device	1339		INV:F11
-c8b85d6f63bd	kernel/core/src/fs/bio.rs	invalidate_device	1354		INV:F11
-fd1520357a2b	kernel/core/src/fs/bio.rs	bh_pinned	1442		INV:INV-SLOT-1
-8a8feb7a7177	kernel/core/src/fs/bio.rs	bh_data_mut	1457		INV:INV-SLOT-1
-d425a9f2d636	kernel/core/src/fs/bio.rs	wait_buffer_io_done	1569		INV:INV-SLOT-1
-8e8fe5cf8eeb	kernel/core/src/fs/bio.rs	bread_async	1655		INV:F11
-2b65076ce625	kernel/core/src/fs/bio.rs	bread_async	1678		INV:F11
-2705314c022f	kernel/core/src/fs/bio.rs	bread_async	1701		GAP
-321044685672	kernel/core/src/fs/bio.rs	bread_async	1808		INV:INV-LOCK-6
-d891e55917a2	kernel/core/src/fs/bio.rs	bread_async	1830		INV:INV-LOCK-6
-cf20693eff89	kernel/core/src/fs/bio.rs	bread_async	1841		INV:INV-LOCK-6
-e9f4bbe02293	kernel/core/src/fs/bio.rs	bread_wait	1864		INV:INV-LOCK-6
-86669631aa16	kernel/core/src/fs/bio.rs	bfree_multi	2095		INV:F11
-cd680b4e60d1	kernel/core/src/fs/bio.rs	as_slice	2241	raw-construct	INV:F11
-a2ad193e03b4	kernel/core/src/fs/bio.rs	sync_dirty_blocks_batched	2808		INV:F11
-159ba0dffe12	kernel/core/src/fs/bio.rs	sync_dirty_buffer	2877		INV:F11
-2452ece1a23a	kernel/core/src/fs/bio.rs	sync_dirty_buffer	2887		INV:F11
-51ad7328a624	kernel/core/src/fs/bio.rs	publication_capture_note_dirty	3261	ptr-ops	GAP
-418cdc82a1f0	kernel/core/src/fs/bio.rs	sync_block_ordered	3757		INV:F11
-23b096689c22	kernel/core/src/fs/bio.rs	with_block_mut	3806		INV:F11
-5a96d95edc5c	kernel/core/src/fs/bio.rs	with_block_mut	3809		INV:F11
-015731bb8b8f	kernel/core/src/fs/bio.rs	with_block_deferred_mut	3834		INV:F11
-89747a7019cf	kernel/core/src/fs/bio.rs	with_block_deferred_mut	3837		INV:F11
-9e03ad88b06b	kernel/core/src/fs/bio.rs	with_block	3858		INV:F11
-e04e7aec976e	kernel/core/src/fs/buffer.rs	new	40	ptr-ops	INV:INV-BUFCHUNK-1
-d2c364adcfff	kernel/core/src/fs/buffer.rs	from_bytes	54		INV:INV-BUFCHUNK-1
-d96aa68b8f8a	kernel/core/src/fs/buffer.rs	new	306	ptr-ops	INV:INV-BUFCHUNK-1
-6c702aec1e28	kernel/core/src/fs/buffer.rs	new_chunk	354	ptr-ops	INV:INV-BUFCHUNK-1
-d255880699ea	kernel/core/src/fs/buffer.rs	read	391	raw-construct,ptr-ops	INV:INV-BUFCHUNK-1
-53d25622db1d	kernel/core/src/fs/buffer.rs	write	427		INV:INV-BUFCHUNK-1
-647b129071f0	kernel/core/src/fs/buffer.rs	resize	466	ptr-ops	GAP
-eed61bd29315	kernel/core/src/fs/dentry.rs	<module>	100		INV:INV-DENTRY-SEND-1
-a41dfe614545	kernel/core/src/fs/dentry.rs	<module>	101		INV:INV-DENTRY-SEND-1
-ed33466d9631	kernel/core/src/fs/dentry.rs	<module>	322		INV:INV-DENTRY-MEMO-1
-25df9764e1cd	kernel/core/src/fs/dentry.rs	<module>	331		INV:INV-DENTRY-MEMO-1
-779ab6c4dc7f	kernel/core/src/fs/dentry.rs	<module>	392		INV:INV-DENTRY-SEND-1
-725a1aa5d650	kernel/core/src/fs/dentry.rs	<module>	393		INV:INV-DENTRY-SEND-1
-b89a110d2856	kernel/core/src/fs/dentry.rs	memo_slot_read	455		INV:INV-DENTRY-MEMO-1
-baede792467f	kernel/core/src/fs/dentry.rs	<module>	555		INV:INV-DENTRY-MEMO-1
-f78edd655762	kernel/core/src/fs/dentry.rs	<module>	556		INV:INV-DENTRY-MEMO-1
-e856f4c30fd4	kernel/core/src/fs/dentry.rs	get_inode_fast	718		INV:INV-DENTRY-MEMO-1
-f2827eb10b09	kernel/core/src/fs/dentry.rs	lookup_child_walk	911		INV:INV-DENTRY-ADOPT-1
-5d13f4a4c0d2	kernel/core/src/fs/dentry.rs	lookup_child_fast	938		INV:INV-DENTRY-ADOPT-1
-6a24caed4678	kernel/core/src/fs/dentry.rs	refill_memo_locked	962		INV:INV-DENTRY-MEMO-1
-ea993ba117c0	kernel/core/src/fs/dentry.rs	refill_memo_locked	972		INV:INV-DENTRY-MEMO-1
-4233bd8bf5d9	kernel/core/src/fs/dentry.rs	refill_memo_locked	989		INV:INV-DENTRY-MEMO-1
-b4a2a5aef4c9	kernel/core/src/fs/dentry.rs	refill_memo_locked	995		INV:INV-DENTRY-MEMO-1
-b05951fc49d3	kernel/core/src/fs/dentry.rs	refill_memo_locked	1004		INV:INV-DENTRY-MEMO-1
-dce5bfe264c6	kernel/core/src/fs/dentry.rs	big_memo_ensure_locked	1043		INV:INV-DENTRY-MEMO-1
-d9ea4c709588	kernel/core/src/fs/dentry.rs	big_memo_ensure_locked	1058		INV:INV-DENTRY-MEMO-1
-3fa32725ad7c	kernel/core/src/fs/dentry.rs	big_memo_ensure_locked	1059		INV:INV-DENTRY-MEMO-1
-a3e8584fe16c	kernel/core/src/fs/dentry.rs	<module>	1403		INV:INV-DENTRY-MEMO-1
-44b29b2e8634	kernel/core/src/fs/dentry.rs	<module>	1404		INV:INV-DENTRY-MEMO-1
-8820edbb494b	kernel/core/src/fs/elf.rs	load_segment	638	ptr-ops	INV:INV-CBYTES-2
-e988a6092c65	kernel/core/src/fs/event_notify.rs	list_first	80		INV:INV-SYSC-1
-77de1a4cf4d5	kernel/core/src/fs/event_notify.rs	list_next	86		INV:INV-SYSC-1
-709f6ec3dba3	kernel/core/src/fs/event_notify.rs	list_link_tail	94		INV:INV-SYSC-1
-51206f685ad6	kernel/core/src/fs/event_notify.rs	list_unlink	101		INV:INV-SYSC-1
-79cf29cc19c9	kernel/core/src/fs/event_notify.rs	boxed_mut	107		INV:INV-SYSC-2
-f954ce75088f	kernel/core/src/fs/event_notify.rs	boxed_drop	114		INV:INV-SYSC-2
-823a5f502dd9	kernel/core/src/fs/event_notify.rs	list_entry_mut	121	ptr-ops	INV:INV-SYSC-1
-4d2b93cf38be	kernel/core/src/fs/event_notify.rs	list_entry	133	ptr-ops	INV:INV-SYSC-1
-c48bca762eff	kernel/core/src/fs/event_notify.rs	boxed_ref	155		INV:INV-SYSC-2
-e183529b2589	kernel/core/src/fs/event_notify.rs	<module>	634		INV:INV-SYSC-2
-fcc6bf15b70a	kernel/core/src/fs/event_notify.rs	<module>	635		INV:INV-SYSC-2
-a82227c4b37d	kernel/core/src/fs/file.rs	<module>	305	ptr-ops	INV:INV-FILE-CELL-1
-1b5664c77f84	kernel/core/src/fs/file.rs	file_arc_try_clone	313		INV:INV-FILE-ARC-1
-2cafacd4b1d2	kernel/core/src/fs/file.rs	file_arc_try_clone	318		INV:INV-FILE-ARC-1
-4b1852ff318e	kernel/core/src/fs/file.rs	file_arc_try_clone	326		INV:INV-FILE-ARC-1
-f480b3a7c6d5	kernel/core/src/fs/file.rs	verify_arc_inner_layout	345	ptr-ops	INV:INV-FILE-ARC-1
-53078dbfdfd3	kernel/core/src/fs/file.rs	verify_arc_inner_layout	351		INV:INV-FILE-ARC-1
-f684fbbbbb02	kernel/core/src/fs/file.rs	verify_arc_inner_layout	356		INV:INV-FILE-ARC-1
-835a76c26146	kernel/core/src/fs/file.rs	verify_arc_inner_layout	358		INV:INV-FILE-ARC-1
-f91db3538017	kernel/core/src/fs/file.rs	<module>	470		INV:INV-FILE-SEND-1
-43c55e27ef08	kernel/core/src/fs/file.rs	<module>	471		INV:INV-FILE-SEND-1
-0a1a12aaf08e	kernel/core/src/fs/file.rs	set_inode	532		INV:INV-FILE-CELL-1
-b9d41617940e	kernel/core/src/fs/file.rs	set_dentry	537		INV:INV-FILE-CELL-1
-5b27cd118270	kernel/core/src/fs/file.rs	get_dentry	548		INV:INV-FILE-CELL-1
-ee9276c86313	kernel/core/src/fs/file.rs	set_ops	553		INV:INV-FILE-CELL-1
-bae2e83c427b	kernel/core/src/fs/file.rs	get_ops	560		INV:INV-FILE-CELL-1
-f478cb0c3fd0	kernel/core/src/fs/file.rs	get_inode	571		INV:INV-FILE-CELL-1
-48f9d26cd7e1	kernel/core/src/fs/file.rs	set_private_data	576		INV:INV-FILE-CELL-1
-5e4bd17fa7ff	kernel/core/src/fs/file.rs	private_data_ptr	590		INV:INV-FS-FILEPRIV-1
-42af7874444d	kernel/core/src/fs/file.rs	clear_private_data	604		INV:INV-FS-FILEPRIV-1
-aca7bf3f1823	kernel/core/src/fs/file.rs	take_private_data	613		INV:INV-FS-FILEPRIV-1
-f6539af76694	kernel/core/src/fs/file.rs	<module>	689		INV:INV-FILE-CELL-1
-09f03e69b56c	kernel/core/src/fs/file.rs	<module>	717	raw-construct	INV:INV-FILE-CELL-1
-652b18d41d56	kernel/core/src/fs/file.rs	<module>	744		INV:INV-FILE-CELL-1
-07368ef30675	kernel/core/src/fs/file.rs	<module>	766		INV:INV-FILE-CELL-1
-860da53ef076	kernel/core/src/fs/file.rs	positional_capable	846		INV:INV-FILE-CELL-1
-60857934527e	kernel/core/src/fs/file.rs	<module>	859	raw-construct	INV:INV-FILE-CELL-1
-bdf20c8cf7e9	kernel/core/src/fs/file.rs	read_slice	952		INV:INV-FILE-CELL-1
-bcdfd160d636	kernel/core/src/fs/file.rs	write_slice	959		INV:INV-FILE-CELL-1
-421c04cf63d5	kernel/core/src/fs/file.rs	read_at_slice	965		INV:INV-FILE-CELL-1
-69fe7a6bdfd0	kernel/core/src/fs/file.rs	write_at_slice	971		INV:INV-FILE-CELL-1
-30470b06d415	kernel/core/src/fs/file.rs	lseek_op	980		INV:INV-FILE-CELL-1
-23f63963d1ab	kernel/core/src/fs/file.rs	<module>	984		INV:INV-FILE-CELL-1
-7b4d0e7d7396	kernel/core/src/fs/file.rs	path	1010		INV:INV-FILE-CELL-1
-1c3daff29311	kernel/core/src/fs/file.rs	path	1015		INV:INV-FILE-CELL-1
-a343765582ec	kernel/core/src/fs/file.rs	drop	1064		INV:INV-FILE-CELL-1
-63fd03d13ba6	kernel/core/src/fs/file.rs	fork_from	1180		INV:INV-FILE-CELL-1
-40098d0a8e93	kernel/core/src/fs/file.rs	get_file_borrow	1357	ptr-ops	INV:INV-FILE-CELL-1
-f56d0439afca	kernel/core/src/fs/file.rs	get_file	1385		INV:INV-FILE-CELL-1
-ad228e21a9f2	kernel/core/src/fs/file.rs	for_each_file	1417		INV:INV-FILE-CELL-1
-af934a21ba54	kernel/core/src/fs/file.rs	close_fd	1475		INV:INV-FILE-CELL-1
-7acc92354775	kernel/core/src/fs/file.rs	close_fd_report	1520		INV:INV-FILE-CELL-1
-a9a9da54d8ec	kernel/core/src/fs/file.rs	dup2_fd	1607		INV:INV-FILE-CELL-1
-95f5842225a8	kernel/core/src/fs/file.rs	dup2_fd	1608		INV:INV-FILE-CELL-1
-b5ac54826b9d	kernel/core/src/fs/file.rs	dup2_fd	1619		INV:INV-FILE-CELL-1
-97b99bd7079b	kernel/core/src/fs/file.rs	drop	1700		INV:INV-FILE-CELL-1
-70756b4dc952	kernel/core/src/fs/file.rs	alloc_staging_buf	1736		INV:INV-FILE-CELL-1
-cd7050d39a8e	kernel/core/src/fs/file.rs	gather_append_user	1753	ptr-ops	INV:INV-FILE-CELL-1
-6c246fd066cd	kernel/core/src/fs/file.rs	get_file_fd_fast	1797	transmute	INV:INV-FILE-CELL-1
-d7b479ca10d6	kernel/core/src/fs/file.rs	get_file_fd_fast	1807	transmute	INV:INV-FILE-CELL-1
-1a1489dfe5fe	kernel/core/src/fs/file.rs	get_file_fd_safe	1820		INV:INV-FILE-CELL-1
-75ac9b43892a	kernel/core/src/fs/file.rs	<module>	1866		INV:INV-FILE-CELL-1
-eb308d4ba27d	kernel/core/src/fs/file.rs	reg_file_read	1875		INV:INV-FILE-CELL-1
-0581cdfb5e88	kernel/core/src/fs/file.rs	reg_file_write	1923		INV:INV-FILE-CELL-1
-512ec9133b83	kernel/core/src/fs/file.rs	reg_file_lseek	1994		INV:INV-FILE-CELL-1
-4f028c7daccc	kernel/core/src/fs/fs_struct.rs	<module>	254		INV:INV-SENDSYNC-1
-5d7adfd64444	kernel/core/src/fs/fs_struct.rs	<module>	255		INV:INV-SENDSYNC-1
-5d8e19b796a7	kernel/core/src/fs/fsctx.rs	fsctx_close	394		INV:INV-FSCTX-1
-baba1a3c61cb	kernel/core/src/fs/fsctx.rs	fsctx_close	395	ptr-ops	INV:INV-FSCTX-1
-d402a93b1fe2	kernel/core/src/fs/fsctx.rs	fsctx_close	396		INV:INV-FSCTX-1
-02b6b2f73f61	kernel/core/src/fs/fsctx.rs	fsctx_of	413		INV:INV-FSCTX-1
-27ed3cf9c7d4	kernel/core/src/fs/fsctx.rs	fsctx_of	414	ptr-ops	INV:INV-FSCTX-1
-43e720b0bd23	kernel/core/src/fs/fsctx.rs	fsctx_of_mut	426		INV:INV-FSCTX-1
-9d802e344b9c	kernel/core/src/fs/fsctx.rs	fsctx_of_mut	427	ptr-ops	INV:INV-FSCTX-1
-4be78c6710a3	kernel/core/src/fs/fsctx.rs	mountfd_close	438		INV:INV-FSCTX-1
-54c262c97419	kernel/core/src/fs/fsctx.rs	mountfd_close	439	ptr-ops	INV:INV-FSCTX-1
-31e0798ae835	kernel/core/src/fs/fsctx.rs	mountfd_close	440		INV:INV-FSCTX-1
-2dae3eb20c3f	kernel/core/src/fs/fsctx.rs	mountfd_of	456		INV:INV-FSCTX-1
-ec2e9d8e5ca0	kernel/core/src/fs/fsctx.rs	mountfd_of	457	ptr-ops	INV:INV-FSCTX-1
-e7d1af26dc2c	kernel/core/src/fs/fsctx.rs	treepath_dentry	473		INV:INV-FSCTX-1
-aa2756f8de08	kernel/core/src/fs/fsctx.rs	make_detached_mount	504	ptr-ops	INV:INV-FSCTX-1
-e689d22b8aad	kernel/core/src/fs/inode.rs	stat_dev_for_fs	610		INV:INV-INODE-STATDEV-1
-21d9484b4da9	kernel/core/src/fs/inode.rs	stat_dev_for_fs	619		INV:INV-INODE-STATDEV-1
-bee49664ae23	kernel/core/src/fs/inode.rs	stat_dev_for_fs	627		INV:INV-INODE-STATDEV-1
-00c0895113ba	kernel/core/src/fs/inode.rs	<module>	739		INV:INV-INODE-STATDEV-1
-1d8575474779	kernel/core/src/fs/inode.rs	<module>	740		INV:INV-INODE-STATDEV-1
-8ad8cb51e8c9	kernel/core/src/fs/inode.rs	update_cached_mode	792	volatile	INV:INV-INODE-STATDEV-1
-46ba020f8556	kernel/core/src/fs/inode.rs	<module>	1225		INV:INV-INODE-STATDEV-1
-dcf74f75d490	kernel/core/src/fs/inode.rs	<module>	1226		INV:INV-INODE-STATDEV-1
-a04452de8ec5	kernel/core/src/fs/journal_seam.rs	<module>	156		GAP
-ae7d2a8f7264	kernel/core/src/fs/journal_seam.rs	<module>	158		GAP
-a386ef30dbb6	kernel/core/src/fs/mount.rs	<module>	152		INV:INV-SENDSYNC-1
-993ebee4e417	kernel/core/src/fs/mount.rs	<module>	153		INV:INV-SENDSYNC-1
-c39bfa3b7230	kernel/core/src/fs/page_cache.rs	pcache_dirty_histogram	313		INV:F13
-6e9b0d4f8c60	kernel/core/src/fs/page_cache.rs	claim_entry_arc	538		INV:INV-PC-CLAIM
-f68aada9ca34	kernel/core/src/fs/page_cache.rs	fill_from	583	ptr-ops	INV:INV-PC-WIN
-7181de2f36b5	kernel/core/src/fs/page_cache.rs	copy_frame_from	597	ptr-ops	INV:INV-PC-WIN
-5a27e36177d6	kernel/core/src/fs/page_cache.rs	copy_into_page	636	ptr-ops,addr-arith	INV:INV-PC-PAGECOPY
-723b6d90f96a	kernel/core/src/fs/page_cache.rs	copy_user_into_page	649	ptr-ops,addr-arith	INV:INV-PC-PAGECOPY
-37800dc81aba	kernel/core/src/fs/page_cache.rs	probe_slot_ptr	759		INV:INV-PC-CLAIM
-72318bd8f71e	kernel/core/src/fs/page_cache.rs	table_find	783		INV:INV-PC-CLAIM
-127a190d2434	kernel/core/src/fs/page_cache.rs	table_publish	841		INV:INV-PC-CLAIM
-6f3d0e94dded	kernel/core/src/fs/page_cache.rs	table_publish	843		INV:INV-PC-CLAIM
-ee1b2e88faa8	kernel/core/src/fs/page_cache.rs	table_publish	852		INV:INV-PC-CLAIM
-da0e4bcddffe	kernel/core/src/fs/page_cache.rs	table_publish	855		INV:INV-PC-CLAIM
-9ff8e827dbe3	kernel/core/src/fs/page_cache.rs	table_publish	856		INV:INV-PC-CLAIM
-efdfc93ffe66	kernel/core/src/fs/page_cache.rs	remove_entry	885		INV:INV-PC-CLAIM
-be85616dbb69	kernel/core/src/fs/page_cache.rs	flush_all_dirty	2046		INV:F13
-f6b835f7e8d7	kernel/core/src/fs/page_cache.rs	collect_wb_work	3284		INV:INV-FRAME-1
-d9b2e57b836e	kernel/core/src/fs/page_cache.rs	evict_one_locked	3687		INV:F13
-315ac9f1e530	kernel/core/src/fs/page_cache.rs	evict_one_locked	3742		INV:F13
-8ed25877af53	kernel/core/src/fs/page_cache.rs	evict_one_locked	3817		INV:F13
-7fe7a4b28edf	kernel/core/src/fs/page_cache.rs	evict_one_locked	3850		INV:F13
-e359747d2b06	kernel/core/src/fs/page_cache.rs	shared_file_fault_page	3993		INV:F13
-9a29c902009a	kernel/core/src/fs/page_cache.rs	shared_file_fault_page	4013	ptr-ops,addr-arith	INV:F13
-c888a1acb791	kernel/core/src/fs/page_cache.rs	shared_file_fault_page	4023		INV:F13
-c24d1533c38e	kernel/core/src/fs/page_cache.rs	shared_file_fault_page	4029	raw-construct	INV:F13
-f34fb75febaa	kernel/core/src/fs/permission.rs	inode_permission	108		INV:INV-KTASK-1
-4d7b9ac8ea5c	kernel/core/src/fs/pidfd.rs	pin_leader	71		INV:INV-PIDFD-PIN-1
-6f6a6289fcb5	kernel/core/src/fs/pidfd.rs	pin_leader	76		INV:INV-PIDFD-PIN-1
-b5705a242155	kernel/core/src/fs/pidfd.rs	pin_leader	81		INV:INV-PIDFD-PIN-1
-c60b3e488d04	kernel/core/src/fs/pidfd.rs	free_pidfd_data	105		INV:INV-PIDFD-PIN-1
-a67a50b7629e	kernel/core/src/fs/pidfd.rs	data_of	123		INV:INV-FS-FILEPRIV-1
-aceb64575f5e	kernel/core/src/fs/pidfd.rs	data_of	128	ptr-ops	INV:INV-FS-FILEPRIV-1
-2311f445b542	kernel/core/src/fs/pidfd.rs	fdinfo_pid_of	147		INV:INV-FS-FILEPRIV-1
-75184c143eab	kernel/core/src/fs/pidfd.rs	resolve_alive	157		INV:INV-PIDFD-PIN-1
-ba30278d1472	kernel/core/src/fs/pidfd.rs	resolve_alive	163	ptr-ops	INV:INV-PIDFD-PIN-1
-5ebe09451cf0	kernel/core/src/fs/pidfd.rs	target_exited	170		INV:INV-PIDFD-PIN-1
-ccee70647636	kernel/core/src/fs/pidfd.rs	target_exited	175		INV:INV-PIDFD-PIN-1
-3d063e2391da	kernel/core/src/fs/pidfd.rs	pidfd_poll	185		INV:INV-PIDFD-PIN-1
-a7d087650732	kernel/core/src/fs/pidfd.rs	pidfd_close	193		INV:INV-PIDFD-PIN-1
-718ab5f0086b	kernel/core/src/fs/pidfd.rs	pidfd_close	196		INV:INV-PIDFD-PIN-1
-9b20107b15fe	kernel/core/src/fs/stat.rs	copy_stat_to_user	279	ptr-ops	INV:INV-UACCESS-SAFE-1
-e2b33d00b39f	kernel/core/src/fs/stat.rs	copy_stat_to_user	289	ptr-ops	INV:INV-UACCESS-SAFE-1
-6a254e02c5c5	kernel/core/src/fs/superblock.rs	<module>	84		INV:INV-SBTYPE-1
-38e0b0788a27	kernel/core/src/fs/superblock.rs	<module>	85		INV:INV-SBTYPE-1
-cf242b096c16	kernel/core/src/fs/superblock.rs	<module>	219		INV:INV-SBTYPE-1
-ae1fd0567aa4	kernel/core/src/fs/superblock.rs	<module>	220		INV:INV-SBTYPE-1
+14ab24c4b2fb	kernel/core/src/fs/hotpath.rs	<module>	439	ptr-ops	INV:INV-FILE-CELL-1
+6f8ab4956f41	kernel/core/src/fs/hotpath.rs	file_arc_try_clone	447		INV:INV-FILE-ARC-1
+a4b17d788b40	kernel/core/src/fs/hotpath.rs	file_arc_try_clone	452		INV:INV-FILE-ARC-1
+0f6d8d76df61	kernel/core/src/fs/hotpath.rs	file_arc_try_clone	460		INV:INV-FILE-ARC-1
+8ebe7b7de9bf	kernel/core/src/fs/hotpath.rs	verify_arc_inner_layout	479	ptr-ops	INV:INV-FILE-ARC-1
+ac9decd507ba	kernel/core/src/fs/hotpath.rs	verify_arc_inner_layout	485		INV:INV-FILE-ARC-1
+01ddd0ae210c	kernel/core/src/fs/hotpath.rs	verify_arc_inner_layout	490		INV:INV-FILE-ARC-1
+b225c9a96368	kernel/core/src/fs/hotpath.rs	verify_arc_inner_layout	492		INV:INV-FILE-ARC-1
+3bcbe77a533f	kernel/core/src/fs/hotpath.rs	<module>	515		INV:INV-FILE-SEND-1
+a3db3c4685a5	kernel/core/src/fs/hotpath.rs	<module>	516		INV:INV-FILE-SEND-1
+894b65acf84d	kernel/core/src/fs/hotpath.rs	set_inode	577		INV:INV-FILE-CELL-1
+ee945cbbbf1b	kernel/core/src/fs/hotpath.rs	set_dentry	582		INV:INV-FILE-CELL-1
+8673a155cfa6	kernel/core/src/fs/hotpath.rs	get_dentry	593		INV:INV-FILE-CELL-1
+87c5ecb7005c	kernel/core/src/fs/hotpath.rs	set_ops	598		INV:INV-FILE-CELL-1
+d8754067cc32	kernel/core/src/fs/hotpath.rs	get_ops	605		INV:INV-FILE-CELL-1
+61ca11146be2	kernel/core/src/fs/hotpath.rs	get_inode	616		INV:INV-FILE-CELL-1
+a5b3a3973510	kernel/core/src/fs/hotpath.rs	set_private_data	621		INV:INV-FILE-CELL-1
+6d34f32f64f6	kernel/core/src/fs/hotpath.rs	private_data_ptr	635		INV:INV-FS-FILEPRIV-1
+3cc56efcb989	kernel/core/src/fs/hotpath.rs	clear_private_data	649		INV:INV-FS-FILEPRIV-1
+ef5fed5781ff	kernel/core/src/fs/hotpath.rs	take_private_data	658		INV:INV-FS-FILEPRIV-1
+73e7a25607fa	kernel/core/src/fs/hotpath.rs	<module>	734		INV:INV-FILE-CELL-1
+84395df6813f	kernel/core/src/fs/hotpath.rs	<module>	762	raw-construct	INV:INV-FILE-CELL-1
+2fe076dc3b1f	kernel/core/src/fs/hotpath.rs	<module>	789		INV:INV-FILE-CELL-1
+ad36aadf642c	kernel/core/src/fs/hotpath.rs	<module>	811		INV:INV-FILE-CELL-1
+87eaa59b4183	kernel/core/src/fs/hotpath.rs	positional_capable	891		INV:INV-FILE-CELL-1
+49288e72f577	kernel/core/src/fs/hotpath.rs	<module>	904	raw-construct	INV:INV-FILE-CELL-1
+75747cedfe90	kernel/core/src/fs/hotpath.rs	read_slice	997		INV:INV-FILE-CELL-1
+8b1b331570ea	kernel/core/src/fs/hotpath.rs	write_slice	1004		INV:INV-FILE-CELL-1
+81f3edf7605e	kernel/core/src/fs/hotpath.rs	read_at_slice	1010		INV:INV-FILE-CELL-1
+0127a83efdb9	kernel/core/src/fs/hotpath.rs	write_at_slice	1016		INV:INV-FILE-CELL-1
+3b08ba879450	kernel/core/src/fs/hotpath.rs	lseek_op	1025		INV:INV-FILE-CELL-1
+315a24530e93	kernel/core/src/fs/hotpath.rs	<module>	1029		INV:INV-FILE-CELL-1
+a6c8afc1b203	kernel/core/src/fs/hotpath.rs	path	1055		INV:INV-FILE-CELL-1
+515b5e7e2646	kernel/core/src/fs/hotpath.rs	path	1060		INV:INV-FILE-CELL-1
+2819ba2318c6	kernel/core/src/fs/hotpath.rs	drop	1109		INV:INV-FILE-CELL-1
+619b08c1d56c	kernel/core/src/fs/hotpath.rs	fork_from	1170		INV:INV-FILE-CELL-1
+41dfd4eac7d4	kernel/core/src/fs/hotpath.rs	get_file_borrow	1347	ptr-ops	INV:INV-FILE-CELL-1
+1ae10ca878d6	kernel/core/src/fs/hotpath.rs	get_file	1375		INV:INV-FILE-CELL-1
+583ca92ceb5a	kernel/core/src/fs/hotpath.rs	for_each_file	1407		INV:INV-FILE-CELL-1
+e405b081b20f	kernel/core/src/fs/hotpath.rs	close_fd	1465		INV:INV-FILE-CELL-1
+afd048ad0a4d	kernel/core/src/fs/hotpath.rs	close_fd_report	1510		INV:INV-FILE-CELL-1
+79eb91dea123	kernel/core/src/fs/hotpath.rs	dup2_fd	1597		INV:INV-FILE-CELL-1
+59120f50e806	kernel/core/src/fs/hotpath.rs	dup2_fd	1598		INV:INV-FILE-CELL-1
+342d8414f8b4	kernel/core/src/fs/hotpath.rs	dup2_fd	1609		INV:INV-FILE-CELL-1
+03544289ac36	kernel/core/src/fs/hotpath.rs	drop	1690		INV:INV-FILE-CELL-1
+501d0e8c7e30	kernel/core/src/fs/hotpath.rs	alloc_staging_buf	1726		INV:INV-FILE-CELL-1
+9971bd4cf28d	kernel/core/src/fs/hotpath.rs	gather_append_user	1743	ptr-ops	INV:INV-FILE-CELL-1
+96a8f6e1f3fb	kernel/core/src/fs/hotpath.rs	get_file_fd_fast	1779	transmute	INV:INV-FILE-CELL-1
+f07351461082	kernel/core/src/fs/hotpath.rs	get_file_fd_fast	1789	transmute	INV:INV-FILE-CELL-1
+869456ba31c1	kernel/core/src/fs/hotpath.rs	get_file_fd_safe	1802		INV:INV-FILE-CELL-1
+e5985705a160	kernel/core/src/fs/hotpath.rs	<module>	1848		INV:INV-FILE-CELL-1
+bbb42c62ad03	kernel/core/src/fs/hotpath.rs	reg_file_read	1857		INV:INV-FILE-CELL-1
+27178a33937a	kernel/core/src/fs/hotpath.rs	reg_file_write	1905		INV:INV-FILE-CELL-1
+a3519591bb32	kernel/core/src/fs/hotpath.rs	reg_file_lseek	1976		INV:INV-FILE-CELL-1
+5a2b41107c08	kernel/core/src/fs/hotpath.rs	list_first	2117		INV:INV-SYSC-1
+a079a30d0cf3	kernel/core/src/fs/hotpath.rs	list_next	2123		INV:INV-SYSC-1
+972e6053e23c	kernel/core/src/fs/hotpath.rs	list_link_tail	2131		INV:INV-SYSC-1
+fc9641fc2181	kernel/core/src/fs/hotpath.rs	list_unlink	2138		INV:INV-SYSC-1
+be641cf7ee71	kernel/core/src/fs/hotpath.rs	boxed_mut	2144		INV:INV-SYSC-2
+5b2fee092f70	kernel/core/src/fs/hotpath.rs	boxed_drop	2151		INV:INV-SYSC-2
+81b717c7265d	kernel/core/src/fs/hotpath.rs	list_entry_mut	2158	ptr-ops	INV:INV-SYSC-1
+78f39f3b01ba	kernel/core/src/fs/hotpath.rs	list_entry	2170	ptr-ops	INV:INV-SYSC-1
+fc18a482ef6f	kernel/core/src/fs/hotpath.rs	boxed_ref	2192		INV:INV-SYSC-2
+f0412eb8959c	kernel/core/src/fs/hotpath.rs	<module>	2622		INV:INV-SYSC-2
+574100e96e9b	kernel/core/src/fs/hotpath.rs	<module>	2623		INV:INV-SYSC-2
+2cc8d4fbe26e	kernel/core/src/fs/hotpath.rs	stat_dev_for_fs	3306		INV:INV-INODE-STATDEV-1
+53fbc4b2f635	kernel/core/src/fs/hotpath.rs	stat_dev_for_fs	3315		INV:INV-INODE-STATDEV-1
+54e1247af400	kernel/core/src/fs/hotpath.rs	stat_dev_for_fs	3323		INV:INV-INODE-STATDEV-1
+ae78ec57c72e	kernel/core/src/fs/hotpath.rs	<module>	3339		INV:INV-INODE-STATDEV-1
+5b96b369f5ce	kernel/core/src/fs/hotpath.rs	<module>	3340		INV:INV-INODE-STATDEV-1
+6fc795bf7135	kernel/core/src/fs/hotpath.rs	update_cached_mode	3392	volatile	INV:INV-INODE-STATDEV-1
+e04ee565291d	kernel/core/src/fs/hotpath.rs	<module>	3790		INV:INV-INODE-STATDEV-1
+2e73f8e2f522	kernel/core/src/fs/hotpath.rs	<module>	3791		INV:INV-INODE-STATDEV-1
+651a0c7a4bdd	kernel/core/src/fs/hotpath.rs	<module>	4135		INV:INV-DENTRY-SEND-1
+7406e3f60cfd	kernel/core/src/fs/hotpath.rs	<module>	4136		INV:INV-DENTRY-SEND-1
+35f2d48f17a1	kernel/core/src/fs/hotpath.rs	<module>	4339		INV:INV-DENTRY-MEMO-1
+5229dfe5fa52	kernel/core/src/fs/hotpath.rs	<module>	4348		INV:INV-DENTRY-MEMO-1
+bbcf131174af	kernel/core/src/fs/hotpath.rs	<module>	4391		INV:INV-DENTRY-SEND-1
+6cdf8959a942	kernel/core/src/fs/hotpath.rs	<module>	4392		INV:INV-DENTRY-SEND-1
+7d2702669025	kernel/core/src/fs/hotpath.rs	memo_slot_read	4429		INV:INV-DENTRY-MEMO-1
+6bf73e6475db	kernel/core/src/fs/hotpath.rs	<module>	4447		INV:INV-DENTRY-MEMO-1
+5e86bddae225	kernel/core/src/fs/hotpath.rs	<module>	4448		INV:INV-DENTRY-MEMO-1
+92fbee71f72e	kernel/core/src/fs/hotpath.rs	get_inode_fast	4610		INV:INV-DENTRY-MEMO-1
+e64303dea7b0	kernel/core/src/fs/hotpath.rs	lookup_child_walk	4803		INV:INV-DENTRY-ADOPT-1
+a83da41553ef	kernel/core/src/fs/hotpath.rs	lookup_child_fast	4830		INV:INV-DENTRY-ADOPT-1
+ea8c056f25d7	kernel/core/src/fs/hotpath.rs	refill_memo_locked	4854		INV:INV-DENTRY-MEMO-1
+b08fb56fcffb	kernel/core/src/fs/hotpath.rs	refill_memo_locked	4864		INV:INV-DENTRY-MEMO-1
+98270912defd	kernel/core/src/fs/hotpath.rs	refill_memo_locked	4881		INV:INV-DENTRY-MEMO-1
+dd5ab39bdff6	kernel/core/src/fs/hotpath.rs	refill_memo_locked	4887		INV:INV-DENTRY-MEMO-1
+567a65052dda	kernel/core/src/fs/hotpath.rs	refill_memo_locked	4896		INV:INV-DENTRY-MEMO-1
+35fd0ec250c2	kernel/core/src/fs/hotpath.rs	big_memo_ensure_locked	4935		INV:INV-DENTRY-MEMO-1
+451d100a014b	kernel/core/src/fs/hotpath.rs	big_memo_ensure_locked	4950		INV:INV-DENTRY-MEMO-1
+191cb9c23e65	kernel/core/src/fs/hotpath.rs	big_memo_ensure_locked	4951		INV:INV-DENTRY-MEMO-1
+148b06c760b2	kernel/core/src/fs/hotpath.rs	<module>	5260		INV:INV-DENTRY-MEMO-1
+414611919c94	kernel/core/src/fs/hotpath.rs	<module>	5261		INV:INV-DENTRY-MEMO-1
+bd5a4e288881	kernel/core/src/fs/hotpath.rs	load_segment	5812	ptr-ops	INV:INV-CBYTES-2
+02e76da6c87e	kernel/core/src/fs/hotpath.rs	new	5887	ptr-ops	INV:INV-BUFCHUNK-1
+761a3b1432bf	kernel/core/src/fs/hotpath.rs	from_bytes	5901		INV:INV-BUFCHUNK-1
+afd0000f9388	kernel/core/src/fs/hotpath.rs	new	6137	ptr-ops	INV:INV-BUFCHUNK-1
+791b1ab2c4bc	kernel/core/src/fs/hotpath.rs	new_chunk	6176	ptr-ops	INV:INV-BUFCHUNK-1
+c4fb1dc3dbb3	kernel/core/src/fs/hotpath.rs	read	6213	raw-construct,ptr-ops	INV:INV-BUFCHUNK-1
+3265d245f652	kernel/core/src/fs/hotpath.rs	write	6249		INV:INV-BUFCHUNK-1
+64705f1b5260	kernel/core/src/fs/hotpath.rs	resize	6288	ptr-ops	GAP
+eab1b05a6111	kernel/core/src/fs/hotpath.rs	<module>	6381		INV:INV-BLKDEV-1
+8500361fb919	kernel/core/src/fs/hotpath.rs	<module>	6384		INV:INV-BLKDEV-1
+e7d7ec5f739e	kernel/core/src/fs/hotpath.rs	new_uninit	6413		INV:INV-BLKDEV-1
+0399fb42ab0e	kernel/core/src/fs/hotpath.rs	bh	6550		INV:F11
+df8bc5582596	kernel/core/src/fs/hotpath.rs	bh_mut	6567		INV:F11
+3bfaa9ad3b08	kernel/core/src/fs/hotpath.rs	entry_ref	6582		INV:F11
+04144c8d7d3c	kernel/core/src/fs/hotpath.rs	drop	6590		INV:F11
+66201cfce6b9	kernel/core/src/fs/hotpath.rs	<module>	6604		INV:F11
+245276a2d584	kernel/core/src/fs/hotpath.rs	<module>	6607		INV:F11
+0d9fc2a28b12	kernel/core/src/fs/hotpath.rs	move_to_lru_head	6678		INV:F11
+40686264e2e2	kernel/core/src/fs/hotpath.rs	push_lru_head	6728		INV:F11
+c4197351be51	kernel/core/src/fs/hotpath.rs	remove_from_lru	6747		INV:F11
+c06492e0e886	kernel/core/src/fs/hotpath.rs	evict_one	6828		INV:F11
+5d609aca9f88	kernel/core/src/fs/hotpath.rs	evict_one	6853		INV:F11
+96ba42d6c292	kernel/core/src/fs/hotpath.rs	evict_one	6860		INV:F11
+82f6b8409895	kernel/core/src/fs/hotpath.rs	evict_one	6917		INV:F11
+0adac05d8cd1	kernel/core/src/fs/hotpath.rs	drop_block	6988		INV:F11
+d5c43730992c	kernel/core/src/fs/hotpath.rs	drop_block	7006		INV:F11
+cee1e90da981	kernel/core/src/fs/hotpath.rs	get	7132		INV:F11
+ec43dacec8b0	kernel/core/src/fs/hotpath.rs	get	7220		INV:F11
+5b857fb90e39	kernel/core/src/fs/hotpath.rs	get	7229		INV:F11
+14b5425aa18b	kernel/core/src/fs/hotpath.rs	get	7241		INV:F11
+fc9fdd2a5d75	kernel/core/src/fs/hotpath.rs	get_zero_impl	7368		INV:F11
+5531cb335921	kernel/core/src/fs/hotpath.rs	get_zero_impl	7375		INV:F11
+9070415b08ae	kernel/core/src/fs/hotpath.rs	get_zero_impl	7385		INV:F11
+a5e3d699e5ed	kernel/core/src/fs/hotpath.rs	put	7393		INV:F11
+84f199d2c7e4	kernel/core/src/fs/hotpath.rs	invalidate	7518		INV:F11
+5975627c44ee	kernel/core/src/fs/hotpath.rs	invalidate_device	7570		INV:F11
+643a21499280	kernel/core/src/fs/hotpath.rs	invalidate_device	7585		INV:F11
+75f7f8b1e169	kernel/core/src/fs/hotpath.rs	bh_pinned	7672		INV:INV-SLOT-1
+4339a072cd76	kernel/core/src/fs/hotpath.rs	bh_data_mut	7687		INV:INV-SLOT-1
+3f8baeda7c9e	kernel/core/src/fs/hotpath.rs	wait_buffer_io_done	7799		INV:INV-SLOT-1
+db7daacd1fa8	kernel/core/src/fs/hotpath.rs	bread_async	7885		INV:F11
+46e8317d43ff	kernel/core/src/fs/hotpath.rs	bread_async	7908		INV:F11
+167ca601f6cc	kernel/core/src/fs/hotpath.rs	bread_async	7931		GAP
+425b8feec472	kernel/core/src/fs/hotpath.rs	bread_async	8038		INV:INV-LOCK-6
+36cfc096fb7e	kernel/core/src/fs/hotpath.rs	bread_async	8060		INV:INV-LOCK-6
+8d579c35af25	kernel/core/src/fs/hotpath.rs	bread_async	8071		INV:INV-LOCK-6
+9bc31144007b	kernel/core/src/fs/hotpath.rs	bread_wait	8094		INV:INV-LOCK-6
+0f7969d6ef59	kernel/core/src/fs/hotpath.rs	bfree_multi	8325		INV:F11
+0ce715fee7ab	kernel/core/src/fs/hotpath.rs	as_slice	8389	raw-construct	INV:F11
+e93af702e9d2	kernel/core/src/fs/hotpath.rs	sync_dirty_blocks_batched	8956		INV:F11
+0a755092004d	kernel/core/src/fs/hotpath.rs	sync_dirty_buffer	9025		INV:F11
+8fa932102c52	kernel/core/src/fs/hotpath.rs	sync_dirty_buffer	9035		INV:F11
+3af81f805fa2	kernel/core/src/fs/hotpath.rs	publication_capture_note_dirty	9367	ptr-ops	GAP
+1978cabbf2b3	kernel/core/src/fs/hotpath.rs	sync_block_ordered	9847		INV:F11
+7ccb614eed85	kernel/core/src/fs/hotpath.rs	with_block_mut	9896		INV:F11
+940fd744cde3	kernel/core/src/fs/hotpath.rs	with_block_mut	9899		INV:F11
+0b2baeff2da4	kernel/core/src/fs/hotpath.rs	with_block_deferred_mut	9924		INV:F11
+7a8c4abd5f3d	kernel/core/src/fs/hotpath.rs	with_block_deferred_mut	9927		INV:F11
+2670b909257f	kernel/core/src/fs/hotpath.rs	with_block	9948		INV:F11
+8f49d7c05831	kernel/core/src/fs/hotpath.rs	get_vfs_root	10133	ptr-ops	INV:INV-VFS-WALK-1
+9310346a2945	kernel/core/src/fs/hotpath.rs	mount_is_busy	10649		INV:INV-VFS-WALK-1
+11a86cffafb6	kernel/core/src/fs/hotpath.rs	path_lookup	12792		INV:INV-VFS-WALK-1
+40ac638ca0d2	kernel/core/src/fs/hotpath.rs	path_lookup	12810		INV:INV-VFS-WALK-1
+0aafca240335	kernel/core/src/fs/hotpath.rs	path_lookup	12883		INV:INV-VFS-WALK-1
+ddcb98bdef8f	kernel/core/src/fs/hotpath.rs	path_lookup	12888		INV:INV-VFS-WALK-1
+cb4c8f02ebf7	kernel/core/src/fs/hotpath.rs	path_lookup	12895		INV:INV-VFS-WALK-1
+bbc29cb27b5a	kernel/core/src/fs/hotpath.rs	path_lookup	12928		INV:INV-VFS-WALK-1
+d7686b108559	kernel/core/src/fs/hotpath.rs	path_lookup	12936		INV:INV-VFS-WALK-1
+f062ea4bce79	kernel/core/src/fs/hotpath.rs	path_lookup	12962		INV:INV-VFS-WALK-1
+7902c2771117	kernel/core/src/fs/hotpath.rs	path_lookup	13120		INV:INV-VFS-WALK-1
+fdaf4efc5248	kernel/core/src/fs/hotpath.rs	path_lookup	13181		INV:INV-VFS-WALK-1
+fd046d03742d	kernel/core/src/fs/hotpath.rs	path_lookup	13210		INV:INV-VFS-WALK-1
+5d3d5be182a4	kernel/core/src/fs/hotpath.rs	path_lookup	13227		INV:INV-VFS-WALK-1
+fd4d3c59f4c8	kernel/core/src/fs/hotpath.rs	path_lookup	13237		INV:INV-VFS-WALK-1
+1949ea37d1d7	kernel/core/src/fs/hotpath.rs	path_lookup	13243		INV:INV-VFS-WALK-1
+533ce1db954a	kernel/core/src/fs/hotpath.rs	path_lookup	13248		INV:INV-VFS-WALK-1
+574fd2f29783	kernel/core/src/fs/hotpath.rs	path_lookup	13277		INV:INV-VFS-WALK-1
+d3ea1c6c367e	kernel/core/src/fs/hotpath.rs	path_lookup	13301		INV:INV-VFS-WALK-1
+e036e26573d3	kernel/core/src/fs/hotpath.rs	path_lookup	13306		INV:INV-VFS-WALK-1
+213095e851da	kernel/core/src/fs/hotpath.rs	file_open_tmpfile	15325		GAP
+73e5a929f7f0	kernel/core/src/fs/hotpath.rs	mem_file_content	17013		GAP
+9f06e9fb66c2	kernel/core/src/fs/hotpath.rs	mem_file_content	17014	ptr-ops	GAP
+7b3e9296d9ce	kernel/core/src/fs/hotpath.rs	mem_file_content_mut	17020		GAP
+3ddb97a5b651	kernel/core/src/fs/hotpath.rs	mem_file_content_mut	17021	ptr-ops	GAP
+857ca05bf7a6	kernel/core/src/fs/hotpath.rs	mem_file_take_owned	17027		GAP
+6cb9e597db73	kernel/core/src/fs/hotpath.rs	mem_file_take_owned	17028	ptr-ops	GAP
+a6bd58adaee4	kernel/core/src/fs/hotpath.rs	inode_permission	17688		INV:INV-KTASK-1
+ed627cc13369	kernel/core/src/fs/hotpath.rs	<module>	17753		INV:INV-SBTYPE-1
+8bafbce38b42	kernel/core/src/fs/hotpath.rs	<module>	17754		INV:INV-SBTYPE-1
+f8bd9f9e2b8f	kernel/core/src/fs/hotpath.rs	<module>	17855		INV:INV-SBTYPE-1
+232eae157d86	kernel/core/src/fs/hotpath.rs	<module>	17856		INV:INV-SBTYPE-1
+03a9a7c40904	kernel/core/src/fs/hotpath.rs	<module>	18093		INV:INV-SENDSYNC-1
+73e5e5f61520	kernel/core/src/fs/hotpath.rs	<module>	18094		INV:INV-SENDSYNC-1
+64095419e50b	kernel/core/src/fs/hotpath.rs	copy_stat_to_user	19481	ptr-ops	INV:INV-UACCESS-SAFE-1
+cf821c48f7b8	kernel/core/src/fs/hotpath.rs	copy_stat_to_user	19491	ptr-ops	INV:INV-UACCESS-SAFE-1
+389e242130c0	kernel/core/src/fs/hotpath.rs	<module>	19873		INV:INV-SENDSYNC-1
+3103b10b1eef	kernel/core/src/fs/hotpath.rs	<module>	19874		INV:INV-SENDSYNC-1
+b86648c3e838	kernel/core/src/fs/hotpath.rs	pcache_dirty_histogram	20151		INV:F13
+1ae110fcfd5a	kernel/core/src/fs/hotpath.rs	claim_entry_arc	20267		INV:INV-PC-CLAIM
+3b865116824e	kernel/core/src/fs/hotpath.rs	fill_from	20302	ptr-ops	INV:INV-PC-WIN
+01dee2fc2c99	kernel/core/src/fs/hotpath.rs	copy_frame_from	20316	ptr-ops	INV:INV-PC-WIN
+3abae6142fc1	kernel/core/src/fs/hotpath.rs	copy_into_page	20355	ptr-ops,addr-arith	INV:INV-PC-PAGECOPY
+ba5b538b96f4	kernel/core/src/fs/hotpath.rs	copy_user_into_page	20368	ptr-ops,addr-arith	INV:INV-PC-PAGECOPY
+64508ceeef72	kernel/core/src/fs/hotpath.rs	probe_slot_ptr	20478		INV:INV-PC-CLAIM
+6eebb6a30fd0	kernel/core/src/fs/hotpath.rs	table_find	20502		INV:INV-PC-CLAIM
+496f73e39660	kernel/core/src/fs/hotpath.rs	table_publish	20560		INV:INV-PC-CLAIM
+354cb1845402	kernel/core/src/fs/hotpath.rs	table_publish	20562		INV:INV-PC-CLAIM
+0e6660e772a1	kernel/core/src/fs/hotpath.rs	table_publish	20571		INV:INV-PC-CLAIM
+bbab29856efd	kernel/core/src/fs/hotpath.rs	table_publish	20574		INV:INV-PC-CLAIM
+bb1e4d1f0dbe	kernel/core/src/fs/hotpath.rs	table_publish	20575		INV:INV-PC-CLAIM
+507027f25fab	kernel/core/src/fs/hotpath.rs	remove_entry	20604		INV:INV-PC-CLAIM
+662af6e736ac	kernel/core/src/fs/hotpath.rs	flush_all_dirty	21765		INV:F13
+c3eac736b5ba	kernel/core/src/fs/hotpath.rs	collect_wb_work	23003		INV:INV-FRAME-1
+284d5223eebc	kernel/core/src/fs/hotpath.rs	evict_one_locked	23406		INV:F13
+aa80af0e5182	kernel/core/src/fs/hotpath.rs	evict_one_locked	23461		INV:F13
+cb5c4126462f	kernel/core/src/fs/hotpath.rs	evict_one_locked	23536		INV:F13
+f0fe5b79c3ec	kernel/core/src/fs/hotpath.rs	evict_one_locked	23569		INV:F13
+260cfe3d54f7	kernel/core/src/fs/hotpath.rs	shared_file_fault_page	23712		INV:F13
+b592a34ec828	kernel/core/src/fs/hotpath.rs	shared_file_fault_page	23732	ptr-ops,addr-arith	INV:F13
+59711bc2b7c9	kernel/core/src/fs/hotpath.rs	shared_file_fault_page	23742		INV:F13
+d2b34f6ad4e0	kernel/core/src/fs/hotpath.rs	shared_file_fault_page	23748	raw-construct	INV:F13
+2ada8ec2503b	kernel/core/src/fs/hotpath.rs	vtdev_close	24736		INV:INV-VT-PRIV-1
+c85a8fa8a712	kernel/core/src/fs/hotpath.rs	vtdev_close	24740	ptr-ops	INV:INV-VT-PRIV-1
+84c19c1af05a	kernel/core/src/fs/hotpath.rs	vtdev_close	24742		INV:INV-VT-PRIV-1
+75c214c53a06	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24771	ptr-ops	INV:INV-VT-PRIV-1
+10b0e3fdf737	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24804	ptr-ops	INV:INV-VT-PRIV-1
+374560b3a96c	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24823	ptr-ops	INV:INV-VT-PRIV-1
+c9deb8767cde	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24834	ptr-ops	INV:INV-VT-PRIV-1
+977c13b6082b	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24870	ptr-ops	INV:INV-VT-PRIV-1
+14e4a23aead1	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24927	ptr-ops	INV:INV-VT-PRIV-1
+749e778df23a	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24938	ptr-ops	INV:INV-VT-PRIV-1
+3ea72adfd807	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24955	ptr-ops	INV:INV-VT-PRIV-1
+07a57cbcf475	kernel/core/src/fs/hotpath.rs	vt_file_ioctl	24965	ptr-ops	INV:INV-VT-PRIV-1
+a7a9df8e22db	kernel/core/src/fs/hotpath.rs	pin_leader	25041		INV:INV-PIDFD-PIN-1
+ff70587e329c	kernel/core/src/fs/hotpath.rs	pin_leader	25046		INV:INV-PIDFD-PIN-1
+b7adab751b40	kernel/core/src/fs/hotpath.rs	pin_leader	25051		INV:INV-PIDFD-PIN-1
+ec4fca878496	kernel/core/src/fs/hotpath.rs	free_pidfd_data	25075		INV:INV-PIDFD-PIN-1
+2d6d0b7789ea	kernel/core/src/fs/hotpath.rs	data_of	25093		INV:INV-FS-FILEPRIV-1
+5d5fb2c76f81	kernel/core/src/fs/hotpath.rs	data_of	25098	ptr-ops	INV:INV-FS-FILEPRIV-1
+63d706e85e01	kernel/core/src/fs/hotpath.rs	fdinfo_pid_of	25117		INV:INV-FS-FILEPRIV-1
+37fd53a0858b	kernel/core/src/fs/hotpath.rs	resolve_alive	25127		INV:INV-PIDFD-PIN-1
+4b681de4402f	kernel/core/src/fs/hotpath.rs	resolve_alive	25133	ptr-ops	INV:INV-PIDFD-PIN-1
+d4c78c481d9d	kernel/core/src/fs/hotpath.rs	target_exited	25140		INV:INV-PIDFD-PIN-1
+c4e38d05d333	kernel/core/src/fs/hotpath.rs	target_exited	25145		INV:INV-PIDFD-PIN-1
+6512ffc2ba85	kernel/core/src/fs/hotpath.rs	pidfd_poll	25155		INV:INV-PIDFD-PIN-1
+d019a6b70bee	kernel/core/src/fs/hotpath.rs	pidfd_close	25163		INV:INV-PIDFD-PIN-1
+b484d4f23845	kernel/core/src/fs/hotpath.rs	pidfd_close	25166		INV:INV-PIDFD-PIN-1
+dd61d32c6179	kernel/core/src/fs/hotpath.rs	fsctx_close	25538		INV:INV-FSCTX-1
+9cb54150a33f	kernel/core/src/fs/hotpath.rs	fsctx_close	25539	ptr-ops	INV:INV-FSCTX-1
+87bf2b5efdb1	kernel/core/src/fs/hotpath.rs	fsctx_close	25540		INV:INV-FSCTX-1
+6c6782b7dc3d	kernel/core/src/fs/hotpath.rs	fsctx_of	25557		INV:INV-FSCTX-1
+a4a5332d3d47	kernel/core/src/fs/hotpath.rs	fsctx_of	25558	ptr-ops	INV:INV-FSCTX-1
+01357a3af606	kernel/core/src/fs/hotpath.rs	fsctx_of_mut	25570		INV:INV-FSCTX-1
+e983f3d913df	kernel/core/src/fs/hotpath.rs	fsctx_of_mut	25571	ptr-ops	INV:INV-FSCTX-1
+f394354da5da	kernel/core/src/fs/hotpath.rs	mountfd_close	25582		INV:INV-FSCTX-1
+17483455685e	kernel/core/src/fs/hotpath.rs	mountfd_close	25583	ptr-ops	INV:INV-FSCTX-1
+ddb95979be3c	kernel/core/src/fs/hotpath.rs	mountfd_close	25584		INV:INV-FSCTX-1
+243550667964	kernel/core/src/fs/hotpath.rs	mountfd_of	25600		INV:INV-FSCTX-1
+537a672885ab	kernel/core/src/fs/hotpath.rs	mountfd_of	25601	ptr-ops	INV:INV-FSCTX-1
+21c489fdca18	kernel/core/src/fs/hotpath.rs	treepath_dentry	25617		INV:INV-FSCTX-1
+263421a2e880	kernel/core/src/fs/hotpath.rs	make_detached_mount	25648	ptr-ops	INV:INV-FSCTX-1
+4e018c14cf1b	kernel/core/src/fs/hotpath.rs	<module>	25904		GAP
+a2f9c23cf1d2	kernel/core/src/fs/hotpath.rs	<module>	25906		GAP
 1dbbbd4c38dd	kernel/core/src/fs/unsafe.rs	privdata_ref	39	ptr-ops	INV:INV-FS-FILEPRIV-1
 10e41594216f	kernel/core/src/fs/unsafe.rs	file_privdata_ref	55		INV:INV-FS-FILEPRIV-1
 b45cd3ea4b81	kernel/core/src/fs/unsafe.rs	file_privdata_ref	57	ptr-ops	INV:INV-FS-FILEPRIV-1
@@ -1202,45 +1241,6 @@ c0847f57450a	kernel/core/src/fs/unsafe.rs	typed_slice_mut	532	ptr-ops	GAP
 ed14947737ce	kernel/core/src/fs/unsafe.rs	u32_array_ref	545	ptr-ops	GAP
 c69b2ab55728	kernel/core/src/fs/unsafe.rs	u32_array_ref_mut	556	ptr-ops	GAP
 90d6a45e738b	kernel/core/src/fs/unsafe.rs	zeroed_on_disk	569		GAP
-2bc35d5ccaf9	kernel/core/src/fs/vfs.rs	get_vfs_root	220	ptr-ops	INV:INV-VFS-WALK-1
-0be8f6f0d8b6	kernel/core/src/fs/vfs.rs	mount_is_busy	736		INV:INV-VFS-WALK-1
-4b5de49c68c2	kernel/core/src/fs/vfs.rs	path_lookup	2893		INV:INV-VFS-WALK-1
-d69936ebb8d5	kernel/core/src/fs/vfs.rs	path_lookup	2911		INV:INV-VFS-WALK-1
-301e47184480	kernel/core/src/fs/vfs.rs	path_lookup	2984		INV:INV-VFS-WALK-1
-475542e7e1d1	kernel/core/src/fs/vfs.rs	path_lookup	2989		INV:INV-VFS-WALK-1
-6486d0e5452c	kernel/core/src/fs/vfs.rs	path_lookup	2996		INV:INV-VFS-WALK-1
-5ac3d04a4dbc	kernel/core/src/fs/vfs.rs	path_lookup	3029		INV:INV-VFS-WALK-1
-e297394be76a	kernel/core/src/fs/vfs.rs	path_lookup	3037		INV:INV-VFS-WALK-1
-29a6fd1a94e6	kernel/core/src/fs/vfs.rs	path_lookup	3063		INV:INV-VFS-WALK-1
-61ce98418591	kernel/core/src/fs/vfs.rs	path_lookup	3221		INV:INV-VFS-WALK-1
-35742e14c840	kernel/core/src/fs/vfs.rs	path_lookup	3282		INV:INV-VFS-WALK-1
-cf9c942667e7	kernel/core/src/fs/vfs.rs	path_lookup	3311		INV:INV-VFS-WALK-1
-10035d673cb5	kernel/core/src/fs/vfs.rs	path_lookup	3328		INV:INV-VFS-WALK-1
-2e945c606497	kernel/core/src/fs/vfs.rs	path_lookup	3338		INV:INV-VFS-WALK-1
-6d0a5c18e3fa	kernel/core/src/fs/vfs.rs	path_lookup	3344		INV:INV-VFS-WALK-1
-0f3831052e13	kernel/core/src/fs/vfs.rs	path_lookup	3349		INV:INV-VFS-WALK-1
-d80ed5632faf	kernel/core/src/fs/vfs.rs	path_lookup	3378		INV:INV-VFS-WALK-1
-a49da779d009	kernel/core/src/fs/vfs.rs	path_lookup	3402		INV:INV-VFS-WALK-1
-a5b641e8cd80	kernel/core/src/fs/vfs.rs	path_lookup	3407		INV:INV-VFS-WALK-1
-f85dbabb2ed7	kernel/core/src/fs/vfs.rs	file_open_tmpfile	5428		GAP
-2fdad553ac82	kernel/core/src/fs/vfs.rs	mem_file_content	7129		GAP
-e591f9634d40	kernel/core/src/fs/vfs.rs	mem_file_content	7130	ptr-ops	GAP
-49ee10fc2b34	kernel/core/src/fs/vfs.rs	mem_file_content_mut	7136		GAP
-59a87985e2b3	kernel/core/src/fs/vfs.rs	mem_file_content_mut	7137	ptr-ops	GAP
-b57d7f356ca0	kernel/core/src/fs/vfs.rs	mem_file_take_owned	7143		GAP
-d563f4e311c6	kernel/core/src/fs/vfs.rs	mem_file_take_owned	7144	ptr-ops	GAP
-afc33abe15b0	kernel/core/src/fs/vt.rs	vtdev_close	193		INV:INV-VT-PRIV-1
-ef75f9e3b93e	kernel/core/src/fs/vt.rs	vtdev_close	197	ptr-ops	INV:INV-VT-PRIV-1
-2a9711846cb5	kernel/core/src/fs/vt.rs	vtdev_close	199		INV:INV-VT-PRIV-1
-c35d81399fa3	kernel/core/src/fs/vt.rs	vt_file_ioctl	228	ptr-ops	INV:INV-VT-PRIV-1
-26903ca658b7	kernel/core/src/fs/vt.rs	vt_file_ioctl	261	ptr-ops	INV:INV-VT-PRIV-1
-bd050559097c	kernel/core/src/fs/vt.rs	vt_file_ioctl	280	ptr-ops	INV:INV-VT-PRIV-1
-f0f679ce0367	kernel/core/src/fs/vt.rs	vt_file_ioctl	291	ptr-ops	INV:INV-VT-PRIV-1
-c3f66e697648	kernel/core/src/fs/vt.rs	vt_file_ioctl	327	ptr-ops	INV:INV-VT-PRIV-1
-47f777cec439	kernel/core/src/fs/vt.rs	vt_file_ioctl	384	ptr-ops	INV:INV-VT-PRIV-1
-687c52468577	kernel/core/src/fs/vt.rs	vt_file_ioctl	395	ptr-ops	INV:INV-VT-PRIV-1
-d60d5828f9e6	kernel/core/src/fs/vt.rs	vt_file_ioctl	412	ptr-ops	INV:INV-VT-PRIV-1
-8e42d4425c35	kernel/core/src/fs/vt.rs	vt_file_ioctl	422	ptr-ops	INV:INV-VT-PRIV-1
 77e205f85473	kernel/core/src/init.rs	init_task_storage_addr	35		INV:F12
 5ec32dfb0aa5	kernel/core/src/init.rs	create_and_start_init_process	187		INV:F12
 dc2063098dfa	kernel/core/src/init.rs	load_and_setup_elf	378		INV:F12
@@ -1569,7 +1569,7 @@ c904ee5472b1	kernel/core/src/process/unsafe.rs	frame_ref	551		INV:INV-PROC-FRAME
 280b0eff250f	kernel/core/src/process/unsafe.rs	exec_copy_user_image	577		INV:INV-PROC-EXEC-COPY-1
 7b93271d03b0	kernel/core/src/process/unsafe.rs	exec_copy_user_image	588	ptr-ops	INV:INV-PROC-EXEC-COPY-1
 dfe061b528c1	kernel/core/src/process/unsafe.rs	exec_phdr_at	609		INV:INV-PROC-EXEC-ELF-1
-17ca6f06592b	kernel/core/src/process/unsafe.rs	exec_ehdr_from	619		INV:INV-PROC-EXEC-ELF-1
+44afe162206b	kernel/core/src/process/unsafe.rs	exec_ehdr_from	619		INV:INV-PROC-EXEC-ELF-1
 482c9f397004	kernel/core/src/process/unsafe.rs	exec_map_user_range	631		INV:INV-PROC-EXEC-MAP-1
 3d70a9ef0432	kernel/core/src/process/unsafe.rs	exec_map_user_region_static	650		INV:INV-PROC-EXEC-VDSO-1
 71bca7da2c26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	661		INV:INV-PROC-EXEC-PROBE-1
@@ -1904,7 +1904,7 @@ e4d7927d8896	kernel/core/src/syscall/unsafe.rs	list_entry_mut	92	ptr-ops	INV:INV
 3ec545cb84e2	kernel/core/src/syscall/unsafe.rs	boxed_ref	148		INV:INV-SYSC-2
 cce4a383f3dc	kernel/core/src/syscall/unsafe.rs	boxed_mut	160		INV:INV-SYSC-2
 e5d1a4766322	kernel/core/src/syscall/unsafe.rs	boxed_drop	172		INV:INV-SYSC-2
-45c764d8a745	kernel/core/src/syscall/unsafe.rs	pidfd_data_of	221		INV:INV-SYSC-5
+606717553b2c	kernel/core/src/syscall/unsafe.rs	pidfd_data_of	221		INV:INV-SYSC-5
 72b64a01f336	kernel/core/src/syscall/unsafe.rs	file_inode_set_pre_publish	241		INV:INV-SYSC-7
 c706f361b757	kernel/core/src/syscall/unsafe.rs	arch_map_page	269		INV:INV-SYSC-8
 58ce3ddd6031	kernel/core/src/syscall/unsafe.rs	unmap_user_leaf_locked	289		INV:INV-SYSC-8
@@ -1926,11 +1926,11 @@ a6fc4596c47c	kernel/core/src/tests/listhead.rs	test_listhead	60		INV:INV-TESTHAR
 5f5d4c6640f8	kernel/core/src/tests/listhead.rs	test_listhead	64	ptr-ops	INV:INV-TESTHARNESS-1
 657b3ddc1065	kernel/core/src/tests/listhead.rs	test_listhead	76		INV:INV-TESTHARNESS-1
 ae6ff235c61a	kernel/core/src/tests/listhead.rs	test_listhead	92		INV:INV-TESTHARNESS-1
-cc39c0250a86	kernel/core/src/tests/loop_flags.rs	test_loop_flags	83		INV:INV-TESTHARNESS-1
+84308b2420ab	kernel/core/src/tests/loop_flags.rs	test_loop_flags	83		INV:INV-TESTHARNESS-1
 2edb2250edaa	kernel/core/src/tests/loop_flags.rs	test_loop_flags	85		INV:INV-TESTHARNESS-1
-fe068ce65117	kernel/core/src/tests/loop_flags.rs	test_loop_flags	95		INV:INV-TESTHARNESS-1
+9c78e44dd7b8	kernel/core/src/tests/loop_flags.rs	test_loop_flags	95		INV:INV-TESTHARNESS-1
 7c3ed316f55e	kernel/core/src/tests/loop_flags.rs	test_loop_flags	97		INV:INV-TESTHARNESS-1
-bfa0a4a3b7c9	kernel/core/src/tests/loop_flags.rs	test_loop_flags	111		INV:INV-TESTHARNESS-1
+3c9ce02f7ad8	kernel/core/src/tests/loop_flags.rs	test_loop_flags	111		INV:INV-TESTHARNESS-1
 3a810e5c0c5f	kernel/core/src/tests/loop_flags.rs	test_loop_flags	113		INV:INV-TESTHARNESS-1
 1cf7d09c6b48	kernel/core/src/tests/mod.rs	setup_boot_task_fdtable	506		INV:INV-TESTHARNESS-1
 f02513581256	kernel/core/src/tests/net_pins.rs	test_net_pins	59	ptr-ops	INV:INV-TESTHARNESS-1
@@ -1959,10 +1959,10 @@ a82d30e116ba	kernel/core/src/tests/scheduler.rs	test_scheduler	50		INV:INV-TESTH
 9d82969fc0b1	kernel/core/src/tests/syscall_file.rs	test_sys_read_write	129		INV:INV-TESTHARNESS-1
 22053c995854	kernel/core/src/tests/syscall_file.rs	test_sys_read_write	173		INV:INV-TESTHARNESS-1
 5edaebc75969	kernel/core/src/tests/syscall_file.rs	test_sys_lseek	266		INV:INV-TESTHARNESS-1
-69725ebfcc5a	kernel/core/src/tests/syscall_io.rs	test_sys_read_write	100		INV:INV-TESTHARNESS-1
-7ec4c7a97f78	kernel/core/src/tests/syscall_io.rs	test_sys_read_write	176		INV:INV-TESTHARNESS-1
-eed00f9c552f	kernel/core/src/tests/syscall_io.rs	test_sys_dup	480		INV:INV-TESTHARNESS-1
-94abf952e2a8	kernel/core/src/tests/syscall_io.rs	test_sys_dup	519		INV:INV-TESTHARNESS-1
+dd031b92f188	kernel/core/src/tests/syscall_io.rs	test_sys_read_write	100		INV:INV-TESTHARNESS-1
+ca07cb1e849b	kernel/core/src/tests/syscall_io.rs	test_sys_read_write	176		INV:INV-TESTHARNESS-1
+002404439271	kernel/core/src/tests/syscall_io.rs	test_sys_dup	480		INV:INV-TESTHARNESS-1
+128bdeb36867	kernel/core/src/tests/syscall_io.rs	test_sys_dup	519		INV:INV-TESTHARNESS-1
 edea223456da	kernel/core/src/tests/syscall_memory.rs	test_sys_mmap	150	ptr-ops	INV:INV-TESTHARNESS-1
 a5920ef724cc	kernel/core/src/tests/syscall_process.rs	test_seccomp_nnp	490		INV:INV-TESTHARNESS-1
 27fd2abec86d	kernel/core/src/tests/syscall_process.rs	test_seccomp_nnp	530		INV:INV-TESTHARNESS-1
