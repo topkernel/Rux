@@ -63,3 +63,4 @@ kernel/core/src/sync/rwlock.rs	18	0	regions moved to sync/hotpath.rs by the pass
 kernel/core/src/sync/rwsem.rs	9	0	regions moved to sync/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/sync/seqlock.rs	7	0	regions moved to sync/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/sync/spinlock.rs	28	0	regions moved to sync/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
+kernel/core/src/net/file_arc.rs	2	0	regions moved to net/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)

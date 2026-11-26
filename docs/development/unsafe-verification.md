@@ -37,8 +37,8 @@ FILE` owns one), and the gate fails on a drop that
 
 - artifacts kept by id: **1934**
 - recovered from reference versions: **0**
-- references consulted: HEAD, MERGE_HEAD, e764797a8
-- annotated regions, baseline -> this bank: **2107 -> 1936**
+- references consulted: HEAD, 1354d238f
+- annotated regions, baseline -> this bank: **1907 -> 1936**
 
 ## Per-subsystem
 
@@ -2815,49 +2815,39 @@ FILE` owns one), and the gate fails on a drop that
 
 ## net
 
-### kernel/core/src/net/buffer.rs (24)
+### kernel/core/src/net/hotpath.rs (29)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 131 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `212473535dcf` |
-| 132 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `d08b56828a25` |
-| 179 | alloc | block | - | INV:INV-SKB-1 | `183f63ff2b53` |
-| 185 | alloc | block | - | INV:INV-SKB-1 | `7ae932b0eba4` |
-| 188 | alloc | block | - | INV:INV-SKB-1 | `ac1e162f8232` |
-| 228 | release | block | - | INV:INV-SKB-1 | `f677af64bf1b` |
-| 260 | skb_put | block | - | INV:INV-SKB-1 | `a41f01a59727` |
-| 283 | skb_push | block | - | INV:INV-SKB-1 | `63c3cf1a5c4c` |
-| 305 | skb_pull | block | - | INV:INV-SKB-1 | `ad9ce8eca55b` |
-| 331 | skb_reserve | block | - | INV:INV-SKB-1 | `834e6832d490` |
-| 352 | skb_put_data | block | ptr-ops | INV:INV-SKB-1 | `404599b0c0a0` |
-| 427 | data_slice | block | raw-construct | INV:INV-SKB-1 | `194cb53e540d` |
-| 439 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `31f3a6218e4c` |
-| 439 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `5071a4678b8f` |
-| 452 | hdr | block | ptr-ops | INV:INV-SKB-1 | `53788ad9873f` |
-| 464 | hdr_mut | block | ptr-ops | INV:INV-SKB-1 | `1d4dc0a9684b` |
-| 479 | hdr_and_tail | block | raw-construct,ptr-ops | INV:INV-SKB-1 | `f12c1a011ee4` |
-| 501 | push_hdr | block | - | INV:INV-SKB-1 | `bd6779a35d85` |
-| 513 | put_hdr | block | - | INV:INV-SKB-1 | `0ca1f45438b0` |
-| 524 | push_bytes | block | ptr-ops | INV:INV-SKB-1 | `7d6067e8b55f` |
-| 534 | push_hdr_val | block | ptr-ops | INV:INV-SKB-1 | `eeceae05f79a` |
-| 564 | skb_copy_bits | block | ptr-ops | INV:INV-SKB-1 | `b76e5987f6d7` |
-| 616 | hdr_view | block | ptr-ops | INV:INV-SKB-1 | `4ec66b2287f1` |
-| 626 | hdr_view_mut | block | ptr-ops | INV:INV-SKB-1 | `e44474c163a9` |
-
-### kernel/core/src/net/file_arc.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 12 | file_arc | block | ptr-ops | INV:INV-NETARC-1 | `4b0f4d5d9d00` |
-| 27 | take_file_arc | block | ptr-ops | INV:INV-NETARC-1 | `a0ae1ad40c2b` |
-
-### kernel/core/src/net/mod.rs (3)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 50 | file_arc | block | - | INV:INV-NETARC-1 | `cb43467c0288` |
-| 66 | reclaim_file_arc | block | - | INV:INV-NETARC-1 | `b15e325d0e19` |
-| 76 | take_file_arc | block | - | INV:INV-NETARC-1 | `c06c0cce37c1` |
+| 62 | mod_file_arc | block | - | INV:INV-NETARC-1 | `a6853241bd52` |
+| 77 | reclaim_file_arc | block | - | INV:INV-NETARC-1 | `d76eb278ec4c` |
+| 86 | mod_take_file_arc | block | - | INV:INV-NETARC-1 | `bc4ff69848d0` |
+| 104 | file_arc | block | ptr-ops | INV:INV-NETARC-1 | `6ff3c31a8ea6` |
+| 119 | take_file_arc | block | ptr-ops | INV:INV-NETARC-1 | `703a0a4aff7d` |
+| 177 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `477dadbb8e7f` |
+| 178 | <module> | unsafe-impl | - | INV:INV-SKB-1 | `8ac72914d975` |
+| 225 | alloc | block | - | INV:INV-SKB-1 | `c51aa4e6d6d2` |
+| 231 | alloc | block | - | INV:INV-SKB-1 | `7940f72c1dc6` |
+| 234 | alloc | block | - | INV:INV-SKB-1 | `e8acf40976c1` |
+| 274 | release | block | - | INV:INV-SKB-1 | `2c7ba241e553` |
+| 306 | skb_put | block | - | INV:INV-SKB-1 | `efdd253da5fb` |
+| 329 | skb_push | block | - | INV:INV-SKB-1 | `ca1ff39daebe` |
+| 351 | skb_pull | block | - | INV:INV-SKB-1 | `81c050f4e3dd` |
+| 377 | skb_reserve | block | - | INV:INV-SKB-1 | `38cecb2ff28a` |
+| 398 | skb_put_data | block | ptr-ops | INV:INV-SKB-1 | `177faefdaa25` |
+| 473 | data_slice | block | raw-construct | INV:INV-SKB-1 | `1a6ffa529800` |
+| 485 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `0c4cc659addc` |
+| 485 | data_slice_at | block | raw-construct | INV:INV-SKB-1 | `7a14f96b6b74` |
+| 498 | hdr | block | ptr-ops | INV:INV-SKB-1 | `30792356601a` |
+| 510 | hdr_mut | block | ptr-ops | INV:INV-SKB-1 | `8a1ad6f54dbc` |
+| 525 | hdr_and_tail | block | raw-construct,ptr-ops | INV:INV-SKB-1 | `1633269a707b` |
+| 547 | push_hdr | block | - | INV:INV-SKB-1 | `55696175ce13` |
+| 559 | put_hdr | block | - | INV:INV-SKB-1 | `2348574df33f` |
+| 570 | push_bytes | block | ptr-ops | INV:INV-SKB-1 | `350bfcf09952` |
+| 580 | push_hdr_val | block | ptr-ops | INV:INV-SKB-1 | `7014a909c311` |
+| 610 | skb_copy_bits | block | ptr-ops | INV:INV-SKB-1 | `27cd46e4a865` |
+| 662 | hdr_view | block | ptr-ops | INV:INV-SKB-1 | `26654c0fbee6` |
+| 672 | hdr_view_mut | block | ptr-ops | INV:INV-SKB-1 | `2717e8ebfa20` |
 
 ### kernel/core/src/net/unsafe.rs (7)
 
