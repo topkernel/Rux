@@ -78,7 +78,7 @@ use super::types::{
 };
 
 #[cfg(feature = "x86_64")]
-use super::types::{FrozenAnswer};
+use super::types::{FrozenAnswer}; pub use super::r#unsafe::{caller_return_address, current_frame_pointer, note_release, walk_fp_chain};
 
 extern crate alloc;
 
@@ -269,7 +269,7 @@ pub fn register_debugfs_knobs() -> usize {
                     // NULL-adjacent page with no mapping and no fixup
                     // entry on this instruction).
                     let p = 0x10usize as *const u64;
-                    let _ = unsafe { core::ptr::read_volatile(p) };
+                    let _ = crate::debug::r#unsafe::provoke_pagefault_read(p);
                     // Unreachable when the oops policy runs; if the
                     // fault was fixed up somehow, report it.
                     crate::pr_err!("debug: provoke-oops fault did not fire");
@@ -280,15 +280,11 @@ pub fn register_debugfs_knobs() -> usize {
                     #[cfg(feature = "riscv64")]
                     // SAFETY: deliberate fault — machine-mode CSR access
                     // from S-mode traps IllegalInstruction.
-                    unsafe {
-                        core::arch::asm!("csrr x0, 0x300", options(nomem, nostack));
-                    }
+                    crate::debug::r#unsafe::provoke_illegal_riscv();
                     #[cfg(feature = "x86_64")]
                     // SAFETY: deliberate fault — ud2 is reserved for
                     // traps (the BUG instruction).
-                    unsafe {
-                        core::arch::asm!("ud2", options(nomem, nostack));
-                    }
+                    crate::debug::r#unsafe::provoke_illegal_x86();
                     crate::pr_err!("debug: provoke-oops illegal did not fire");
                     crate::errno::Errno::IOError.as_neg_i32()
                 }
@@ -373,17 +369,15 @@ macro_rules! bug {
 /// tables (round-4 consolidation — the ONE audited PageTableWalker edge
 /// for the debug family; INV-DFXWALK-1: `root` is the diagnosed task's own
 /// mm root and the read is read-only through the linear map).
-pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {
+#[allow(unused_imports)] pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {
     use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
     use crate::arch::mm::mm_ops::PageTableWalker;
     // SAFETY: INV-DFXWALK-1 — the backend walk is the arch contract
     // (caller holds the address space), and the linear map covers all of
     // RAM for a read-only diagnostic access.
-    let (ppn, _) = unsafe { PageTableWalker::walk(root, va) }?;
+    let (ppn, _) = crate::debug::r#unsafe::ptw_walk(root, va)?;
     let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
-    Some(unsafe {
-        core::ptr::read_volatile((base.as_usize() + (va & 0xfff) as usize) as *const T)
-    })
+    Some(crate::debug::r#unsafe::read_volatile_t(base.as_usize() + (va & 0xfff) as usize))
 }
 
 
@@ -472,7 +466,7 @@ pub fn note_ref(page: *const crate::mm::types::Page, kind: u8, site: u8, old: i3
         return;
     }
     // SAFETY: the caller passes a valid page descriptor it is operating on.
-    let p = unsafe { &*page };
+    let p = crate::debug::r#unsafe::page_view(page);
     use crate::mm::types::PageType;
     if p.page_type() != PageType::PageCache {
         return;
@@ -690,35 +684,7 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
         crate::pr_err!("  desc: NO DESCRIPTOR (pfn outside managed range)");
     } else {
         // SAFETY: read-only descriptor access on the diagnostic path.
-        unsafe {
-            use crate::mm::types::PageFlag;
-            let p = &*page;
-            let bit = |f: PageFlag, n: &'static str| -> &'static str {
-                if p.test_flag(f) {
-                    n
-                } else {
-                    ""
-                }
-            };
-            crate::pr_err!(
-                "  desc: refcount={} mapcount={} order={} mapped={} type={} mapping={:#x} index={} flags:[{}{}{}{}{}{}{}{}]",
-                p.refcount(),
-                p.mapcount(),
-                p.order(),
-                p.is_mapped(),
-                p.page_type() as u32,
-                p.mapping() as usize,
-                p.index(),
-                bit(PageFlag::OnFreelist, "OnFreelist "),
-                bit(PageFlag::OnPcp, "OnPcp "),
-                bit(PageFlag::Lru, "Lru "),
-                bit(PageFlag::Anonymous, "Anon "),
-                bit(PageFlag::Dirty, "Dirty "),
-                bit(PageFlag::UpToDate, "UpToDate "),
-                bit(PageFlag::Reserved, "Reserved "),
-                bit(PageFlag::Active, "Active "),
-            );
-        }
+        crate::debug::r#unsafe::page_desc_report(page);
     }
 
     // ---- 2. PT ledger ----
@@ -1382,76 +1348,8 @@ impl fmt::Write for ConsoleWriter {
 // Frame Pointer Stack Walk
 // ============================================================================
 
-/// Read the current frame pointer register (`s0` on riscv64, `rbp` on x86_64).
-#[inline]
-pub fn current_frame_pointer() -> u64 {
-    let fp: u64;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
-    }
-    #[cfg(feature = "aarch64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
-    {
-        fp = 0;
-    }
-    fp
-}
 
-/// Return address of the calling function (for "current" trace entries).
-#[inline]
-pub fn caller_return_address() -> u64 {
-    let ra: u64;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: frame pointers are forced on (force-frame-pointers=yes), so
-    // [rbp+8] is this function's return address.
-    unsafe {
-        core::arch::asm!("mov {}, [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "aarch64")]
-    // SAFETY: x29 is the frame-chain base; [x29+8] is the LR slot.
-    unsafe {
-        core::arch::asm!("ldr {}, [x29, 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
-    {
-        ra = 0;
-    }
-    ra
-}
 
-/// Unwind one frame: given a frame pointer, return (return_addr, next_fp).
-///
-/// riscv64 frame layout: [fp] = saved_fp, [fp+8] = return_addr.
-/// x86_64 frame layout:  [rbp] = saved_rbp, [rbp+8] = return_addr.
-#[inline]
-fn unwind_frame(fp: u64) -> Option<(u64, u64)> {
-    // SAFETY: caller validated `fp` (kernel range, aligned); reads of the
-    // two frame words are the standard unwind operation.
-    unsafe {
-        let ret_addr = *((fp + 8) as *const u64);
-        let next_fp = *(fp as *const u64);
-        if ret_addr == 0 {
-            return None;
-        }
-        Some((ret_addr, next_fp))
-    }
-}
 
 /// Walk frame pointers and call the callback for each frame.
 ///
@@ -1474,7 +1372,7 @@ pub fn walk_stack_trace(cb: &mut dyn FnMut(u64, u64)) {
             break;
         }
 
-        if let Some((ret_addr, next_fp)) = unwind_frame(fp) {
+        if let Some((ret_addr, next_fp)) = crate::debug::r#unsafe::unwind_frame(fp) {
             cb(ret_addr, fp);
 
             // Check if next fp is valid (should be > current fp or 0)
@@ -1564,43 +1462,7 @@ const REG_NAMES: [&str; 31] = [
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
     // SAFETY: register stores into a stack buffer; no memory reads.
-    unsafe {
-        core::arch::asm!(
-            "str x0, [{buf}, #0]",
-            "str x1, [{buf}, #8]",
-            "str x2, [{buf}, #16]",
-            "str x3, [{buf}, #24]",
-            "str x4, [{buf}, #32]",
-            "str x5, [{buf}, #40]",
-            "str x6, [{buf}, #48]",
-            "str x7, [{buf}, #56]",
-            "str x8, [{buf}, #64]",
-            "str x9, [{buf}, #72]",
-            "str x10, [{buf}, #80]",
-            "str x11, [{buf}, #88]",
-            "str x12, [{buf}, #96]",
-            "str x13, [{buf}, #104]",
-            "str x14, [{buf}, #112]",
-            "str x15, [{buf}, #120]",
-            "str x16, [{buf}, #128]",
-            "str x17, [{buf}, #136]",
-            "str x18, [{buf}, #144]",
-            "str x19, [{buf}, #152]",
-            "str x20, [{buf}, #160]",
-            "str x21, [{buf}, #168]",
-            "str x22, [{buf}, #176]",
-            "str x23, [{buf}, #184]",
-            "str x24, [{buf}, #192]",
-            "str x25, [{buf}, #200]",
-            "str x26, [{buf}, #208]",
-            "str x27, [{buf}, #216]",
-            "str x28, [{buf}, #224]",
-            "str x29, [{buf}, #232]",
-            "str x30, [{buf}, #240]",
-            buf = inout(reg) regs.as_mut_ptr() => _,
-            options(nostack)
-        );
-    }
+    crate::debug::r#unsafe::save_regs_aarch64(&mut regs);
     regs
 }
 
@@ -1610,43 +1472,7 @@ pub fn save_regs() -> [u64; 31] {
 #[cfg(feature = "riscv64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    unsafe {
-        core::arch::asm!(
-            "sd ra,  0*8({buf})",
-            "sd sp,  1*8({buf})",
-            "sd gp,  2*8({buf})",
-            "sd tp,  3*8({buf})",
-            "sd t0,  4*8({buf})",
-            "sd t1,  5*8({buf})",
-            "sd t2,  6*8({buf})",
-            "sd s0,  7*8({buf})",
-            "sd s1,  8*8({buf})",
-            "sd a0,  9*8({buf})",
-            "sd a1,  10*8({buf})",
-            "sd a2,  11*8({buf})",
-            "sd a3,  12*8({buf})",
-            "sd a4,  13*8({buf})",
-            "sd a5,  14*8({buf})",
-            "sd a6,  15*8({buf})",
-            "sd a7,  16*8({buf})",
-            "sd s2,  17*8({buf})",
-            "sd s3,  18*8({buf})",
-            "sd s4,  19*8({buf})",
-            "sd s5,  20*8({buf})",
-            "sd s6,  21*8({buf})",
-            "sd s7,  22*8({buf})",
-            "sd s8,  23*8({buf})",
-            "sd s9,  24*8({buf})",
-            "sd s10, 25*8({buf})",
-            "sd s11, 26*8({buf})",
-            "sd t3,  27*8({buf})",
-            "sd t4,  28*8({buf})",
-            "sd t5,  29*8({buf})",
-            "sd t6,  30*8({buf})",
-            buf = inout(reg) regs.as_mut_ptr() => _,
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::debug::r#unsafe::save_regs_riscv64(&mut regs);
     regs
 }
 
@@ -1657,25 +1483,7 @@ pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
     // SAFETY: the pushes are balanced by the rsp adjustment; only this
     // stack scratch area is touched.
-    unsafe {
-        core::arch::asm!(
-            "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
-            "mov {rbx_v}, [rsp + 5*8]",
-            "mov {rbp_v}, [rsp + 4*8]",
-            "mov {r12_v}, [rsp + 3*8]",
-            "mov {r13_v}, [rsp + 2*8]",
-            "mov {r14_v}, [rsp + 1*8]",
-            "mov {r15_v}, [rsp + 0*8]",
-            "add rsp, 6*8",
-            rbx_v = out(reg) regs[0],
-            rbp_v = out(reg) regs[1],
-            r12_v = out(reg) regs[2],
-            r13_v = out(reg) regs[3],
-            r14_v = out(reg) regs[4],
-            r15_v = out(reg) regs[5],
-            options(preserves_flags)
-        );
-    }
+    crate::debug::r#unsafe::save_regs_x86_64(&mut regs);
     regs
 }
 
@@ -1708,17 +1516,8 @@ pub fn dump_regs(regs: &[u64; 31]) {
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
 
-    let (sstatus, scause, stval, sepc): (u64, u64, u64, u64);
-    unsafe {
-        core::arch::asm!(
-            "csrr {0}, sstatus",
-            "csrr {1}, scause",
-            "csrr {2}, stval",
-            "csrr {3}, sepc",
-            out(reg) sstatus, out(reg) scause, out(reg) stval, out(reg) sepc,
-            options(nomem, nostack)
-        );
-    }
+
+    let (sstatus, scause, stval, sepc) = crate::debug::r#unsafe::csr_quad_read_riscv();
 
     let _ = write!(w, "Sstatus: {:016x}\n", sstatus);
     let _ = write!(w, "Scause : {:016x}\n", scause);
@@ -1738,18 +1537,9 @@ pub fn dump_csrs() {
 #[cfg(feature = "aarch64")]
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
-    let (esr, elr, far, spsr): (u64, u64, u64, u64);
+
     // SAFETY: pure system-register reads, valid in any context.
-    unsafe {
-        core::arch::asm!(
-            "mrs {0}, esr_el1",
-            "mrs {1}, elr_el1",
-            "mrs {2}, far_el1",
-            "mrs {3}, spsr_el1",
-            out(reg) esr, out(reg) elr, out(reg) far, out(reg) spsr,
-            options(nomem, nostack)
-        );
-    }
+    let (esr, elr, far, spsr) = crate::debug::r#unsafe::csr_quad_read_aarch64();
     let _ = write!(w, "ESR    : {:016x}\n", esr);
     let _ = write!(w, "ELR    : {:016x}\n", elr);
     let _ = write!(w, "FAR    : {:016x}\n", far);
@@ -2266,7 +2056,7 @@ fn report_hung_task(task_ref: &crate::process::types::Task, elapsed_secs: u64) {
         // caller's softirq context — TaskBorrow's short-read contract.
         let vfork_ppid = t
             .vfork_parent_ptr()
-            .and_then(|p| unsafe { crate::process::types::TaskBorrow::from_raw(p as *mut crate::process::types::Task) })
+            .and_then(|p| crate::debug::r#unsafe::task_view(p))
             .map(|p| p.pid())
             .unwrap_or(0);
         let _ = write!(
@@ -3211,7 +3001,7 @@ pub fn dump_all_tasks(reason: &str) {
             } else {
                 // SAFETY (one adopt edge): the per-CPU current Task stays
                 // allocated; pid is a stable field read.
-                put_dec(unsafe { crate::process::types::TaskBorrow::from_raw(cur) }
+                put_dec(crate::debug::r#unsafe::task_view(cur)
                     .map(|t| t.pid() as u64)
                     .unwrap_or(999999));
             }
@@ -3258,7 +3048,7 @@ pub fn dump_all_tasks(reason: &str) {
             // SAFETY (one adopt edge): the per-CPU current snapshot's Task
             // stays allocated (idle tasks and hash-invisible exiting tasks
             // are still valid Task objects); stable-field diagnostic read.
-            let tk = match unsafe { crate::process::types::TaskBorrow::from_raw(t) } {
+            let tk = match crate::debug::r#unsafe::task_view(t) {
                 Some(tk) => tk,
                 None => continue,
             };
@@ -3694,17 +3484,10 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
     // misdirection canary (51st session's prime suspect: cpu1's
     // cpu_id() resolving to 0 would land its QS reports in slot 0).
     let gs_cpu = crate::arch::x86_64::smp::gs_cpu_id() as u32;
-    let gs_magic_q: u64;
+
     // SAFETY: %gs:PC_MAGIC reads this CPU's PerCpu.magic — a plain data
     // read of the active GS base, exactly what the trap stubs do.
-    unsafe {
-        core::arch::asm!(
-            "mov {0}, qword ptr gs:[{1}]",
-            out(reg) gs_magic_q,
-            const crate::arch::x86_64::smp::PC_MAGIC,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    let gs_magic_q = crate::debug::r#unsafe::gs_percpu_magic_read();
     a.gs_cpu.store(gs_cpu, Ordering::Relaxed);
     a.gs_magic.store(gs_magic_q, Ordering::Relaxed);
 
@@ -3719,7 +3502,7 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
     if !pr.is_null() && (pr as u64) >= 0xffff_8000_0000_0000 {
         // SAFETY: CURRENT_PT_REGS[cpu] was swapped to this IPI's live
         // frame by trap_handler before dispatch — the one frame edge.
-        let frame = unsafe { &*pr };
+        let frame = crate::debug::r#unsafe::location_ref(pr);
         let (rip, rsp) = (frame.rip, frame.rsp);
         a.int_rip.store(rip, Ordering::Relaxed);
         a.int_rsp.store(rsp, Ordering::Relaxed);
@@ -3819,7 +3602,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             if !t.is_null() {
                 // SAFETY (one adopt edge): as the per-CPU walk — the
                 // current Task stays allocated; stable-field reads.
-                let tk = match unsafe { crate::process::types::TaskBorrow::from_raw(t) } {
+                let tk = match crate::debug::r#unsafe::task_view(t) {
                     Some(tk) => tk,
                     None => return,
                 };
@@ -4632,79 +4415,8 @@ pub fn plausible_fp(fp: u64) -> bool {
         && crate::arch::mm::is_linear_mapping(fp as usize)
 }
 
-#[inline(never)]
-#[cfg(feature = "riscv64")]
-pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
-    for slot in out.iter_mut() {
-        *slot = 0;
-        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
-            return;
-        }
-        let ra = core::ptr::read_volatile((fp - 8) as *const u64);
-        let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
-        *slot = ra;
-        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
-            return;
-        }
-        fp = next;
-    }
-}
 
-/// x86_64 twin. The riscv64 walk above reads the RISC-V frame layout
-/// (s0 at the TOP of the frame: saved ra at [fp-8], saved s0 at
-/// [fp-0x10]); SysV x86_64 stores the saved rbp AT [rbp] with the return
-/// address at [rbp+8]. Running the riscv64 layout on x86_64 dereferenced
-/// the frame's LOCAL VARIABLES — locals that happened to hold kernel
-/// pointers passed the plausibility gate, so nearly every allocation
-/// interned a UNIQUE garbage chain, exhausting PSITE_SLOTS within the
-/// first minutes of a boot and dropping every real call site from the
-/// MEMPSITES attribution (observed live on the pt4 audit boot: f2 slots
-/// full of ASCII data like 0x49657069505d737d, top net=198 against
-/// 442k page frees).
-/// aarch64 twin: AAPCS64 frame layout stores the saved x29 (caller fp)
-/// at [fp] and lr at [fp+8] — the same walk shape as the x86_64 SysV
-/// twin below (NOT the riscv64 top-of-frame layout).
-#[inline(never)]
-#[cfg(feature = "aarch64")]
-pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
-    for slot in out.iter_mut() {
-        *slot = 0;
-        if !(fp >= 0xffff_8000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
-            return;
-        }
-        // AAPCS64: [fp] = caller's saved x29, [fp+8] = this frame's
-        // return address. Stacks grow down, so the caller's fp is
-        // strictly greater than the current one.
-        let next = core::ptr::read_volatile(fp as *const u64);
-        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
-        *slot = ra;
-        if !(next >= 0xffff_8000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
-            return;
-        }
-        fp = next;
-    }
-}
 
-#[inline(never)]
-#[cfg(feature = "x86_64")]
-pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
-    for slot in out.iter_mut() {
-        *slot = 0;
-        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
-            return;
-        }
-        // SysV: [fp] = caller's saved rbp, [fp+8] = this frame's return
-        // address. Stacks grow down, so the caller's rbp is strictly
-        // greater than the current one (same ascending check as riscv64).
-        let next = core::ptr::read_volatile(fp as *const u64);
-        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
-        *slot = ra;
-        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
-            return;
-        }
-        fp = next;
-    }
-}
 
 fn chain_key(bucket: usize, frames: &[u64; SITE_FRAMES]) -> usize {
     // keep 0 as the "empty slot" sentinel
@@ -5140,9 +4852,7 @@ pub fn note_page_alloc(phys: usize, order: usize, frames: &[u64; SITE_FRAMES]) {
     let pages = 1usize << order;
     let mut i = first;
     while i < first + pages && i < PPAGE_TABLE_ENTRIES {
-        unsafe {
-            (*table)[i].store(sid as u8, Ordering::Relaxed);
-        }
+        crate::debug::r#unsafe::ppage_stamp_slot(table, i, sid);
         i += 1;
     }
 }
@@ -5162,16 +4872,14 @@ pub fn note_page_free(phys: usize, order: usize) {
     if table.is_null() {
         return;
     }
-    let sid = unsafe { (*table)[first].load(Ordering::Relaxed) };
+    let sid = crate::debug::r#unsafe::ppage_slot_load(table, first);
     if sid == 0 || sid as usize > PSITE_SLOTS {
         return;
     }
     let pages = 1usize << order;
     let mut i = first;
     while i < first + pages && i < PPAGE_TABLE_ENTRIES {
-        unsafe {
-            (*table)[i].store(0, Ordering::Relaxed);
-        }
+        crate::debug::r#unsafe::ppage_stamp_slot(table, i, 0);
         i += 1;
     }
     PSITES[sid as usize - 1].frees.fetch_add(1, Ordering::Relaxed);
@@ -5203,78 +4911,12 @@ fn tracked_index(phys: usize) -> usize {
     idx
 }
 
-fn memwatch_put_dec(v: u64) {
+pub(crate) fn memwatch_put_dec(v: u64) {
     taskdump_dec(v);
 }
 
-/// Print the kernel root's low-half (vpn2[0..1]) non-leaf population:
-/// `l1` non-leaf PGD entries and `l0` non-leaf L1 entries beneath them.
-/// Read-only walk; diagnostic noise under concurrency is acceptable.
-fn kroot_pollution() {
-    taskdump_raw_line(b"MEMKROOT l1=");
-    let mut l1n = 0u64;
-    let mut l0n = 0u64;
-    let mut min_va = u64::MAX;
-    let mut max_va = 0u64;
-    let mut user_leaves = 0u64;
-    unsafe {
-        let root_ptr = &raw const crate::arch::mm::mmu_init::ROOT_PAGE_TABLE;
-        let root = &*root_ptr;
-        for i in 0..2usize {
-            let pte2 = root.get(i);
-            if !pte2.is_valid() || pte2.is_leaf() {
-                continue;
-            }
-            l1n += 1;
-            let t1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                pte2.ppn() << 12,
-            );
-            if t1.is_null() {
-                continue;
-            }
-            for j in 0..512usize {
-                let pte1 = (*t1).get(j);
-                if !pte1.is_valid() {
-                    continue;
-                }
-                let va = ((i as u64) << 30) | ((j as u64) << 21);
-                if va < min_va { min_va = va; }
-                if va + (1 << 21) > max_va { max_va = va + (1 << 21); }
-                if pte1.is_leaf() {
-                    if pte1.is_user() { user_leaves += 1; }
-                    continue;
-                }
-                l0n += 1;
-                let t0 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte1.ppn() << 12,
-                );
-                if t0.is_null() {
-                    continue;
-                }
-                for k in 0..512usize {
-                    let pte0 = (*t0).get(k);
-                    if pte0.is_valid() && pte0.is_leaf() && pte0.is_user() {
-                        user_leaves += 1;
-                    }
-                }
-            }
-        }
-    }
-    memwatch_put_dec(l1n);
-    taskdump_raw_line(b" l0=");
-    memwatch_put_dec(l0n);
-    taskdump_raw_line(b" uleaf=");
-    memwatch_put_dec(user_leaves);
-    if min_va != u64::MAX {
-        taskdump_raw_line(b" va=0x");
-        memwatch_put_hex(min_va);
-        taskdump_raw_line(b"-0x");
-        memwatch_put_hex(max_va);
-    }
-    taskdump_raw_line(b"\n");
-}
 
-fn memwatch_put_hex(v: u64) {
+pub(crate) fn memwatch_put_hex(v: u64) {
     taskdump_raw_line(b"0x");
     let mut shift = 64;
     while shift > 0 {
@@ -5608,7 +5250,7 @@ fn dump_page_ledger() {
     // ROOT_PAGE_TABLE vpn2[0..1]. Every non-leaf L1 entry here costs one
     // L0-table copy per exec (copy_kernel_mappings), so growth in these
     // counters is the exec-leak amplifier.
-    kroot_pollution();
+    crate::debug::r#unsafe::kroot_pollution();
     let mut ptaken = [false; PSITE_SLOTS];
     for _ in 0..16 {
         let mut best: isize = -1;
@@ -5897,13 +5539,7 @@ pub fn dump(site: &str) {
         // SAFETY: read-only descriptor access inside the mapped vmemmap
         // span; the flags atomics are the same ones every other reader
         // uses lock-free.
-        let (rc, linked, reserved) = unsafe {
-            (
-                (*page).refcount(),
-                (*page).test_flag(PageFlag::OnFreelist),
-                (*page).is_reserved(),
-            )
-        };
+        let (rc, linked, reserved) = crate::debug::r#unsafe::leak_page_counts3(page);
         if rc == 0 {
             if reserved {
                 c.reserved += 1;
@@ -5932,14 +5568,7 @@ pub fn dump(site: &str) {
                 continue;
             }
         }
-        let (anon, cow, mapped, lru) = unsafe {
-            (
-                (*page).is_anonymous(),
-                (*page).is_cow(),
-                (*page).is_mapped(),
-                (*page).test_flag(PageFlag::Lru),
-            )
-        };
+        let (anon, cow, mapped, lru) = crate::debug::r#unsafe::leak_page_flags4(page);
         if anon {
             c.anon += 1;
         } else if cow {
@@ -6256,7 +5885,7 @@ pub mod scribble {
     //! (Z2/Z4 — honored by TCG, unlike guest DR registers) on the victim
     //! neighborhood to catch the writer's next store with its RIP.
 
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}; pub use crate::debug::r#unsafe::{crash_report, double_seed, quiesce, register, slot_divergence, task_plausible, verify, verify_consistency}; use crate::debug::r#unsafe::{putc, rd};
 
     use crate::process::types::Task;
 
@@ -6270,23 +5899,23 @@ pub mod scribble {
     pub(crate) const HEAP_WINDOW: core::ops::Range<usize> =
         0xffff_8880_4000_0000..(0xffff_8880_4000_0000 + crate::config::KERNEL_HEAP_SIZE);
 
-    const OFF_THREAD: usize = core::mem::offset_of!(Task, thread);
-    const OFF_FS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, fs_base);
-    const OFF_GS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, gs_base);
-    const OFF_SP: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp);
-    const OFF_RET: usize =
+    pub(crate) const OFF_THREAD: usize = core::mem::offset_of!(Task, thread);
+    pub(crate) const OFF_FS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, fs_base);
+    pub(crate) const OFF_GS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, gs_base);
+    pub(crate) const OFF_SP: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp);
+    pub(crate) const OFF_RET: usize =
         OFF_THREAD + core::mem::offset_of!(crate::arch::thread::CalleeSaved, ret_addr);
     /// Ownership word: {ti_on_cpu: bool, running_on_cpu: i32} share one
     /// aligned qword (R65 hunt). A single 8-byte store of a kernel-static
     /// pointer here yields {false, -1} — the double-run seed observed as
     /// ring "PUB" events without a preceding publish-out (x86-scribble3 g3:
     /// victim word held 0xffffffff_80661100, a .rodata ops pointer).
-    const OFF_ONCPU: usize = core::mem::offset_of!(Task, ti_on_cpu);
+    pub(crate) const OFF_ONCPU: usize = core::mem::offset_of!(Task, ti_on_cpu);
     const OFF_CLAIM: usize = core::mem::offset_of!(Task, running_on_cpu);
 
     use crate::debug::types::ScribbleSlot;
 
-    static SLOTS: [ScribbleSlot; SCRIBBLE_SLOTS] = [const {
+    pub(crate) static SLOTS: [ScribbleSlot; SCRIBBLE_SLOTS] = [const {
         ScribbleSlot {
             task: AtomicU64::new(0),
             armed: AtomicU32::new(0),
@@ -6313,13 +5942,13 @@ pub mod scribble {
     /// gdb can arm quiet-region watchpoints (stack bottoms, tp_value,
     /// exception_sp) on the whole live set before the scribbler strikes.
     pub static PARK_SWEEP: AtomicBool = AtomicBool::new(false);
-    static REG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    static VERIFY_TICK: AtomicU32 = AtomicU32::new(0);
-    static DIVERGE: AtomicU32 = AtomicU32::new(0);
-    static GS_FIX_ANNOUNCED: AtomicBool = AtomicBool::new(false);
-    static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    pub(crate) static REG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    pub(crate) static VERIFY_TICK: AtomicU32 = AtomicU32::new(0);
+    pub(crate) static DIVERGE: AtomicU32 = AtomicU32::new(0);
+    pub(crate) static GS_FIX_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    pub(crate) static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);
     // R68: Task-header canary global one-shot (see verify()).
-    static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    pub(crate) static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
     // ---- pick/publish event ring (rux:scribble (retired debug=scribble)) -------------------------
     // Every mark_picked_on_cpu and x86_switch_publish appends here; the CONS
@@ -6425,12 +6054,7 @@ pub mod scribble {
                 break;
             }
             // SAFETY: diagnostic reads of the live call stack.
-            let (ra, next) = unsafe {
-                (
-                    core::ptr::read_volatile((fp + 8) as *const u64),
-                    core::ptr::read_volatile(fp as *const u64),
-                )
-            };
+            let (ra, next) = (crate::debug::r#unsafe::raw_qword(fp + 8), crate::debug::r#unsafe::raw_qword(fp));
             if ra == 0 {
                 break;
             }
@@ -6515,7 +6139,7 @@ pub mod scribble {
         }
     }
     /// Verify cadence: every N timer ticks per CPU.
-    const VERIFY_EVERY: u32 = 4;
+    pub(crate) const VERIFY_EVERY: u32 = 4;
 
     // ---------------------------------------------------------------------------
     // R65 hunt: pin park + scheduler consumption tripwires
@@ -6543,7 +6167,7 @@ pub mod scribble {
         Some(v)
     }
 
-    fn pin_park_check(task: *mut Task) {
+    pub(crate) fn pin_park_check(task: *mut Task) {
         if PIN_DONE.load(Ordering::Relaxed) {
             return;
         }
@@ -6570,111 +6194,7 @@ pub mod scribble {
         }
     }
 
-    /// Task-pointer authenticity probe for the scheduler consumption points
-    /// (R65). The x86-scribble2/3 captures show `__switch_to` running with
-    /// prev/next = kernel-stack addresses and Task ownership words holding
-    /// kernel-static pointers — this predicate separates real Tasks from
-    /// such garbage before it is dereferenced by the switch path.
-    ///
-    /// Cheap by design: range check, then a pid bound and a kernel-stack
-    /// sanity pass. Static (.bss) tasks (idle storages, the boot task) run on
-    /// static stacks, so only the pid bound applies to them.
-    pub fn task_plausible(task: *mut Task) -> bool {
-        if task.is_null() {
-            return true;
-        }
-        let a = task as usize;
-        let in_kimg = (0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&a);
-        let in_heap = HEAP_WINDOW.contains(&a);
-        if !in_kimg && !in_heap {
-            return false;
-        }
-        // SAFETY: read-only probes of scheduler header fields. The range
-        // check above keeps us inside mapped memory for both known classes.
-        unsafe {
-            let pid = (*task).pid();
-            if pid == crate::sched::hotpath::TASK_POISON || pid > (1 << 22) {
-                return false;
-            }
-            if !in_heap {
-                return true; // static task (idle/boot): stacks are static too
-            }
-            let top = (*task).get_kernel_stack().map_or(0, |p| p as usize);
-            if top == 0 || top & 0xF != 0 {
-                return false;
-            }
-            if !HEAP_WINDOW.contains(&top)
-                && !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&top)
-            {
-                return false;
-            }
-            let bottom = (*task).kernel_stack_bottom();
-            let sp = (*task).thread().sp as usize;
-            if bottom >= top || sp < bottom || sp > top {
-                return false;
-            }
-            true
-        }
-    }
 
-    /// R65 double-run seed report: `mark_picked_on_cpu` (GRQ held) is about to
-    /// mark a task that is STILL another CPU's published current or still
-    /// carries another CPU's running_on_cpu claim — the pick just passed the
-    /// on_cpu skip, so the ownership word was reset outside the publish
-    /// protocol. This is the earliest scheduler-visible instant of the
-    /// shared-stack engine; dump the full ownership picture and park.
-    pub fn double_seed(task: *mut Task, me: u64, owner_slot: i32, claim: i32) {
-        let mut spins = 0u32;
-        while REPORT_LOCK
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-            && spins < 200_000
-        {
-            spins += 1;
-            core::hint::spin_loop();
-        }
-        REPORT_POS.store(0, Ordering::Relaxed);
-        REPORTING.store(true, Ordering::Relaxed);
-        puts(b"\nDOUBLE-SEED task=");
-        put_hex(task as u64);
-        // SAFETY: diagnostic header reads of the seed task.
-        unsafe {
-            puts(b" pid=");
-            put_dec((*task).pid() as u64);
-            puts(b" oncpu=");
-            put_dec((*task).on_cpu() as u64);
-            puts(b" claim=");
-            put_dec(claim as i64 as u64);
-        }
-        puts(b" me=");
-        put_dec(me);
-        puts(b" owner_slot=");
-        put_dec(owner_slot as i64 as u64);
-        puts(b"\n");
-        // Ownership word + neighborhood (byte-flip / static-pointer shapes).
-        dump_qwords(b"OWN", (task as usize + OFF_ONCPU) & !0xF, 8);
-        for c in 0..crate::config::MAX_CPUS {
-            puts(b" slot");
-            put_dec(c as u64);
-            puts(b"=");
-            put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
-            puts(b"/");
-            put_hex(crate::arch::smp::PER_CPU[c].current_task.load(Ordering::Relaxed));
-            puts(b"\n");
-        }
-        ring_dump();
-        REPORTING.store(false, Ordering::Relaxed);
-        REPORT_LEN.store(REPORT_POS.load(Ordering::Relaxed), Ordering::Release);
-        REPORT_LOCK.store(false, Ordering::Release);
-        if PARK.load(Ordering::Relaxed) {
-            puts(b"SCRIBBLE-SEEDPARK task=");
-            put_hex(task as u64);
-            puts(b" oncpu_addr=");
-            put_hex((task as usize + OFF_ONCPU) as u64);
-            puts(b"\n");
-            scribble_seed_park(task as u64);
-        }
-    }
 
     /// R65 garbage argument report: the switch path is about to consume (or
     /// was offered) a task pointer that fails the authenticity probe.
@@ -6760,29 +6280,14 @@ pub mod scribble {
     // Raw console helpers (lock-free, usable from any context)
     // ---------------------------------------------------------------------------
 
-    fn putc(c: u8) {
-        // While a report is being formatted, mirror every byte into the
-        // static report buffer (gdb-readable copy immune to serial
-        // interleaving).
-        if REPORTING.load(Ordering::Relaxed) {
-            let p = REPORT_POS.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: diagnostic buffer, bounded by len check.
-            let buf = unsafe { &mut *REPORT_BUF.0.get() };
-            if p < buf.len() {
-                buf[p] = c;
-            }
-        }
-        // SAFETY: raw console byte, no locking, no allocation.
-        unsafe { crate::console::putchar_no_lock(c) };
-    }
 
-    fn puts(s: &[u8]) {
+    pub(crate) fn puts(s: &[u8]) {
         for &b in s {
             putc(b);
         }
     }
 
-    fn put_hex(v: u64) {
+    pub(crate) fn put_hex(v: u64) {
         let mut shift = 64;
         while shift > 0 {
             shift -= 4;
@@ -6792,7 +6297,7 @@ pub mod scribble {
         }
     }
 
-    fn put_dec(mut v: u64) {
+    pub(crate) fn put_dec(mut v: u64) {
         let mut buf = [0u8; 20];
         let mut i = buf.len();
         if v == 0 {
@@ -6809,41 +6314,17 @@ pub mod scribble {
         }
     }
 
-    /// Hex-dump `n` qwords at `base`, 4 per line, tagged.
-    fn dump_qwords(tag: &[u8], base: usize, n: usize) {
-        puts(tag);
-        puts(b" @");
-        put_hex(base as u64);
-        puts(b"\n");
-        for i in 0..n {
-            if i % 4 == 0 {
-                puts(b"  ");
-                put_hex((base + i * 8) as u64);
-                puts(b":");
-            }
-            puts(b" ");
-            // SAFETY: diagnostic read of kernel memory.
-            let v = unsafe { core::ptr::read_volatile((base + i * 8) as *const u64) };
-            put_hex(v);
-            if i % 4 == 3 {
-                puts(b"\n");
-            }
-        }
-        if n % 4 != 0 {
-            puts(b"\n");
-        }
-    }
 
     // ---------------------------------------------------------------------------
     // ScribbleSlot table
     // ---------------------------------------------------------------------------
 
-    fn hash_of(task: usize) -> usize {
+    pub(crate) fn hash_of(task: usize) -> usize {
         // Task allocations are at least page aligned.
         (task >> 12) & (SCRIBBLE_SLOTS - 1)
     }
 
-    fn slot_of(task: *mut Task) -> Option<usize> {
+    pub(crate) fn slot_of(task: *mut Task) -> Option<usize> {
         let h = hash_of(task as usize);
         for i in 0..SCRIBBLE_SLOTS {
             let idx = (h + i) & (SCRIBBLE_SLOTS - 1);
@@ -6858,14 +6339,9 @@ pub mod scribble {
         None
     }
 
-    #[inline]
-    fn rd(task: *mut Task, off: usize) -> u64 {
-        // SAFETY: diagnostic read of a live Task field.
-        unsafe { core::ptr::read_volatile((task as usize + off) as *const u64) }
-    }
 
     #[inline]
-    fn gen_of(idx: usize) -> u32 {
+    pub(crate) fn gen_of(idx: usize) -> u32 {
         SLOTS[idx].gen.load(Ordering::Acquire)
     }
 
@@ -6873,110 +6349,6 @@ pub mod scribble {
     // Lifecycle
     // ---------------------------------------------------------------------------
 
-    /// Register a freshly built Task (called at the end of `new_task_at`).
-    pub fn register(task: *mut Task) {
-        if !crate::trace::EVENT_SCRIBBLE.armed() || task.is_null() {
-            return;
-        }
-        // R65 pin park (boot param `scribblepin=0x<hex>`): park exactly when
-        // the Task allocated at the given address registers, so a gdb session
-        // can arm QEMU write-watchpoints on the ownership word (task+0x38)
-        // BEFORE the engine strikes. The hunt victim's page is deterministic
-        // across boots (same allocation sequence), which is what makes the
-        // pin usable.
-        pin_park_check(task);
-        // Reclaimed-page guard: a Task page freed without its unregister
-        // landing (exit raced the table-full path, or the free came from an
-        // error path that bypassed free_task_slot) leaves a STALE armed slot
-        // for this address; the slot_of probe would then hand verify() a
-        // half-old shadow for the NEW occupant (the TASK_NEW + zeroed-thread
-        // HIT family on reused pages, u-series). Reset any such slot first.
-        if let Some(idx) = slot_of(task) {
-            SLOTS[idx].gen.fetch_add(1, Ordering::AcqRel);
-            SLOTS[idx].task.store(0, Ordering::Release);
-            SLOTS[idx].armed.store(0, Ordering::Release);
-        }
-        let h = hash_of(task as usize);
-        for i in 0..SCRIBBLE_SLOTS {
-            let idx = (h + i) & (SCRIBBLE_SLOTS - 1);
-            if SLOTS[idx]
-                .task
-                .compare_exchange(0, task as u64, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                SLOTS[idx].gen.fetch_add(1, Ordering::AcqRel);
-                SLOTS[idx].armed.store(0, Ordering::Release);
-                SLOTS[idx].sh_fs.store(rd(task, OFF_FS), Ordering::Relaxed);
-                SLOTS[idx].sh_gs.store(rd(task, OFF_GS), Ordering::Relaxed);
-                SLOTS[idx].sh_sp.store(rd(task, OFF_SP), Ordering::Relaxed);
-                SLOTS[idx].sh_ret.store(rd(task, OFF_RET), Ordering::Relaxed);
-                SLOTS[idx].sh_rip.store(0, Ordering::Relaxed);
-                SLOTS[idx].sh_rsp.store(0, Ordering::Relaxed);
-                SLOTS[idx].sh_cs.store(0, Ordering::Relaxed);
-                // Sweep park: once the live set is large (boot tasks ~25,
-                // LTP storm children after), hand gdb the addresses so it
-                // can arm quiet-region mines before the scribbler strikes.
-                if PARK_SWEEP.load(Ordering::Relaxed) {
-                    let n = REG_COUNT.fetch_add(1, Ordering::AcqRel) + 1;
-                    if n == 30 {
-                        puts(b"SCRIBBLE-SWEEPPARK");
-                        puts(b" task=");
-                        put_hex(task as u64);
-                        puts(b" gs=");
-                        put_hex((task as usize + OFF_GS) as u64);
-                        puts(b" fs=");
-                        put_hex((task as usize + OFF_FS) as u64);
-                        puts(b" sp=");
-                        put_hex((task as usize + OFF_SP) as u64);
-                        puts(b" ret=");
-                        put_hex((task as usize + OFF_RET) as u64);
-                        puts(b" thread=");
-                        put_hex((task as usize + OFF_THREAD) as u64);
-                        puts(b"\n");
-                        scribble_park(task as u64);
-                    }
-                }
-                // pid1 park: the init task outlives the whole storm; its
-                // Task struct and kernel stack sit at boot-fixed addresses.
-                // gdb breaks on scribble_park, parses this line from the
-                // serial log, and arms QEMU watchpoints on the listed
-                // addresses (the x86 link strips DWARF, so the kernel hands
-                // gdb the exact field addresses).
-                if PARK_PID1.load(Ordering::Relaxed) {
-                    // SAFETY: read-only pid probe of the just-built task.
-                    let pid = unsafe { (*task).pid() };
-                    if pid == 1 {
-                        puts(b"SCRIBBLE-PID1");
-                        puts(b" task=");
-                        put_hex(task as u64);
-                        if let Some(kstack_bottom) = unsafe {
-                            (*task).get_kernel_stack().map(|top| {
-                                top as usize
-                                    - crate::config::KERNEL_STACK_SIZE
-                            })
-                        } {
-                            puts(b" kstack=");
-                            put_hex(kstack_bottom as u64);
-                        }
-                        puts(b" gs=");
-                        put_hex((task as usize + OFF_GS) as u64);
-                        puts(b" fs=");
-                        put_hex((task as usize + OFF_FS) as u64);
-                        puts(b" sp=");
-                        put_hex((task as usize + OFF_SP) as u64);
-                        puts(b" ret=");
-                        put_hex((task as usize + OFF_RET) as u64);
-                        puts(b" state=");
-                        put_hex((task as usize + crate::process::hotpath::TASK_STATE) as u64);
-                        puts(b"\n");
-                        scribble_park(task as u64);
-                    }
-                }
-                return;
-            }
-        }
-        // Table full: silently untracked (512 live tasks is already a flood).
-    }
 
     /// Unregister a Task about to be freed (`free_task_slot`, before drop).
     pub fn unregister(task: *mut Task) {
@@ -7006,302 +6378,7 @@ pub mod scribble {
     // Detection
     // ---------------------------------------------------------------------------
 
-    /// Switch-out quiesce point: the task's context is fully saved. Any
-    /// tracked field that differs from its shadow changed outside the
-    /// legitimate write points — scribbled while running.
-    pub fn quiesce(task: *mut Task) {
-        if !crate::trace::EVENT_SCRIBBLE.armed() || task.is_null() {
-            return;
-        }
-        let Some(idx) = slot_of(task) else { return };
-        let s = &SLOTS[idx];
-        if s.armed.load(Ordering::Acquire) != 0 {
-            let live_gs = rd(task, OFF_GS);
-            let live_fs = rd(task, OFF_FS);
-            if live_gs != s.sh_gs.load(Ordering::Relaxed)
-                || live_fs != s.sh_fs.load(Ordering::Relaxed)
-            {
-                report(task, idx, b"run-window");
-            }
-        }
-        // Absorb this run's saved state into the shadow (sp/ret/fs/gs were
-        // just rewritten by the switch path itself). Seqlock discipline:
-        // odd generation while the shadows are being rewritten.
-        let g = s.gen.fetch_add(1, Ordering::AcqRel);
-        let _ = g;
-        s.sh_fs.store(rd(task, OFF_FS), Ordering::Relaxed);
-        s.sh_gs.store(rd(task, OFF_GS), Ordering::Relaxed);
-        s.sh_sp.store(rd(task, OFF_SP), Ordering::Relaxed);
-        s.sh_ret.store(rd(task, OFF_RET), Ordering::Relaxed);
-        // Snapshot the parked pt_regs (last complete trap frame at the
-        // kernel stack top).
-        if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
-            let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
-            const OFF_RIP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rip);
-            const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
-            const OFF_RSP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rsp);
-            // SAFETY: diagnostic reads of the task's kernel stack top.
-            unsafe {
-                s.sh_rip
-                    .store(core::ptr::read_volatile((pr + OFF_RIP) as *const u64), Ordering::Relaxed);
-                s.sh_rsp
-                    .store(core::ptr::read_volatile((pr + OFF_RSP) as *const u64), Ordering::Relaxed);
-                s.sh_cs
-                    .store(core::ptr::read_volatile((pr + OFF_CS) as *const u64), Ordering::Relaxed);
-            }
-        }
-        s.gen.fetch_add(1, Ordering::AcqRel); // even again
-        s.armed.store(1, Ordering::Release);
-    }
 
-    /// Periodic verify from the timer tick: scan tasks and compare against
-    /// the shadows using seqlock discipline (a read set is trusted only if
-    /// the generation stayed even and unchanged across it).
-    pub fn verify() {
-        if !crate::trace::EVENT_SCRIBBLE.armed() {
-            return;
-        }
-        let n = VERIFY_TICK.fetch_add(1, Ordering::Relaxed);
-        if n % VERIFY_EVERY != 0 {
-            return;
-        }
-        // R69: drain pending allocator audit records first — a double
-        // handoff recorded seconds ago ages out of the ring otherwise.
-        audit_drain();
-        let cur = crate::sched::hotpath::current().map(|t| t as *mut Task);
-        for idx in 0..SCRIBBLE_SLOTS {
-            let t = SLOTS[idx].task.load(Ordering::Acquire);
-            if t == 0 {
-                continue;
-            }
-            let task = t as *mut Task;
-            if cur == Some(task) {
-                continue;
-            }
-            // A task running on ANOTHER CPU also moves its sp/fpu state
-            // legitimately between our read and its next quiesce — the
-            // sp-only WEAK reports on cross-CPU running tasks were pure
-            // detector noise (u-series logs). Skip anything a CPU actually
-            // runs or is picking right now; only fully quiescent sleepers
-            // can be judged.
-            if unsafe { (*task).on_cpu() }
-                || (0..crate::config::MAX_CPUS)
-                    .any(|c| crate::sched::hotpath::cpu_state(c).current == task)
-            {
-                continue;
-            }
-            // Recycled-page race: unregister (free_task_slot) bumps gen and
-            // clears the task pointer, but verify may already hold the old
-            // pointer while the page is re-born as a fork child — TASK_NEW
-            // (0x80, half-built thread fields) or ZOMBIE/DEAD (exit path
-            // rewriting them). Neither is a judgeable quiescent sleeper;
-            // both produced the state=0x80/empty-comm HIT spam (u5, v1).
-            {
-                let st = unsafe { (*task).state().bits() };
-                if st
-                    & (crate::process::types::TaskState::TASK_NEW
-                        | crate::process::types::TaskState::ZOMBIE
-                        | crate::process::types::TaskState::DEAD)
-                    != 0
-                {
-                    continue;
-                }
-            }
-            let s = &SLOTS[idx];
-            if s.armed.load(Ordering::Acquire) == 0 {
-                continue;
-            }
-            // R67 (parked-tail tripwire): the exit-path frame validation in
-            // trap.S refuses scribbled control tails at load time; this scan
-            // catches them EARLY (while the task still sleeps — the report's
-            // ring tail is then at most 40ms from the write). A kernel-origin
-            // tail must name kernel text; a user tail must carry the exact
-            // user selectors. Heap tasks with a user mm only: kernel threads
-            // never build a user entry frame at their stack tops (their top
-            // region holds boot/idle residue like rip=0/cs=8 — the s1 run's
-            // false-positive storm).
-            if HEAP_WINDOW.contains(&(task as usize))
-                && s.armed.load(Ordering::Acquire) != 0
-                && unsafe { (*task).has_address_space() }
-                // Latch: report each victim once (the kill comes at resume;
-                // re-reporting every scan floods the console and wedges the
-                // serial interleave — the s1 lesson).
-                && s.armed_swapped.fetch_or(8, Ordering::AcqRel) & 8 == 0
-            {
-                if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
-                    let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
-                    const OFF_RIP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rip);
-                    const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
-                    const OFF_SS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, ss);
-                    // SAFETY: diagnostic reads of the task's parked frame.
-                    let (rip, cs, ss) = unsafe {
-                        (
-                            core::ptr::read_volatile((pr + OFF_RIP) as *const u64),
-                            core::ptr::read_volatile((pr + OFF_CS) as *const u64),
-                            core::ptr::read_volatile((pr + OFF_SS) as *const u64),
-                        )
-                    };
-                    let bad_tail = if cs & 3 == 0 {
-                        // kernel-origin tail: rip must be inside the kernel image
-                        !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&rip)
-                    } else {
-                        cs != 0x33 || ss != 0x2b
-                    };
-                    if bad_tail {
-                        puts(b"\nSCRIBBLE-TAIL task=");
-                        put_hex(task as u64);
-                        puts(b" rip=");
-                        put_hex(rip);
-                        puts(b" cs=");
-                        put_hex(cs);
-                        puts(b" ss=");
-                        put_hex(ss);
-                        puts(b"\n");
-                        ring_dump();
-                        // The exit-path guard will kill the task when it
-                        // resumes; re-tripping later is fine and useful.
-                    }
-                }
-            }
-            // R68 (Task-header canary): the v12 residual crash showed the
-            // victim's own comm string ("accept02") written into
-            // hung_task_since (+0x20) while the ownership graph stayed
-            // clean — user-data shapes inside a live Task page. Two header
-            // invariants are false-positive-free on x86_64: hung_task_since
-            // is 0 or a boot-relative ns timestamp (init 0, writers store
-            // `now` — always far below 2^48 for any realistic uptime), and
-            // ti_a0/a1/a2 are never written after construction on x86 (the
-            // old misaligned switch-out store that dirtied ti_a0's low half
-            // is gone — R67). A violation names the wild writer's victim
-            // with the event ring at most one scan from the write. Global
-            // one-shot: a corrupted header re-trips every scan and would
-            // flood the serial interleave (the s1 lesson).
-            #[cfg(feature = "x86_64")]
-            if HEAP_WINDOW.contains(&(task as usize))
-                && unsafe {
-                    let hts = (*task).hung_task_since.load(Ordering::Acquire);
-                    let a0 = core::ptr::read_volatile(
-                        (task as usize + crate::process::hotpath::TI_A0) as *const u64,
-                    );
-                    hts >> 48 != 0 || a0 != 0
-                }
-                && !HEADER_HIT_ANNOUNCED.swap(true, core::sync::atomic::Ordering::AcqRel)
-            {
-                puts(b"\nSCRIBBLE-HDR task=");
-                put_hex(task as u64);
-                unsafe {
-                    puts(b" pid=");
-                    put_dec((*task).pid() as u64);
-                    puts(b" hts=");
-                    put_hex((*task).hung_task_since.load(Ordering::Acquire));
-                    puts(b" a0=");
-                    put_hex(core::ptr::read_volatile(
-                        (task as usize + crate::process::hotpath::TI_A0) as *const u64,
-                    ));
-                    puts(b" comm=");
-                    for &b in (*task).comm() {
-                        put_hex(b as u64);
-                    }
-                }
-                puts(b"\n");
-                ring_dump();
-            }
-            // Stable read set (retry a couple of times when a concurrent
-            // quiesce bumps the generation mid-read).
-            let mut live_gs = 0;
-            let mut live_fs = 0;
-            let mut live_sp = 0;
-            let mut live_ret = 0;
-            let mut sh_gs = 0;
-            let mut sh_fs = 0;
-            let mut sh_sp = 0;
-            let mut sh_ret = 0;
-            let mut stable = false;
-            for _ in 0..3 {
-                let g0 = gen_of(idx);
-                if g0 % 2 == 1 {
-                    core::hint::spin_loop();
-                    continue;
-                }
-                live_gs = rd(task, OFF_GS);
-                live_fs = rd(task, OFF_FS);
-                live_sp = rd(task, OFF_SP);
-                live_ret = rd(task, OFF_RET);
-                sh_gs = s.sh_gs.load(Ordering::Relaxed);
-                sh_fs = s.sh_fs.load(Ordering::Relaxed);
-                sh_sp = s.sh_sp.load(Ordering::Relaxed);
-                sh_ret = s.sh_ret.load(Ordering::Relaxed);
-                if gen_of(idx) == g0 {
-                    stable = true;
-                    break;
-                }
-            }
-            if !stable {
-                continue;
-            }
-            let mut mism = 0;
-            if live_gs != sh_gs {
-                mism += 1;
-            }
-            if live_fs != sh_fs {
-                mism += 1;
-            }
-            if live_sp != sh_sp {
-                mism += 1;
-            }
-            if live_ret != sh_ret {
-                mism += 1;
-            }
-            if mism == 0 {
-                continue;
-            }
-            // pt_regs control words for tasks asleep off-CPU: a garbage cs
-            // (not __USER_CS 0x33 / __KERNEL_CS 0x08) is a frame scribble.
-            let mut frame_bad = false;
-            // SAFETY: atomic state probe of a live task.
-            let st = unsafe { (*task).state().bits() };
-            let on_cpu = unsafe { (*task).on_cpu() };
-            if !on_cpu
-                && st != crate::process::types::TaskState::RUNNING
-                && (st == crate::process::types::TaskState::INTERRUPTIBLE
-                    || st == crate::process::types::TaskState::UNINTERRUPTIBLE)
-            {
-                if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
-                    let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
-                    const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
-                    // SAFETY: diagnostic read of the task's parked frame.
-                    let cs = unsafe { core::ptr::read_volatile((pr + OFF_CS) as *const u64) };
-                    if cs != 0x33 && cs != 0x08 {
-                        frame_bad = true;
-                    }
-                }
-            }
-            // Single-field sp drifts are the weakest signal (deep stack
-            // depth changes between runs read as mismatch only when the
-            // quiesce hook raced); report but do not park on them.
-            if mism == 1 && live_sp != sh_sp && !frame_bad {
-                puts(b"SCRIBBLE-WEAK sp-only task=");
-                put_hex(task as u64);
-                puts(b" sh=");
-                put_hex(sh_sp);
-                puts(b" live=");
-                put_hex(live_sp);
-                puts(b"\n");
-                s.sh_sp.store(live_sp, Ordering::Relaxed);
-                s.gen.fetch_add(2, Ordering::AcqRel);
-                continue;
-            }
-            report(task, idx, b"quiescent");
-            // Resync so repeated scribbles on the same field re-trip.
-            let g = s.gen.fetch_add(1, Ordering::AcqRel);
-            let _ = g;
-            s.sh_gs.store(rd(task, OFF_GS), Ordering::Relaxed);
-            s.sh_fs.store(rd(task, OFF_FS), Ordering::Relaxed);
-            s.sh_sp.store(rd(task, OFF_SP), Ordering::Relaxed);
-            s.sh_ret.store(rd(task, OFF_RET), Ordering::Relaxed);
-            s.gen.fetch_add(1, Ordering::AcqRel);
-        }
-    }
 
     /// Periodic GS sanity tripwire: with the per-CPU GS pairing intact, the
     /// ACTIVE GS base points at PER_CPU[cpu] whose first u32 is a small cpu
@@ -7332,17 +6409,7 @@ pub mod scribble {
             puts(b" (faulting user-return iretq repaired: SIGSEGV routed)\n");
         }
         // SAFETY: one %gs-relative u32 read; MSR reads are data-safe.
-        let (gscpu, gsbase, kgsbase) = unsafe {
-            let id: u32;
-            core::arch::asm!(
-                "mov {0:e}, dword ptr gs:[0]",
-                out(reg) id,
-                options(nomem, nostack, preserves_flags)
-            );
-            let b1 = crate::arch::x86_64::cpu::rdmsr(0xC000_0101);
-            let b2 = crate::arch::x86_64::cpu::rdmsr(0xC000_0102);
-            (id, b1, b2)
-        };
+        let (gscpu, gsbase, kgsbase) = crate::debug::r#unsafe::gs_triple_read();
         if gscpu as usize >= crate::config::MAX_CPUS {
             let n = HITS.fetch_add(1, Ordering::AcqRel) + 1;
             puts(b"\nSCRIBBLE-GS-BAD #");
@@ -7362,199 +6429,7 @@ pub mod scribble {
         }
     }
 
-    /// Scheduler-consistency scan: run under the GRQ lock (trylock — skip
-    /// the round when contended) so scheduler transients are excluded, and
-    /// require the anomaly to persist across two consecutive scans before
-    /// reporting. A task that is BOTH linked on a class queue AND on-CPU is
-    /// a double-run seed — the second CPU that picks it executes on the
-    /// same kernel stack (register-frame scribbles, interleaved trap
-    /// frames, sp/ret drift).
-    pub fn verify_consistency() {
-        if !crate::trace::EVENT_SCRIBBLE.armed() {
-            return;
-        }
-        // Try the GRQ lock; skip this round if the scheduler holds it.
-        let Some(_grq_guard) = crate::sched::hotpath::try_grq_lock() else {
-            return;
-        };
-        let cur = crate::sched::hotpath::current().map(|t| t as *mut Task);
-        for idx in 0..SCRIBBLE_SLOTS {
-            let t = SLOTS[idx].task.load(Ordering::Acquire);
-            if t == 0 {
-                continue;
-            }
-            let task = t as *mut Task;
-            // SAFETY: read-only probes of live task scheduling fields; the
-            // GRQ lock is held, so pick/dequeue/publish windows are closed.
-            let (on_rq, on_cpu, state) = unsafe {
-                ((*task).sched_entity().is_on_rq(), (*task).on_cpu(), (*task).state().bits())
-            };
-            let running = state == crate::process::types::TaskState::RUNNING;
-            const CLS_A: &[u8] = b"onrq+oncpu";
-            const CLS_B: &[u8] = b"onrq+sleeping";
-            const CLS_C: &[u8] = b"phantom-run";
-            // Under the GRQ lock the legitimate states are:
-            //   (linked ∧ RUNNING ∧ ¬on_cpu ∧ ¬current)   — queued
-            //   (¬linked ∧ RUNNING ∧ on_cpu)              — running/picked
-            //   (¬linked ∧ sleeping ∧ ¬on_cpu)            — blocked
-            //   current (this CPU's or another's pick is excluded by the lock)
-            // R65: (linked ∧ on_cpu) is ALSO legitimate while the task's CPU
-            // is inside its switch-out (a wake links the task — the pick-side
-            // skip sequences the resume — while the on_cpu mark survives
-            // until __switch_to's asm-side release point). Exclude the
-            // SWITCHING_OUT-marked tasks from the anomaly classes; a mark
-            // that outlives the switch is still caught two scans later.
-            // Anything else that persists across two scans is an invariant
-            // break worth naming. (onrq+sleeping is also the pre-schedule
-            // window ONLY when the sleeper itself is current on a CPU —
-            // excluded via the current-slot scan.)
-            let curr_any = cur == Some(task)
-                || crate::sched::hotpath::task_is_mid_switch_out(task)
-                || (0..crate::config::MAX_CPUS)
-                    .any(|c| crate::sched::hotpath::cpu_state(c).current == task);
-            let anomaly: &[u8] = if curr_any {
-                continue;
-            } else if on_rq && on_cpu {
-                CLS_A
-            } else if on_rq && !running {
-                CLS_B
-            } else if running && !on_rq && !on_cpu {
-                CLS_C
-            } else {
-                // Consistent again: re-arm the rate-limit for this slot.
-                SLOTS[idx].armed_swapped.store(0, Ordering::Relaxed);
-                continue;
-            };
-            let key = if core::ptr::eq(anomaly.as_ptr(), CLS_A.as_ptr()) {
-                1u32
-            } else if core::ptr::eq(anomaly.as_ptr(), CLS_B.as_ptr()) {
-                2
-            } else {
-                4
-            };
-            // Persistence filter: first sighting only latches the class;
-            // report on the SECOND consecutive scan.
-            let seen = SLOTS[idx].armed_swapped.fetch_or(key, Ordering::AcqRel);
-            if seen & key == 0 {
-                // Latch: freeze the event-ring tail NOW (the report-side
-                // dump comes 40ms later — causal entries scroll out).
-                puts(b"SCRIBBLE-LATCH ");
-                put_hex(task as u64);
-                puts(b" cls=");
-                puts(anomaly);
-                puts(b"\n");
-                ring_dump();
-                continue;
-            }
-            puts(b"SCRIBBLE-CONS ");
-            put_hex(task as u64);
-            // SAFETY: diagnostic read of the task header.
-            unsafe {
-                puts(b" pid=");
-                put_dec((*task).pid() as u64);
-            }
-            puts(b" cls=");
-            puts(anomaly);
-            puts(b" onrq=");
-            put_dec(on_rq as u64);
-            puts(b" oncpu=");
-            put_dec(on_cpu as u64);
-            puts(b" st=0x");
-            put_hex(state as u64);
-            puts(b" cpu=");
-            put_dec(crate::arch::cpu_id() as u64);
-            // Full ownership picture: which CPU's slots claim this task,
-            // the task's own ti_cpu + running_on_cpu claim, policy.
-            // SAFETY: diagnostic reads of scheduling fields.
-            unsafe {
-                puts(b" ticpu=");
-                put_dec((*task).ti_cpu() as i64 as u64);
-                puts(b" claim=");
-                put_dec((*task).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
-                for c in 0..crate::config::MAX_CPUS {
-                    puts(b" s");
-                    put_dec(c as u64);
-                    puts(b"=");
-                    put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
-                    puts(b"/");
-                    put_hex(
-                        crate::arch::smp::PER_CPU[c]
-                            .current_task
-                            .load(Ordering::Relaxed),
-                    );
-                }
-            }
-            puts(b"\n");
-            if key == 1 || key == 2 {
-                ring_dump();
-                let n = HITS.fetch_add(1, Ordering::AcqRel) + 1;
-                if PARK.load(Ordering::Relaxed) && n == 1 {
-                    puts(b"SCRIBBLE-CONSPARK task=");
-                    put_hex(task as u64);
-                    puts(b" gs=");
-                    put_hex((task as usize + OFF_GS) as u64);
-                    puts(b" fs=");
-                    put_hex((task as usize + OFF_FS) as u64);
-                    puts(b" sp=");
-                    put_hex((task as usize + OFF_SP) as u64);
-                    puts(b" ret=");
-                    put_hex((task as usize + OFF_RET) as u64);
-                    puts(b" thread=");
-                    put_hex((task as usize + OFF_THREAD) as u64);
-                    puts(b"\n");
-                    scribble_park((task as usize + OFF_THREAD) as u64);
-                }
-            }
-        }
-    }
 
-    /// R55 tripwire: __schedule observed slot-prev != hardware-current (tp).
-    /// Names the divergence the moment the scheduler first sees it — before
-    /// any heal, with every slot's claim printed.
-    pub fn slot_divergence(cpu: usize, tp: *mut Task, slot_prev: *mut Task) {
-        let n = DIVERGE.fetch_add(1, Ordering::AcqRel) + 1;
-        if n > 64 {
-            return; // rate limit
-        }
-        puts(b"SCRIBBLE-DIVERGE #");
-        put_dec(n as u64);
-        puts(b" cpu=");
-        put_dec(cpu as u64);
-        puts(b" tp=");
-        put_hex(tp as u64);
-        // SAFETY: diagnostic header reads; the pages are live task structs.
-        unsafe {
-            if !tp.is_null() {
-                puts(b"(pid=");
-                put_dec((*tp).pid() as u64);
-                puts(b")");
-            }
-            puts(b" slot=");
-            put_hex(slot_prev as u64);
-            if !slot_prev.is_null() {
-                puts(b"(pid=");
-                put_dec((*slot_prev).pid() as u64);
-                puts(b")");
-            }
-            puts(b" slots:");
-            for c in 0..crate::config::MAX_CPUS {
-                put_dec(c as u64);
-                puts(b"=");
-                put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
-            }
-            if !tp.is_null() {
-                puts(b" tponcpu=");
-                put_dec((*tp).on_cpu() as u64);
-                puts(b" tpclaim=");
-                put_dec((*tp).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
-                puts(b" tponrq=");
-                put_dec((*tp).sched_entity().is_on_rq() as u64);
-                puts(b" tpst=0x");
-                put_hex((*tp).state().bits() as u64);
-            }
-        }
-        puts(b"\n");
-    }
 
     /// Double-run report: the running_on_cpu claim swap in
     /// x86_switch_publish detected a second switch-into a task whose
@@ -7644,216 +6519,15 @@ pub mod scribble {
 
     pub use crate::debug::types::ReportBuf;
 
-    unsafe impl Sync for ReportBuf {}
     /// Symbol gdb dumps after a run: `dump binary memory file &REPORT_BUF ..`
     pub static REPORT_BUF: ReportBuf = ReportBuf(core::cell::UnsafeCell::new([0; 4096]));
     pub static REPORT_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-    static REPORTING: AtomicBool = AtomicBool::new(false);
-    static REPORT_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    static REPORT_LOCK: AtomicBool = AtomicBool::new(false);
+    pub(crate) static REPORTING: AtomicBool = AtomicBool::new(false);
+    pub(crate) static REPORT_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    pub(crate) static REPORT_LOCK: AtomicBool = AtomicBool::new(false);
 
-    /// R63 crash capture: on a kernel-mode fatal trap (#GP/#UD/#PF-to-panic),
-    /// serialize a full picture BEFORE the (4-CPU-interleaving) panic printer
-    /// runs: the faulting pt_regs verbatim, the per-CPU ownership picture
-    /// (sched current slots, arch hardware current_task, switch-out marks),
-    /// the current task identity, and the pick/publish ring tail. One CPU at
-    /// a time via REPORT_LOCK, so at least one clean copy reaches the serial
-    /// log even when several CPUs die together.
-    pub fn crash_report(vector: &[u8], regs: &crate::arch::pt_regs::PtRegs) {
-        if !crate::trace::EVENT_SCRIBBLE.armed() {
-            return;
-        }
-        // Bounded spin (a concurrent panic path may hold the lock; never
-        // wedge the crash report itself).
-        let mut spins = 0u32;
-        while REPORT_LOCK
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-            && spins < 200_000
-        {
-            spins += 1;
-            core::hint::spin_loop();
-        }
-        REPORT_POS.store(0, Ordering::Relaxed);
-        REPORTING.store(true, Ordering::Relaxed);
 
-        puts(b"\n=== SCRIBBLE-CRASH ");
-        puts(vector);
-        puts(b" rip=");
-        put_hex(regs.rip);
-        puts(b" cs=");
-        put_hex(regs.cs);
-        puts(b" err=");
-        put_hex(regs.orig_rax);
-        puts(b" cr2-ish rsp=");
-        put_hex(regs.rsp);
-        puts(b"\n");
-        // Full pt_regs (fault frame verbatim).
-        dump_qwords(b"PTREGS", regs as *const _ as usize, 21);
-
-        // Stack window around the faulting rsp — the recursion signature:
-        // a repeated return address across this band names the function
-        // that burned the stack (R64: the overflow-into-neighbor engine).
-        {
-            let rsp = regs.rsp as usize;
-            let lo = rsp.saturating_sub(0x40) & !0xF;
-            let hi = rsp + 0x380;
-            dump_qwords(b"STACKWIN", lo, (hi - lo) / 8);
-        }
-
-        // Ownership picture.
-        let tp = crate::arch::cpu::get_thread_id() as *mut Task;
-        puts(b"OWNER cpu=");
-        put_dec(crate::arch::cpu_id() as u64);
-        puts(b" tp=");
-        put_hex(tp as u64);
-        if !tp.is_null() {
-            // SAFETY: diagnostic header reads of the task the hardware runs.
-            unsafe {
-                puts(b" pid=");
-                put_dec((*tp).pid() as u64);
-                puts(b" st=0x");
-                put_hex((*tp).state().bits() as u64);
-                puts(b" oncpu=");
-                put_dec((*tp).on_cpu() as u64);
-                puts(b" claim=");
-                put_dec((*tp).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
-                puts(b" onrq=");
-                put_dec((*tp).sched_entity().is_on_rq() as u64);
-                if let Some(kstack) = (*tp).get_kernel_stack() {
-                    puts(b" kstack=");
-                    put_hex(kstack as u64);
-                }
-            }
-        }
-        puts(b"\nSLOTS:");
-        for c in 0..crate::config::MAX_CPUS {
-            puts(b" c");
-            put_dec(c as u64);
-            puts(b"=");
-            put_hex(crate::sched::hotpath::cpu_state(c).current as u64);
-            puts(b"/");
-            put_hex(
-                crate::arch::smp::PER_CPU[c]
-                    .current_task
-                    .load(Ordering::Relaxed),
-            );
-        }
-        puts(b"\n");
-
-        // Victim task header + thread struct (thread.sp / kernel_stack /
-        // callee.ret_addr live here — a torn value names which field the
-        // scribbler rewrote to route this CPU onto a foreign stack).
-        if !tp.is_null() {
-            dump_qwords(b"TPHDR", tp as usize, 16);
-            dump_qwords(b"THRD", (tp as usize) + OFF_THREAD, 76);
-        }
-
-        // Pick/publish ring tail — the scheduling history into the crash.
-        ring_dump();
-
-        REPORTING.store(false, Ordering::Relaxed);
-        REPORT_LEN.store(REPORT_POS.load(Ordering::Relaxed), Ordering::Release);
-        REPORT_LOCK.store(false, Ordering::Release);
-    }
-
-    fn report(task: *mut Task, idx: usize, phase: &[u8]) {
-        // One writer at a time (bounded spin — never deadlock a panic path).
-        let mut spins = 0u32;
-        while REPORT_LOCK
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-            && spins < 200_000
-        {
-            spins += 1;
-            core::hint::spin_loop();
-        }
-        REPORT_POS.store(0, Ordering::Relaxed);
-        REPORTING.store(true, Ordering::Relaxed);
-
-        let n = HITS.fetch_add(1, Ordering::AcqRel) + 1;
-        let s = &SLOTS[idx];
-        puts(b"\nSCRIBBLE-HIT #");
-        put_dec(n as u64);
-        puts(b" phase=");
-        puts(phase);
-        puts(b" cpu=");
-        put_dec(crate::arch::cpu_id() as u64);
-        puts(b" task=");
-        put_hex(task as u64);
-        // SAFETY: diagnostic reads of stable Task header fields.
-        unsafe {
-            puts(b" pid=");
-            put_dec((*task).pid() as u64);
-            puts(b" comm=");
-            let comm = (*task).comm();
-            for &b in comm.iter() {
-                if b == 0 {
-                    break;
-                }
-                putc(b);
-            }
-            puts(b" state=0x");
-            put_hex((*task).state().bits() as u64);
-        }
-        puts(b"\n");
-
-        puts("  gs  sh=".as_bytes());
-        put_hex(s.sh_gs.load(Ordering::Relaxed));
-        puts(b" live=");
-        put_hex(rd(task, OFF_GS));
-        puts(b"\n  fs  sh=");
-        put_hex(s.sh_fs.load(Ordering::Relaxed));
-        puts(b" live=");
-        put_hex(rd(task, OFF_FS));
-        puts(b"\n  sp  sh=");
-        put_hex(s.sh_sp.load(Ordering::Relaxed));
-        puts(b" live=");
-        put_hex(rd(task, OFF_SP));
-        puts(b"\n  ret sh=");
-        put_hex(s.sh_ret.load(Ordering::Relaxed));
-        puts(b" live=");
-        put_hex(rd(task, OFF_RET));
-        puts(b"\n");
-
-        // Full ThreadStruct dump — the damage SHAPE (contiguous 512-byte
-        // block == fxsave-looking; register-frame runs == trap-push on a
-        // wild rsp) names the writer family.
-        dump_qwords(b"THREAD", (task as usize) + OFF_THREAD, 76);
-        // Task header (thread_info fields + state/pid + early list links).
-        dump_qwords(b"TASKHDR", task as usize, 16);
-        // Parked pt_regs at the stack top.
-        if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
-            let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
-            dump_qwords(b"PTREGS", pr, 21);
-        }
-
-        REPORTING.store(false, Ordering::Relaxed);
-        REPORT_LEN.store(REPORT_POS.load(Ordering::Relaxed), Ordering::Release);
-        REPORT_LOCK.store(false, Ordering::Release);
-
-        if PARK.load(Ordering::Relaxed) {
-            // Park the FIRST hit: gdb arms watchpoints on the neighborhood.
-            if n == 1 {
-                puts(b"SCRIBBLE-HITPARK");
-                puts(b" task=");
-                put_hex(task as u64);
-                puts(b" gs=");
-                put_hex((task as usize + OFF_GS) as u64);
-                puts(b" fs=");
-                put_hex((task as usize + OFF_FS) as u64);
-                puts(b" sp=");
-                put_hex((task as usize + OFF_SP) as u64);
-                puts(b" ret=");
-                put_hex((task as usize + OFF_RET) as u64);
-                puts(b" thread=");
-                put_hex((task as usize + OFF_THREAD) as u64);
-                puts(b"\n");
-                scribble_park((task as usize + OFF_GS) as u64);
-            }
-        }
-    }
 }
 
 
@@ -8048,14 +6722,14 @@ mod stub {
 }
 
 #[cfg(feature = "x86_64")]
-mod x86 {
+pub(crate) mod x86 {
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use crate::arch::mm::pagetable::PageTableEntry;
+    use crate::arch::mm::pagetable::PageTableEntry; use crate::debug::r#unsafe::{canary_qword_read, canary_selftest_fire, enable_write_protect, fill_canary, kernel_pa_offset, page_table_virt_raw, wild_link_aliases};
 
     /// Canary fill qword: "WILDWATC" + per-index salt, complement every
     /// other qword — a partial-line smash still leaves a checkable shape.
-    const CANARY_MAGIC: u64 = 0x5749_4c44_5741_5453;
+    pub(crate) const CANARY_MAGIC: u64 = 0x5749_4c44_5741_5453;
 
     /// Guarded regions (max 4 clusters x 8 pages each is plenty; the hpet
     /// cluster is 2 pages). Recorded for is_armed() and canary verify.
@@ -8109,35 +6783,7 @@ mod x86 {
         let mut guarded_aliases = 0usize;
         // SAFETY: the only linking store per split is one aligned 8-byte
         // store; concurrent readers stay consistent under either mapping.
-        unsafe {
-            // Alias 1: link-time kernel-half VAs (the statics themselves).
-            for va in (start..start + len).step_by(4096) {
-                if protect_page(va) {
-                    ok_pages += 1;
-                } else {
-                    fail_pages += 1;
-                }
-            }
-            // Alias 2+3: every other VA the frames are reachable at.
-            // Resolve the physical frames through the kernel-half walk,
-            // then guard the linear-map alias and (if under 2GB) the low
-            // identity alias.
-            for va in (start..start + len).step_by(4096) {
-                let Some(phys) = resolve_phys(va) else {
-                    continue;
-                };
-                let lin = phys
-                    .wrapping_add(crate::arch::mm::memory_layout::PAGE_OFFSET as u64);
-                if lin != va as u64 && protect_page(lin as usize) {
-                    guarded_aliases += 1;
-                }
-                if phys < 0x8000_0000 {
-                    if phys as usize != va && protect_page(phys as usize) {
-                        guarded_aliases += 1;
-                    }
-                }
-            }
-        }
+        wild_link_aliases(start, len, &mut ok_pages, &mut fail_pages, &mut guarded_aliases);
         if ok_pages > 0 {
             // CR0.WP: this kernel has never set it (verified live:
             // cr0=0x80000013, WP clear) — with WP=0 a ring-0 store
@@ -8167,7 +6813,7 @@ mod x86 {
                 );
                 // SAFETY: deliberate wild-store emulation onto the RO
                 // guard page — this instruction MUST page-fault.
-                unsafe { victim.write_volatile(0xdead_beef_dead_beef) };
+                crate::debug::r#unsafe::canary_selftest_fire(victim);
                 crate::pr_err!("WILDWATCH-SELFTEST(arm) FAULT NOT TAKEN");
             }
         } else if tries < 30 {
@@ -8181,31 +6827,7 @@ mod x86 {
         }
     }
 
-    /// Set CR0.WP on the CURRENT cpu (idempotent). With WP clear, ring-0
-    /// stores ignore page RW bits — the guard pages would be writable.
-    fn enable_write_protect() {
-        // SAFETY: one CR0 read-modify-write; WP is a boot-time-static bit.
-        unsafe {
-            let cr0 = crate::arch::cpu::read_cr0();
-            crate::arch::cpu::write_cr0(cr0 | 0x1_0000);
-        }
-    }
 
-    fn fill_canary(start: usize) {
-        // Only the FIRST page of the cluster is canary (hpet::GUARD
-        // layout: canary page, then the live members).
-        let page = start as *mut u64;
-        for i in 0..512usize {
-            let salt = i as u64;
-            let v = if i & 1 == 0 {
-                CANARY_MAGIC ^ (salt << 32)
-            } else {
-                !(CANARY_MAGIC ^ (salt << 32))
-            };
-            // SAFETY: kernel .bss page, written once before RO arming.
-            unsafe { page.add(i).write_volatile(v) };
-        }
-    }
 
     /// Verify canary pages (DMA-class writers bypass PTEs; the RO trap
     /// cannot see them). Called from the timer softirq cadence.
@@ -8230,7 +6852,7 @@ mod x86 {
                 crate::pr_err!("WILDWATCH-SELFTEST firing: deliberate store to {:#x}", start + 4096);
                 // SAFETY: deliberate wild-store emulation onto the RO
                 // guard page — this instruction MUST page-fault.
-                unsafe { victim.write_volatile(0xdead_beef_dead_beef) };
+                crate::debug::r#unsafe::canary_selftest_fire(victim);
                 // If control returns here the trap did NOT fire — the
                 // tripwire is broken; scream.
                 crate::pr_err!("WILDWATCH-SELFTEST FAULT NOT TAKEN — guard page is NOT read-only!");
@@ -8256,7 +6878,7 @@ mod x86 {
                     !(CANARY_MAGIC ^ ((i as u64) << 32))
                 };
                 // SAFETY: registered armed kernel page.
-                let v = unsafe { page.add(i).read_volatile() };
+                let v = crate::debug::r#unsafe::canary_qword_read(page, i);
                 if v != expect {
                     if !CANARY_REPORTED[r].swap(true, Ordering::AcqRel) {
                         crate::pr_err!(
@@ -8299,183 +6921,21 @@ mod x86 {
     /// boot-time tables come from the early pool INSIDE the kernel image,
     /// whose kernel-half VAs are valid by the constant VMA-LMA offset —
     /// use that translation for image-phys, arch helper otherwise.
-    fn table_virt(phys: u64) -> *mut crate::arch::mm::pagetable::PageTable {
+    pub(crate) fn table_virt(phys: u64) -> *mut crate::arch::mm::pagetable::PageTable {
         use crate::arch::mm::memory_layout::{KERNEL_ENTRY, KERNEL_MAP};
         let end = crate::arch::mm::mmu_init::kernel_image_phys_end();
         // SAFETY: read-only access of the boot-constant VMA-LMA offset
         // (written once during mmu init, before any wildwatch code runs).
-        let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+        let offset = crate::debug::r#unsafe::kernel_pa_offset() as u64;
         if phys >= KERNEL_ENTRY && phys < end {
             let va = phys.wrapping_add(offset);
             return va as *mut _;
         }
         // SAFETY: same contract as the arch helper.
-        unsafe { crate::arch::mm::mmu_init::get_page_table_virt(phys) }
+        crate::debug::r#unsafe::page_table_virt_raw(phys)
     }
 
-    /// Resolve the physical address a kernel-half VA maps to (leaf walk).
-    /// Full 4-level walk: PML4 -> PDPT -> PD -> PTE.
-    fn resolve_phys(va: usize) -> Option<u64> {
-        // SAFETY: read-only walk of the shared kernel root.
-        unsafe {
-            let root = table_virt(crate::arch::mm::mmu_init::root_static_phys());
-            let pml4i = (va >> 39) & 0x1ff;
-            let pdpti = (va >> 30) & 0x1ff;
-            let pdi = (va >> 21) & 0x1ff;
-            let pti = (va >> 12) & 0x1ff;
-            let pml4e = (*root).get(pml4i);
-            if !pml4e.is_table() {
-                return None;
-            }
-            let pdpt = &mut *table_virt(pml4e.phys_addr());
-            let pd_e = pdpt.get(pdpti);
-            if !pd_e.is_table() {
-                return None;
-            }
-            let pd = &mut *table_virt(pd_e.phys_addr());
-            let pmd = pd.get(pdi);
-            if !pmd.is_valid() {
-                return None;
-            }
-            if pmd.is_leaf() {
-                return Some(pmd.phys_addr() | ((va as u64) & 0x1F_FFFF));
-            }
-            let pt = &mut *table_virt(pmd.phys_addr());
-            let pte = pt.get(pti);
-            if !pte.is_valid() {
-                return None;
-            }
-            Some(pte.phys_addr() | ((va as u64) & 0xFFF))
-        }
-    }
 
-    /// Clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf if
-    /// needed. Returns true when the leaf reads back read-only.
-    ///
-    /// SAFETY (caller): runs pre-SMP from debug::init on the BSP; the
-    /// linking store is one aligned 8-byte store, so the old and new
-    /// translations are both consistent for concurrent readers.
-    unsafe fn protect_page(va: usize) -> bool {
-        use crate::arch::mm::pagetable::PageTable;
-
-        let root = table_virt(crate::arch::mm::mmu_init::root_static_phys());
-        let pml4i = (va >> 39) & 0x1ff;
-        let pdpti = (va >> 30) & 0x1ff;
-        let pdi = (va >> 21) & 0x1ff;
-        let pti = (va >> 12) & 0x1ff;
-
-        // Full 4-level walk. (An earlier draft read PML4[i] and used its
-        // PDPT page directly as the PD — one level short; every guard
-        // read as zeros. The gdb cross-check below is what caught it.)
-        let pml4e = (*root).get(pml4i);
-        if !pml4e.is_table() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pml4[{:}]={:#x} not a table link",
-                va,
-                pml4i,
-                pml4e.bits()
-            );
-            return false;
-        }
-        let pdpt: &mut PageTable = &mut *table_virt(pml4e.phys_addr());
-        let pd_e = pdpt.get(pdpti);
-        if !pd_e.is_valid() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pdpt[{:}]={:#x} invalid",
-                va,
-                pdpti,
-                pd_e.bits()
-            );
-            return false;
-        }
-        if pd_e.is_leaf() {
-            // 1GiB leaf — split not implemented (no guard region lands
-            // under one today); fail loudly rather than silently skip.
-            crate::pr_err!(
-                "wildwatch: va={:#x} pdpt[{:}] is a 1GiB leaf (split unsupported)",
-                va,
-                pdpti
-            );
-            return false;
-        }
-        let pd: &mut PageTable = &mut *table_virt(pd_e.phys_addr());
-        let pmd = pd.get(pdi);
-        if !pmd.is_valid() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pml4i={} pdpti={} pdi={} pti={} pd[{:+}]={:#x} pd[{}]={:#x} pd[{}]={:#x} pd[{}]={:#x} (cr3={:#x})",
-                va,
-                pml4i,
-                pdpti,
-                pdi,
-                pti,
-                pdi as isize - 1,
-                pd.get(pdi.wrapping_sub(1)).bits(),
-                pdi,
-                pmd.bits(),
-                pdi + 1,
-                pd.get(pdi + 1).bits(),
-                pdi + 2,
-                pd.get(pdi + 2).bits(),
-                crate::arch::cpu::read_cr3()
-            );
-            return false;
-        }
-
-        if pmd.is_table() {
-            // Already 4KiB entries: flip this one's RW off.
-            let pt: &mut PageTable = &mut *table_virt(pmd.phys_addr());
-            let mut e = pt.get(pti);
-            if !e.is_valid() {
-                crate::pr_err!(
-                    "wildwatch: va={:#x} cr3={:#x} pml4[{}]={:#x} pdpt[{}]={:#x} pd[{}]={:#x} pt[{}]={:#x} invalid",
-                    va,
-                    crate::arch::cpu::read_cr3(),
-                    pml4i,
-                    pml4e.bits(),
-                    pdpti,
-                    pd_e.bits(),
-                    pdi,
-                    pmd.bits(),
-                    pti,
-                    e.bits()
-                );
-                return false;
-            }
-            e = PageTableEntry::from_bits(e.bits() & !PageTableEntry::RW);
-            pt.set(pti, e);
-            crate::arch::cpu::invlpg(va as u64);
-            return !pt.get(pti).is_writable();
-        }
-
-        // 2MiB leaf: split into a fresh 4KiB table replicating the leaf,
-        // with the target page's RW cleared.
-        let phys2m = pmd.phys_addr();
-        // Keep the flag bits that apply per-page; PS (7) and GLOBAL (8)
-        // are dropped for children of a split.
-        let mut flags = pmd.bits() & 0xFFF & !PageTableEntry::PS & !PageTableEntry::GLOBAL;
-        // A supervisor leaf never carries US; keep whatever it carried.
-        flags |= PageTableEntry::P;
-        let Some(newpt_phys) = crate::arch::mm::mmu_init::alloc_page_table() else {
-            return false;
-        };
-        let newpt: &mut PageTable =
-            &mut *table_virt(newpt_phys);
-        for i in 0..512u64 {
-            let mut bits = (phys2m + i * 4096) | flags;
-            if i as usize == pti {
-                bits &= !PageTableEntry::RW;
-            }
-            newpt.set(i as usize, PageTableEntry::from_bits(bits));
-        }
-        // One aligned 8-byte linking store replaces the huge leaf.
-        pd.set(
-            pdi,
-            PageTableEntry::from_bits(newpt_phys | PageTableEntry::P | PageTableEntry::RW),
-        );
-        crate::arch::cpu::invlpg(va as u64);
-        let pt: &mut PageTable = &mut *table_virt(pd.get(pdi).phys_addr());
-        !pt.get(pti).is_writable()
-    }
 }
 
 
@@ -10265,13 +8725,13 @@ pub const PSTORE_RAM_SIZE: usize = 128 * 1024;
 
 /// The staging sink's size (the panic report itself — header, CSRs,
 /// registers, stack — is captured here as it prints).
-const SINK_SIZE: usize = 16 * 1024;
+pub(crate) const SINK_SIZE: usize = 16 * 1024;
 
 /// The record magic: "RUXPST02".
-const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST02");
+pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST02");
 
 
-const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 2;
 
 /// Console flavor — the panic report (`console-ramoops-0`).
 pub const KIND_CONSOLE: u32 = 0;
@@ -10289,8 +8749,8 @@ static RECORD_KIND: AtomicU32 = AtomicU32::new(KIND_CONSOLE);
 
 /// The staging sink: the panic report's bytes, ring-buffered (the write
 /// index wraps; the newest SINK_SIZE bytes survive).
-static SINK: [AtomicU8Cell; SINK_SIZE] = [const { AtomicU8Cell::new() }; SINK_SIZE];
-static SINK_AT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static SINK: [AtomicU8Cell; SINK_SIZE] = [const { AtomicU8Cell::new() }; SINK_SIZE];
+pub(crate) static SINK_AT: AtomicUsize = AtomicUsize::new(0);
 /// The sink is armed (between panic-handler entry and the region write).
 static SINK_ARMED: AtomicBool = AtomicBool::new(false);
 
@@ -10356,7 +8816,7 @@ pub fn early_scan() {
     // SAFETY: the region is reserved RAM, mapped by the linear map; the
     // header reads are plain loads of memory no writer touches (the
     // previous boot is gone).
-    let hdr = unsafe { &*(virt as *const RecordHeader) };
+    let hdr = crate::debug::r#unsafe::record_header_at(virt);
     if hdr.magic != MAGIC || hdr.version != VERSION {
         return;
     }
@@ -10369,9 +8829,7 @@ pub fn early_scan() {
     HAS_RECORD.store(true, Ordering::Release);
     RECORD_KIND.store(kind, Ordering::Release);
     // SAFETY: same region; this boot now owns it. Clear only the magic.
-    unsafe {
-        core::ptr::write_volatile(virt as *mut u64, 0);
-    }
+    crate::debug::r#unsafe::clear_record_magic(virt);
     crate::pr_info!(
         "pstore: previous boot's {} record found ({} bytes) — /sys/fs/pstore/{}, jiffies {}",
         if kind == KIND_DMESG { "dmesg" } else { "console" },
@@ -10408,11 +8866,9 @@ pub fn read_record() -> alloc::vec::Vec<u8> {
     // SAFETY: reserved, mapped, owned by this boot since early_scan
     // cleared the magic; no writer exists until the next panic (and a
     // next panic would overwrite with a full new header first).
-    let hdr = unsafe { &*(virt as *const RecordHeader) };
+    let hdr = crate::debug::r#unsafe::record_header_at(virt);
     let length = (hdr.length as usize).min(PSTORE_RAM_SIZE - size_of::<RecordHeader>());
-    let bytes = unsafe {
-        core::slice::from_raw_parts(virt.add(size_of::<RecordHeader>()), length)
-    };
+    let bytes = crate::debug::r#unsafe::record_payload(virt, length);
     bytes.to_vec()
 }
 
@@ -10481,58 +8937,7 @@ fn write_record(kind: u32, hw: &HeadWriter) {
     // else touches it (the other CPUs are already stopped or on their
     // way; a racing capture on another CPU at worst interleaves bytes —
     // the record is a forensic artifact, not a protocol).
-    unsafe {
-        let budget = PSTORE_RAM_SIZE - size_of::<RecordHeader>();
-        let limit = virt.addr() + size_of::<RecordHeader>() + budget;
-        let mut dst = virt.add(size_of::<RecordHeader>());
-        let mut write = |src: &[u8]| {
-            let take = src.len().min(limit - dst.addr());
-            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, take);
-            dst = dst.add(take);
-        };
-
-        // 1. The identity head.
-        write(&hw.buf[..hw.len]);
-
-        // 2. The staged report — the static sink, copied ring-wise
-        // (atomic loads; every byte ever sunk sits at SINK[s %
-        // SINK_SIZE], the newest SINK_SIZE bytes are kept, oldest-first).
-        write(b"--- report (as printed) ---\n");
-        let at = SINK_AT.load(Ordering::Relaxed);
-        let first = at.saturating_sub(SINK_SIZE);
-        for s in first..at {
-            let b = SINK[s % SINK_SIZE].0.load(Ordering::Relaxed);
-            if dst.addr() >= limit {
-                break;
-            }
-            core::ptr::write_volatile(dst, b);
-            dst = dst.add(1);
-        }
-
-        // 3. The console tail, formatted straight into the region's
-        // remaining space (try-lock inside — a stopped CPU may hold the
-        // printk ring; the panic path must never wait).
-        if dst.addr() < limit {
-            let tail = core::slice::from_raw_parts_mut(dst, limit - dst.addr());
-            let n = crate::printk::ring_tail_into(tail);
-            dst = dst.add(n);
-        }
-        let length = dst.addr() - virt.addr() - size_of::<RecordHeader>();
-
-        // Header last-word-first: everything but the magic now, magic
-        // LAST — a crash inside this function must not leave a record
-        // the next boot would trust halfway.
-        let hdr = virt as *mut RecordHeader;
-        core::ptr::write_volatile(&mut (*hdr).version, VERSION);
-        core::ptr::write_volatile(
-            &mut (*hdr).jiffies,
-            crate::timer::get_jiffies() as u32,
-        );
-        core::ptr::write_volatile(&mut (*hdr).kind, kind);
-        core::ptr::write_volatile(&mut (*hdr)._reserved, [0; 2]);
-        core::ptr::write_volatile(&mut (*hdr).length, length as u32);
-        core::ptr::write_volatile(&mut (*hdr).magic, MAGIC);
-    }
+    crate::debug::r#unsafe::pstore_commit(kind, hw, virt);
 }
 
 
@@ -10636,7 +9041,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     // Latch first: recursion inside the report parks here instead of
     // nesting forever.
     if OOPS_ENTERED.swap(true, Ordering::Relaxed) {
-        let mut put = |b: u8| unsafe { crate::console::putchar_no_lock(b) };
+        let mut put = |b: u8| crate::debug::r#unsafe::putchar_no_lock_raw(b);
         for &b in b"trap: oops re-entered during report; halting\n" {
             put(b);
         }
@@ -12644,7 +11049,7 @@ static LEAKORIGIN_TABLE: [LoSlot; LEAKORIGIN_SLOTS] = {
 };
 
 #[inline]
-fn leakorigin_slot_of(task: *mut crate::process::types::Task) -> &'static LoSlot {
+pub(crate) fn leakorigin_slot_of(task: *mut crate::process::types::Task) -> &'static LoSlot {
     let a = task as usize;
     // preempt-hunt: XOR-of-shifts mixes alias — for every shift set there
     // are address strides (observed live: 0x1000000, then 0x2080000)
@@ -12688,12 +11093,7 @@ pub fn note_acquire(
         let mis = if (cpu as usize) < crate::config::MAX_CPUS {
             // Volatile: the sched slot is written by its owning CPU under
             // the GRQ; this is a racy diagnostic read.
-            let slot_task = unsafe {
-                core::ptr::read_volatile(
-                    &crate::sched::hotpath::cpu_state(cpu as usize).current
-                        as *const *mut crate::process::types::Task
-                ) as usize
-            };
+            let slot_task = crate::debug::r#unsafe::sched_slot_current(cpu as usize);
             if slot_task != task as usize {
                 slot.oslot.store(slot_task, Ordering::Release);
                 // ph5/ph5b verdict (2/2 boots wedged vs ph3's clean 1200s
@@ -12701,7 +11101,7 @@ pub fn note_acquire(
                 // LIVE print from inside the acquire path is wedged-boot
                 // correlated — record-only now. The data still surfaces
                 // at adjudication time (oslot= on the ORIGIN lines).
-                report_acquire_divergent(task, loc, cpu, slot_task);
+                crate::debug::r#unsafe::report_acquire_divergent(task, loc, cpu, slot_task);
                 1
             } else {
                 0
@@ -12733,8 +11133,8 @@ pub fn note_acquire(
         // pid=0, budget gone before the runtime window). Budgeted
         // direct console (R34): the acquire path may run with IRQs on
         // and locks held.
-        if !unsafe { (*task).state().is_dead() }
-            && unsafe { (*task).pid() } != 0
+        if !crate::debug::r#unsafe::t_state_dead(task)
+            && crate::debug::r#unsafe::t_pid(task) != 0
             && !crate::sched::hotpath::pick_owner_live(task)
         {
             static PB_N: AtomicU32 = AtomicU32::new(120);
@@ -12780,7 +11180,7 @@ pub fn note_acquire(
                 for &c in b" pid=" {
                     putchar(c);
                 }
-                pdec(unsafe { (*task).pid() } as u64);
+                pdec(crate::debug::r#unsafe::t_pid(task) as u64);
                 for &c in b" cpu=" {
                     putchar(c);
                 }
@@ -12788,7 +11188,7 @@ pub fn note_acquire(
                 for &c in b" state=0x" {
                     putchar(c);
                 }
-                phex(unsafe { (*task).state().bits() } as usize);
+                phex(crate::debug::r#unsafe::t_state_bits(task) as usize);
                 // SAFETY: stored from a &'static Location above.
                 let site = loc;
                 for &c in b" site=" {
@@ -12822,304 +11222,7 @@ pub fn note_acquire(
 /// print rides only on boots that ask for it, on a tree where kpreempt
 /// defaults OFF.
 
-#[allow(unsafe_code)]
-fn report_acquire_divergent(
-    task: *mut crate::process::types::Task,
-    loc: &'static Location,
-    cpu: u32,
-    slot_task: usize,
-) {
-    if !crate::trace::EVENT_ACQDIV.armed() {
-        let _ = (task, loc, cpu, slot_task);
-        return;
-    }
-    static N: AtomicU32 = AtomicU32::new(60);
-    let b = N.load(Ordering::Acquire);
-    if b == 0 {
-        return;
-    }
-    if N.compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
-        return;
-    }
-    use crate::console::uart_putc_raw as putchar;
-    // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
-    // current on this CPU (pinned by execution), `slot_task` was this
-    // CPU's slot content moments before (same discipline as the s14
-    // IRQ-PAIR report).
-    unsafe {
-        let pid = (*task).pid();
-        let pc = (*task).preempt_count();
-        let slot_pid = if slot_task >= 0x80000000 {
-            (*(slot_task as *mut crate::process::types::Task)).pid()
-        } else {
-            0
-        };
-        for &c in b"\nACQUIRE-DIVERGENT pid=" {
-            putchar(c);
-        }
-        let mut v = pid as u64;
-        let mut buf = [0u8; 12];
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        for &c in b" pc=0x" {
-            putchar(c);
-        }
-        let mut x = pc as u32 as u64;
-        for sh in (0..8).rev() {
-            let d = ((x >> (sh * 4)) & 0xF) as u8;
-            putchar(if d < 10 { b'0' + d } else { b'a' + d - 10 });
-        }
-        for &c in b" cpu=" {
-            putchar(c);
-        }
-        let mut v = cpu as u64;
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        for &c in b" site=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        let mut v = loc.line() as u64;
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        for &c in b" slotpid=" {
-            putchar(c);
-        }
-        let mut v = slot_pid as u64;
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        putchar(b'\n');
-    }
-}
 
-/// Outermost base release (base field 1->0): clears the leak-origin
-/// record — that acquire paired. Called from `Task::sub_preempt_count_at`
-/// / `sub_preempt_count2_at` when val == PREEMPT_OFFSET and the base
-/// field transitions 1->0.
-///
-/// Pair-split face: if the recorded outermost acquire names a DIFFERENT
-/// task than the releaser, the acquire's 1->0 never ran on its own task
-/// — either a slot collision (two tasks hashing to one slot; the report
-/// carries both pointers so collisions are identifiable) or a genuine
-/// cross-task booking split. Budgeted; the flag is evidence, not proof.
-#[inline]
-pub fn note_release(task: *mut crate::process::types::Task) {
-    if !crate::trace::EVENT_LEAKHUNT.armed() {
-        return;
-    }
-    let slot = leakorigin_slot_of(task);
-    let ot = slot.otask.load(Ordering::Acquire);
-    if ot == 0 {
-        return;
-    }
-    if ot == task as usize {
-        slot.otask.store(0, Ordering::Release);
-        return;
-    }
-    // Split: budgeted direct console (may fire from IRQ-laden contexts).
-    static SPLIT_N: AtomicU32 = AtomicU32::new(40);
-    let b = SPLIT_N.load(Ordering::Acquire);
-    if b == 0 {
-        return;
-    }
-    if SPLIT_N
-        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    use crate::console::uart_putc_raw as putchar;
-    fn ph(v: usize) {
-        use crate::console::uart_putc_raw as putchar;
-        for sh in (0..16).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
-    for &c in b"\nACQUIRE-PAIR-SPLIT releaser=0x" {
-        putchar(c);
-    }
-    ph(task as usize);
-    for &c in b" recorded=0x" {
-        putchar(c);
-    }
-    ph(ot);
-    // The recorded acquire's site + cpu identify where the orphan 0->1
-    // came from.
-    let site = slot.osite.load(Ordering::Acquire) as *const Location;
-    if !site.is_null() {
-        // SAFETY: stored from a &'static Location (see note_acquire).
-        let loc = crate::debug::r#unsafe::location_ref(site);
-        for &c in b" osite=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        let mut v = loc.line() as u64;
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        while v > 0 {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-    }
-    for &c in b" ocpu=" {
-        putchar(c);
-    }
-    let mut v = slot.ocpu.load(Ordering::Acquire) as u64;
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        putchar(b'0');
-    }
-    while v > 0 {
-        buf[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-    }
-    while n > 0 {
-        n -= 1;
-        putchar(buf[n]);
-    }
-    // stress-port r8 discriminators: the RECORDED task's live state at
-    // print time. The r7 forker boot saturated this print's 40-line
-    // budget with osite=sched.rs:2641 pairs (including symmetric
-    // swapped releaser/recorded pairs across cpu0/cpu1) — the shape of
-    // two live tasks sharing one 2048-entry hash slot under fork churn,
-    // their __schedule GRQ acquire/release windows (~µs) interleaving
-    // across CPUs, each release observing the other's still-armed
-    // o-record. That cross-talk shows the recorded task OWNED (slot- or
-    // SWITCHING_OUT-named) with its base count in flight or already 0;
-    // a GENUINE cross-task booking (the lying-slot family) shows the
-    // recorded task owned by nothing with base stuck at 1 (its release
-    // truly never ran). rpid/rpc/rown let every line self-adjudicate.
-    // SAFETY: diagnostic reads of stable Task fields on a pointer that
-    // was executing on `ocpu` moments ago; same discipline as
-    // note_acquire's sched-slot read.
-    if ot >= 0x80000000 {
-        unsafe {
-            let rt = ot as *mut crate::process::types::Task;
-            for &c in b" rpid=" {
-                putchar(c);
-            }
-            let mut v = (*rt).pid() as u64;
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-            for &c in b" rpc=" {
-                putchar(c);
-            }
-            let mut v = ((*rt).preempt_count()
-                & crate::interrupt::preempt::PREEMPT_MASK) as u64;
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-            // rown bit 1: some cpu's sched slot names it; bit 2: some
-            // cpu is switching it out right now.
-            let mut rown: u64 = 0;
-            for c in 0..crate::config::MAX_CPUS {
-                if crate::sched::hotpath::cpu_state(c).current == rt {
-                    rown |= 1;
-                }
-            }
-            if crate::sched::hotpath::task_is_mid_switch_out(rt) {
-                rown |= 2;
-            }
-            for &c in b" rown=" {
-                putchar(c);
-            }
-            let mut v = rown;
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-        }
-    }
-    putchar(b'\n');
-}
 
 /// Record a HARDIRQ_OFFSET acquire (last wins; s14 extension — the
 /// stranded-0x10000 face). `loc` is the trap dispatch site when
@@ -13162,12 +11265,7 @@ pub fn note_softirq_acquire(
     slot.scpu.store(cpu, Ordering::Release);
     let mis = if (cpu as usize) < crate::config::MAX_CPUS {
         // Volatile racy diagnostic read (same discipline as note_acquire).
-        let slot_task = unsafe {
-            core::ptr::read_volatile(
-                &crate::sched::hotpath::cpu_state(cpu as usize).current
-                    as *const *mut crate::process::types::Task
-            ) as usize
-        };
+        let slot_task = crate::debug::r#unsafe::sched_slot_current(cpu as usize);
         if slot_task != task as usize { 1 } else { 0 }
     } else {
         2
@@ -13231,7 +11329,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::types::Task)
     for &c in b" pid=" {
         putchar(c);
     }
-    putd(unsafe { (*task).pid() } as u64);
+    putd(crate::debug::r#unsafe::t_pid(task) as u64);
     // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
     let loc = crate::debug::r#unsafe::location_ref(site);
     for &c in b" hsite=" {
@@ -13302,11 +11400,11 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::types::Task)
     for &c in b" pid=" {
         putchar(c);
     }
-    putd(unsafe { (*task).pid() } as u64);
+    putd(crate::debug::r#unsafe::t_pid(task) as u64);
     for &c in b" pc=0x" {
         putchar(c);
     }
-    let pc = unsafe { (*task).preempt_count() } as u32 as u64;
+    let pc = crate::debug::r#unsafe::t_preempt_count(task) as u32 as u64;
     for sh in (0..8).rev() {
         let n = ((pc >> (sh * 4)) & 0xF) as u8;
         putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -13357,7 +11455,7 @@ pub fn check_user_return() {
         return;
     };
     // SAFETY: current() pins a live task; scalar field reads.
-    let pc = unsafe { (*task).preempt_count() };
+    let pc = crate::debug::r#unsafe::t_preempt_count(task);
     if pc == 0 {
         return;
     }
@@ -13418,7 +11516,7 @@ pub fn report_parked_site(task: *mut crate::process::types::Task) {
         if tp == task {
             tpcpu = c as i32;
             // SAFETY: diagnostic field read.
-            tppc = unsafe { (*tp).preempt_count() };
+            tppc = crate::debug::r#unsafe::t_preempt_count(tp);
             break;
         }
     }
@@ -13434,7 +11532,7 @@ pub fn report_parked_site(task: *mut crate::process::types::Task) {
         }
         pd(tppc as u64);
     }
-    emit(b" LEAK-ORIGIN parked", task, unsafe { (*task).preempt_count() });
+    emit(b" LEAK-ORIGIN parked", task, crate::debug::r#unsafe::t_preempt_count(task));
 }
 
 /// Append the recorded site for the tick-side PREEMPT-LEAK incumbent
@@ -13443,7 +11541,7 @@ pub fn report_incumbent_site(task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
-    emit(b"\nLEAK-ORIGIN running", task, unsafe { (*task).preempt_count() });
+    emit(b"\nLEAK-ORIGIN running", task, crate::debug::r#unsafe::t_preempt_count(task));
 }
 
 /// Print the OUTERMOST-acquire record for `task` (the preempt-hunt tap):
@@ -13499,7 +11597,7 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::types::Task) {
     for &c in b" pid=" {
         putchar(c);
     }
-    putd(unsafe { (*task).pid() } as u64);
+    putd(crate::debug::r#unsafe::t_pid(task) as u64);
     let site = slot.osite.load(Ordering::Acquire) as *const Location;
     if !site.is_null() {
         // SAFETY: stored from a &'static Location (see note_acquire).
@@ -13589,7 +11687,7 @@ fn emit(tag: &[u8], task: *mut crate::process::types::Task, pc: i32) {
     for &c in b" pid=" {
         putchar(c);
     }
-    put_i64(unsafe { (*task).pid() } as i64);
+    put_i64(crate::debug::r#unsafe::t_pid(task) as i64);
     for &c in b" pc=" {
         putchar(c);
     }
@@ -13720,10 +11818,10 @@ fn emit(tag: &[u8], task: *mut crate::process::types::Task, pc: i32) {
 // two paths of tasks colliding on a slot, which is cosmetic (bounded
 // print, utf8-checked).
 
-const N: usize = 8;
+pub(crate) const N: usize = 8;
 
 
-static mut PATHSTASH_SLOTS: [Slot; N] = [const {
+pub(crate) static mut PATHSTASH_SLOTS: [Slot; N] = [const {
     Slot {
         tid: AtomicU32::new(0),
         op: AtomicU32::new(0),
@@ -13767,7 +11865,7 @@ pub fn stash_file(op: u32, path: &str) {
     let n = bytes.len().min(CAP);
     // SAFETY: diagnostic write into a static slot; this task is the
     // only writer for its tid slot, publication ordered via tid/len.
-    let s = unsafe { &mut *core::ptr::addr_of_mut!(PATHSTASH_SLOTS[(tid as usize) % N]) };
+    let s = crate::debug::r#unsafe::stash_slot_for(tid);
     s.tid.store(0, Ordering::Release);
     s.buf[..n].copy_from_slice(&bytes[..n]);
     s.op.store(op, Ordering::Release);
@@ -13797,7 +11895,7 @@ pub fn lookup_file(tid: u32) -> Option<(u32, &'static str)> {
     // SAFETY: diagnostic read of the static slot table; the 'static
     // borrow is derived from the static itself and bytes are
     // utf8-checked below.
-    let s: &'static Slot = unsafe { &*core::ptr::addr_of!(PATHSTASH_SLOTS).cast::<Slot>().add(i) };
+    let s: &'static Slot = crate::debug::r#unsafe::stash_slot_at(i);
     if s.tid.load(Ordering::Acquire) != tid {
         return None;
     }
@@ -13917,7 +12015,7 @@ pub fn slowtask_tick() {
     let now = crate::timer::get_jiffies() as u64;
     // SAFETY: single-auditor (heartbeat CAS admits one CPU; the table
     // is only touched from this path).
-    unsafe { audit(now) };
+    audit(now);
 }
 
 /// Collect this round's stuck entries (>= 8 s old), print them.

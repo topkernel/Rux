@@ -93,12 +93,7 @@ from unsafe_census import (  # noqa: E402
     ROOT, mask_comments_and_strings, match_brace, find_body_brace, scan_file)
 
 UNSAFE_RE = re.compile(r"\bunsafe\b")
-# the whole fn DECLARATION head (visibility / unsafe / extern prefixes
-# included) — fn_span_from must accept an unsafe-fn region's keyword, which
-# sits between the decl start and the body brace
-FN_SPAN = re.compile(
-    r"\b(?:pub(?:\([^)]*\))? )?(?:unsafe\s+)?(?:extern\s+\"[^\"]+\"\s+)?fn\s+"
-    r"([A-Za-z_][A-Za-z0-9_]*)")
+FN_SPAN = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
 FN_DECL = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))? )?(?:unsafe\s+)?(?:extern\s+\"C\"\s+)?fn\s+")
 SPEC_DIR = ROOT / "scripts" / "refactor" / "pass3"
@@ -162,12 +157,10 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and (masked[j:j + 5] in ("impl ", "trait", "exter")
-                                  or masked[j:j + 3] == "fn "):
-            # item keyword shapes: `unsafe impl X`, `unsafe fn f(..)`,
-            # `unsafe trait T`, `unsafe extern "C" {` — prefix-matched, the
-            # body brace found from the keyword on (the sched pilot only
-            # exercised the `impl ` arm; mm's unsafe-fn regions need `fn `)
+        elif j < len(masked) and (masked[j:j + 5] == "impl "
+                                  or masked[j:j + 3] == "fn "
+                                  or masked[j:j + 6] == "trait "
+                                  or masked[j:j + 7] == "extern"):
             brace = find_body_brace(masked, j)
             if brace >= 0:
                 hits.append((m.start(), match_brace(masked, brace) + 1))
@@ -179,16 +172,25 @@ def region_char_span(text, masked, reg, kind):
 
 def fn_span_from(text, masked, inner_char):
     """Line span (first, last inclusive) of the innermost fn containing
-    inner_char, doc comment and attributes included. `inner_char` may sit
-    INSIDE the fn body (a block region) or inside its DECLARATION (an
-    unsafe-fn region — the `unsafe` keyword precedes the body brace)."""
+    inner_char, doc comment and attributes included."""
+    # an `unsafe fn` region's span starts at the KEYWORD, one token
+    # before the `fn` FN_SPAN matches — advance to the fn's own body so
+    # the enclosing-fn scan (which requires brace < inner_char) sees the
+    # fn itself, not just its parent
+    if masked[inner_char:inner_char + 6] == "unsafe":
+        j = inner_char + 6
+        while j < len(masked) and masked[j] in " \t":
+            j += 1
+        brace = find_body_brace(masked, j)
+        if brace >= 0:
+            inner_char = brace + 1
     best = None
     for m in FN_SPAN.finditer(masked):
         brace = find_body_brace(masked, m.start())
-        if brace < 0:
+        if brace < 0 or brace >= inner_char:
             continue
         end = match_brace(masked, brace)
-        if not (m.start() <= inner_char <= end):
+        if end < inner_char:
             continue
         if best is None or m.start() > best[0]:
             best = (m.start(), end)
@@ -278,12 +280,20 @@ def apply_spec(spec, dry):
                     section_order.append((d["section"], spec["moves"].index(d), fn_text))
                     fn_lines = fn_text.rstrip("\n").split("\n")
                 if inline:
-                    cut_line = lines[first_line]
-                    call = cut_line[:span[0] - ls] + d["call"] + cut_line[span[1] - ls:]
-                    rec["cut_lines"] = [cut_line]
+                    # a within-line replacement: the call goes where the
+                    # block stood, between the first line's prefix and the
+                    # last line's suffix — the block may span many lines
+                    # (`let x = unsafe {` ... `};`), so take the prefix and
+                    # suffix from their OWN lines and collapse the whole
+                    # span into the one call line
+                    prefix = lines[first_line][:span[0] - ls]
+                    ls_last = line_start(text, span[1] - 1)
+                    suffix = text[span[1]:line_end(text, span[1] - 1)]
+                    call = prefix + d["call"] + suffix
+                    rec["cut_lines"] = lines[first_line:last_line + 1]
                     rec["inserted_lines"] = [call]
                     rec["whole_line"] = False
-                    lines[first_line] = call
+                    lines[first_line:last_line + 1] = [call]
                 else:
                     cut = "\n".join(lines[first_line:last_line + 1])
                     call_lines = d["call"].split("\n")
@@ -359,17 +369,8 @@ def apply_spec(spec, dry):
                   f"{m.get('section')} ({m.get('inv')})")
         return 0
 
-    # call-site rewrites + general source edits (each must hit exactly once).
-    # Edits targeting the target unsafe.rs ITSELF (path fixes inside the
-    # moved bodies) run AFTER the section insert below: the moved text is
-    # only in unsafe.rs once apply has appended it (mm's moved fns keep
-    # verbatim bodies that name the source module's items).
-    unsafe_rs_rel = str(unsafe_rs.relative_to(ROOT))
-    late_edits = [e for e in spec.get("source_edits", [])
-                  if e["file"] == unsafe_rs_rel]
-    early_edits = file_edits + [e for e in spec.get("source_edits", [])
-                                if e["file"] != unsafe_rs_rel]
-    for e in early_edits:
+    # call-site rewrites + general source edits (each must hit exactly once)
+    for e in file_edits + list(spec.get("source_edits", [])):
         p = ROOT / e["file"]
         t = p.read_text()
         n = t.count(e["find"])
@@ -391,17 +392,6 @@ def apply_spec(spec, dry):
         for it in items:
             rs += it + "\n"
     unsafe_rs.write_text(rs)
-
-    # late edits: post-insert fixes inside unsafe.rs itself (each must hit
-    # exactly once in the appended text)
-    for e in late_edits:
-        p = ROOT / e["file"]
-        t = p.read_text()
-        n = t.count(e["find"])
-        if n != 1:
-            raise SystemExit(f"pass3: source edit hits {n} times (want 1) in "
-                             f"{e['file']}: {e['find'][:70]!r} ({e.get('why')})")
-        p.write_text(t.replace(e["find"], e["replace"]))
 
     for rel in spec.get("forbid", []):
         p = ROOT / rel
@@ -495,11 +485,15 @@ def append_doc(item, note):
 def rewrite_vis(item, vis):
     hits = 0
     out = []
+    EXISTING_VIS = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)")
     for l in item.split("\n"):
         if not hits and FN_DECL.match(l):
             hits += 1
             indent = l[:len(l) - len(l.lstrip())]
-            l = indent + vis + " " + l.strip()
+            # strip an existing visibility before applying the override —
+            # the spec's `vis` is the FINAL visibility, not a prefix
+            # (an already-`pub` fn with vis "pub" would spell `pub pub`)
+            l = indent + vis + " " + EXISTING_VIS.sub("", l.strip())
         out.append(l)
     return "\n".join(out), hits
 
@@ -565,9 +559,13 @@ def verify(sub, base_rev, manifest_path):
     sub_dir = str(Path(files[0]).parent)
     dirpath = ROOT / sub_dir
 
-    rels = set()
-    for p in sorted(dirpath.rglob("*.rs")):
-        rels.add(str(p.relative_to(ROOT)))
+    # tracked source only: build.rs writes gitignored placeholders
+    # (ksyms_generated.rs) INSIDE subsystem dirs; they are build
+    # artifacts, not source, and must not enter the audited multiset
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", sub_dir],
+        capture_output=True, text=True).stdout.split()
+    rels = set(tracked)
     rels |= set(files)
     base, cur = collections.Counter(), collections.Counter()
     for rel in sorted(rels):
@@ -591,7 +589,8 @@ def verify(sub, base_rev, manifest_path):
     for e in man["file_edits"]:
         # find/replace are exact-substring texts and may span several lines
         # (an insertion in place); the audit's currency is single lines, so
-        # split both sides (mm's path-stability re-exports do this)
+        # split both sides (mm's path-stability re-exports, drivers' const
+        # rewrite do this)
         for l in e["find"].split("\n"):
             claimed_removed[l.rstrip()] += 1
         for l in e["replace"].split("\n"):
@@ -708,12 +707,6 @@ def selftest():
                  "kind": "unsafe-impl", "ordinal": 0, "base_id": "x4", "inv": "INV-X-2",
                  "section": "proofs", "inv_note": "INV-X-2: the fixture Send proof."},
             ],
-            "source_edits": [
-                {"file": f"{src}/unsafe.rs",
-                 "find": "pub(crate) fn reader(p: *const u32) -> u32",
-                 "replace": "/// INV-X-1: moved-body path fix (late edit probe).\npub(crate) fn reader(p: *const u32) -> u32",
-                 "why": "selftest: source edits on unsafe.rs itself run after the insert"},
-            ],
         }
         apply_spec(spec, dry=False)
         hp = (tmp / src / "hotpath.rs").read_text()
@@ -728,7 +721,6 @@ def selftest():
             "call sites rewritten": "r#unsafe::reader(p);" in hp and
                                     "r#unsafe::read_once(p);" in hp,
             "wrapper body verbatim": "unsafe { core::ptr::read_volatile(p) }" in rs,
-            "late unsafe.rs source edit applied": "late edit probe" in rs,
         }
         bad = [k for k, v in checks.items() if not v]
         for k, v in checks.items():
