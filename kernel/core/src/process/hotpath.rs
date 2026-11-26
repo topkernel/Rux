@@ -62,7 +62,7 @@ use super::types::KstackBlocks;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
-use crate::mm::pagemap::AddressSpace;
+use crate::mm::types::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SigInfo, SigPending, Signal, SignalStruct};
 use crate::config::TIME_SLICE_TICKS as DEFAULT_TIME_SLICE;
@@ -1204,11 +1204,11 @@ impl Task {
     /// same 250ms hold: sizes are the ArcInner block (2 refcount
     /// words) + the struct.
     fn register_slot_deferred_sizes() {
-        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
-        crate::mm::deferred_free::register_deferred_size(
+        crate::mm::hotpath::register_deferred_size(core::mem::size_of::<Task>());
+        crate::mm::hotpath::register_deferred_size(
             2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
         );
-        crate::mm::deferred_free::register_deferred_size(
+        crate::mm::hotpath::register_deferred_size(
             2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
         );
     }
@@ -3411,7 +3411,7 @@ impl Task {
             {
                 use crate::console::putchar;
                 let addr = stack_bottom as usize;
-                let (hs, he) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+                let (hs, he) = crate::mm::hotpath::GLOBAL_ALLOCATOR.heap_bounds();
                 let bogus = addr & 0xF != 0
                     || addr + KERNEL_STACK_SIZE > he
                     || addr < hs;
@@ -6240,7 +6240,7 @@ pub fn do_exit(exit_code: i32) -> ! {
     // SAFETY: current is the raw pointer to the calling task, valid
     // because we are it and do_exit never returns.
     let dying_pid = cur.pid();
-    crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
+    crate::mm::hotpath::reclaim_gate_exit_release(dying_pid);
 
     // ub-gfx (greeter-chain forensics): name the death of every gdm
     // ladder / accounts-daemon / Xorg process with its exit code, so the
@@ -7038,7 +7038,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 let mm_rss = cur.address_space()
                     .map(|mm| mm.rss())
                     .unwrap_or(0);
-                mm_rss * (crate::mm::page::PAGE_SIZE / 1024) as u64
+                mm_rss * (crate::mm::types::PAGE_SIZE / 1024) as u64
             };
             cur.ext.exit_maxrss_kb.store(rss_kb, Relaxed);
             if is_leader {

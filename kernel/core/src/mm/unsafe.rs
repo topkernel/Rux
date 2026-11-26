@@ -26,8 +26,8 @@
 //!   entry, an allocation this thread owns, or a walk under the PTE
 //!   lock). `None` mirrors the null-check the call sites performed.
 
-use super::page_desc::Page;
-use super::pglist::PglistData;
+use super::types::Page;
+use super::types::PglistData;
 
 /// The first (and only, on UMA) online node, mutably
 /// (INV-MM-1: caller holds the node's `lru_lock` or is in the
@@ -37,14 +37,14 @@ use super::pglist::PglistData;
 pub fn first_node_mut() -> Option<&'static mut PglistData> {
     // SAFETY: INV-MM-1 — the lock/boot exclusivity the unsafe fn's
     // contract names, proven by every caller of this edge.
-    unsafe { super::pglist::first_online_node_mut() }
+    unsafe { super::hotpath::first_online_node_mut() }
 }
 
 /// The first (and only, on UMA) online node, shared (INV-MM-1 shared
 /// arm: read-only statistics/census walks).
 #[inline]
 pub fn first_node() -> Option<&'static PglistData> {
-    super::pglist::first_online_node()
+    super::hotpath::first_online_node()
 }
 
 /// The page descriptor of `pfn`, mutably (INV-MM-2: the PFN comes from
@@ -52,7 +52,7 @@ pub fn first_node() -> Option<&'static PglistData> {
 /// descriptors are machine-lifetime statics).
 #[inline]
 pub fn page_of(pfn: usize) -> Option<&'static mut Page> {
-    let p = super::page_desc::pfn_to_page_mut(pfn);
+    let p = super::hotpath::pfn_to_page_mut(pfn);
     if p.is_null() {
         None
     } else {
@@ -66,7 +66,7 @@ pub fn page_of(pfn: usize) -> Option<&'static mut Page> {
 /// read-only flag/lru-field probes).
 #[inline]
 pub fn page_ref_of(pfn: usize) -> Option<&'static Page> {
-    let p = super::page_desc::pfn_to_page_mut(pfn) as *const Page;
+    let p = super::hotpath::pfn_to_page_mut(pfn) as *const Page;
     if p.is_null() {
         None
     } else {
@@ -86,19 +86,19 @@ pub fn page_ref_of(pfn: usize) -> Option<&'static Page> {
 /// early boot the data is effectively immutable; before that, the caller
 /// runs in the single-threaded boot window).
 #[inline]
-pub fn memblock_ref() -> &'static super::memblock::MemBlock {
+pub fn memblock_ref() -> &'static super::types::MemBlock {
     // SAFETY: INV-MM-3 — MEMBLOCK is initialized (memblock_init ran)
     // before any call reaches here; post-boot it is never mutated.
-    unsafe { &*super::memblock::memblock_raw() }
+    unsafe { &*super::hotpath::memblock_raw() }
 }
 
 /// Mutable borrow of the memblock (INV-MM-3 exclusive arm: early boot
 /// only, before the scheduler starts — no concurrent access exists).
 #[inline]
-pub fn memblock_mut() -> &'static mut super::memblock::MemBlock {
+pub fn memblock_mut() -> &'static mut super::types::MemBlock {
     // SAFETY: INV-MM-3 — single-threaded boot window; the caller is the
     // boot path that owns MEMBLOCK exclusively.
-    unsafe { &mut *super::memblock::memblock_raw() }
+    unsafe { &mut *super::hotpath::memblock_raw() }
 }
 
 /// Walk the CURRENT stack's frame-pointer chain into `frames` (INV-MM-2
@@ -138,10 +138,10 @@ pub fn slab_write_freelist_link(obj_ptr: *mut u8, v: u16) {
 /// The SlabHeader of a slab page (INV-MM-4: addr is page-aligned inside
 /// the slab region; the caller holds the cache lock).
 #[inline]
-pub fn slab_header_mut(addr: usize) -> &'static mut super::slab::SlabHeader {
+pub fn slab_header_mut(addr: usize) -> &'static mut super::types::SlabHeader {
     // SAFETY: INV-MM-4 — page-aligned in-region address; exclusivity
     // via the cache lock.
-    unsafe { &mut *(addr as *mut super::slab::SlabHeader) }
+    unsafe { &mut *(addr as *mut super::types::SlabHeader) }
 }
 
 /// The cache_idx byte of a slab header (INV-MM-4 shared arm: written by
@@ -149,7 +149,7 @@ pub fn slab_header_mut(addr: usize) -> &'static mut super::slab::SlabHeader {
 #[inline]
 pub fn slab_header_cache_idx(addr: usize) -> u8 {
     // SAFETY: INV-MM-4 — in-region page-aligned header read.
-    unsafe { (*(addr as *const super::slab::SlabHeader)).cache_idx }
+    unsafe { (*(addr as *const super::types::SlabHeader)).cache_idx }
 }
 
 /// One-time boot write of the SlabPages cell (INV-MM-4 init arm: called
@@ -159,16 +159,16 @@ pub fn slab_pages_init(base_addr: usize, max_pages: usize) {
     // SAFETY: INV-MM-4 init arm — the single-threaded boot window;
     // the cell is never written again.
     unsafe {
-        *super::slab::slab_pages_cell().get() = super::slab::SlabPages::new(base_addr, max_pages);
+        *super::hotpath::slab_pages_cell().get() = super::types::SlabPages::new(base_addr, max_pages);
     }
 }
 
 /// Shared view of the initialized SlabPages (INV-MM-4 shared arm: after
 /// init the cell is only read).
 #[inline]
-pub fn slab_pages() -> &'static super::slab::SlabPages {
+pub fn slab_pages() -> &'static super::types::SlabPages {
     // SAFETY: INV-MM-4 — post-init read-only access.
-    unsafe { &*super::slab::slab_pages_cell().get() }
+    unsafe { &*super::hotpath::slab_pages_cell().get() }
 }
 
 /// Zero a kmalloc'd allocation for kzalloc (INV-MM-4 owned arm: ptr and
@@ -184,11 +184,11 @@ pub fn slab_zero(ptr: *mut u8, size: usize) {
 // SAFETY: SlabPages' only concurrently-modified field is an AtomicUsize;
 // the rest are immutable after init; get_header_mut() addresses are
 // non-overlapping page-aligned regions.
-unsafe impl Sync for super::slab::SlabPages {}
+unsafe impl Sync for super::types::SlabPages {}
 
 // SAFETY: all SlabAllocator fields are individually Sync (per-cache
 // Spinlocks, the SlabPages pair above, an AtomicUsize gate).
-unsafe impl Sync for super::slab::SlabAllocator {}
+unsafe impl Sync for super::types::SlabAllocator {}
 
 // ---------------------------------------------------------------------------
 // INV-MM-5: the per-CPU page-cache rows. `PcpRow` is an UnsafeCell whose
@@ -200,7 +200,7 @@ unsafe impl Sync for super::slab::SlabAllocator {}
 
 // SAFETY: cross-CPU access never forms a reference (peeks only);
 // mutable access is confined to the owning CPU's irq-off window.
-unsafe impl Sync for super::pcp::PcpRow {}
+unsafe impl Sync for super::types::PcpRow {}
 
 /// Run `f` with this CPU's row, mutably (INV-MM-5 exclusive arm: the
 /// caller disabled interrupts on THIS CPU — the only CPU that may touch
@@ -208,11 +208,11 @@ unsafe impl Sync for super::pcp::PcpRow {}
 #[inline]
 pub fn pcp_row_exclusive<R>(
     c: usize,
-    f: impl FnOnce(&mut super::pcp::PcpPageset) -> R,
+    f: impl FnOnce(&mut super::types::PcpPageset) -> R,
 ) -> R {
     // SAFETY: INV-MM-5 — per-CPU row, IRQs off on this CPU (the
     // with_row caller's discipline).
-    let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
+    let row = unsafe { &*core::ptr::addr_of!(super::hotpath::PCP_ROWS[c]) }.0.get();
     f(unsafe { &mut *row })
 }
 
@@ -221,17 +221,17 @@ pub fn pcp_row_exclusive<R>(
 #[inline]
 pub fn pcp_row_count_peek(c: usize) -> usize {
     // SAFETY: INV-MM-5 — raw usize load through the row pointer.
-    let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
+    let row = unsafe { &*core::ptr::addr_of!(super::hotpath::PCP_ROWS[c]) }.0.get();
     unsafe { (*row).count }
 }
 
 /// Peek a shared view of row `c` for forensic scans (INV-MM-5 peek
 /// arm: read-only walk of count/list; racy by design).
 #[inline]
-pub fn pcp_row_ref_peek(c: usize) -> &'static super::pcp::PcpPageset {
+pub fn pcp_row_ref_peek(c: usize) -> &'static super::types::PcpPageset {
     // SAFETY: INV-MM-5 — read-only borrow for the scan body; no
     /// reference escapes the caller.
-    let row = unsafe { &*core::ptr::addr_of!(super::pcp::PCP_ROWS[c]) }.0.get();
+    let row = unsafe { &*core::ptr::addr_of!(super::hotpath::PCP_ROWS[c]) }.0.get();
     unsafe { &*row }
 }
 
@@ -266,14 +266,14 @@ pub fn copy_kva_from(dst: &mut [u8], src: *const u8) {
 pub fn page_slice_mut(virt_addr: usize) -> &'static mut [u8] {
     // SAFETY: INV-MM-7 — page-aligned live frame; PAGE_SIZE length
     // matches the buddy allocation exactly.
-    unsafe { core::slice::from_raw_parts_mut(virt_addr as *mut u8, crate::mm::page::PAGE_SIZE) }
+    unsafe { core::slice::from_raw_parts_mut(virt_addr as *mut u8, crate::mm::types::PAGE_SIZE) }
 }
 
 /// The shared twin of [`page_slice_mut`] (INV-MM-7 page-slice arm).
 #[inline]
 pub fn page_slice(virt_addr: usize) -> &'static [u8] {
     // SAFETY: INV-MM-7 — as page_slice_mut, shared.
-    unsafe { core::slice::from_raw_parts(virt_addr as *const u8, crate::mm::page::PAGE_SIZE) }
+    unsafe { core::slice::from_raw_parts(virt_addr as *const u8, crate::mm::types::PAGE_SIZE) }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,10 +285,10 @@ pub fn page_slice(virt_addr: usize) -> &'static [u8] {
 /// The deferred-free pool ring, mutably (INV-MM-8: caller holds
 /// POOL_LOCK).
 #[inline]
-pub fn defer_pool_mut() -> &'static mut [super::deferred_free::Entry; super::deferred_free::POOL_CAP] {
+pub fn defer_pool_mut() -> &'static mut [super::types::Entry; super::hotpath::POOL_CAP] {
     // SAFETY: INV-MM-8 — the lock is held; the static-mut ring has no
     // other accessor.
-    unsafe { &mut *core::ptr::addr_of_mut!(super::deferred_free::POOL) }
+    unsafe { &mut *core::ptr::addr_of_mut!(super::hotpath::POOL) }
 }
 
 /// Route one drained entry's dealloc by region (INV-MM-8 drain arm:
@@ -297,13 +297,13 @@ pub fn defer_pool_mut() -> &'static mut [super::deferred_free::Entry; super::def
 /// entry cannot be re-deferred).
 #[inline]
 pub fn defer_dealloc(ptr: usize, layout: core::alloc::Layout) {
-    let in_slab = crate::mm::slab::slab_region()
+    let in_slab = crate::mm::hotpath::slab_region()
         .map(|(s, e)| ptr >= s && ptr < e)
         .unwrap_or(false);
     if in_slab {
-        crate::mm::kfree(ptr as *mut u8);
+        crate::mm::hotpath::kfree(ptr as *mut u8);
     } else {
-        crate::mm::buddy_allocator::dealloc_untracked_pub(ptr as *mut u8, layout);
+        crate::mm::hotpath::dealloc_untracked_pub(ptr as *mut u8, layout);
     }
 }
 
@@ -316,18 +316,18 @@ pub fn defer_dealloc(ptr: usize, layout: core::alloc::Layout) {
 
 /// The vmemmap stats static, shared (INV-MM-9: post-init read-only).
 #[inline]
-pub fn vmemmap_stats_read() -> super::vmemmap::VmemmapStats {
+pub fn vmemmap_stats_read() -> super::types::VmemmapStats {
     // SAFETY: INV-MM-9 — initialized before any call; Copy plain read.
-    unsafe { super::vmemmap::VMEMMAP_STATS }
+    unsafe { super::hotpath::VMEMMAP_STATS }
 }
 
 /// The vmemmap stats static, mutable (INV-MM-9 init arm: the
 /// VMEMMAP_INIT-guarded single write).
 #[inline]
-pub fn vmemmap_stats_write(v: super::vmemmap::VmemmapStats) {
+pub fn vmemmap_stats_write(v: super::types::VmemmapStats) {
     // SAFETY: INV-MM-9 — init window; no concurrent readers until
     /// init_vmemmap() returns.
-    unsafe { super::vmemmap::VMEMMAP_STATS = v }
+    unsafe { super::hotpath::VMEMMAP_STATS = v }
 }
 
 /// Zero the freshly reserved vmemmap region (INV-MM-9 init arm:
@@ -377,8 +377,8 @@ pub fn switch_address_space(root_ppn: u64, asid: u16) {
 // SAFETY: MmStruct's shared state is atomics + Spinlocks; the raw pgd
 // root crosses threads only under the Arc-pin discipline (last-Arc
 // teardown drains readers before Drop).
-unsafe impl Send for super::mm_struct::MmStruct {}
-unsafe impl Sync for super::mm_struct::MmStruct {}
+unsafe impl Send for super::types::MmStruct {}
+unsafe impl Sync for super::types::MmStruct {}
 
 /// Copy one page's contents between two frames' linear-map aliases
 /// (the compaction mover; INV-MM-2 copy arm: src pinned by the
@@ -387,7 +387,7 @@ unsafe impl Sync for super::mm_struct::MmStruct {}
 pub fn compact_copy_page(src_pfn: usize, dst_pfn: usize) {
     // SAFETY: INV-MM-2 — both frames live for the copy; the migration
     // window holds the source and the claim owns the destination.
-    unsafe { super::page_desc::copy_page_contents(src_pfn, dst_pfn) }
+    unsafe { super::hotpath::copy_page_contents(src_pfn, dst_pfn) }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,18 +397,18 @@ pub fn compact_copy_page(src_pfn: usize, dst_pfn: usize) {
 /// Write the kernel layout (INV-MM-11 init arm: the compare_exchange
 /// winner in the single boot pass).
 #[inline]
-pub fn kernel_layout_write(layout: super::layout::KernelMemoryLayout) {
+pub fn kernel_layout_write(layout: super::types::KernelMemoryLayout) {
     // SAFETY: INV-MM-11 — first and only write, guarded by the caller's
     // compare_exchange.
-    unsafe { super::layout::KERNEL_LAYOUT.write(layout); }
+    unsafe { super::hotpath::KERNEL_LAYOUT.write(layout); }
 }
 
 /// The initialized kernel layout (INV-MM-11 shared arm: the init flag's
 /// Acquire load pairs with the write's completion).
 #[inline]
-pub fn kernel_layout_ref() -> &'static super::layout::KernelMemoryLayout {
+pub fn kernel_layout_ref() -> &'static super::types::KernelMemoryLayout {
     // SAFETY: INV-MM-11 — the flag proves initialization completed.
-    unsafe { super::layout::KERNEL_LAYOUT.assume_init_ref() }
+    unsafe { super::hotpath::KERNEL_LAYOUT.assume_init_ref() }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,13 +423,13 @@ pub fn node_data_init() {
     // names.
     // SAFETY: INV-MM-12 — the boot-window store the unsafe fn's
     // contract names.
-    unsafe { super::pglist::NODE_DATA[0] = Some(super::pglist::PglistData::new(0)) }
+    unsafe { super::hotpath::NODE_DATA[0] = Some(super::types::PglistData::new(0)) }
 }
 
 // SAFETY: VmaManager's shared state is the lock-guarded VMA tree plus
 // atomics (start_brk/brk) — every mutable access runs under its lock.
-unsafe impl Send for super::vma::VmaManager {}
-unsafe impl Sync for super::vma::VmaManager {}
+unsafe impl Send for super::types::VmaManager {}
+unsafe impl Sync for super::types::VmaManager {}
 
 /// The caller's return address (x86_64 diagnostic: `movq 8(%rbp)`;
 /// INV-MM-2 diag arm — frame pointers are forced on, this stack frame
@@ -455,20 +455,20 @@ pub fn x86_caller_return_address() -> u64 {
 /// The in-page PageHdr, mutable (INV-MM-13: class lock held or the
 /// fresh page is not yet published).
 #[inline]
-pub fn sa_hdr_mut(page: usize) -> &'static mut super::small_alloc::PageHdr {
+pub fn sa_hdr_mut(page: usize) -> &'static mut super::types::PageHdr {
     // SAFETY: INV-MM-13 — page is a live class page; exclusivity via
     // the class lock / pre-publication.
-    unsafe { &mut *(page as *mut super::small_alloc::PageHdr) }
+    unsafe { &mut *(page as *mut super::types::PageHdr) }
 }
 
 /// The in-page PageHdr, shared (INV-MM-13 probe arm: read-only
 /// magic/class fields of a live heap page).
 #[inline]
-pub fn sa_hdr_ref(page: usize) -> &'static super::small_alloc::PageHdr {
+pub fn sa_hdr_ref(page: usize) -> &'static super::types::PageHdr {
     // SAFETY: INV-MM-13 — the page lies inside the kernel heap direct
     // map (bitmap bit set); plain u8/u16 loads, worst case torn and
     // filtered by the magic check.
-    unsafe { &*(page as *const super::small_alloc::PageHdr) }
+    unsafe { &*(page as *const super::types::PageHdr) }
 }
 
 /// Volatile u16 read (INV-MM-13: freelist link / diagnostic slot probe).

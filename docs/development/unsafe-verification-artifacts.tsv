@@ -208,7 +208,7 @@ f9169cafdaea	kernel/core/src/arch/riscv64/mm/mm_ops.rs	enable	58	asm	INV:F19
 d9ebc24d76f7	kernel/core/src/arch/riscv64/mm/mm_ops.rs	flush_tlb_addr_page	83	asm	INV:F19
 3ad263ea8b80	kernel/core/src/arch/riscv64/mm/mm_ops.rs	map_single_page	96	ptr-ops,addr-arith	INV:F19
 d655bce7f2d0	kernel/core/src/arch/riscv64/mm/mm_ops.rs	map_single_page	104	addr-arith	INV:F19
-ed634e56baec	kernel/core/src/arch/riscv64/mm/mm_ops.rs	map_single_page	116	ptr-ops,addr-arith	INV:F19
+ef50804df4b3	kernel/core/src/arch/riscv64/mm/mm_ops.rs	map_single_page	116	ptr-ops,addr-arith	INV:F19
 2f7dead2d7a9	kernel/core/src/arch/riscv64/mm/mm_ops.rs	unmap_pages	159		INV:F20
 8265f4bf54e9	kernel/core/src/arch/riscv64/mm/mm_ops.rs	unmap_pages	176		INV:F20
 e457dd97c169	kernel/core/src/arch/riscv64/mm/mm_ops.rs	unmap_pages	208		INV:F20
@@ -216,7 +216,7 @@ a6b5950f64fb	kernel/core/src/arch/riscv64/mm/mm_ops.rs	unmap_pages	250	asm	INV:F
 ea12429b0246	kernel/core/src/arch/riscv64/mm/mm_ops.rs	create_user_address_space	560		INV:F20
 2386dc073be4	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_user_memory	926	ptr-ops	INV:INV-RE-ZP
 8bc4a8555d5c	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_user_memory	945		INV:INV-RE-ZP
-ec68274c2cad	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_user_memory	951		INV:INV-RE-ZP
+8b3aa0bd83d5	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_user_memory	951		INV:INV-RE-ZP
 d130087902c0	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_user_memory	961		INV:INV-RE-ZP
 83bafead6d60	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_to_kernel_table	1027	ptr-ops	INV:INV-RE-ZP
 6ed8f33d0bdf	kernel/core/src/arch/riscv64/mm/mm_ops.rs	alloc_and_map_to_user_table	1119	ptr-ops	INV:INV-RE-ZP
@@ -230,13 +230,13 @@ d42d3e8172d5	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	156	pt
 512671d37e85	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	162		INV:F20
 789c4363825e	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	164	ptr-ops	INV:F20
 2c1f5a2d9525	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	181	ptr-ops,addr-arith	INV:F20
-f5a4b20e179c	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	190	addr-arith	INV:F20
+d12af5b67463	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	190	addr-arith	INV:F20
 1bf295ae275a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	268	asm	INV:F20
 e3c2d2f997bc	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	273		INV:F20
 de6a623597b3	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	282	ptr-ops,addr-arith	INV:F20
 dbdcb9cf61c8	kernel/core/src/arch/riscv64/mm/mmu_init.rs	stamp_kernel_tree_boot	339		INV:F20
 8fa336aa1d1e	kernel/core/src/arch/riscv64/mm/mmu_init.rs	free_page_table	381		INV:F20
-a20c1217972a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	take	611		INV:F20
+da3104abc438	kernel/core/src/arch/riscv64/mm/mmu_init.rs	take	611		INV:F20
 540eea1fc3e7	kernel/core/src/arch/riscv64/mm/mmu_init.rs	task_pid_alive	709		INV:F20
 a335b814499a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	965		INV:F20
 350d746d6739	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	966		INV:F20
@@ -529,11 +529,11 @@ cc379f05f53f	kernel/core/src/arch/x86_64/mm/mmu_init.rs	root_static_phys	68	ptr-
 488128dfd38b	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	201		INV:F20
 c29c4122d3ef	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	204		INV:F20
 9de2dfc28b72	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	208	ptr-ops	INV:F20
-62267bc11dc0	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	235	addr-arith	INV:F20
+6a08f6dce572	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	235	addr-arith	INV:F20
 b35f995af70b	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	336	asm	INV:F20
 357f091fe4ec	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	343		INV:F20
 a2a3e0ac2a3c	kernel/core/src/arch/x86_64/mm/mmu_init.rs	free_page_table	475		INV:F20
-410c854c03ba	kernel/core/src/arch/x86_64/mm/mmu_init.rs	take	834		INV:F20
+b38a00004818	kernel/core/src/arch/x86_64/mm/mmu_init.rs	take	834		INV:F20
 ce2a79bdb1b5	kernel/core/src/arch/x86_64/mm/mmu_init.rs	task_pid_alive	928		INV:F20
 3d91f5b6aa9e	kernel/core/src/arch/x86_64/mm/mmu_init.rs	valid_table_link_ppn	1685		INV:F20
 2c292e639e88	kernel/core/src/arch/x86_64/mm/mmu_init.rs	map_page_noflush	1970	raw-construct	INV:F20
@@ -752,8 +752,8 @@ f9ff94da6aba	kernel/core/src/debug/memwatch.rs	<module>	215	volatile,ptr-ops	INV
 11be2ea8a0c8	kernel/core/src/debug/memwatch.rs	note_page_free	727		INV:F3
 363c92baa380	kernel/core/src/debug/memwatch.rs	note_page_free	734		INV:F3
 5f0c8c75fa3e	kernel/core/src/debug/memwatch.rs	kroot_pollution	782		INV:F3
-c09e04089784	kernel/core/src/debug/mmforensics.rs	note_ref	102		INV:F18
-76eae58b1c23	kernel/core/src/debug/mmforensics.rs	capture_frame	333		INV:F18
+f7110b9ee27b	kernel/core/src/debug/mmforensics.rs	note_ref	102		INV:F18
+46518fd55c3d	kernel/core/src/debug/mmforensics.rs	capture_frame	333		INV:F18
 0213c1338954	kernel/core/src/debug/mod.rs	register_debugfs_knobs	280	volatile	INV:F10
 5866f2a04cf8	kernel/core/src/debug/mod.rs	register_debugfs_knobs	291	asm	INV:F10
 b40633befaf6	kernel/core/src/debug/mod.rs	register_debugfs_knobs	297	asm	INV:F10
@@ -1245,7 +1245,7 @@ d60d5828f9e6	kernel/core/src/fs/vt.rs	vt_file_ioctl	412	ptr-ops	INV:INV-VT-PRIV-
 5ec32dfb0aa5	kernel/core/src/init.rs	create_and_start_init_process	187		INV:F12
 dc2063098dfa	kernel/core/src/init.rs	load_and_setup_elf	378		INV:F12
 582972a861ed	kernel/core/src/init.rs	load_and_setup_elf	394		INV:F12
-28f2f563bce2	kernel/core/src/init.rs	load_and_setup_elf	419		INV:F12
+48adb392c8b9	kernel/core/src/init.rs	load_and_setup_elf	419		INV:F12
 a9946d5d237a	kernel/core/src/init.rs	load_and_setup_elf	427	ffi	INV:F12
 013cdc4f27b7	kernel/core/src/initrd.rs	load	113	raw-construct,ptr-ops	INV:INV-FDT-1
 dbf87486dd23	kernel/core/src/interrupt/irqdesc.rs	handle_fasteoi_nmi	776	transmute	INV:F19
@@ -1342,104 +1342,104 @@ be7b9ed4f7ba	kernel/core/src/list.rs	<module>	140	ptr-ops	INV:INV-LIST-1
 6b442501bce3	kernel/core/src/list.rs	<module>	156		INV:INV-LIST-1
 d628c6283a3f	kernel/core/src/list.rs	<module>	194		INV:INV-LIST-1
 cf4feb42d99c	kernel/core/src/list.rs	offset	218		INV:INV-LIST-1
-2113e8e95d56	kernel/core/src/mm/buddy_allocator.rs	<module>	171		INV:INV-HEAP-3
-1a0ff026c6d4	kernel/core/src/mm/buddy_allocator.rs	<module>	172		INV:INV-HEAP-3
-0e58920c41f8	kernel/core/src/mm/buddy_allocator.rs	get	185		INV:INV-HEAP-3
-aaf715d683c5	kernel/core/src/mm/buddy_allocator.rs	get_mut	192		INV:INV-HEAP-3
-a150a1a01da8	kernel/core/src/mm/buddy_allocator.rs	<module>	221		INV:INV-HEAP-3
-e3b2e19632bc	kernel/core/src/mm/buddy_allocator.rs	<module>	222		INV:INV-HEAP-3
-6f42d43baa1d	kernel/core/src/mm/buddy_allocator.rs	buddy_block_span	254		INV:INV-HEAP-3
-4b8b41fe9175	kernel/core/src/mm/buddy_allocator.rs	fill_interior_order	406	ptr-ops	INV:INV-HEAP-3
-8967179fcde0	kernel/core/src/mm/buddy_allocator.rs	<module>	736	ptr-ops	INV:INV-HEAP-3
-58017c16821c	kernel/core/src/mm/buddy_allocator.rs	<module>	737		INV:INV-HEAP-3
-f852f09a09aa	kernel/core/src/mm/buddy_allocator.rs	alloc	822		INV:INV-SMALLALLOC-1
-f2b5926a8067	kernel/core/src/mm/buddy_allocator.rs	<module>	844	ptr-ops	INV:INV-SMALLALLOC-1
-71558b90d7d7	kernel/core/src/mm/buddy_allocator.rs	realloc	854		INV:INV-SMALLALLOC-1
-7e6b276e87fd	kernel/core/src/mm/buddy_allocator.rs	<module>	875		INV:INV-SMALLALLOC-1
-a48268dc96bf	kernel/core/src/mm/buddy_allocator.rs	trace_kmalloc_at	915		INV:INV-SMALLALLOC-1
-a2d49b13b2a9	kernel/core/src/mm/buddy_allocator.rs	trace_kfree_at	940		INV:INV-SMALLALLOC-1
-d152e53502bd	kernel/core/src/mm/buddy_allocator.rs	<module>	1315		INV:INV-HEAP-3
-d283eb9f47bb	kernel/core/src/mm/buddy_allocator.rs	<module>	1316		INV:INV-HEAP-3
-9cb64c47e9bf	kernel/core/src/mm/buddy_allocator.rs	meta_audit_inner	1345		INV:INV-HEAP-3
-f8cd32b7e902	kernel/core/src/mm/buddy_allocator.rs	<module>	1655		INV:INV-HEAP-3
-c8e4acebfed0	kernel/core/src/mm/buddy_allocator.rs	<module>	1682		INV:INV-HEAP-3
-afcb1ef2e1c5	kernel/core/src/mm/buddy_allocator.rs	<module>	1683		INV:INV-HEAP-3
-a228efac6aaa	kernel/core/src/mm/buddy_allocator.rs	<module>	1712		INV:INV-HEAP-3
-9061c084d27f	kernel/core/src/mm/page_desc.rs	<module>	889	ptr-ops,addr-arith	INV:INV-PAGEDESC-1
-fd90a39dfc93	kernel/core/src/mm/page_desc.rs	mark_non_ram_pages	1054		INV:INV-PAGEDESC-1
-4306edd337ef	kernel/core/src/mm/page_desc.rs	init_mem_map	1101		INV:INV-PAGEDESC-1
-613a7042f440	kernel/core/src/mm/page_desc.rs	init_mem_map	1123		INV:INV-PAGEDESC-1
-116c2de53291	kernel/core/src/mm/page_desc.rs	page_desc_stats	1292		INV:INV-PAGEDESC-1
-198afa571129	kernel/core/src/mm/page_desc.rs	<module>	1329	addr-arith	INV:INV-PAGEDESC-1
-decabe773795	kernel/core/src/mm/page_desc.rs	<module>	1338	static-mut,addr-arith	INV:INV-PAGEDESC-1
-3d7294d5098c	kernel/core/src/mm/page_desc.rs	page_desc	1361		INV:INV-PAGEDESC-1
-adeee08fb5d5	kernel/core/src/mm/pglist.rs	node_data	271		INV:INV-MM-12
-5d6f325cfcc2	kernel/core/src/mm/pglist.rs	node_data_mut	284		INV:INV-MM-12
-959426818c4a	kernel/core/src/mm/pglist.rs	<module>	300	static-mut	INV:INV-MM-12
-c4f1d3e802e9	kernel/core/src/mm/unsafe.rs	first_node_mut	40		INV:INV-MM-1
+586696748e5f	kernel/core/src/mm/hotpath.rs	<module>	431		INV:INV-HEAP-3
+3af418f13cc9	kernel/core/src/mm/hotpath.rs	<module>	432		INV:INV-HEAP-3
+5b19aebbfe74	kernel/core/src/mm/hotpath.rs	get	445		INV:INV-HEAP-3
+c416c63235e4	kernel/core/src/mm/hotpath.rs	get_mut	452		INV:INV-HEAP-3
+5c23bc0f43bc	kernel/core/src/mm/hotpath.rs	<module>	458		INV:INV-HEAP-3
+d0995e1356b2	kernel/core/src/mm/hotpath.rs	<module>	459		INV:INV-HEAP-3
+0018ba8f559f	kernel/core/src/mm/hotpath.rs	buddy_block_span	491		INV:INV-HEAP-3
+0fa9a9283674	kernel/core/src/mm/hotpath.rs	fill_interior_order	643	ptr-ops	INV:INV-HEAP-3
+7f718da0ff86	kernel/core/src/mm/hotpath.rs	<module>	973	ptr-ops	INV:INV-HEAP-3
+49df818ac8db	kernel/core/src/mm/hotpath.rs	<module>	974		INV:INV-HEAP-3
+db8aa49f4870	kernel/core/src/mm/hotpath.rs	alloc	1059		INV:INV-SMALLALLOC-1
+30c38811366f	kernel/core/src/mm/hotpath.rs	<module>	1081	ptr-ops	INV:INV-SMALLALLOC-1
+e503266c881a	kernel/core/src/mm/hotpath.rs	realloc	1091		INV:INV-SMALLALLOC-1
+d245a6b5a2c2	kernel/core/src/mm/hotpath.rs	<module>	1112		INV:INV-SMALLALLOC-1
+6014c4e33c14	kernel/core/src/mm/hotpath.rs	trace_kmalloc_at	1152		INV:INV-SMALLALLOC-1
+b46d29b273fa	kernel/core/src/mm/hotpath.rs	trace_kfree_at	1177		INV:INV-SMALLALLOC-1
+04f3a0651646	kernel/core/src/mm/hotpath.rs	<module>	1491		INV:INV-HEAP-3
+de7526da0893	kernel/core/src/mm/hotpath.rs	<module>	1492		INV:INV-HEAP-3
+12614798d07a	kernel/core/src/mm/hotpath.rs	meta_audit_inner	1521		INV:INV-HEAP-3
+92d80f4692e2	kernel/core/src/mm/hotpath.rs	<module>	1818		INV:INV-HEAP-3
+c17937b8814a	kernel/core/src/mm/hotpath.rs	<module>	1845		INV:INV-HEAP-3
+2447450b039a	kernel/core/src/mm/hotpath.rs	<module>	1846		INV:INV-HEAP-3
+25a8c38c4524	kernel/core/src/mm/hotpath.rs	<module>	1875		INV:INV-HEAP-3
+627b27996720	kernel/core/src/mm/hotpath.rs	<module>	3249	ptr-ops,addr-arith	INV:INV-PAGEDESC-1
+547754e7d9bf	kernel/core/src/mm/hotpath.rs	mark_non_ram_pages	3413		INV:INV-PAGEDESC-1
+17823f35ac79	kernel/core/src/mm/hotpath.rs	init_mem_map	3460		INV:INV-PAGEDESC-1
+25d95ec87f2a	kernel/core/src/mm/hotpath.rs	init_mem_map	3482		INV:INV-PAGEDESC-1
+9fe4f03e906a	kernel/core/src/mm/hotpath.rs	page_desc_stats	3630		INV:INV-PAGEDESC-1
+62c02ecdaaf2	kernel/core/src/mm/hotpath.rs	<module>	3667	addr-arith	INV:INV-PAGEDESC-1
+99909fbc6609	kernel/core/src/mm/hotpath.rs	<module>	3676	static-mut,addr-arith	INV:INV-PAGEDESC-1
+1c2c430ba0cc	kernel/core/src/mm/hotpath.rs	page_desc	3699		INV:INV-PAGEDESC-1
+91c3706a5bcf	kernel/core/src/mm/hotpath.rs	node_data	8755		INV:INV-MM-12
+39b81b86ecd1	kernel/core/src/mm/hotpath.rs	node_data_mut	8768		INV:INV-MM-12
+5ae198771960	kernel/core/src/mm/hotpath.rs	<module>	8784	static-mut	INV:INV-MM-12
+d1d5b814c5c8	kernel/core/src/mm/hotpath.rs	<module>	12640	ptr-ops	INV:INV-VDSO-DATA-1
+822adfe2c4ea	kernel/core/src/mm/hotpath.rs	vdso_seq	12641	ptr-ops	INV:INV-VDSO-DATA-1
+fc44f4e5a366	kernel/core/src/mm/hotpath.rs	vdso_data_tick	12656	volatile,ptr-ops	INV:INV-VDSO-DATA-1
+3439b1921ca3	kernel/core/src/mm/hotpath.rs	<module>	12757	volatile,ptr-ops	INV:INV-VDSO-DATA-1
+be2f18688849	kernel/core/src/mm/hotpath.rs	rd	12758	volatile,ptr-ops	INV:INV-VDSO-DATA-1
+7c5b3c4e5adb	kernel/core/src/mm/hotpath.rs	<module>	12765	volatile,ptr-ops	INV:INV-VDSO-DATA-1
+59095d3d6d47	kernel/core/src/mm/hotpath.rs	wr	12766	volatile,ptr-ops	INV:INV-VDSO-DATA-1
+436ad2f1e584	kernel/core/src/mm/hotpath.rs	read_tsc_ordered	12784	asm	INV:INV-VDSO-DATA-1
+315e75da46e5	kernel/core/src/mm/hotpath.rs	<module>	12820		INV:INV-VDSO-DATA-1
+4efb95044c4d	kernel/core/src/mm/hotpath.rs	seq_try_begin	12821		INV:INV-VDSO-DATA-1
+5a39879fc5a9	kernel/core/src/mm/hotpath.rs	<module>	12832		INV:INV-VDSO-DATA-1
+992bc6371a38	kernel/core/src/mm/hotpath.rs	seq_end	12833		INV:INV-VDSO-DATA-1
+d5623831ef74	kernel/core/src/mm/hotpath.rs	publish_tsc_anchor	12841		INV:INV-VDSO-DATA-1
+2817b21e455a	kernel/core/src/mm/hotpath.rs	tsc_anchor_step_forward	12863		INV:INV-VDSO-DATA-1
+9c86a24dd444	kernel/core/src/mm/hotpath.rs	tsc_anchor_step_back	12880		INV:INV-VDSO-DATA-1
+882827d75840	kernel/core/src/mm/hotpath.rs	tsc_anchor_peek	12898		INV:INV-VDSO-DATA-1
+183ed3ae0924	kernel/core/src/mm/hotpath.rs	tsc_track_now_nominal	12939		INV:INV-VDSO-DATA-1
+a6bd6d2b7614	kernel/core/src/mm/hotpath.rs	vdso_data_tick	12981		INV:INV-VDSO-DATA-1
+1382fea7e30e	kernel/core/src/mm/hotpath.rs	vdso_init	14018		INV:INV-VDSO-DATA-1
+ba9137ff7b39	kernel/core/src/mm/unsafe.rs	first_node_mut	40		INV:INV-MM-1
 10ee10bbade0	kernel/core/src/mm/unsafe.rs	page_of	61		INV:INV-MM-2
 ac1a9c0c1c58	kernel/core/src/mm/unsafe.rs	page_ref_of	74		INV:INV-MM-2
-bb89756ce6b4	kernel/core/src/mm/unsafe.rs	memblock_ref	92		INV:INV-MM-3
-1d88f8933497	kernel/core/src/mm/unsafe.rs	memblock_mut	101		INV:INV-MM-2
+9eb0ce80bfb2	kernel/core/src/mm/unsafe.rs	memblock_ref	92		INV:INV-MM-3
+b243282047e3	kernel/core/src/mm/unsafe.rs	memblock_mut	101		INV:INV-MM-2
 2dbd5886037d	kernel/core/src/mm/unsafe.rs	walk_fp_chain	111		INV:INV-MM-2
 53817e10ad17	kernel/core/src/mm/unsafe.rs	slab_read_freelist_link	127	ptr-ops	INV:INV-MM-4
 309659b58aba	kernel/core/src/mm/unsafe.rs	slab_write_freelist_link	135	ptr-ops	INV:INV-MM-4
-ac4891f4d31d	kernel/core/src/mm/unsafe.rs	slab_header_mut	144	ptr-ops	INV:INV-MM-4
-2a3adde6a482	kernel/core/src/mm/unsafe.rs	slab_header_cache_idx	152	ptr-ops	INV:INV-MM-4
-b94694aff7fe	kernel/core/src/mm/unsafe.rs	slab_pages_init	161		INV:INV-MM-4
-e0aeb6d10dfc	kernel/core/src/mm/unsafe.rs	slab_pages	171		INV:INV-MM-4
+23785f7619a2	kernel/core/src/mm/unsafe.rs	slab_header_mut	144	ptr-ops	INV:INV-MM-4
+f77eef877f75	kernel/core/src/mm/unsafe.rs	slab_header_cache_idx	152	ptr-ops	INV:INV-MM-4
+8c9fff251b87	kernel/core/src/mm/unsafe.rs	slab_pages_init	161		INV:INV-MM-4
+af1eb5c7adf6	kernel/core/src/mm/unsafe.rs	slab_pages	171		INV:INV-MM-4
 f053bea0b3cb	kernel/core/src/mm/unsafe.rs	slab_zero	179	ptr-ops	INV:INV-MM-4
-846db107d0f2	kernel/core/src/mm/unsafe.rs	<module>	187		INV:INV-MM-4
-1e0a5acc5009	kernel/core/src/mm/unsafe.rs	<module>	191		INV:INV-MM-5
-efe88516a4df	kernel/core/src/mm/unsafe.rs	<module>	203		INV:INV-MM-5
-c324c0e97750	kernel/core/src/mm/unsafe.rs	pcp_row_exclusive	215		INV:INV-MM-5
+320bc76fb8ee	kernel/core/src/mm/unsafe.rs	<module>	187		INV:INV-MM-4
+2539aa3dd552	kernel/core/src/mm/unsafe.rs	<module>	191		INV:INV-MM-5
+96429ee7123d	kernel/core/src/mm/unsafe.rs	<module>	203		INV:INV-MM-5
+9d368fc86304	kernel/core/src/mm/unsafe.rs	pcp_row_exclusive	215		INV:INV-MM-5
 c17bf23fcaa0	kernel/core/src/mm/unsafe.rs	pcp_row_exclusive	216		INV:INV-MM-5
-cc80c47752cd	kernel/core/src/mm/unsafe.rs	pcp_row_count_peek	224		INV:INV-MM-5
+6ba52044e942	kernel/core/src/mm/unsafe.rs	pcp_row_count_peek	224		INV:INV-MM-5
 2101ca588f24	kernel/core/src/mm/unsafe.rs	pcp_row_count_peek	225		INV:INV-MM-5
-b22c6fb07737	kernel/core/src/mm/unsafe.rs	pcp_row_ref_peek	234		INV:INV-MM-5
+5aa7ee4dd429	kernel/core/src/mm/unsafe.rs	pcp_row_ref_peek	234		INV:INV-MM-5
 cf2425eeca0d	kernel/core/src/mm/unsafe.rs	pcp_row_ref_peek	235		INV:INV-MM-5
 2514ab4aa82f	kernel/core/src/mm/unsafe.rs	copy_kva	246	ptr-ops	INV:INV-MM-6
 38f62907e30c	kernel/core/src/mm/unsafe.rs	copy_kva_from	255	ptr-ops	INV:INV-MM-6
 badac82c44f7	kernel/core/src/mm/unsafe.rs	page_slice_mut	269	ptr-ops,addr-arith	INV:INV-MM-7
 a83b41640b1c	kernel/core/src/mm/unsafe.rs	page_slice	276	raw-construct,ptr-ops,addr-arith	INV:INV-MM-7
-a7ed187bf041	kernel/core/src/mm/unsafe.rs	defer_pool_mut	291		INV:INV-MM-8
-f57a93850507	kernel/core/src/mm/unsafe.rs	vmemmap_stats_read	321		INV:INV-MM-9
-582c73e85c7d	kernel/core/src/mm/unsafe.rs	vmemmap_stats_write	330		INV:INV-MM-9
+109e5f1c2be0	kernel/core/src/mm/unsafe.rs	defer_pool_mut	291		INV:INV-MM-8
+6ac65bdec8d6	kernel/core/src/mm/unsafe.rs	vmemmap_stats_read	321		INV:INV-MM-9
+511834e94c4d	kernel/core/src/mm/unsafe.rs	vmemmap_stats_write	330		INV:INV-MM-9
 6f60a404cae8	kernel/core/src/mm/unsafe.rs	vmemmap_zero_region	340	ptr-ops	INV:INV-MM-9
 ed4e586a26e2	kernel/core/src/mm/unsafe.rs	switch_address_space	365		INV:INV-MM-10
-987e85bc2886	kernel/core/src/mm/unsafe.rs	<module>	380		INV:INV-MM-10
-6becbedafe42	kernel/core/src/mm/unsafe.rs	<module>	381		INV:INV-MM-2
-6535dad0ad3c	kernel/core/src/mm/unsafe.rs	compact_copy_page	390		INV:INV-MM-2
-b342166348f4	kernel/core/src/mm/unsafe.rs	kernel_layout_write	403		INV:INV-MM-11
-b2d17fbacb13	kernel/core/src/mm/unsafe.rs	kernel_layout_ref	411		INV:INV-MM-11
-767c3aff245c	kernel/core/src/mm/unsafe.rs	node_data_init	426		INV:INV-MM-12
-785dd73ec475	kernel/core/src/mm/unsafe.rs	<module>	431		INV:INV-MM-12
-d5abc8c1e71f	kernel/core/src/mm/unsafe.rs	<module>	432		INV:INV-MM-2
+0cadeefd05cf	kernel/core/src/mm/unsafe.rs	<module>	380		INV:INV-MM-10
+bff889ffaa5e	kernel/core/src/mm/unsafe.rs	<module>	381		INV:INV-MM-2
+2765005268a2	kernel/core/src/mm/unsafe.rs	compact_copy_page	390		INV:INV-MM-2
+11ee338bb5f2	kernel/core/src/mm/unsafe.rs	kernel_layout_write	403		INV:INV-MM-11
+2d54086af395	kernel/core/src/mm/unsafe.rs	kernel_layout_ref	411		INV:INV-MM-11
+3b52dcea6ce9	kernel/core/src/mm/unsafe.rs	node_data_init	426		INV:INV-MM-12
+722e52d733c4	kernel/core/src/mm/unsafe.rs	<module>	431		INV:INV-MM-12
+8bec1de169df	kernel/core/src/mm/unsafe.rs	<module>	432		INV:INV-MM-2
 83a3a07674b9	kernel/core/src/mm/unsafe.rs	x86_caller_return_address	443	asm	INV:INV-MM-2
-5912cd72b5bb	kernel/core/src/mm/unsafe.rs	sa_hdr_mut	461	ptr-ops	INV:INV-MM-13
-d5c7547d6570	kernel/core/src/mm/unsafe.rs	sa_hdr_ref	471	ptr-ops	INV:INV-MM-13
+bbf5bc90e6f8	kernel/core/src/mm/unsafe.rs	sa_hdr_mut	461	ptr-ops	INV:INV-MM-13
+e52348e4d47e	kernel/core/src/mm/unsafe.rs	sa_hdr_ref	471	ptr-ops	INV:INV-MM-13
 c44c757fe4b1	kernel/core/src/mm/unsafe.rs	sa_read_u16	479	volatile,ptr-ops	INV:INV-MM-13
 75826a4f0f26	kernel/core/src/mm/unsafe.rs	sa_write_u16	487	volatile,ptr-ops	INV:INV-MM-13
 c38a578072c8	kernel/core/src/mm/unsafe.rs	sa_read_u64	494	volatile,ptr-ops	INV:INV-MM-13
-24dd6e7aaaa7	kernel/core/src/mm/vdso.rs	<module>	108	ptr-ops	INV:INV-VDSO-DATA-1
-d8c70d09addf	kernel/core/src/mm/vdso.rs	vdso_seq	109	ptr-ops	INV:INV-VDSO-DATA-1
-af902ee55104	kernel/core/src/mm/vdso.rs	vdso_data_tick	124	volatile,ptr-ops	INV:INV-VDSO-DATA-1
-a33e38c04e52	kernel/core/src/mm/vdso.rs	<module>	225	volatile,ptr-ops	INV:INV-VDSO-DATA-1
-10325c8aad3d	kernel/core/src/mm/vdso.rs	rd	226	volatile,ptr-ops	INV:INV-VDSO-DATA-1
-5300a691d135	kernel/core/src/mm/vdso.rs	<module>	233	volatile,ptr-ops	INV:INV-VDSO-DATA-1
-be81556fba11	kernel/core/src/mm/vdso.rs	wr	234	volatile,ptr-ops	INV:INV-VDSO-DATA-1
-fcde9dfd9a92	kernel/core/src/mm/vdso.rs	read_tsc_ordered	252	asm	INV:INV-VDSO-DATA-1
-4832518795f5	kernel/core/src/mm/vdso.rs	<module>	288		INV:INV-VDSO-DATA-1
-213ee968d7fc	kernel/core/src/mm/vdso.rs	seq_try_begin	289		INV:INV-VDSO-DATA-1
-671f8fc625a5	kernel/core/src/mm/vdso.rs	<module>	300		INV:INV-VDSO-DATA-1
-9cf6f998c956	kernel/core/src/mm/vdso.rs	seq_end	301		INV:INV-VDSO-DATA-1
-923345524720	kernel/core/src/mm/vdso.rs	publish_tsc_anchor	309		INV:INV-VDSO-DATA-1
-423d34b176e3	kernel/core/src/mm/vdso.rs	tsc_anchor_step_forward	331		INV:INV-VDSO-DATA-1
-6056466326f0	kernel/core/src/mm/vdso.rs	tsc_anchor_step_back	348		INV:INV-VDSO-DATA-1
-674360fb2f4d	kernel/core/src/mm/vdso.rs	tsc_anchor_peek	366		INV:INV-VDSO-DATA-1
-f5e0d435f1f4	kernel/core/src/mm/vdso.rs	tsc_track_now_nominal	407		INV:INV-VDSO-DATA-1
-898e6a7e64c4	kernel/core/src/mm/vdso.rs	vdso_data_tick	449		INV:INV-VDSO-DATA-1
-228861aaa0e0	kernel/core/src/mm/vdso.rs	vdso_init	1490		INV:INV-VDSO-DATA-1
 d1edc10526ee	kernel/core/src/module/mod.rs	sys_init_module_impl	341	ptr-ops	INV:INV-STATIC-CELL-1
 f39fd3a4203f	kernel/core/src/module/mod.rs	sys_finit_module_impl	378		INV:INV-STATIC-CELL-1
 3604254d9ff8	kernel/core/src/module/mod.rs	sys_finit_module_impl	391		INV:INV-STATIC-CELL-1
@@ -1546,7 +1546,7 @@ c16b52d6c0d0	kernel/core/src/process/unsafe.rs	file_private_data_mut	205		INV:IN
 b852026b8f76	kernel/core/src/process/unsafe.rs	journal_handle	261		INV:INV-PROC-JOURNAL-1
 c8d205051f55	kernel/core/src/process/unsafe.rs	free_fork_pt_regs	294	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
 08a6d396020d	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	308		INV:INV-PROC-ROOTSWITCH-1
-afd4a78bb3a7	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	313		INV:INV-PROC-ROOTSWITCH-1
+6db2c60dcc19	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	313		INV:INV-PROC-ROOTSWITCH-1
 3e88f5f81d98	kernel/core/src/process/unsafe.rs	apppark_rets	327		INV:INV-PROC-APPPARK-1
 12fb2eacd76a	kernel/core/src/process/unsafe.rs	freelist_next	343	ptr-ops	INV:INV-PROC-KSTACK-1
 66173bca9837	kernel/core/src/process/unsafe.rs	freelist_link	353	ptr-ops	INV:INV-PROC-KSTACK-1
@@ -1570,14 +1570,14 @@ c904ee5472b1	kernel/core/src/process/unsafe.rs	frame_ref	551		INV:INV-PROC-FRAME
 7b93271d03b0	kernel/core/src/process/unsafe.rs	exec_copy_user_image	588	ptr-ops	INV:INV-PROC-EXEC-COPY-1
 dfe061b528c1	kernel/core/src/process/unsafe.rs	exec_phdr_at	609		INV:INV-PROC-EXEC-ELF-1
 17ca6f06592b	kernel/core/src/process/unsafe.rs	exec_ehdr_from	619		INV:INV-PROC-EXEC-ELF-1
-482c9f397004	kernel/core/src/process/unsafe.rs	exec_map_user_range	631		INV:INV-PROC-EXEC-MAP-1
+f5e6af510611	kernel/core/src/process/unsafe.rs	exec_map_user_range	631		INV:INV-PROC-EXEC-MAP-1
 3d70a9ef0432	kernel/core/src/process/unsafe.rs	exec_map_user_region_static	650		INV:INV-PROC-EXEC-VDSO-1
 71bca7da2c26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	661		INV:INV-PROC-EXEC-PROBE-1
 7a9b10befe26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	666	volatile,ptr-ops	INV:INV-PROC-EXEC-PROBE-1
 0932c8233145	kernel/core/src/process/unsafe.rs	exec_free_user_page_trees	680		INV:INV-PROC-EXEC-FREETREE-1
 7101dbc4f9e1	kernel/core/src/process/unsafe.rs	exec_write_sigtramp	698	volatile,ptr-ops	INV:INV-PROC-EXEC-TRAMP-1
-9ce2928eb85c	kernel/core/src/process/unsafe.rs	exec_mm_new_user	712		INV:INV-PROC-EXEC-MMNEW-1
-1d765531f51f	kernel/core/src/process/unsafe.rs	exec_switch_address_space	725		INV:INV-PROC-EXEC-SWITCH-1
+f583bf0747d8	kernel/core/src/process/unsafe.rs	exec_mm_new_user	712		INV:INV-PROC-EXEC-MMNEW-1
+bdcaddddd803	kernel/core/src/process/unsafe.rs	exec_switch_address_space	725		INV:INV-PROC-EXEC-SWITCH-1
 a64d8daa9c81	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	760		INV:INV-LOCK-7
 ef936ecf5fdb	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	807		INV:INV-LOCK-7
 41eb9bd53d45	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	866		INV:INV-LOCK-7
@@ -1955,7 +1955,7 @@ d5288bdbe88e	kernel/core/src/tests/scheduler.rs	test_scheduler	58		INV:INV-TESTH
 098b7e6cb367	kernel/core/src/tests/small_alloc.rs	test_small_alloc	186	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 69bd8c080edb	kernel/core/src/tests/small_alloc.rs	test_small_alloc	194	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 8ea5d1051b83	kernel/core/src/tests/small_alloc.rs	test_small_alloc	230	volatile,ptr-ops	INV:INV-TESTHARNESS-1
-6429f369a8c7	kernel/core/src/tests/small_alloc.rs	test_small_alloc	286	volatile,ptr-ops	INV:INV-TESTHARNESS-1
+26360fd54d68	kernel/core/src/tests/small_alloc.rs	test_small_alloc	286	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 9d82969fc0b1	kernel/core/src/tests/syscall_file.rs	test_sys_read_write	129		INV:INV-TESTHARNESS-1
 22053c995854	kernel/core/src/tests/syscall_file.rs	test_sys_read_write	173		INV:INV-TESTHARNESS-1
 5edaebc75969	kernel/core/src/tests/syscall_file.rs	test_sys_lseek	266		INV:INV-TESTHARNESS-1

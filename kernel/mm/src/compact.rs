@@ -19,12 +19,12 @@
 
 #![forbid(unsafe_code)]
 
-use rux::mm::page_desc::{
-    Page, PageFlag, pfn_to_page, pfn_to_page_mut, page_to_pfn, copy_page_contents,
+use rux::mm::{
+    types::Page, types::PageFlag, hotpath::pfn_to_page, hotpath::pfn_to_page_mut, hotpath::page_to_pfn, hotpath::copy_page_contents,
 };
-use rux::mm::zone::{Zone, pfn_to_phys};
-use rux::mm::rmap::try_to_unmap_migration;
-use rux::mm::PAGE_SIZE;
+use rux::mm::{types::Zone, hotpath::pfn_to_phys};
+use rux::mm::hotpath::try_to_unmap_migration;
+use rux::mm::types::PAGE_SIZE;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -243,7 +243,7 @@ fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
         }
 
         // Skip unmapped pages
-        if !rux::mm::rmap::page_mapped(p) {
+        if !rux::mm::hotpath::page_mapped(p) {
             continue;
         }
 
@@ -308,7 +308,7 @@ fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     // Step 1: Recover the virtual address. page.index stores the PAGE NUMBER
     // (address / PAGE_SIZE, see page_add_anon_rmap / the fault path), not the
     // raw address — convert before using it as a virtual address.
-    let old_vaddr = src.index() * (rux::mm::PAGE_SIZE as usize);
+    let old_vaddr = src.index() * (rux::mm::types::PAGE_SIZE as usize);
     if src.index() == 0 {
         return false;
     }
@@ -337,7 +337,7 @@ fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     // pid-hash bucket locks (never dropped there — a last-reference drop
     // runs the schedulable teardown), walk them after. Cell::take: the
     // walker takes F: Fn.
-    let flag_mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::mm_struct::MmStruct>>::new());
+    let flag_mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::types::MmStruct>>::new());
     crate::sched::hotpath::for_each_task(|task| {
         if let Some(mm_arc) = task.address_space_arc() {
             let mut pins = flag_mm_pins.take();
@@ -401,8 +401,8 @@ fn migrate_page_window(
 
     // Step 5: Transfer mapcount from src to dst (exact copy, not per-PTE counting)
     dst.reset_mapcount();
-    if saved_mapcount > rux::mm::page_desc::PAGE_MAPCOUNT_BIAS {
-        let delta = saved_mapcount - rux::mm::page_desc::PAGE_MAPCOUNT_BIAS;
+    if saved_mapcount > rux::mm::hotpath::PAGE_MAPCOUNT_BIAS {
+        let delta = saved_mapcount - rux::mm::hotpath::PAGE_MAPCOUNT_BIAS;
         for _ in 0..delta {
             dst.add_mapcount();
         }
@@ -446,7 +446,7 @@ fn migrate_page_window(
     // free_pages() will reset refcount to 0 before releasing to buddy.
 
     // Step 6: Release source page back to buddy
-    rux::mm::page_alloc::free_pages(pfn_to_phys(src_pfn), 0);
+    rux::mm::hotpath::free_pages(pfn_to_phys(src_pfn), 0);
 
     true
 }
@@ -472,7 +472,7 @@ fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
     // pid-hash bucket locks (an Arc dropped there could run the
     // schedulable mm teardown under the spinlock), then remap after.
     // Cell::take: the walker takes F: Fn.
-    let mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::mm_struct::MmStruct>>::new());
+    let mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::types::MmStruct>>::new());
     crate::sched::hotpath::for_each_task(|task| {
         if let Some(mm_arc) = task.address_space_arc() {
             let mut pins = mm_pins.take();
@@ -491,8 +491,8 @@ fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         // structure. Write lock needed because we modify PTEs (fixes F03-06).
         let vma_mgr = mm.vma_write();
         let vma_matches = vma_mgr.iter().any(|vma| {
-            vma.vma_type() == rux::mm::vma::VmaType::Anonymous
-                && vma.contains(rux::mm::page::VirtAddr::new(old_vaddr))
+            vma.vma_type() == rux::mm::types::VmaType::Anonymous
+                && vma.contains(rux::mm::types::VirtAddr::new(old_vaddr))
         });
 
         if !vma_matches {
@@ -522,7 +522,7 @@ fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
             saved_flags,
         ) {
             // Flush TLB for this address
-            rux::mm::flush_tlb_page_local(old_vaddr as u64);
+            rux::mm::hotpath::flush_tlb_page_local(old_vaddr as u64);
         }
         // vma_mgr dropped here — lock released after PTE update
     }

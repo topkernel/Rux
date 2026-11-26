@@ -4,12 +4,12 @@
 //!
 //! PhysAddr/VirtAddr/PhysFrame/VirtPage arithmetic invariant tests.
 //!
-//! Types copied from: kernel/core/src/mm/page.rs
+//! Types copied from: kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/core/src/mm/page.rs
+// Copied types from kernel/core/src/mm/types.rs
 // ============================================================================
 
 pub const PAGE_SIZE: usize = 4096;

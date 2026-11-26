@@ -851,7 +851,7 @@ pub fn dump_all_tasks(reason: &str) {
         // obj_allocs+obj_frees is the magazine's live traffic-ratio
         // readout (atomic loads + raw UART only, no allocator lock,
         // safe from the periodic path).
-        crate::mm::small_alloc::census_line();
+        crate::mm::hotpath::census_line();
     }
 }
 

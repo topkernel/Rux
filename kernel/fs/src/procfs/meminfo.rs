@@ -14,22 +14,22 @@ use alloc::vec::Vec;
 
 /// Total physical memory in kB.
 fn mem_total_kb() -> u64 {
-    crate::mm::meminfo::get_basic_memory_info().mem_total as u64 / 1024
+    crate::mm::hotpath::get_basic_memory_info().mem_total as u64 / 1024
 }
 
 /// Free memory in kB.
 fn mem_free_kb() -> u64 {
-    crate::mm::meminfo::get_basic_memory_info().mem_free as u64 / 1024
+    crate::mm::hotpath::get_basic_memory_info().mem_free as u64 / 1024
 }
 
 /// Estimated available memory in kB.
 fn mem_available_kb() -> u64 {
-    crate::mm::meminfo::get_basic_memory_info().mem_available as u64 / 1024
+    crate::mm::hotpath::get_basic_memory_info().mem_available as u64 / 1024
 }
 
 /// Used memory in kB.
 fn mem_used_kb() -> u64 {
-    crate::mm::meminfo::get_basic_memory_info().mem_used as u64 / 1024
+    crate::mm::hotpath::get_basic_memory_info().mem_used as u64 / 1024
 }
 
 /// Page-cache pages in kB (4 KiB pages).
@@ -51,19 +51,19 @@ fn cached_kb() -> u64 {
 fn lru_kb() -> (u64, u64, u64, u64) {
     // Physical bound for any page-count counter: a class size above the
     // machine's page total is wrapped garbage, clamp it before the math.
-    let total_pages = (crate::mm::meminfo::get_basic_memory_info().mem_total
-        / crate::mm::PAGE_SIZE) as u64;
-    crate::mm::pglist::first_online_node().map_or((0, 0, 0, 0), |node| {
+    let total_pages = (crate::mm::hotpath::get_basic_memory_info().mem_total
+        / crate::mm::types::PAGE_SIZE) as u64;
+    crate::mm::hotpath::first_online_node().map_or((0, 0, 0, 0), |node| {
         let sz = |which: usize| {
             (node.lru_sizes[which].load(core::sync::atomic::Ordering::Relaxed) as u64)
                 .min(total_pages)
                 .saturating_mul(4)
         };
         (
-            sz(crate::mm::pglist::LRU_ACTIVE_FILE),
-            sz(crate::mm::pglist::LRU_INACTIVE_FILE),
-            sz(crate::mm::pglist::LRU_ACTIVE_ANON),
-            sz(crate::mm::pglist::LRU_INACTIVE_ANON),
+            sz(crate::mm::types::LRU_ACTIVE_FILE),
+            sz(crate::mm::types::LRU_INACTIVE_FILE),
+            sz(crate::mm::types::LRU_ACTIVE_ANON),
+            sz(crate::mm::types::LRU_INACTIVE_ANON),
         )
     })
 }
@@ -79,7 +79,7 @@ fn swap_kb() -> (u64, u64) {
 
 /// Kernel buddy-heap stats in kB: (total, used, free).
 fn heap_kb() -> (u64, u64, u64) {
-    let h = crate::mm::buddy_allocator::buddy_stats();
+    let h = crate::mm::hotpath::buddy_stats();
     (h.heap_size as u64 / 1024, h.used_bytes as u64 / 1024, h.free_bytes as u64 / 1024)
 }
 

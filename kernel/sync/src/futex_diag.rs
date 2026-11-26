@@ -207,10 +207,10 @@ pub fn ffrt_chain_walk(
         if va <= 0x10000 || (va >> 47) != 0 {
             return false;
         }
-        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+        match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
             Some(vma) => {
                 !vma.flags().is_executable()
-                    && !vma.flags().contains(crate::mm::vma::VmaFlags::GROWSDOWN)
+                    && !vma.flags().contains(crate::mm::types::VmaFlags::GROWSDOWN)
             }
             None => false,
         }
@@ -258,12 +258,12 @@ pub fn ffrt_chain_walk(
             // and (head-0x10) a file-backed non-exec pointer (the
             // mutexPrivate vtable in some .so's data).
             let filebacked = |va: u64| -> bool {
-                match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+                match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
                     Some(vma) => {
                         !vma.flags().is_executable()
                             && matches!(
                                 vma.vma_type(),
-                                crate::mm::vma::VmaType::FileBacked
+                                crate::mm::types::VmaType::FileBacked
                             )
                     }
                     None => false,
@@ -277,7 +277,7 @@ pub fn ffrt_chain_walk(
             // class and the walk then "decoded" version-chain churn as
             // mutex traffic; require the deref hit here.
             let exec_ptr = |va: u64| -> bool {
-                match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+                match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
                     Some(vma) => vma.flags().is_executable(),
                     None => false,
                 }
@@ -455,16 +455,16 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::types::Task) -> Option<alloc::
         if va <= 0x10000 || (va >> 47) != 0 {
             return false;
         }
-        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+        match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
             Some(vma) => {
                 !vma.flags().is_executable()
-                    && !vma.flags().contains(crate::mm::vma::VmaFlags::GROWSDOWN)
+                    && !vma.flags().contains(crate::mm::types::VmaFlags::GROWSDOWN)
             }
             None => false,
         }
     };
     let exec_ptr = |va: u64| -> bool {
-        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+        match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
             Some(vma) => vma.flags().is_executable(),
             None => false,
         }
@@ -758,16 +758,16 @@ pub fn fuxw_word_shape(task: *mut crate::process::types::Task, uaddr: u64) -> Op
         }
     };
     let filebacked = |va: u64| -> bool {
-        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+        match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
             Some(vma) => {
                 !vma.flags().is_executable()
-                    && matches!(vma.vma_type(), crate::mm::vma::VmaType::FileBacked)
+                    && matches!(vma.vma_type(), crate::mm::types::VmaType::FileBacked)
             }
             None => false,
         }
     };
     let exec_ptr = |va: u64| -> bool {
-        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+        match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
             Some(vma) => vma.flags().is_executable(),
             None => false,
         }
@@ -874,15 +874,15 @@ pub fn deep_ufw(task: *mut crate::process::types::Task) -> Option<alloc::string:
 /// VmaManager).
 fn heap_class<M>(va: u64, mgr: &M) -> bool
 where
-    M: core::ops::Deref<Target = crate::mm::vma::VmaManager>,
+    M: core::ops::Deref<Target = crate::mm::types::VmaManager>,
 {
     if va <= 0x10000 || (va >> 47) != 0 {
         return false;
     }
-    match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+    match mgr.find(crate::mm::types::VirtAddr::new(va as usize)) {
         Some(vma) => {
             !vma.flags().is_executable()
-                && !vma.flags().contains(crate::mm::vma::VmaFlags::GROWSDOWN)
+                && !vma.flags().contains(crate::mm::types::VmaFlags::GROWSDOWN)
         }
         None => false,
     }
@@ -953,7 +953,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
             // stacks (whose waiters are the A1 BLOCK_THREAD class) and
             // NEVER the coroutine pool where the M2 HOLDER (A2)
             // suspends.
-            if !matches!(vma.vma_type(), crate::mm::vma::VmaType::Anonymous)
+            if !matches!(vma.vma_type(), crate::mm::types::VmaType::Anonymous)
                 || size < 0xF_0000
                 || size > 0x20_0_0000
             {
@@ -1038,7 +1038,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                             continue;
                         };
                         if matches!(
-                            mgr.find(crate::mm::vma::VirtAddr::new(x as usize)),
+                            mgr.find(crate::mm::types::VirtAddr::new(x as usize)),
                             Some(v2) if v2.flags().is_executable()
                         ) {
                             let _ = write!(fr, " {:#x}", x);
@@ -1067,7 +1067,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                                 && rd_word(root, vt)
                                     .map_or(false, |f| {
                                         matches!(
-                                            mgr.find(crate::mm::vma::VirtAddr::new(f as usize)),
+                                            mgr.find(crate::mm::types::VirtAddr::new(f as usize)),
                                             Some(v3) if v3.flags().is_executable()
                                         )
                                     });
@@ -1760,7 +1760,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                             }
                             if let Some(aspace) = tk.address_space() {
                                 if let Some(mgr) = aspace.vma_try_read() {
-                                    if let Some(v) = mgr.find(crate::mm::vma::VirtAddr::new(
+                                    if let Some(v) = mgr.find(crate::mm::types::VirtAddr::new(
                                         rip as usize,
                                     )) {
                                         let name = aspace
@@ -3033,8 +3033,8 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
             // (FileBacked writable) — OH's malloc arenas may be
             // ashmem-typed; the vtable-signature match itself rejects
             // everything but mutexPrivate objects, so accept both.
-            if !matches!(vt, crate::mm::vma::VmaType::Anonymous)
-                && !matches!(vt, crate::mm::vma::VmaType::FileBacked)
+            if !matches!(vt, crate::mm::types::VmaType::Anonymous)
+                && !matches!(vt, crate::mm::types::VmaType::FileBacked)
             {
                 continue;
             }
@@ -3228,7 +3228,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
                             continue;
                         };
                         if matches!(
-                            _mgr2.find(crate::mm::vma::VirtAddr::new(x as usize)),
+                            _mgr2.find(crate::mm::types::VirtAddr::new(x as usize)),
                             Some(v2) if v2.flags().is_executable()
                         ) {
                             let _ = write!(fr, " {:#x}", x);

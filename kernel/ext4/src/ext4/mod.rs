@@ -2223,7 +2223,7 @@ pub fn ext4_fallocate_on(
         {
             let cache = rux::fs::page_cache::get_page_cache();
             let fs_id = fs as *const Ext4FileSystem as u64;
-            let ps = crate::mm::PAGE_SIZE as u64;
+            let ps = crate::mm::types::PAGE_SIZE as u64;
             let first_full = offset.div_ceil(ps);
             let last_full = file_end / ps; // exclusive
             if last_full > first_full {

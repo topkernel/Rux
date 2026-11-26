@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 
 use crate::fs::FdTable;
 use crate::list::ListHead;
-use crate::mm::pagemap::AddressSpace;
+use crate::mm::types::AddressSpace;
 use crate::signal::{SignalStruct, SigPending};
 use crate::sync::spinlock::Spinlock;
 

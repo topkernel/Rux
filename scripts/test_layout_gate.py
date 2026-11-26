@@ -39,11 +39,11 @@ ALLOWLIST = {
     ("kernel/core/src/timer/wheel.rs", "test_shared"),
     ("kernel/core/src/process/hotpath.rs", "test_ti_flag"),
     # page_desc's atomic bit helpers: "test" as in test-and-set, not tests.
-    ("kernel/core/src/mm/page_desc.rs", "test_and_set"),
-    ("kernel/core/src/mm/page_desc.rs", "test_and_clear"),
-    ("kernel/core/src/mm/page_desc.rs", "test_flag"),
-    ("kernel/core/src/mm/page_desc.rs", "test_and_set_flag"),
-    ("kernel/core/src/mm/page_desc.rs", "test_and_clear_flag"),
+    ("kernel/core/src/mm/hotpath.rs", "test_and_set"),
+    ("kernel/core/src/mm/hotpath.rs", "test_and_clear"),
+    ("kernel/core/src/mm/hotpath.rs", "test_flag"),
+    ("kernel/core/src/mm/hotpath.rs", "test_and_set_flag"),
+    ("kernel/core/src/mm/hotpath.rs", "test_and_clear_flag"),
 }
 
 FN_TEST_RE = re.compile(r'\bfn\s+(test_[A-Za-z0-9_]+)')

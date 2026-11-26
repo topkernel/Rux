@@ -13499,7 +13499,7 @@ pub fn task_cgroup(task: *const Task) -> Option<&'static CgroupNode> {
         // Small kernel allocations (Arc<CgroupNode> included) come from the
         // slab-backed global allocator, whose pages live in their own region
         // past the heap — those addresses are valid node pointers too.
-        let in_slab = crate::mm::slab::slab_region()
+        let in_slab = crate::mm::hotpath::slab_region()
             .map(|(base, end)| {
                 let addr = ptr as usize;
                 addr >= base && addr < end

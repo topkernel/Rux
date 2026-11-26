@@ -26,20 +26,20 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 /// The zones Linux reports, in Linux's order.
-const ZONE_ORDER: [crate::mm::zone::ZoneType; 4] = [
-    crate::mm::zone::ZoneType::ZoneDma,
-    crate::mm::zone::ZoneType::ZoneDma32,
-    crate::mm::zone::ZoneType::ZoneNormal,
-    crate::mm::zone::ZoneType::ZoneMovable,
+const ZONE_ORDER: [crate::mm::types::ZoneType; 4] = [
+    crate::mm::types::ZoneType::ZoneDma,
+    crate::mm::types::ZoneType::ZoneDma32,
+    crate::mm::types::ZoneType::ZoneNormal,
+    crate::mm::types::ZoneType::ZoneMovable,
 ];
 
 /// Linux's zone names for /proc/buddyinfo.
-fn zone_name(zone: crate::mm::zone::ZoneType) -> &'static str {
+fn zone_name(zone: crate::mm::types::ZoneType) -> &'static str {
     match zone {
-        crate::mm::zone::ZoneType::ZoneDma => "DMA",
-        crate::mm::zone::ZoneType::ZoneDma32 => "DMA32",
-        crate::mm::zone::ZoneType::ZoneNormal => "Normal",
-        crate::mm::zone::ZoneType::ZoneMovable => "Movable",
+        crate::mm::types::ZoneType::ZoneDma => "DMA",
+        crate::mm::types::ZoneType::ZoneDma32 => "DMA32",
+        crate::mm::types::ZoneType::ZoneNormal => "Normal",
+        crate::mm::types::ZoneType::ZoneMovable => "Movable",
         // ZoneCount is a sentinel, not a real zone.
         _ => "Unknown",
     }
@@ -49,7 +49,7 @@ fn zone_name(zone: crate::mm::zone::ZoneType) -> &'static str {
 fn nr_free_pages() -> u64 {
     let mut total = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = crate::mm::pglist::first_online_node() {
+    if let Some(node) = crate::mm::hotpath::first_online_node() {
         for zt in ZONE_ORDER {
             if let Some(zone) = node.zone(zt) {
                 if zone.is_initialized() {
@@ -112,15 +112,15 @@ crate::procfile! {
     "nr_dirty" => 0,
     "nr_writeback" => 0,
     // --- page allocator ---
-    "pgfault" => crate::mm::vmstat::PGFAULT.load(Ordering::Relaxed),
-    "pgmajfault" => crate::mm::vmstat::PGMAJFAULT.load(Ordering::Relaxed),
-    "pgfree" => crate::mm::vmstat::PGFREE.load(Ordering::Relaxed),
+    "pgfault" => crate::mm::hotpath::PGFAULT.load(Ordering::Relaxed),
+    "pgmajfault" => crate::mm::hotpath::PGMAJFAULT.load(Ordering::Relaxed),
+    "pgfree" => crate::mm::hotpath::PGFREE.load(Ordering::Relaxed),
     // Linux's pgalloc_* order follows the zone-type enum
     // (mm/vmstat.c VMSTAT_ITEMS): DMA, DMA32, Normal, Movable.
-    "pgalloc_dma" => crate::mm::vmstat::PGALLOC_DMA.load(Ordering::Relaxed),
-    "pgalloc_dma32" => crate::mm::vmstat::PGALLOC_DMA32.load(Ordering::Relaxed),
-    "pgalloc_normal" => crate::mm::vmstat::PGALLOC_NORMAL.load(Ordering::Relaxed),
-    "pgalloc_movable" => crate::mm::vmstat::PGALLOC_MOVABLE.load(Ordering::Relaxed),
+    "pgalloc_dma" => crate::mm::hotpath::PGALLOC_DMA.load(Ordering::Relaxed),
+    "pgalloc_dma32" => crate::mm::hotpath::PGALLOC_DMA32.load(Ordering::Relaxed),
+    "pgalloc_normal" => crate::mm::hotpath::PGALLOC_NORMAL.load(Ordering::Relaxed),
+    "pgalloc_movable" => crate::mm::hotpath::PGALLOC_MOVABLE.load(Ordering::Relaxed),
     "pgactivate" => 0,
     "pgdeactivate" => 0,
     "pglazyfree" => 0,
@@ -152,7 +152,7 @@ pub fn generate() -> Vec<u8> {
 pub fn generate_buddyinfo() -> Vec<u8> {
     let mut out = String::new();
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = crate::mm::pglist::first_online_node() {
+    if let Some(node) = crate::mm::hotpath::first_online_node() {
         for zt in ZONE_ORDER {
             let zone = match node.zone(zt) {
                 Some(z) if z.is_initialized() => z,

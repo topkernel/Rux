@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 // Test: Page allocator
-use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, PAGE_SIZE, PAGE_MASK};
+use crate::mm::{types::PhysAddr, types::VirtAddr, types::PhysFrame, types::VirtPage, types::PAGE_SIZE, hotpath::PAGE_MASK};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_page_allocator() {

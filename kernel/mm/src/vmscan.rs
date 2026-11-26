@@ -17,14 +17,14 @@ extern crate alloc;
 
 use core::sync::atomic::Ordering;
 
-use rux::mm::page_desc::{PageFlag, pfn_to_page_mut, page_desc};
-use rux::mm::page_alloc::free_page;
-use rux::mm::zone::{ZoneType, WMARK_LOW};
-use rux::mm::pglist::{
-    first_online_node_mut, LRU_INACTIVE_ANON, LRU_INACTIVE_FILE,
-    NR_LRU_LISTS, DEF_PRIORITY,
+use rux::mm::{types::PageFlag, hotpath::pfn_to_page_mut, hotpath::page_desc};
+use rux::mm::hotpath::free_page;
+use rux::mm::types::{ZoneType, WMARK_LOW};
+use rux::mm::{
+    hotpath::first_online_node_mut, types::LRU_INACTIVE_ANON, types::LRU_INACTIVE_FILE,
+    types::NR_LRU_LISTS, hotpath::DEF_PRIORITY,
 };
-use rux::mm::pfn_to_phys;
+use rux::mm::hotpath::pfn_to_phys;
 use crate::lru;
 use crate::swap;
 
@@ -237,7 +237,7 @@ pub fn vscan_heartbeat() {
 /// instead of dirty-fraction — Rux keeps no global dirty count), the
 /// discipline is the same. Read-only atomics; callable from any context.
 pub fn zone_below_dirty_writeback_mark() -> bool {
-    let Some(node) = rux::mm::pglist::first_online_node() else {
+    let Some(node) = rux::mm::hotpath::first_online_node() else {
         return false;
     };
     let Some(zone) = node.zone(ZoneType::ZoneNormal) else {
@@ -260,7 +260,7 @@ pub fn zone_below_dirty_writeback_mark() -> bool {
 /// write pays a synchronous flush — the over-throttling measured on the
 /// fallocate05 fill: one 4 KiB page flushed per write syscall).
 pub fn zone_dirty_writeback_state() -> Option<(usize, usize, usize)> {
-    let node = rux::mm::pglist::first_online_node()?;
+    let node = rux::mm::hotpath::first_online_node()?;
     let zone = node.zone(ZoneType::ZoneNormal)?;
     if !zone.is_initialized() {
         return None;
@@ -322,7 +322,7 @@ pub fn balance_pgdat(order: i32) -> usize {
     // the system IS making progress, so they keep retrying instead of
     // failing (reference should_reclaim_retry semantics).
     if sc.nr_reclaimed > 0 {
-        rux::mm::page_alloc::RECLAIM_PROGRESS.fetch_add(sc.nr_reclaimed as u64, core::sync::atomic::Ordering::Relaxed);
+        rux::mm::hotpath::RECLAIM_PROGRESS.fetch_add(sc.nr_reclaimed as u64, core::sync::atomic::Ordering::Relaxed);
     }
     sc.nr_reclaimed
 }
@@ -336,12 +336,12 @@ pub fn try_to_free_pages(order: i32) -> usize {
     // the schbd heartbeat (rux:schb (retired debug=schb)). No lock held; note_drct is a
     // counter tick unless the switch is off.
     let j0 = crate::timer::get_jiffies();
-    rux::mm::page_alloc::gate_note_phase(rux::mm::page_alloc::GATE_PHASE_ROUND);
+    rux::mm::hotpath::gate_note_phase(rux::mm::hotpath::GATE_PHASE_ROUND);
     let r = balance_pgdat(order);
     // SP-5 census: round progress + pages freed by the gate holder (the
     // stamps are no-ops for kswapd — gate_note_phase checks identity).
     if r > 0 {
-        rux::mm::page_alloc::gate_note_round_done(r as u64);
+        rux::mm::hotpath::gate_note_round_done(r as u64);
     }
     crate::debug::schb::note_drct(j0);
     r
@@ -414,11 +414,11 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
             break;
         }
         passes += 1;
-        rux::mm::page_alloc::gate_note_deep_pass(0);
+        rux::mm::hotpath::gate_note_deep_pass(0);
         let want = core::cmp::min(CHUNK, nr_to_reclaim - freed_total);
         let freed = cache.shrink_reclaim(want);
         freed_total += freed;
-        rux::mm::page_alloc::gate_note_deep_pass(freed as u64);
+        rux::mm::hotpath::gate_note_deep_pass(freed as u64);
         if freed < want {
             // Chunk starved: the inactive walk hit the referenced wall
             // (evict_one's LRU rounds exhaust MAX_SCAN graduating pages)
@@ -485,7 +485,7 @@ fn shrink_node(sc: &mut ScanControl) {
 }
 
 /// Per-lruvec reclaim: determine scan counts and dispatch.
-fn shrink_lruvec(node: &rux::mm::pglist::PglistData, sc: &mut ScanControl) {
+fn shrink_lruvec(node: &rux::mm::types::PglistData, sc: &mut ScanControl) {
     // Scan inactive anon list
     let scan_anon = nr_to_scan(LRU_INACTIVE_ANON, node, sc);
     if scan_anon > 0 {
@@ -505,7 +505,7 @@ fn shrink_lruvec(node: &rux::mm::pglist::PglistData, sc: &mut ScanControl) {
 ///
 /// Following `get_scan_count()` in mm/vmscan.c:
 ///   scan = size >> (priority - 2)
-fn nr_to_scan(lru: usize, node: &rux::mm::pglist::PglistData, sc: &ScanControl) -> usize {
+fn nr_to_scan(lru: usize, node: &rux::mm::types::PglistData, sc: &ScanControl) -> usize {
     let size = node.lru_sizes[lru].load(Ordering::Relaxed);
     if size == 0 {
         return 0;
@@ -535,7 +535,7 @@ fn nr_to_scan(lru: usize, node: &rux::mm::pglist::PglistData, sc: &ScanControl) 
 fn shrink_inactive_list(
     lru: usize,
     nr_to_scan: usize,
-    _node: &rux::mm::pglist::PglistData,
+    _node: &rux::mm::types::PglistData,
     sc: &mut ScanControl,
 ) {
     if lru == LRU_INACTIVE_FILE {
@@ -545,13 +545,13 @@ fn shrink_inactive_list(
         // dirty-frame writeback so abandoned unflushed MAP_SHARED pages
         // become evictable instead of a permanent drain. The mmu_init
         // PT-alloc retry must NOT use this variant (per-mm PteLock held).
-        rux::mm::page_alloc::gate_note_phase(rux::mm::page_alloc::GATE_PHASE_SHRINK);
+        rux::mm::hotpath::gate_note_phase(rux::mm::hotpath::GATE_PHASE_SHRINK);
         let cache_reclaimed =
             crate::fs::page_cache::get_page_cache().shrink_reclaim(nr_to_scan);
         sc.nr_reclaimed += cache_reclaimed;
     } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
         // Reclaim anonymous pages via swap
-        rux::mm::page_alloc::gate_note_phase(rux::mm::page_alloc::GATE_PHASE_ANON);
+        rux::mm::hotpath::gate_note_phase(rux::mm::hotpath::GATE_PHASE_ANON);
         let c0 = vscan_census();
         let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
         sc.nr_reclaimed += anon_reclaimed;
@@ -600,7 +600,7 @@ fn shrink_inactive_list(
 ///      without a swap cache).
 ///   3. Free the physical page
 fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
-    use rux::mm::rmap::try_to_unmap_with_swap;
+    use rux::mm::hotpath::try_to_unmap_with_swap;
     use core::sync::atomic::Ordering::Relaxed;
 
     let mut reclaimed = 0usize;
@@ -739,8 +739,8 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 swap::swap_mark_pending(swap_type, swap_offset);
                 let unmapped = try_to_unmap_with_swap(p, swap_entry);
                 if unmapped > 0 && !p.is_mapped() {
-                    rux::mm::page_alloc::gate_note_phase(
-                        rux::mm::page_alloc::GATE_PHASE_SWAPW,
+                    rux::mm::hotpath::gate_note_phase(
+                        rux::mm::hotpath::GATE_PHASE_SWAPW,
                     );
                     let write_ok = swap::swap_write_page(swap_type, swap_offset, phys).is_ok();
                     swap::swap_clear_pending(swap_type, swap_offset);
@@ -816,7 +816,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 }
             } else {
                 // Multi-mapping page — legacy order: write first, then unmap.
-                rux::mm::page_alloc::gate_note_phase(rux::mm::page_alloc::GATE_PHASE_SWAPW);
+                rux::mm::hotpath::gate_note_phase(rux::mm::hotpath::GATE_PHASE_SWAPW);
                 if swap::swap_write_page(swap_type, swap_offset, phys).is_err() {
                     // Write failed — free the slot and skip this page
                     swap::swap_free_slot(swap_type, swap_offset);

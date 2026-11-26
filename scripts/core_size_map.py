@@ -63,8 +63,10 @@ HOT_FILES = re.compile(
     # the lock primitives and the per-CPU layer
     r"|sync/(spinlock|rwlock|percpu|seqlock|unsafe)\.rs"
     r"|interrupt/[^/]+\.rs"
-    # the timekeeping core and the allocator entry points
-    r"|timer\.rs|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|unsafe)\.rs"
+    # the timekeeping core and the hot-path files (pass 2 put every topic
+    # file but types.rs into hotpath.rs; no function is judged hot or cold
+    # until the shrink stage)
+    r"|timer\.rs|mm/(hotpath|unsafe)\.rs"
     r"|process/(hotpath|unsafe)\.rs"
     r"|safety/.*\.rs)$")
 

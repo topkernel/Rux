@@ -11,7 +11,7 @@
 //! (the null arm is the torn-teardown window and is skipped, matching
 //! the historical behavior).
 
-use crate::mm::{phys_to_pfn, pfn_to_page_mut};
+use crate::mm::{hotpath::phys_to_pfn, hotpath::pfn_to_page_mut};
 
 /// Take one reference on the segment page backing `phys` (the
 /// per-attachment pin installed by the shmat map loop, review 2R.6:

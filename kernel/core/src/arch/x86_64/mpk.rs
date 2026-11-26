@@ -190,7 +190,7 @@ pub fn probe() {
     // and a kernel-mode write to a US page is legal with SMAP unarmed
     // (the boot arms SMEP only) — PKU still gates it via PKRU.
     let va: u64 = 0x6000_0000_0000;
-    let frame = crate::mm::alloc_pages(crate::mm::GfpFlags::GFP_KERNEL, 0);
+    let frame = crate::mm::hotpath::alloc_pages(crate::mm::types::GfpFlags::GFP_KERNEL, 0);
     if frame == 0 {
         crate::println!("mpk: probe page alloc FAILED");
         return;

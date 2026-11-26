@@ -12,7 +12,7 @@
 /// on the (rare) user-mode illegal-instruction path, so the serial cost is
 /// acceptable even for large processes.
 pub fn sigill_mapping_forensics(pid: usize, epc: usize) {
-    use crate::mm::vma::VmaType;
+    use crate::mm::types::VmaType;
 
     // One volatile-u64 diagnostic read through the framework's audited
     // riscv64 diag edge (kernel-half page-table/code addresses only).
@@ -128,7 +128,7 @@ pub fn sigill_mapping_forensics(pid: usize, epc: usize) {
     // (a genuine text page), and for whom?
     if pte & 1 != 0 {
         let pfn = ((pte >> 10) & 0xFFF_FFFF_FFFF) as usize;
-        match crate::mm::page_desc::text_stamp_get(pfn) {
+        match crate::mm::hotpath::text_stamp_get(pfn) {
             Some((owner_pid, owner_va)) => {
                 // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
                 crate::pr_info!(

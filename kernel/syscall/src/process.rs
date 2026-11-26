@@ -41,7 +41,7 @@ pub const CLONE_HEAP_RESERVE_BYTES: usize = 8 << 20;
 
 /// Whether the kernel heap is too low to safely create another task.
 pub fn clone_heap_reserve_low() -> bool {
-    let st = crate::mm::buddy_allocator::buddy_stats();
+    let st = crate::mm::hotpath::buddy_stats();
     st.heap_size > 0 && st.free_bytes < CLONE_HEAP_RESERVE_BYTES
 }
 
@@ -70,7 +70,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         static N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            let st = crate::mm::buddy_allocator::buddy_stats();
+            let st = crate::mm::hotpath::buddy_stats();
             let comm = rux::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -3108,7 +3108,7 @@ fn sync_stack_limit(task: &rux::process::types::Task, rlim_cur: u64) {
         let stack_top = aspace.start_stack();
         if stack_top != 0 {
             let size = (rlim_cur.min(STACK_MAX_SIZE as u64)) as usize;
-            let limit = stack_top.saturating_sub(size) + crate::mm::page::PAGE_SIZE;
+            let limit = stack_top.saturating_sub(size) + crate::mm::types::PAGE_SIZE;
             aspace.set_stack_limit(limit);
         }
     }
@@ -4164,7 +4164,7 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         // count), not the Kernel.toml nominal size — sysinfo(2) callers
         // (installers, OOM-aware daemons) size their behavior off these
         // fields; freeram used to be a hard-coded "half of nominal".
-        let mem = crate::mm::meminfo::get_basic_memory_info();
+        let mem = crate::mm::hotpath::get_basic_memory_info();
         let _ = ua::write_user::<u64>(base + 32, mem.mem_total as u64);
         // freeram
         let _ = ua::write_user::<u64>(base + 40, mem.mem_free as u64);

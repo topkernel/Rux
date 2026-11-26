@@ -36,7 +36,7 @@ use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault};
 pub use super::page_fault::MmFaultResult;
 use crate::println;
 use crate::process::types::TaskState;
-use crate::mm::vma::VmaFlags;
+use crate::mm::types::VmaFlags;
 
 /// Exception table entry
 ///
@@ -196,7 +196,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // /proc/vmstat pgfault, and the per-task counter behind
     // /proc/[pid]/stat field 10 (minflt). Linux counts only faults
     // taken in user mode.
-    crate::mm::vmstat::note_fault();
+    crate::mm::hotpath::note_fault();
     if regs.user_mode() {
         if let Some(task) = crate::sched::hotpath::current() {
             // SAFETY: current() returned a live task pointer; this
@@ -280,7 +280,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             if kernel_data_fill {
                 let covered = addr_space
                     .vma_read()
-                    .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                    .find(crate::mm::types::VirtAddr::new(fault_addr.as_usize()))
                     .is_some();
                 // 84th (x86_64 twin: installs SIGABRT, ohw156 t=161.5): an
                 // UNCOVERED kernel uaccess fault must still reach
@@ -294,7 +294,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 // Segfault -> `_` arm).
                 if covered || addr_space
                     .vma_read()
-                    .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                    .find_stack_vma(crate::mm::types::VirtAddr::new(fault_addr.as_usize()))
                     .is_some()
                 {
                     let result = crate::api::mm::handle_mm_fault(
@@ -490,7 +490,7 @@ crate::pr_err!(
                     {
                         use crate::arch::mm::mm_ops::PageTableWalker;
                         if let Some((ppn, bits)) = unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x3fffffe000u64) } {
-                            use crate::mm::page_desc::pfn_to_page_mut;
+                            use crate::mm::hotpath::pfn_to_page_mut;
                             let page = pfn_to_page_mut(ppn as usize);
                             if !page.is_null() {
                                 crate::pr_err!("  STACKPG ppn={:#x} pte={:#x} refcount={} mapcount={}",
@@ -525,7 +525,7 @@ crate::pr_err!(
                             // Zone-ledger replay: alloc/free history of this ppn.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
-                                use crate::mm::zone::{ZTRACE_ALLOC, ZALLOC_CUR, ZTRACE_FREE, ZFREE_CUR};
+                                use crate::mm::hotpath::{ZTRACE_ALLOC, ZALLOC_CUR, ZTRACE_FREE, ZFREE_CUR};
                                 let covers = |entry: u64| -> bool {
                                     let b = entry >> 4;
                                     let o = (entry & 0xF) as u64;

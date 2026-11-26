@@ -1918,7 +1918,7 @@ impl SharedPageWindow {
 }
 
 fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
-    let page = crate::mm::page::PAGE_SIZE as usize;
+    let page = crate::mm::types::PAGE_SIZE as usize;
     let mut guard = entry.shared_pages.lock_irqsave();
     let cur = guard.as_ref().map(|sp| sp.size).unwrap_or(0);
     if cur >= min_len {
@@ -2039,7 +2039,7 @@ pub fn shared_fault_file_page(file: &rux::fs::File, file_off: usize) -> Option<u
     }
     let guard = entry.shared_pages.lock_irqsave();
     let sp = guard.as_ref()?;
-    let idx = file_off / (crate::mm::page::PAGE_SIZE as usize);
+    let idx = file_off / (crate::mm::types::PAGE_SIZE as usize);
     let pfn = *sp.pfns.get(idx)?;
     // b83 hunt: the selinux-trie walker reads the WRONG file's bytes at
     // its mapping base — name which file each shared fault serves.
@@ -2083,7 +2083,7 @@ fn shared_entry_of(file: &rux::fs::File) -> Option<(&'static DevfsEntry, usize)>
 /// Copy `n` bytes at `off` OUT of the shared backing (bounded by the
 /// backed size and the logical size). Returns bytes copied.
 fn shared_read_off(entry: &DevfsEntry, logical: usize, off: usize, buf: &mut [u8]) -> usize {
-    let page = crate::mm::page::PAGE_SIZE as usize;
+    let page = crate::mm::types::PAGE_SIZE as usize;
     let guard = entry.shared_pages.lock_irqsave();
     let Some(sp) = guard.as_ref() else { return 0 };
     let limit = core::cmp::min(sp.size, logical);
@@ -2113,7 +2113,7 @@ fn shared_write_off(
     off: usize,
     buf: &[u8],
 ) -> usize {
-    let page = crate::mm::page::PAGE_SIZE as usize;
+    let page = crate::mm::types::PAGE_SIZE as usize;
     let need = off.saturating_add(buf.len());
     let backed = shared_grow_locked(entry, need);
     if backed < need {

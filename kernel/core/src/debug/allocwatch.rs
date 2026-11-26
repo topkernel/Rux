@@ -220,7 +220,7 @@ fn stuck_report(
 }
 
 fn tick_stuck_scan(now: u64) {
-    let sa = crate::mm::small_alloc::audit_class_locks();
+    let sa = crate::mm::hotpath::audit_class_locks();
     for i in 0..8u32 {
         let s = &SA_STUCK[i as usize];
         if sa & (1 << i) != 0 && !stamp_live(SITE_SMALL_ALLOC, i as u8) {
@@ -236,7 +236,7 @@ fn tick_stuck_scan(now: u64) {
             s.store(0, Ordering::Relaxed);
         }
     }
-    let sl = crate::mm::slab::audit_cache_locks();
+    let sl = crate::mm::hotpath::audit_cache_locks();
     for i in 0..10u32 {
         let s = &SLAB_STUCK[i as usize];
         if sl & (1 << i) != 0 && !stamp_live(SITE_SLAB, i as u8) {
@@ -250,7 +250,7 @@ fn tick_stuck_scan(now: u64) {
             s.store(0, Ordering::Relaxed);
         }
     }
-    if crate::mm::buddy_allocator::audit_lock_held() && !stamp_live(SITE_BUDDY, 0) {
+    if crate::mm::hotpath::audit_lock_held() && !stamp_live(SITE_BUDDY, 0) {
         let first = BUDDY_STUCK.load(Ordering::Relaxed);
         if first == 0 {
             BUDDY_STUCK.store(now, Ordering::Relaxed);
@@ -282,7 +282,7 @@ pub fn tick_check() {
                 .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            let m = crate::mm::small_alloc::audit_section_peek();
+            let m = crate::mm::hotpath::audit_section_peek();
             crate::pr_warn!(
                 "ALLOC-SECT small_alloc max_cyc={:x} over10ms={}",
                 m.iter().map(|x| x.0).max().unwrap_or(0),
@@ -372,7 +372,7 @@ pub fn tick_check() {
         // 300 ms of real KVM execution — the per-class max/over10ms
         // counters say whether that is normal for this boot.
         if site == SITE_SMALL_ALLOC as usize {
-            let m = crate::mm::small_alloc::audit_section_peek();
+            let m = crate::mm::hotpath::audit_section_peek();
             crate::pr_warn!(
                 "ALLOC-SECT small_alloc max_cyc={:x} over10ms={}",
                 m.iter().map(|x| x.0).max().unwrap_or(0),
@@ -386,7 +386,7 @@ pub fn tick_check() {
         // buddy slot ever appearing. Name the buddy word's live state on
         // every small_alloc/slab hold report.
         let buddy_hint = if site < SITE_MAX {
-            if crate::mm::buddy_allocator::audit_lock_held() {
+            if crate::mm::hotpath::audit_lock_held() {
                 " buddyword=locked"
             } else {
                 " buddyword=clean"

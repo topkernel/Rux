@@ -70,8 +70,8 @@ impl PtTable {
         if phys == 0 {
             return None;
         }
-        if crate::mm::page_desc::descs_published()
-            && !crate::mm::phys_valid(phys as usize)
+        if crate::mm::hotpath::descs_published()
+            && !crate::mm::hotpath::phys_valid(phys as usize)
         {
             return None;
         }

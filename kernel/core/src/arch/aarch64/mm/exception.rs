@@ -123,7 +123,7 @@ fn no_context(regs: &mut PtRegs, fault_addr: VirtAddr) -> MmFaultResult {
 /// handle_mm_fault with CowPending resolved through handle_cow_fault.
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // /proc/vmstat pgfault + the per-task minflt counter (user mode only)
-    crate::mm::vmstat::note_fault();
+    crate::mm::hotpath::note_fault();
     if regs.user_mode() {
         if let Some(task) = crate::sched::hotpath::current() {
             // SAFETY: current() returned a live task pointer; per-task
@@ -174,7 +174,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         if kernel_data_fill {
             let covered = addr_space
                 .vma_read()
-                .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .find(crate::mm::types::VirtAddr::new(fault_addr.as_usize()))
                 .is_some();
             // 84th (twin of the x86_64 installs-SIGABRT fix): an
             // UNCOVERED kernel uaccess fault must still reach
@@ -185,7 +185,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             // still fixup (find_stack_vma None -> Segfault -> `_`).
             if covered || addr_space
                 .vma_read()
-                .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .find_stack_vma(crate::mm::types::VirtAddr::new(fault_addr.as_usize()))
                 .is_some()
             {
                 let result = crate::api::mm::handle_mm_fault(

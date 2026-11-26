@@ -154,7 +154,7 @@ pub fn diag_user_pte(root_ppn: u64, va: u64) -> Option<(u64, u64)> {
 /// report prints.
 pub fn diag_frame_desc(ppn: u64) -> (i64, i64, u64, usize) {
     let frame = (ppn as usize) << 12;
-    let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(frame));
+    let pd = crate::mm::hotpath::pfn_to_page_mut(crate::mm::hotpath::phys_to_pfn(frame));
     if pd.is_null() {
         return (-999, -999, 0, 0);
     }

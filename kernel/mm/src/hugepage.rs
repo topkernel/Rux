@@ -26,8 +26,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
 use crate::sync::seqlock::SeqLock;
 
-use rux::mm::PAGE_SIZE;
-use rux::mm::zone::{GfpFlags, MAX_ORDER};
+use rux::mm::types::PAGE_SIZE;
+use rux::mm::types::{GfpFlags, MAX_ORDER};
 
 // ==================== Huge Page Constants ====================
 
@@ -135,7 +135,7 @@ pub fn alloc_hugepage(gfp_flags: GfpFlags, hp_type: HugePageType) -> usize {
     }
 
     // Allocate from buddy allocator
-    let addr = rux::mm::page_alloc::alloc_pages(gfp_flags, order);
+    let addr = rux::mm::hotpath::alloc_pages(gfp_flags, order);
 
     if addr != 0 {
         // Update statistics
@@ -178,7 +178,7 @@ pub fn free_hugepage(addr: usize, hp_type: HugePageType) {
     }
 
     // Free to buddy allocator
-    rux::mm::page_alloc::free_pages(addr, hp_type.order());
+    rux::mm::hotpath::free_pages(addr, hp_type.order());
 }
 
 /// Allocate a PMD huge page (2MB)

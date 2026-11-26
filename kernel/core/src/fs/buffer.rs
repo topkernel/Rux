@@ -292,8 +292,8 @@ enum FileChunk {
 
 impl FileChunk {
     fn new() -> Option<Self> {
-        let phys = crate::mm::page_alloc::alloc_pages(
-            crate::mm::zone::GfpFlags::GFP_KERNEL,
+        let phys = crate::mm::hotpath::alloc_pages(
+            crate::mm::types::GfpFlags::GFP_KERNEL,
             CHUNK_ORDER,
         );
         if phys != 0 {
@@ -332,7 +332,7 @@ impl FileChunk {
 impl Drop for FileChunk {
     fn drop(&mut self) {
         if let FileChunk::Page(phys) = *self {
-            crate::mm::page_alloc::free_pages(phys, CHUNK_ORDER);
+            crate::mm::hotpath::free_pages(phys, CHUNK_ORDER);
         }
     }
 }

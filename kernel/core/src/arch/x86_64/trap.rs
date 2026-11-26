@@ -2990,7 +2990,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
     if OOM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
     crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
     }
-            crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
+            crate::mm::hotpath::oom_forensic_dump("pagefault OOM");
             if regs.user_mode() {
                 // fake-OOM family: Linux pagefault_out_of_memory parity —
                 // give the global OOM killer (badness-based victim

@@ -18,8 +18,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
-use rux::mm::zone::{ZoneType, WMARK_HIGH};
-use rux::mm::pglist::first_online_node_mut;
+use rux::mm::types::{ZoneType, WMARK_HIGH};
+use rux::mm::hotpath::first_online_node_mut;
 use crate::vmscan::balance_pgdat;
 
 // ============================================================================
@@ -129,9 +129,9 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 let mut deep_freed = 0usize;
                 if let Some(node) = rux::mm::r#unsafe::first_node_mut() {
                     for zt in [
-                        rux::mm::zone::ZoneType::ZoneNormal,
-                        rux::mm::zone::ZoneType::ZoneDma32,
-                        rux::mm::zone::ZoneType::ZoneDma,
+                        rux::mm::types::ZoneType::ZoneNormal,
+                        rux::mm::types::ZoneType::ZoneDma32,
+                        rux::mm::types::ZoneType::ZoneDma,
                     ] {
                         if let Some(zone) = node.zone(zt) {
                             if !zone.is_initialized() {
@@ -141,7 +141,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                             // the zone's WMARK_LOW shortfall (plus the
                             // request), clamped to the drain's bounds.
                             let wmark_low =
-                                zone.watermark(rux::mm::zone::WMARK_LOW);
+                                zone.watermark(rux::mm::types::WMARK_LOW);
                             let shortfall = wmark_low
                                 .saturating_add(1usize << order.max(0))
                                 .saturating_sub(zone.nr_free());
@@ -178,7 +178,7 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 if let Some(node) = rux::mm::r#unsafe::first_node_mut() {
                     // Find total pages from any initialized zone
                     let mut totalpages = 0u64;
-                    for zt in [rux::mm::zone::ZoneType::ZoneNormal, rux::mm::zone::ZoneType::ZoneDma32, rux::mm::zone::ZoneType::ZoneDma] {
+                    for zt in [rux::mm::types::ZoneType::ZoneNormal, rux::mm::types::ZoneType::ZoneDma32, rux::mm::types::ZoneType::ZoneDma] {
                         if let Some(zone) = node.zone(zt) {
                             if zone.is_initialized() {
                                 totalpages = zone.managed_pages() as u64;

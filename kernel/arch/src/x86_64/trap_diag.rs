@@ -168,7 +168,7 @@ pub fn gp_mmhistory_dump(regs: &PtRegs) {
     // unmap_pages range covers the corrupted pointer VAs.
     crate::pr_debug!(
                             "GP-UNWATCH: tail of PTE-clearing ring (newest first):");
-    crate::mm::unwatch::dump_tail(120);
+    crate::mm::hotpath::dump_tail(120);
     for (name, v) in [
         ("rbx", regs.rbx),
         ("rsi", regs.rsi),
@@ -176,7 +176,7 @@ pub fn gp_mmhistory_dump(regs: &PtRegs) {
         ("rdx", regs.rdx),
     ] {
         if v > 0x1_0000 && v < 0x0000_8000_0000_0000 {
-            let hit = crate::mm::unwatch::covered_by_unmap(v & !0xfff);
+            let hit = crate::mm::hotpath::covered_by_unmap(v & !0xfff);
             crate::pr_debug!(
                             "GP-UNWATCH: {}={:#x} covered_by_unmap={}", name, v, hit);
         }
@@ -508,7 +508,7 @@ fn dump_mm_ops(tag: &str, t: &crate::process::types::Task) {
         // and the stack VMA (rsp inside a file-backed read-only segment
         // would name a clobbered stack). Print-path only.
         for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
-            match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
+            match vmas.find(crate::mm::types::VirtAddr::new(probe as usize)) {
                 // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                 Some(v) => crate::pr_err!(
                     "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
@@ -531,7 +531,7 @@ fn dump_mm_ops(tag: &str, t: &crate::process::types::Task) {
         // addr2line offset directly (sc49: appspawn children die inside a
         // FileBacked VMA and fd/offset alone leaves the crash site
         // anonymous).
-        if let Some(v) = vmas.find(crate::mm::page::VirtAddr::new(regs.rip as usize)) {
+        if let Some(v) = vmas.find(crate::mm::types::VirtAddr::new(regs.rip as usize)) {
             let fd = v.file_fd();
             if fd >= 0 {
                 // SAFETY: current task's fd table is alive for the
@@ -766,7 +766,7 @@ fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
                         continue;
                     }
                     if let Some(v) = vmas2
-                        .find(crate::mm::page::VirtAddr::new(val as usize))
+                        .find(crate::mm::types::VirtAddr::new(val as usize))
                     {
                         // Only code-looking mappings (r-x / rwx).
                         let f = v.flags();

@@ -18,8 +18,8 @@ use alloc::sync::Arc;
 use alloc::boxed::Box;
 
 use crate::fs::{File, FileOps, FileFlags};
-use crate::mm::page_alloc::{alloc_pages, free_pages};
-use crate::mm::zone::GfpFlags;
+use crate::mm::hotpath::{alloc_pages, free_pages};
+use crate::mm::types::GfpFlags;
 use crate::sync::spinlock::Spinlock;
 
 // ==================== UAPI Constants ====================
@@ -312,9 +312,9 @@ fn free_ring_region(region: &RingRegion) {
     // page has been unpinned — otherwise a stray mapping's munmap will
     // release the last reference per page (review 2R.6).
     let mut still_pinned = false;
-    let base_pfn = crate::mm::phys_to_pfn(region.phys);
+    let base_pfn = crate::mm::hotpath::phys_to_pfn(region.phys);
     for i in 0..region.npages {
-        let page = crate::mm::pfn_to_page_mut(base_pfn + i);
+        let page = crate::mm::hotpath::pfn_to_page_mut(base_pfn + i);
         if !page.is_null() {
             // SAFETY: page descriptor exists for this in-RAM page.
             let r = unsafe { (*page).put_page() };
@@ -558,8 +558,8 @@ pub fn io_uring_mmap_handler(
     file: &File, addr: usize, length: usize, offset: u64, prot: u32,
 ) -> Result<usize, i32> {
     use crate::arch::mm::{PageTableEntry, VirtAddr, PhysAddr, map_page};
-    use crate::mm::vma::{Vma, VmaFlags};
-    use crate::mm::page::VirtAddr as PageVirtAddr;
+    use crate::mm::types::{Vma, VmaFlags};
+    use crate::mm::types::VirtAddr as PageVirtAddr;
 
     // R7-C4: read the pointer INSIDE the lock (was read before, deref
     // after — a concurrent close() could free the ring in between).
@@ -630,8 +630,8 @@ pub fn io_uring_mmap_handler(
         PageVirtAddr::new(vaddr + region.size),
         vma_flags,
     );
-    vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-        crate::mm::vma::VmaOrigin::OTHER,
+    vma.set_origin(crate::mm::types::VmaOrigin::from_bits(
+        crate::mm::types::VmaOrigin::OTHER,
     ));
     if addr_space.vma_write().add(vma).is_err() {
         return Err(-12);
@@ -651,8 +651,8 @@ pub fn io_uring_mmap_handler(
             // reference so munmap's put_page cannot free a page the ring
             // still owns (Wave-2 regression, review 2R.6). The final free
             // happens in Drop only when every mapping is gone.
-            let page = crate::mm::pfn_to_page_mut(
-                crate::mm::phys_to_pfn(pa),
+            let page = crate::mm::hotpath::pfn_to_page_mut(
+                crate::mm::hotpath::phys_to_pfn(pa),
             );
             if !page.is_null() {
                 (*page).get_page();

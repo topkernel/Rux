@@ -357,7 +357,7 @@ pub fn devno_ctx(dev: &DevNo) -> Option<BinderCtx> {
 }
 
 const BINDER_MMAP_MAX: usize = 4 << 20;
-const PAGE_SIZE: usize = crate::mm::page::PAGE_SIZE;
+const PAGE_SIZE: usize = crate::mm::types::PAGE_SIZE;
 
 fn align8(v: usize) -> usize {
     (v + 7) & !7
@@ -2332,18 +2332,18 @@ impl Drop for BinderAlloc {
     /// before fds close, so by the time we get here the owner reference is
     /// the last one for each page — free the buddy block.
     fn drop(&mut self) {
-        let base_pfn = crate::mm::phys_to_pfn(self.phys);
+        let base_pfn = crate::mm::hotpath::phys_to_pfn(self.phys);
         let mut still_pinned = false;
         for i in 0..self.npages {
             // INV-FRAME-1 typed descriptor (out-of-range -> None).
-            if let Some(page) = crate::mm::page_desc(base_pfn + i) {
+            if let Some(page) = crate::mm::hotpath::page_desc(base_pfn + i) {
                 if page.put_page() > 0 {
                     still_pinned = true;
                 }
             }
         }
         if !still_pinned {
-            crate::mm::page_alloc::free_pages(self.phys, self.order);
+            crate::mm::hotpath::free_pages(self.phys, self.order);
         }
     }
 }
@@ -3896,9 +3896,9 @@ pub fn binder_mmap_handler(
     prot: u32,
 ) -> Result<usize, i32> {
     use crate::arch::mm::{map_page, PageTableEntry, PhysAddr, VirtAddr};
-    use crate::mm::GfpFlags;
-    use crate::mm::page_alloc::{alloc_pages, free_pages};
-    use crate::mm::vma::{Vma, VmaFlags};
+    use crate::mm::types::GfpFlags;
+    use crate::mm::hotpath::{alloc_pages, free_pages};
+    use crate::mm::types::{Vma, VmaFlags};
 
     if offset != 0 {
         return Err(-22); // EINVAL
@@ -3993,8 +3993,8 @@ pub fn binder_mmap_handler(
             }
             // Hint honored only when the whole range is VMA-free.
             let probe = Vma::new(
-                crate::mm::page::VirtAddr::new(b),
-                crate::mm::page::VirtAddr::new(b + size),
+                crate::mm::types::VirtAddr::new(b),
+                crate::mm::types::VirtAddr::new(b + size),
                 vma_flags,
             );
             if vmas.iter().any(|v| v.overlaps(&probe)) {
@@ -4039,12 +4039,12 @@ pub fn binder_mmap_handler(
         }
         let b = base.unwrap();
         let mut vma = Vma::new(
-            crate::mm::page::VirtAddr::new(b),
-            crate::mm::page::VirtAddr::new(b + size),
+            crate::mm::types::VirtAddr::new(b),
+            crate::mm::types::VirtAddr::new(b + size),
             vma_flags,
         );
-        vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-            crate::mm::vma::VmaOrigin::BINDER,
+        vma.set_origin(crate::mm::types::VmaOrigin::from_bits(
+            crate::mm::types::VmaOrigin::BINDER,
         ));
         // Account the mapped zone like any other VMA (the reference
         // kernel charges every installed VMA, so the binder buffer counts
@@ -4092,11 +4092,11 @@ pub fn binder_mmap_handler(
                 // replace below. put_page→0 frees; refcount is 1 (fresh
                 // zero page inside our private VMA window). INV-FRAME-1
                 // typed descriptor (out-of-range -> None).
-                if let Some(page) = crate::mm::page_desc(old_ppn as usize) {
+                if let Some(page) = crate::mm::hotpath::page_desc(old_ppn as usize) {
                     page.rmap_alt_remove(addr_space as *const _ as usize, va / PAGE_SIZE);
                     page.dec_mapcount();
                     if page.put_page() == 0 {
-                        crate::mm::page_alloc::free_pages((old_ppn as usize) << 12, 0);
+                        crate::mm::hotpath::free_pages((old_ppn as usize) << 12, 0);
                     }
                 }
                 addr_space.sub_rss(1);
@@ -4108,7 +4108,7 @@ pub fn binder_mmap_handler(
             }
             // Mapping reference (io_uring discipline): munmap drops one,
             // binder_close drops the owner one, the last drop frees.
-            if let Some(page) = crate::mm::page_desc(crate::mm::phys_to_pfn(pa)) {
+            if let Some(page) = crate::mm::hotpath::page_desc(crate::mm::hotpath::phys_to_pfn(pa)) {
                 page.get_page();
             }
         }
@@ -5197,7 +5197,7 @@ fn bc_corruption_snapshot(
     bad_off: usize,
     cmd: u32,
 ) {
-    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+    use crate::mm::types::{VirtAddr, PAGE_SIZE};
 
     let bad_va = buffer.wrapping_add(bad_off as u64);
     crate::pr_debug!(
@@ -5311,17 +5311,17 @@ fn bc_corruption_snapshot(
                 bits & 0x8 != 0
             );
 
-            if let Some(p) = crate::mm::page_desc(ppn as usize) {
+            if let Some(p) = crate::mm::hotpath::page_desc(ppn as usize) {
                 crate::pr_debug!(
                     "BC-FORENSICS: page desc refcount={} mapcount={} Cow={} Anon={} SwapBacked={} OnFreelist={} Reserved={} Migrating={}",
                     p.refcount(),
                     p.mapcount(),
-                    p.test_flag(crate::mm::page_desc::PageFlag::Cow),
-                    p.test_flag(crate::mm::page_desc::PageFlag::Anonymous),
-                    p.test_flag(crate::mm::page_desc::PageFlag::SwapBacked),
-                    p.test_flag(crate::mm::page_desc::PageFlag::OnFreelist),
-                    p.test_flag(crate::mm::page_desc::PageFlag::Reserved),
-                    p.test_flag(crate::mm::page_desc::PageFlag::Migrating),
+                    p.test_flag(crate::mm::types::PageFlag::Cow),
+                    p.test_flag(crate::mm::types::PageFlag::Anonymous),
+                    p.test_flag(crate::mm::types::PageFlag::SwapBacked),
+                    p.test_flag(crate::mm::types::PageFlag::OnFreelist),
+                    p.test_flag(crate::mm::types::PageFlag::Reserved),
+                    p.test_flag(crate::mm::types::PageFlag::Migrating),
                 );
                 let mut mappings = alloc::string::String::new();
                 p.rmap_alt_for_each(|mm, vpn| {
@@ -5338,7 +5338,7 @@ fn bc_corruption_snapshot(
             // Raw page contents through the direct map: is the WHOLE page
             // zero, or only the binder words? (frame may be any user page;
             // the linear map covers all RAM on both targets)
-            if crate::mm::pfn_valid(ppn as usize) {
+            if crate::mm::hotpath::pfn_valid(ppn as usize) {
                 let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(ppn << 12));
                 let base = kv.bits() as usize as *const u64;
                 // SAFETY: base points at the physical page behind the PTE

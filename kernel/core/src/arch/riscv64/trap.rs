@@ -1345,7 +1345,7 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                     if let Some(mm) = task.address_space_arc() {
                         for a in [fault_addr, regs.epc] {
                             match mm.find_vma(
-                                crate::mm::VirtAddr::new(a as usize)) {
+                                crate::mm::types::VirtAddr::new(a as usize)) {
                                 // HOTPATH-PRINT: fault-path — budgeted/one-shot above
                                 None => crate::pr_err!(
                                     "  segv vma[{:#x}]: unmapped", a),
@@ -1361,15 +1361,15 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                                     .map(|&(on, c)| if on { c } else { '-' })
                                     .collect();
                                     let name = if f.contains(
-                                        crate::mm::vma::VmaFlags::GROWSDOWN)
+                                        crate::mm::types::VmaFlags::GROWSDOWN)
                                     {
                                         alloc::string::String::from("[stack]")
                                     } else if f.contains(
-                                        crate::mm::vma::VmaFlags::EXECUTABLE)
+                                        crate::mm::types::VmaFlags::EXECUTABLE)
                                     {
                                         alloc::string::String::from("[exe]")
                                     } else if v.vma_type()
-                                        == crate::mm::vma::VmaType::FileBacked
+                                        == crate::mm::types::VmaType::FileBacked
                                     {
                                         let mut path =
                                             alloc::string::String::new();
@@ -1543,7 +1543,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
         
             }
             // FORENSIC (fake-OOM family): allocator state at the kill moment.
-            crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
+            crate::mm::hotpath::oom_forensic_dump("pagefault OOM");
             // fake-OOM family: Linux pagefault_out_of_memory parity — the
             // global OOM killer (badness-based victim selection,
             // rate-limited) gets the chance to free the real hog before

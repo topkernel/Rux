@@ -20,12 +20,12 @@
 #![forbid(unsafe_code)]
 use crate::arch::mm::VirtAddr as ArchVirtAddr;
 use crate::drivers::blkdev::GenDisk;
-use crate::mm::mm_struct::MmStruct;
-use crate::mm::page::VirtAddr as PageVirtAddr;
-use crate::mm::page_desc::Page;
-use crate::mm::pagemap::{MapError, Perm};
-use crate::mm::vma::{VmaFlags, VmaType};
-use crate::mm::zone::Zone;
+use crate::mm::types::MmStruct;
+use crate::mm::types::VirtAddr as PageVirtAddr;
+use crate::mm::types::Page;
+use crate::mm::types::{MapError, Perm};
+use crate::mm::types::{VmaFlags, VmaType};
+use crate::mm::types::Zone;
 use crate::process::types::Task;
 
 // ==================== The seam vocabulary ====================

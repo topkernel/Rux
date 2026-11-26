@@ -94,17 +94,17 @@ pub static REF_CUR: AtomicUsize = AtomicUsize::new(0);
 /// `kind`: 0 = get_page, 1 = put (site-attributed). No-op unless
 /// `rux:mmforensics (retired debug=mmforensics)` is armed; takes no locks (safe under PTE locks).
 #[inline]
-pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old: i32) {
+pub fn note_ref(page: *const crate::mm::types::Page, kind: u8, site: u8, old: i32) {
     if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
     // SAFETY: the caller passes a valid page descriptor it is operating on.
     let p = unsafe { &*page };
-    use crate::mm::page_desc::PageType;
+    use crate::mm::types::PageType;
     if p.page_type() != PageType::PageCache {
         return;
     }
-    let ppn = crate::mm::page_desc::page_to_pfn(page) as u64;
+    let ppn = crate::mm::hotpath::page_to_pfn(page) as u64;
     let idx = REF_CUR.fetch_add(1, Ordering::Relaxed) % REF_RING_LEN;
     let e = &REF_RING[idx];
     e.ppn.store(ppn, Ordering::Relaxed);
@@ -199,13 +199,13 @@ fn ring_history(ppn: u64) {
     // Zone allocator ledger (raw pfn<<4|order entries; no pid).
     for (ring, cur, name) in [
         (
-            &crate::mm::zone::ZTRACE_ALLOC,
-            &crate::mm::zone::ZALLOC_CUR,
+            &crate::mm::hotpath::ZTRACE_ALLOC,
+            &crate::mm::hotpath::ZALLOC_CUR,
             "zalloc",
         ),
         (
-            &crate::mm::zone::ZTRACE_FREE,
-            &crate::mm::zone::ZFREE_CUR,
+            &crate::mm::hotpath::ZTRACE_FREE,
+            &crate::mm::hotpath::ZFREE_CUR,
             "zfree",
         ),
     ] {
@@ -325,13 +325,13 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
     );
 
     // ---- 1. page-descriptor state (buddy + page-cache view) ----
-    let page = crate::mm::page_desc::pfn_to_page(pfn);
+    let page = crate::mm::hotpath::pfn_to_page(pfn);
     if page.is_null() {
         crate::pr_err!("  desc: NO DESCRIPTOR (pfn outside managed range)");
     } else {
         // SAFETY: read-only descriptor access on the diagnostic path.
         unsafe {
-            use crate::mm::page_desc::PageFlag;
+            use crate::mm::types::PageFlag;
             let p = &*page;
             let bit = |f: PageFlag, n: &'static str| -> &'static str {
                 if p.test_flag(f) {
@@ -377,7 +377,7 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
 
     // ---- 4. per-CPU pageset rows ----
     let mut rows = [0usize; 8];
-    let n = crate::mm::pcp::forensics_scan_rows(pfn, &mut rows);
+    let n = crate::mm::hotpath::forensics_scan_rows(pfn, &mut rows);
     if n > 0 {
         crate::pr_err!(
             "  pcp: pfn sits in CPU row(s) {:?} (still pcp-cached!)",

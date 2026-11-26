@@ -17,9 +17,9 @@ use super::r#unsafe::PtTable;
 use super::mmu_init::{map_page, get_page_table_virt, ROOT_PAGE_TABLE};
 use super::mm_ops::{alloc_user_phys_page, is_cow_page, check_pte_permissions, PageTableWalker};
 use super::pagetable::*;
-use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
-use crate::mm::vma::VmaType;
-use crate::mm::AddressSpace;
+use crate::mm::types::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
+use crate::mm::types::VmaType;
+use crate::mm::types::AddressSpace;
 
 // ==================== Fault Flags ====================
 

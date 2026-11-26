@@ -142,7 +142,7 @@ pub fn kernel_va_readable(va: usize) -> bool {
         let po = crate::arch::x86_64::mm::PAGE_OFFSET;
         if va >= po {
             let phys = va - po;
-            return phys < crate::mm::page_desc::max_pfn() * 4096;
+            return phys < crate::mm::hotpath::max_pfn() * 4096;
         }
         false
     }
@@ -154,7 +154,7 @@ pub fn kernel_va_readable(va: usize) -> bool {
         let po = crate::arch::mm::PAGE_OFFSET;
         if va >= po {
             let phys = va.wrapping_sub(po);
-            return phys < crate::mm::page_desc::max_pfn() * 4096;
+            return phys < crate::mm::hotpath::max_pfn() * 4096;
         }
         false
     }
@@ -743,8 +743,8 @@ pub fn note_page_free(phys: usize, order: usize) {
 /// are absolute (0x800000000+ on qemu virt); the table indexes from the
 /// DRAM base. usize::MAX = outside tracked DRAM.
 fn tracked_index(phys: usize) -> usize {
-    let base = if crate::mm::layout::is_kernel_layout_initialized() {
-        crate::mm::layout::kernel_layout().phys_base
+    let base = if crate::mm::hotpath::is_kernel_layout_initialized() {
+        crate::mm::hotpath::kernel_layout().phys_base
     } else {
         0x8000_0000
     };
@@ -889,7 +889,7 @@ pub fn dump_mem() {
         taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_RESP.load(core::sync::atomic::Ordering::Relaxed));
         taskdump_raw_line(b" timeout=");
         taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_TIMEOUT.load(core::sync::atomic::Ordering::Relaxed));
-    let st = crate::mm::buddy_allocator::buddy_stats();
+    let st = crate::mm::hotpath::buddy_stats();
     put_dec((st.used_bytes / 1024) as u64);
     taskdump_raw_line(b"K/");
     put_dec((st.heap_size / 1024) as u64);
@@ -906,7 +906,7 @@ pub fn dump_mem() {
     put_dec(at);
     taskdump_raw_line(b" f=");
     put_dec(ft);
-    let sl = crate::mm::slab::slab_stats();
+    let sl = crate::mm::hotpath::slab_stats();
     let mut sa = 0usize;
     let mut sf = 0usize;
     for c in sl.cache_stats.iter() {
@@ -919,7 +919,7 @@ pub fn dump_mem() {
     put_dec(sa as u64);
     taskdump_raw_line(b" f=");
     put_dec(sf as u64);
-    let pg = crate::mm::page_desc::page_desc_stats();
+    let pg = crate::mm::hotpath::page_desc_stats();
     taskdump_raw_line(b" | pages u=");
     put_dec(pg.used_pages as u64);
     taskdump_raw_line(b" r=");
@@ -1091,7 +1091,7 @@ pub fn dump_heap_ledger() {
     taskdump_raw_line(b"MEMFLOW net pages per order (alloc - free)\n");
     let mut net_total = 0usize;
     for o in 0..=crate::config::BUDDY_MAX_ORDER {
-        let n = crate::mm::buddy_allocator::NET_PAGES[o].load(Ordering::Relaxed);
+        let n = crate::mm::hotpath::NET_PAGES[o].load(Ordering::Relaxed);
         if n != 0 {
             taskdump_raw_line(b" o");
             put_dec(o as u64);
@@ -1108,23 +1108,23 @@ pub fn dump_heap_ledger() {
     taskdump_raw_line(b"K\n");
     taskdump_raw_line(b"MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned\n ");
     for i in 0..6 {
-        put_dec(crate::mm::buddy_allocator::FREE_REFUSED[i].load(Ordering::Relaxed) as u64);
+        put_dec(crate::mm::hotpath::FREE_REFUSED[i].load(Ordering::Relaxed) as u64);
         taskdump_raw_line(b" ");
     }
     taskdump_raw_line(b"\n refused-ring (addr order metaord metafree):\n");
     for i in 0..16 {
         let slot = i * 4;
-        let a = crate::mm::buddy_allocator::REFUSED_RING[slot].load(Ordering::Relaxed);
+        let a = crate::mm::hotpath::REFUSED_RING[slot].load(Ordering::Relaxed);
         if a == 0 {
             continue;
         }
         put_hex(a as u64);
         taskdump_raw_line(b" o");
-        put_dec(crate::mm::buddy_allocator::REFUSED_RING[slot + 1].load(Ordering::Relaxed) as u64);
+        put_dec(crate::mm::hotpath::REFUSED_RING[slot + 1].load(Ordering::Relaxed) as u64);
         taskdump_raw_line(b" mo");
-        put_dec(crate::mm::buddy_allocator::REFUSED_RING[slot + 2].load(Ordering::Relaxed) as u64);
+        put_dec(crate::mm::hotpath::REFUSED_RING[slot + 2].load(Ordering::Relaxed) as u64);
         taskdump_raw_line(b" mf");
-        put_dec(crate::mm::buddy_allocator::REFUSED_RING[slot + 3].load(Ordering::Relaxed) as u64);
+        put_dec(crate::mm::hotpath::REFUSED_RING[slot + 3].load(Ordering::Relaxed) as u64);
         taskdump_raw_line(b"\n");
     }
     taskdump_raw_line(b"MEMBIG last-32 big allocs (size pid f1..f4):\n");

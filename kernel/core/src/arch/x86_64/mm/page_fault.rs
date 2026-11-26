@@ -15,9 +15,9 @@ use super::r#unsafe::PtTable;
 use super::mm_ops::{alloc_user_phys_page, check_pte_permissions, is_cow_page, PageTableWalker};
 use super::mmu_init::{get_page_table_virt, map_page, map_page_noflush, ROOT_PAGE_TABLE};
 use super::pagetable::*;
-use crate::mm::page::PAGE_SIZE as PAGE_SIZE_USIZE;
-use crate::mm::vma::VmaType;
-use crate::mm::AddressSpace;
+use crate::mm::types::PAGE_SIZE as PAGE_SIZE_USIZE;
+use crate::mm::types::VmaType;
+use crate::mm::types::AddressSpace;
 
 // ==================== Fault Flags ====================
 
@@ -153,7 +153,7 @@ pub fn filemap_pin_cache_page(
 /// `phys` is a page-cache frame pinned for THIS mapping (pin taken by
 /// `filemap_pin_cache_page`), being mapped right now under the PTE lock.
 pub fn filemap_bookkeep_mapped_cache_page(phys: u64) {
-    use crate::mm::page_desc::page_desc;
+    use crate::mm::hotpath::page_desc;
     // Descriptor of a live, pinned cache frame.
     if let Some(page) = page_desc((phys >> PAGE_SHIFT) as usize) {
         page.get_page();
@@ -167,7 +167,7 @@ pub fn release_fill_page(phys: u64, from_cache: bool) {
     if from_cache {
         super::mm_ops::release_cache_mapping_pin((phys >> PAGE_SHIFT) as usize);
     } else {
-        crate::mm::page_alloc::free_page(phys as usize);
+        crate::mm::hotpath::free_page(phys as usize);
     }
 }
 

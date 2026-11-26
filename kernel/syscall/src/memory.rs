@@ -23,7 +23,7 @@ use crate::arch::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry
 /// a wrap, never a panic.
 #[inline]
 fn round_up_pages_checked(len: usize) -> Option<usize> {
-    const PS: usize = crate::mm::page::PAGE_SIZE; // usize (arch::mm's is u64)
+    const PS: usize = crate::mm::types::PAGE_SIZE; // usize (arch::mm's is u64)
     len.checked_add(PS - 1).map(|r| r & !(PS - 1))
 }
 
@@ -45,9 +45,9 @@ fn round_up_pages_checked(len: usize) -> Option<usize> {
 /// - RISC-V: 214
 pub fn sys_brk(args: [u64; 6]) -> i64 {
     use rux::sched;
-    use crate::mm::page::PAGE_SIZE;
+    use crate::mm::types::PAGE_SIZE;
     use crate::arch::mm::PageTableEntry;
-    use crate::mm::alloc_and_map_user_memory;
+    use crate::mm::hotpath::alloc_and_map_user_memory;
 
     let new_brk = args[0] as u64;
 
@@ -156,7 +156,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 if new_page_end < current_page_end {
                     if let Some(addr_space) = current_task.address_space() {
                         let _ = rux::api::mm::munmap(&addr_space, 
-                            crate::mm::page::VirtAddr::new(new_page_end as usize),
+                            crate::mm::types::VirtAddr::new(new_page_end as usize),
                             (current_page_end - new_page_end) as usize,
                         );
                     }
@@ -210,7 +210,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
 
                 if let Some(addr_space) = current_task.address_space() {
                     if new_page_end > vma_start {
-                        use crate::mm::vma::{Vma, VmaFlags, VmaType};
+                        use crate::mm::types::{Vma, VmaFlags, VmaType};
                         // Linux sys_brk refuses growth when any VMA
                         // overlaps [oldbrk_page, newbrk_page + PAGE)
                         // (find_vma_intersection(mm, oldbrk,
@@ -236,7 +236,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         let guard_end = new_page_end + page;
                         let mut vma_mgr = addr_space.vma_write();
                         let next = vma_mgr.find_vma_after(
-                            crate::mm::page::VirtAddr::new(vma_start as usize),
+                            crate::mm::types::VirtAddr::new(vma_start as usize),
                         );
                         if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
                             // Keep the old brk on failure (Linux parity:
@@ -244,16 +244,16 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                             return current_brk as i64;
                         }
                         let heap_vma = Vma::new(
-                            crate::mm::page::VirtAddr::new(vma_start as usize),
-                            crate::mm::page::VirtAddr::new(new_page_end as usize),
+                            crate::mm::types::VirtAddr::new(vma_start as usize),
+                            crate::mm::types::VirtAddr::new(new_page_end as usize),
                             VmaFlags::from_bits(
                                 VmaFlags::READ | VmaFlags::WRITE | VmaFlags::PRIVATE,
                             ),
                         );
                         let mut heap_vma = heap_vma;
                         heap_vma.set_type(VmaType::Anonymous);
-                        heap_vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-                            crate::mm::vma::VmaOrigin::BRK,
+                        heap_vma.set_origin(crate::mm::types::VmaOrigin::from_bits(
+                            crate::mm::types::VmaOrigin::BRK,
                         ));
                         // The heap grows by the new VMA's own pages:
                         // charge them (the reference kernel accounts a brk
@@ -407,11 +407,11 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
 }
 
 fn sys_mmap_inner(args: [u64; 6]) -> i64 {
-    use crate::mm::page::VirtAddr;
-    use crate::mm::vma::{VmaFlags, VmaType};
-    use crate::mm::pagemap::Perm;
+    use crate::mm::types::VirtAddr;
+    use crate::mm::types::{VmaFlags, VmaType};
+    use crate::mm::types::Perm;
     use crate::arch::mm::{prot, mmap_error};
-    use crate::mm::map;
+    use crate::mm::hotpath::map;
 
     // mmprof (cmdline mmprof=1, oh-launcher perf handoff): placement
     // scalars + issuer attribution (the whole-syscall bracket lives in
@@ -459,7 +459,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // silently shifted the mapping's file extent: the VMA's offset was
     // stored verbatim (vma.set_offset(offset)) and the fault path then
     // looked up a page-cache entry at a non-page-aligned offset.
-    if offset % crate::mm::page::PAGE_SIZE as u64 != 0 {
+    if offset % crate::mm::types::PAGE_SIZE as u64 != 0 {
         return mmap_error::EINVAL;
     }
     // bring-up trace: every MAP_SHARED file mapping with the raw args —
@@ -558,7 +558,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // so an unaligned fixed mmap mapped the WRONG page and returned
     // success (arena-mmap lane probe T16, 2026-11-14).
     if map_flags & (map::MAP_FIXED | map::MAP_FIXED_NOREPLACE) != 0
-        && addr % crate::mm::page::PAGE_SIZE != 0
+        && addr % crate::mm::types::PAGE_SIZE != 0
     {
         return mmap_error::EINVAL;
     }
@@ -567,7 +567,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // with an EXISTING mapping fails EEXIST instead of replacing it
     // (Linux do_mmap — LTP mmap17 maps the same address twice).
     if map_flags & map::MAP_FIXED_NOREPLACE != 0 {
-        if addr % crate::mm::page::PAGE_SIZE != 0 || addr == 0 {
+        if addr % crate::mm::types::PAGE_SIZE != 0 || addr == 0 {
             return mmap_error::EINVAL;
         }
         // Page-rounded, overflow-safe end (Vma::new asserts alignment).
@@ -575,13 +575,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             Some(s) => s,
             None => return mmap_error::EINVAL,
         };
-        let end = sum.div_ceil(crate::mm::page::PAGE_SIZE) * crate::mm::page::PAGE_SIZE;
+        let end = sum.div_ceil(crate::mm::types::PAGE_SIZE) * crate::mm::types::PAGE_SIZE;
         if end <= addr {
             return mmap_error::EINVAL;
         }
         if let Some(task) = rux::sched::hotpath::current() {
             if let Some(aspace) = task.address_space() {
-                let test = crate::mm::vma::Vma::new(
+                let test = crate::mm::types::Vma::new(
                     VirtAddr::new(addr),
                     VirtAddr::new(end),
                     VmaFlags::new(),
@@ -665,7 +665,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         .load(core::sync::atomic::Ordering::Acquire)
         == 2
         && map_flags & map::MAP_NORESERVE == 0
-        && actual_length > crate::mm::layout::phys_memory_size()
+        && actual_length > crate::mm::hotpath::phys_memory_size()
     {
         return mmap_error::ENOMEM;
     }
@@ -783,7 +783,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     rux::process::hotpath::rlimit_res::AS,
                 );
                 if as_cur != u64::MAX {
-                    let page = crate::mm::page::PAGE_SIZE as u64;
+                    let page = crate::mm::types::PAGE_SIZE as u64;
                     let len_pages = (actual_length as u64 + page - 1) / page;
                     let total = current_task
                         .address_space()
@@ -978,7 +978,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 VirtAddr::new(addr),
                                 actual_length,
                                 vma_flags,
-                                crate::mm::vma::VmaType::Device,
+                                crate::mm::types::VmaType::Device,
                                 perm,
                                 map_flags & map::MAP_FIXED,
                             ) {
@@ -1056,7 +1056,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     VirtAddr::new(addr),
                                     actual_length,
                                     vma_flags,
-                                    crate::mm::vma::VmaType::Device,
+                                    crate::mm::types::VmaType::Device,
                                     perm,
                                     map_flags & map::MAP_FIXED,
                                 ) {
@@ -1281,13 +1281,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 // PRIVATE zero pages per process (parent
                                 // read 0 where the child wrote its pid).
                                 let npages = (actual_length
-                                    + crate::mm::page::PAGE_SIZE
+                                    + crate::mm::types::PAGE_SIZE
                                         - 1)
-                                    / crate::mm::page::PAGE_SIZE;
+                                    / crate::mm::types::PAGE_SIZE;
                                 let mut failed = false;
                                 for i in 0..npages {
-                                    let phys = crate::mm::page_alloc::get_zeroed_page(
-                                        crate::mm::zone::GfpFlags::GFP_USER,
+                                    let phys = crate::mm::hotpath::get_zeroed_page(
+                                        crate::mm::types::GfpFlags::GFP_USER,
                                     );
                                     if phys == 0 {
                                         failed = true;
@@ -1313,7 +1313,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                             root_ppn,
                                             crate::arch::mm::memory_layout::VirtAddr::new(
                                                 (mapped_addr.as_usize()
-                                                    + i * crate::mm::page::PAGE_SIZE)
+                                                    + i * crate::mm::types::PAGE_SIZE)
                                                     as u64,
                                             ),
                                             crate::arch::mm::memory_layout::PhysAddr::new(
@@ -1332,22 +1332,22 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         // INV-SYSC-8 desc edge (fresh
                                         // frame, exclusively owned).
                                         if let Some(page) =
-                                            crate::r#unsafe::page_desc_of(crate::mm::phys_to_pfn(phys))
+                                            crate::r#unsafe::page_desc_of(crate::mm::hotpath::phys_to_pfn(phys))
                                         {
                                             page.set_flag(
-                                                crate::mm::page_desc::PageFlag::Anonymous,
+                                                crate::mm::types::PageFlag::Anonymous,
                                             );
                                             page.set_index(
                                                 (mapped_addr.as_usize()
-                                                    + i * crate::mm::page::PAGE_SIZE)
-                                                    / crate::mm::page::PAGE_SIZE,
+                                                    + i * crate::mm::types::PAGE_SIZE)
+                                                    / crate::mm::types::PAGE_SIZE,
                                             );
                                             page.inc_mapcount();
-                                            crate::mm::rmap::page_record_mapping(
+                                            crate::mm::hotpath::page_record_mapping(
                                                 page,
                                                 (&address_space) as *const _ as usize,
                                                 mapped_addr.as_usize()
-                                                    + i * crate::mm::page::PAGE_SIZE,
+                                                    + i * crate::mm::types::PAGE_SIZE,
                                             );
                                         }
                                     }
@@ -1452,10 +1452,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // returned when the mapping never happened.
                             rux::sched::hotpath::cgroup_memory_uncharge(actual_length);
                             let err = match e {
-                                crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
-                                crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
-                                crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
-                                crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
+                                crate::mm::types::MapError::OutOfMemory => mmap_error::ENOMEM,
+                                crate::mm::types::MapError::Invalid => mmap_error::EINVAL,
+                                crate::mm::types::MapError::AlreadyMapped => mmap_error::ENOMEM,
+                                crate::mm::types::MapError::NotMapped => mmap_error::EINVAL,
                             };
                             err
                         }
@@ -1486,7 +1486,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
 ///
 /// - RISC-V: 215
 pub fn sys_munmap(args: [u64; 6]) -> i64 {
-    use crate::mm::page::VirtAddr;
+    use crate::mm::types::VirtAddr;
     use crate::arch::mm::mmap_error;
 
     let addr = args[0] as usize;
@@ -1547,8 +1547,8 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
                         }
                         Err(e) => {
                             let err = match e {
-                                crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
-                                crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
+                                crate::mm::types::MapError::Invalid => mmap_error::EINVAL,
+                                crate::mm::types::MapError::NotMapped => mmap_error::EINVAL,
                                 _ => mmap_error::ENOMEM,
                             };
                             err
@@ -1832,7 +1832,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     v.end().as_usize() > addr
                         && v.start().as_usize() < end
                         && f & 0x7 == 0
-                        && v.vma_type() == crate::mm::vma::VmaType::Anonymous
+                        && v.vma_type() == crate::mm::types::VmaType::Anonymous
                         && v.end().as_usize() - v.start().as_usize() >= 0x10_0000
                 });
                 if hits_big_protnone {
@@ -1907,10 +1907,10 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // lookup; a None leaves cursor at addr and the walk
                 // still fails with the correct ENOMEM for a real gap.
                 let mut cursor = addr;
-                if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                if let Some(v) = vma_mgr.find(crate::mm::types::VirtAddr::new(addr)) {
                     cursor = v.end().as_usize();
                 }
-                for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                for v in vma_mgr.iter_after(crate::mm::types::VirtAddr::new(addr.saturating_sub(1))) {
                     let (s, e) = (v.start().as_usize(), v.end().as_usize());
                     if s >= addr + length {
                         break; // past the span; covered so far is final
@@ -1951,7 +1951,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 if prot & 0x2 != 0 {
                     let range_end = addr + length;
                     let mut cursor = addr;
-                    if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                    if let Some(v) = vma_mgr.find(crate::mm::types::VirtAddr::new(addr)) {
                         cursor = v.end().as_usize();
                         if v.flags().is_shared() {
                             if let Some(file) = addr_space.get_vma_file(v.start().as_usize()) {
@@ -1961,7 +1961,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             }
                         }
                     }
-                    for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                    for v in vma_mgr.iter_after(crate::mm::types::VirtAddr::new(addr.saturating_sub(1))) {
                         let (vs, ve) = (v.start().as_usize(), v.end().as_usize());
                         if vs >= range_end {
                             break; // past the span
@@ -2112,7 +2112,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 let range_end = addr + length;
 
                 // Snapshot overlapping VMAs (start addresses).
-                let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> = alloc::vec::Vec::new();
+                let mut starts: alloc::vec::Vec<crate::mm::types::VirtAddr> = alloc::vec::Vec::new();
                 for v in vma_mgr.iter() {
                     if v.end().as_usize() > range_start && v.start().as_usize() < range_end {
                         starts.push(v.start());
@@ -2157,9 +2157,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
 
                     // Head piece [v_start, range_start): keep original flags.
                     let head = if v_start < range_start {
-                        let mut h = crate::mm::vma::Vma::new(
-                            crate::mm::page::VirtAddr::new(v_start),
-                            crate::mm::page::VirtAddr::new(range_start),
+                        let mut h = crate::mm::types::Vma::new(
+                            crate::mm::types::VirtAddr::new(v_start),
+                            crate::mm::types::VirtAddr::new(range_start),
                             full_flags,
                         );
                         h.set_type(old_type);
@@ -2174,9 +2174,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
 
                     // Tail piece [range_end, v_end): keep original flags.
                     let tail = if v_end > range_end {
-                        let mut t = crate::mm::vma::Vma::new(
-                            crate::mm::page::VirtAddr::new(range_end),
-                            crate::mm::page::VirtAddr::new(v_end),
+                        let mut t = crate::mm::types::Vma::new(
+                            crate::mm::types::VirtAddr::new(range_end),
+                            crate::mm::types::VirtAddr::new(v_end),
                             full_flags,
                         );
                         t.set_type(old_type);
@@ -2193,23 +2193,23 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // new permission bits, non-permission flags preserved.
                     let cov_start = v_start.max(range_start);
                     let cov_end = v_end.min(range_end);
-                    let mut cov = crate::mm::vma::Vma::new(
-                        crate::mm::page::VirtAddr::new(cov_start),
-                        crate::mm::page::VirtAddr::new(cov_end),
-                        crate::mm::vma::VmaFlags::from_bits(
+                    let mut cov = crate::mm::types::Vma::new(
+                        crate::mm::types::VirtAddr::new(cov_start),
+                        crate::mm::types::VirtAddr::new(cov_end),
+                        crate::mm::types::VmaFlags::from_bits(
                             (full_flags.bits() & !0x7) | perm_bits,
                         ),
                     );
                     cov.set_type(old_type);
-                    cov.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-                        crate::mm::vma::VmaOrigin::MPROTECT,
+                    cov.set_origin(crate::mm::types::VmaOrigin::from_bits(
+                        crate::mm::types::VmaOrigin::MPROTECT,
                     ));
                     cov.set_file_fd(old_fd);
                     cov.set_file_size(old_fsz);
                     cov.set_offset(old_off + (cov_start - v_start));
 
                     // Swap: remove original, re-add pieces (with pins).
-                    let _ = vma_mgr.remove(crate::mm::page::VirtAddr::new(v_start));
+                    let _ = vma_mgr.remove(crate::mm::types::VirtAddr::new(v_start));
                     addr_space.unpin_vma_file(v_start);
                     if let Some(h) = head {
                         let hs = h.start().as_usize();
@@ -2256,7 +2256,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
 /// # Description
 /// msync writes changes from file mapping back to disk
 pub fn sys_msync(args: [u64; 6]) -> i64 {
-    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+    use crate::mm::types::{VirtAddr, PAGE_SIZE};
     use crate::arch::mm::mmap_error;
 
     let addr = args[0] as usize;
@@ -2337,7 +2337,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                     // is EBUSY — the pages cannot be dropped (Linux
                     // SYSCALL msync → EBUSY; LTP msync03 case 1).
                     if flags & MS_INVALIDATE != 0
-                        && vma.flags().contains(crate::mm::vma::VmaFlags::LOCKED)
+                        && vma.flags().contains(crate::mm::types::VmaFlags::LOCKED)
                     {
                         return -16_i64; // EBUSY
                     }
@@ -2360,7 +2360,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
     // original file contents).
     {
         use crate::arch::mm::{PageTableEntry, PageTable};
-        use crate::mm::vma::{VmaFlags, VmaType};
+        use crate::mm::types::{VmaFlags, VmaType};
 
         let root_ppn = address_space.root_ppn();
         let end_addr = addr + length_aligned;
@@ -2487,11 +2487,11 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
 /// (should not happen — pins live for the VMA — but msync must not skip
 /// writeback silently): re-resolve through the VMA's recorded fd.
 fn vma_file_by_range(
-    address_space: &crate::mm::mm_struct::MmStruct,
+    address_space: &crate::mm::types::MmStruct,
     addr: usize,
 ) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
     let vma_mgr = address_space.vma_read();
-    let vma = vma_mgr.find(crate::mm::page::VirtAddr::new(addr))?;
+    let vma = vma_mgr.find(crate::mm::types::VirtAddr::new(addr))?;
     let fd = vma.file_fd();
     if fd < 0 {
         return None;
@@ -2513,15 +2513,15 @@ fn vma_file_by_range(
 /// Caller must ensure both old and new ranges are valid, page-aligned, and
 /// the old range is mapped.
 fn copy_old_to_new_pages(
-    mm: &crate::mm::AddressSpace,
+    mm: &crate::mm::types::AddressSpace,
     old_addr: usize,
     new_addr: usize,
     size: usize,
 ) {
     use crate::arch::mm::{PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, PageTableEntry};
-    use crate::mm::page_alloc::alloc_page;
-    use crate::mm::page_desc::PageFlag;
-    use crate::mm::zone::GfpFlags;
+    use crate::mm::hotpath::alloc_page;
+    use crate::mm::types::PageFlag;
+    use crate::mm::types::GfpFlags;
 
     let root_ppn = mm.root_ppn();
     crate::arch::mm::mm_ops::MM_CTX.store(4, core::sync::atomic::Ordering::Relaxed);
@@ -2600,7 +2600,7 @@ fn copy_old_to_new_pages(
                 page.set_index(new_virt as usize / (PAGE_SIZE as usize));
                 page.inc_mapcount();
                 if rux::sched::hotpath::current().and_then(|t| t.address_space()).is_some() {
-                    crate::mm::rmap::page_record_mapping(
+                    crate::mm::hotpath::page_record_mapping(
                         page,
                         mm as *const _ as usize,
                         new_virt as usize,
@@ -2625,7 +2625,7 @@ fn copy_old_to_new_pages(
 /// No-op when no VMA starts exactly at `piece_start` (an in-place
 /// anonymous extension merged into its predecessor).
 fn mremap_carry_file_attrs(
-    address_space: &crate::mm::mm_struct::MmStruct,
+    address_space: &crate::mm::types::MmStruct,
     piece_start: usize,
     piece_offset: usize,
     fd: i32,
@@ -2634,7 +2634,7 @@ fn mremap_carry_file_attrs(
 ) {
     let found = {
         let mut mgr = address_space.vma_write();
-        mgr.get_mut(crate::mm::page::VirtAddr::new(piece_start))
+        mgr.get_mut(crate::mm::types::VirtAddr::new(piece_start))
             .map(|vma| {
                 vma.set_file_fd(fd);
                 vma.set_file_size(file_size);
@@ -2714,11 +2714,11 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
 }
 
 fn sys_mremap_inner(args: [u64; 6]) -> i64 {
-    use crate::mm::page::{VirtAddr, PAGE_SIZE};
-    use crate::mm::vma::{VmaFlags, VmaType};
-    use crate::mm::pagemap::Perm;
+    use crate::mm::types::{VirtAddr, PAGE_SIZE};
+    use crate::mm::types::{VmaFlags, VmaType};
+    use crate::mm::types::Perm;
     use crate::arch::mm::mmap_error;
-    use crate::mm::map;
+    use crate::mm::hotpath::map;
 
     let old_addr = args[0] as usize;
     let old_size = args[1] as usize;
@@ -2926,10 +2926,10 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                 }
                 Err(e) => {
                     let err = match e {
-                        crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
-                        crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
-                        crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
-                        crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
+                        crate::mm::types::MapError::OutOfMemory => mmap_error::ENOMEM,
+                        crate::mm::types::MapError::Invalid => mmap_error::EINVAL,
+                        crate::mm::types::MapError::AlreadyMapped => mmap_error::ENOMEM,
+                        crate::mm::types::MapError::NotMapped => mmap_error::EINVAL,
                     };
                     err
                 }
@@ -3066,7 +3066,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
 /// # Description
 /// madvise allows application to give advice to kernel about how to use memory
 pub fn sys_madvise(args: [u64; 6]) -> i64 {
-    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+    use crate::mm::types::{VirtAddr, PAGE_SIZE};
     use crate::arch::mm::mmap_error;
 
     let addr = args[0] as usize;
@@ -3186,9 +3186,9 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
                     Some(vma) => {
                         let locked = vma
                             .flags()
-                            .contains(crate::mm::vma::VmaFlags::LOCKED);
-                        let anon = vma.vma_type() == crate::mm::vma::VmaType::Anonymous
-                            || vma.vma_type() == crate::mm::vma::VmaType::SharedMemory;
+                            .contains(crate::mm::types::VmaFlags::LOCKED);
+                        let anon = vma.vma_type() == crate::mm::types::VmaType::Anonymous
+                            || vma.vma_type() == crate::mm::types::VmaType::SharedMemory;
                         match advice {
                             MADV_REMOVE | MADV_DONTNEED | MADV_FREE if locked => {
                                 rejected = true;
@@ -3315,7 +3315,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
 /// mincore returns a vector indicating which pages are in memory
 /// Lowest bit of each byte in vec indicates if corresponding page is in memory
 pub fn sys_mincore(args: [u64; 6]) -> i64 {
-    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+    use crate::mm::types::{VirtAddr, PAGE_SIZE};
     use crate::arch::mm::{PageTableEntry, PageTable, mmap_error};
 
     let addr = args[0] as usize;
@@ -3347,7 +3347,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     // Calculate needed page count (checked: wrap = EINVAL, see
     // round_up_pages_checked)
     let page_count = match round_up_pages_checked(length) {
-        Some(v) => v / crate::mm::page::PAGE_SIZE,
+        Some(v) => v / crate::mm::types::PAGE_SIZE,
         None => return mmap_error::EINVAL,
     };
 
@@ -3429,8 +3429,8 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         if !page_in_memory {
             // File-backed? consult the page cache for the (fs,ino,off).
             if let Some(vma) = vma_mgr.find(VirtAddr::new(page_addr)) {
-                if vma.vma_type() == crate::mm::vma::VmaType::FileBacked
-                    || vma.vma_type() == crate::mm::vma::VmaType::SharedMemory
+                if vma.vma_type() == crate::mm::types::VmaType::FileBacked
+                    || vma.vma_type() == crate::mm::types::VmaType::SharedMemory
                 {
                     let fd = vma.file_fd();
                     if fd >= 0 {
@@ -3440,7 +3440,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
                                 if let Some(inode) = file.get_inode() {
                                     let voff = vma.offset() as u64
                                         + (page_addr - vma.start().as_usize()) as u64;
-                                    let idx = voff / crate::mm::page::PAGE_SIZE as u64;
+                                    let idx = voff / crate::mm::types::PAGE_SIZE as u64;
                                     // Non-pinning probe: `get()` transfers a
                                     // pin the caller must put back; dropping
                                     // its handle leaked one pin per consulted
@@ -3486,14 +3486,14 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
 }
 /// Derive a sub-VMA of `v` covering [s, e) — same attributes, file
 /// offset advanced by the sub-range start.
-fn sub_vma(v: &crate::mm::vma::Vma, s: usize, e: usize) -> crate::mm::vma::Vma {
-    let page_delta = (s - v.start().as_usize()) / crate::mm::page::PAGE_SIZE;
-    let mut nv = crate::mm::vma::Vma::new(
-        crate::mm::page::VirtAddr::new(s),
-        crate::mm::page::VirtAddr::new(e),
+fn sub_vma(v: &crate::mm::types::Vma, s: usize, e: usize) -> crate::mm::types::Vma {
+    let page_delta = (s - v.start().as_usize()) / crate::mm::types::PAGE_SIZE;
+    let mut nv = crate::mm::types::Vma::new(
+        crate::mm::types::VirtAddr::new(s),
+        crate::mm::types::VirtAddr::new(e),
         v.flags(),
     );
-    nv.set_offset(v.offset() + page_delta * crate::mm::page::PAGE_SIZE);
+    nv.set_offset(v.offset() + page_delta * crate::mm::types::PAGE_SIZE);
     nv.set_type(v.vma_type());
     // Derived piece keeps the source mapping's origin.
     nv.set_origin(v.origin());
@@ -3520,8 +3520,8 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
 /// Shared implementation for mlock(2) and mlock2(2) (`onfault` skips the
 /// prefault pass — Linux VM_LOCKONFAULT: pages lock as they fault in).
 fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
-    use crate::mm::page::VirtAddr;
-    use crate::mm::vma::VmaFlags;
+    use crate::mm::types::VirtAddr;
+    use crate::mm::types::VmaFlags;
 
     if length == 0 {
         return -22_i64; // EINVAL
@@ -3529,7 +3529,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
     // Linux rounds the range to page boundaries: addr DOWN, len UP — an
     // unaligned addr is legal (LTP mlock01 locks one byte past a page
     // boundary).
-    let addr = raw_addr & !(crate::mm::page::PAGE_SIZE - 1);
+    let addr = raw_addr & !(crate::mm::types::PAGE_SIZE - 1);
     let length_aligned = match round_up_pages_checked(length) {
         Some(v) => v,
         None => return -22_i64,
@@ -3639,8 +3639,8 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
             prefault_spans.push((
                 seg_start,
                 seg_end,
-                vma_type == crate::mm::vma::VmaType::Anonymous
-                    || vma_type == crate::mm::vma::VmaType::SharedMemory,
+                vma_type == crate::mm::types::VmaType::Anonymous
+                    || vma_type == crate::mm::types::VmaType::SharedMemory,
             ));
             if ve >= end {
                 break;
@@ -3666,7 +3666,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
     if !onfault {
         let root_ppn = address_space.root_ppn();
         for (seg_start, seg_end, anon_or_shm) in prefault_spans {
-            let mut p = seg_start & !(crate::mm::page::PAGE_SIZE - 1);
+            let mut p = seg_start & !(crate::mm::types::PAGE_SIZE - 1);
             while p < seg_end {
                 // Read-only inspection of the task's own page tables
                 // (INV-SY-1 walk edge).
@@ -3700,7 +3700,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                         );
                     }
                 }
-                p += crate::mm::page::PAGE_SIZE;
+                p += crate::mm::types::PAGE_SIZE;
             }
         }
     }
@@ -3717,8 +3717,8 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
 /// munmaps the middle of a locked area and expects munlock(ENOENT hole)
 /// to return ENOMEM.
 pub fn sys_munlock(args: [u64; 6]) -> i64 {
-    use crate::mm::page::VirtAddr;
-    use crate::mm::vma::VmaFlags;
+    use crate::mm::types::VirtAddr;
+    use crate::mm::types::VmaFlags;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -3728,7 +3728,7 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
     }
     // Round to page boundaries like mlock (Linux mlock/munlock never
     // require the caller to align).
-    let addr = addr & !(crate::mm::page::PAGE_SIZE - 1);
+    let addr = addr & !(crate::mm::types::PAGE_SIZE - 1);
     let length_aligned = match round_up_pages_checked(length) {
         Some(v) => v,
         None => return -22_i64,
@@ -3807,8 +3807,8 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
 
 /// sys_mlockall - Lock all process memory (NR 230)
 pub fn sys_mlockall(args: [u64; 6]) -> i64 {
-    use crate::mm::page::VirtAddr;
-    use crate::mm::vma::VmaFlags;
+    use crate::mm::types::VirtAddr;
+    use crate::mm::types::VmaFlags;
 
     // MCL_CURRENT = 1, MCL_FUTURE = 2, MCL_ONFAULT = 4.
     const MCL_CURRENT: u32 = 1;
@@ -3894,8 +3894,8 @@ pub fn sys_mlockall(args: [u64; 6]) -> i64 {
 
 /// sys_munlockall - Unlock all process memory (NR 231)
 pub fn sys_munlockall(_args: [u64; 6]) -> i64 {
-    use crate::mm::page::VirtAddr;
-    use crate::mm::vma::VmaFlags;
+    use crate::mm::types::VirtAddr;
+    use crate::mm::types::VmaFlags;
 
     // P2 mlock: clear VM_LOCKED on every current VMA.
     let current_task = match rux::sched::hotpath::current() {
@@ -3952,7 +3952,7 @@ pub fn sys_mlock2(args: [u64; 6]) -> i64 {
     if length == 0 {
         return -22_i64;
     }
-    if addr % crate::mm::page::PAGE_SIZE != 0 {
+    if addr % crate::mm::types::PAGE_SIZE != 0 {
         return -22_i64;
     }
     mlock_impl(addr, length, flags & MLOCK_ONFAULT != 0)
@@ -4161,7 +4161,7 @@ pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
 ///                                       mapping; the net mapping is
 ///                                       unchanged)
 pub fn sys_remap_file_pages(args: [u64; 6]) -> i64 {
-    use crate::mm::vma::{VmaFlags, VmaType};
+    use crate::mm::types::{VmaFlags, VmaType};
 
     let start = args[0] as usize;
     let size = args[1] as usize;
@@ -4197,7 +4197,7 @@ pub fn sys_remap_file_pages(args: [u64; 6]) -> i64 {
     };
 
     // The VMA must cover the whole range and be MAP_SHARED.
-    let vma = match aspace.find_vma(crate::mm::page::VirtAddr::new(start)) {
+    let vma = match aspace.find_vma(crate::mm::types::VirtAddr::new(start)) {
         Some(v) => v,
         None => return -errno::EINVAL as i64,
     };

@@ -34,14 +34,14 @@ use alloc::vec::Vec;
 use super::memory_layout::*;
 use super::r#unsafe::PtTable;
 use super::pagetable::*;
-use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
-use crate::mm::pagemap::{MapError, Perm, PageTableType};
-use crate::mm::vma::{Vma, VmaFlags, VmaOrigin, VmaType};
-use crate::mm::{MmStruct, alloc_pages, GfpFlags};
+use crate::mm::types::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
+use crate::mm::types::{MapError, Perm, PageTableType};
+use crate::mm::types::{Vma, VmaFlags, VmaOrigin, VmaType};
+use crate::mm::{types::MmStruct, hotpath::alloc_pages, types::GfpFlags};
 
 // Re-export AddressSpace for backward compatibility
 #[allow(unused_imports)]
-pub use crate::mm::AddressSpace;
+pub use crate::mm::types::AddressSpace;
 
 // ==================== Page Table Walker ====================
 //
@@ -181,7 +181,7 @@ impl MmStruct {
         );
 
         {
-            use crate::mm::page_desc::{page_desc, PageFlag};
+            use crate::mm::{hotpath::page_desc, types::PageFlag};
             if let Some(page) = page_desc(phys_addr / (PAGE_SIZE as usize)) {
                 page.set_flag(PageFlag::Anonymous);
                 // SwapBacked + LRU membership: make the page reclaimable
@@ -189,7 +189,7 @@ impl MmStruct {
                 page.set_flag(PageFlag::SwapBacked);
                 page.set_index(virt_addr.bits() as usize / (PAGE_SIZE as usize));
                 page.inc_mapcount();
-                crate::mm::rmap::page_record_mapping(
+                crate::mm::hotpath::page_record_mapping(
                     page,
                     self as *const _ as usize,
                     virt_addr.bits() as usize,
@@ -248,7 +248,7 @@ impl MmStruct {
                     .map_or(false, |i| {
                         phys >= i.addr && phys < i.addr + i.size as u64
                     });
-                if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
+                if fb || crate::mm::hotpath::is_foreign_user_frame(phys as usize) {
                     // SAFETY: verified present user leaf.
                     unsafe { self.clear_pte(addr as u64); }
                     addr += PAGE_SIZE_USIZE;
@@ -258,7 +258,7 @@ impl MmStruct {
             // Remove reverse mapping before clearing the PTE, then drop
             // this mapping's reference; the last reference frees the page.
             {
-                use crate::mm::page_desc::pfn_to_page_mut;
+                use crate::mm::hotpath::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
                 if !page.is_null() {
                     // SAFETY: null-checked descriptor of the leaf frame
@@ -269,7 +269,7 @@ impl MmStruct {
                             addr / PAGE_SIZE_USIZE,
                         );
                         if (*page).is_mapped() {
-                            crate::mm::rmap::page_remove_rmap(&*page);
+                            crate::mm::hotpath::page_remove_rmap(&*page);
                         }
                         (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_RV);
                     }
@@ -323,18 +323,18 @@ impl MmStruct {
             let phys = (ppn_val as u64) << 12;
             let fb = crate::console::get_framebuffer_info()
                 .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
-            if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
+            if fb || crate::mm::hotpath::is_foreign_user_frame(phys as usize) {
                 self.clear_pte(va as u64);
                 return true;
             }
         }
-        use crate::mm::page_desc::page_desc;
+        use crate::mm::hotpath::page_desc;
         // Descriptor of the leaf frame mapped at `va` by this address
         // space (INV-FRAME-1).
         if let Some(page) = page_desc(ppn_val as usize) {
             page.rmap_alt_remove(self as *const _ as usize, va / PAGE_SIZE_USIZE);
             if page.is_mapped() {
-                crate::mm::rmap::page_remove_rmap(page);
+                crate::mm::hotpath::page_remove_rmap(page);
             }
             page.put_page_site(crate::debug::driftwatch::S_UNMAP_RV);
             if pte_bits & cow_flags::PCACHE != 0 {
@@ -552,24 +552,24 @@ pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 
 /// Global PTE modify lock (riscv64 twin: serializes fork walks against
 /// COW faults and mprotect/munmap table surgery)
-pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
-    crate::mm::mm_struct::GlobalPteLock::new();
+pub static PTE_MODIFY_LOCK: crate::mm::types::GlobalPteLock =
+    crate::mm::types::GlobalPteLock::new();
 
 /// Per-mm leaf-PTE section hook (INV-LOCK-7): split mode on all arches
 /// since the 2026-10-31 perf review (per-mm spin + global epoch SHARED;
 /// see mm/mm_struct.rs `PteLock::lock`).
 #[inline]
 pub fn pte_lock_for(
-    mm: &crate::mm::mm_struct::MmStruct,
-) -> &crate::mm::mm_struct::PteLock {
+    mm: &crate::mm::types::MmStruct,
+) -> &crate::mm::types::PteLock {
     // Split mode on all arches (perf review 2026-10-31): per-mm leaf-PTE
     // spin; global-mode users keep the epoch exclusive. See
     // docs/architecture/lock-ordering.md.
     mm.pte_lock()
 }
 
-static PTE_GLOBAL_HANDLE: crate::mm::mm_struct::PteLock =
-    crate::mm::mm_struct::PteLock::new();
+static PTE_GLOBAL_HANDLE: crate::mm::types::PteLock =
+    crate::mm::types::PteLock::new();
 
 // ==================== Leaf primitives for shared mm code (FD-1) ====================
 //
@@ -625,7 +625,7 @@ pub const PTE_FLAGS_ANON_DEFAULT: u64 = PageTableEntry::V
 /// `root_ppn` must be a live page-table root of `mm` (pinned by the
 /// caller), and `vaddr` a user address of that mm.
 pub fn leaf_pte_replace(
-    mm: &crate::mm::mm_struct::MmStruct,
+    mm: &crate::mm::types::MmStruct,
     root_ppn: u64,
     vaddr: u64,
     expect_pfn: u64,
@@ -676,7 +676,7 @@ pub fn leaf_pte_replace(
 /// `root_ppn` must be a live page-table root of `mm` (pinned by the
 /// caller), and `vaddr` a user address of that mm.
 pub fn leaf_pte_install(
-    mm: &crate::mm::mm_struct::MmStruct,
+    mm: &crate::mm::types::MmStruct,
     root_ppn: u64,
     vaddr: u64,
     pfn: u64,
@@ -742,7 +742,7 @@ pub fn alloc_and_map_user_memory(
             0
         } else {
             (remain.next_power_of_two().trailing_zeros() as usize)
-                .min(crate::mm::zone::MAX_ORDER)
+                .min(crate::mm::types::MAX_ORDER)
         };
         let block_pages = 1usize << order;
         // block_pages >= remain whenever remain <= 2^MAX_ORDER, so the
@@ -780,7 +780,7 @@ pub fn alloc_and_map_user_memory(
                 let present = PageTableWalker::walk(user_root_ppn, va)
                     .map_or(false, |(_p, bits)| bits & PageTableEntry::V != 0);
                 if present {
-                    crate::mm::page_alloc::free_pages(
+                    crate::mm::hotpath::free_pages(
                         ((base_pfn + i) as usize) << PAGE_SHIFT,
                         0,
                     );
@@ -800,7 +800,7 @@ pub fn alloc_and_map_user_memory(
         if block_pages > chunk_pages {
             let base_pfn = phys_addr >> PAGE_SHIFT;
             for pfn in (base_pfn + chunk_pages)..(base_pfn + block_pages) {
-                crate::mm::page_alloc::free_pages((pfn << PAGE_SHIFT) as usize, 0);
+                crate::mm::hotpath::free_pages((pfn << PAGE_SHIFT) as usize, 0);
             }
         }
 
@@ -842,7 +842,7 @@ pub fn alloc_and_map_to_user_table(
         // floor(log2(remain)), capped at MAX_ORDER; block_pages <=
         // remain always, so chunk == block and no excess exists.
         let order = ((usize::BITS - 1 - remain.leading_zeros()) as usize)
-            .min(crate::mm::zone::MAX_ORDER);
+            .min(crate::mm::types::MAX_ORDER);
         let block_pages = 1usize << order;
         let chunk_pages = remain.min(block_pages);
         let chunk_bytes = chunk_pages * PAGE_SIZE as usize;
@@ -898,7 +898,7 @@ pub mod cow_flags {
 /// Drop the page-cache pin owned by ONE mapping of a cache-backed frame
 /// (twin contract; dormant on aarch64 until the filemap port lands).
 pub(super) fn release_cache_mapping_pin(ppn: usize) {
-    use crate::mm::page_desc::page_desc;
+    use crate::mm::hotpath::page_desc;
     let Some(page) = page_desc(ppn) else { return };
     // Descriptor of a live frame that was mapped until this unmap;
     // mapping/index are only cleared by the cache's own release path,
@@ -925,10 +925,10 @@ pub(super) fn release_cache_mapping_pin(ppn: usize) {
 /// # Safety
 /// Parent root valid; PTE_MODIFY_LOCK held.
 pub fn copy_page_table_cow(
-    parent: &crate::mm::mm_struct::MmStruct,
+    parent: &crate::mm::types::MmStruct,
     cow_exempt: &[(u64, u64)],
 ) -> Option<u64> {
-    use crate::mm::page_desc::page_desc;
+    use crate::mm::hotpath::page_desc;
 
     let parent_root_ppn = parent.root_ppn();
     if parent_root_ppn == 0 {
@@ -1029,7 +1029,7 @@ pub fn copy_page_table_cow(
                         || fb_frame_range.map_or(false, |(lo, hi)| {
                             (leaf_phys >> 12) >= lo && (leaf_phys >> 12) < hi
                         });
-                    let foreign = crate::mm::page_alloc::is_foreign_user_frame(
+                    let foreign = crate::mm::hotpath::is_foreign_user_frame(
                         leaf_phys as usize,
                     );
 
@@ -1046,7 +1046,7 @@ pub fn copy_page_table_cow(
                                 // keeps every permission bit, drops W,
                                 // adds COW; rebuild_user_leaf rederives
                                 // the hardware attrs (AP_RO).
-                                page.set_flag(crate::mm::page_desc::PageFlag::Cow);
+                                page.set_flag(crate::mm::types::PageFlag::Cow);
                                 let sw = (e3.bits()
                                     & PageTableEntry::SW_SOFTWARE_MASK)
                                     & !PageTableEntry::W
@@ -1087,13 +1087,13 @@ pub fn copy_page_table_cow(
 /// # Safety
 /// Descriptor belongs to a mapped frame.
 fn cow_share_block(entry: PageTableEntry) {
-    use crate::mm::page_desc::page_desc;
+    use crate::mm::hotpath::page_desc;
     if !entry.is_user() {
         return;
     }
     let phys = entry.output_addr();
     if phys == 0
-        || crate::mm::page_alloc::is_foreign_user_frame(phys as usize)
+        || crate::mm::hotpath::is_foreign_user_frame(phys as usize)
         || crate::console::get_framebuffer_info().map_or(false, |i| {
             phys >= i.addr && phys < i.addr + i.size as u64
         })
@@ -1130,11 +1130,11 @@ pub enum CowFaultResult {
 /// # Safety
 /// mm/root_ppn/fault_addr describe the faulting mapping of the current task.
 pub fn handle_cow_fault(
-    mm: &crate::mm::mm_struct::MmStruct,
+    mm: &crate::mm::types::MmStruct,
     root_ppn: u64,
     fault_addr: VirtAddr,
 ) -> CowFaultResult {
-    use crate::mm::page_desc::page_desc;
+    use crate::mm::hotpath::page_desc;
 
     // Speculative pre-lock allocation (twin S7-oom01wedge).
     let spec_phys = match alloc_user_phys_page() {
@@ -1145,7 +1145,7 @@ pub fn handle_cow_fault(
     impl Drop for SpecPage {
         fn drop(&mut self) {
             if let Some(p) = self.0.take() {
-                crate::mm::page_alloc::free_pages(p as usize, 0);
+                crate::mm::hotpath::free_pages(p as usize, 0);
             }
         }
     }
@@ -1188,7 +1188,7 @@ pub fn handle_cow_fault(
         // Clear the descriptor flag too (twin R7-C9: "COW set with
         // refcount 1" is an invariant violation).
         if let Some(p) = old_page {
-            p.clear_flag(crate::mm::page_desc::PageFlag::Cow);
+            p.clear_flag(crate::mm::types::PageFlag::Cow);
         }
         // Present user leaf; rebuild preserves its output address.
         write_user_leaf(root_ppn, virt_addr, PageTableEntry::rebuild_user_leaf(old_bits, sw));
@@ -1231,7 +1231,7 @@ pub fn handle_cow_fault(
     if let Some(p) = old_page {
         p.put_page_site(crate::debug::driftwatch::S_COW_RV);
         p.dec_mapcount();
-        p.clear_flag(crate::mm::page_desc::PageFlag::Cow);
+        p.clear_flag(crate::mm::types::PageFlag::Cow);
     }
 
     // Old PCACHE pin follows the mapping (twin ordering; dormant).
@@ -1241,14 +1241,14 @@ pub fn handle_cow_fault(
 
     // Reverse mapping + RSS for the new private page.
     {
-        use crate::mm::page_desc::PageFlag;
+        use crate::mm::types::PageFlag;
         if let Some(new_page) = page_desc(new_ppn as usize) {
             // Exclusively owned fresh frame.
             new_page.set_flag(PageFlag::Anonymous);
             new_page.set_flag(PageFlag::SwapBacked);
             new_page.set_index(virt_addr as usize / (PAGE_SIZE as usize));
             new_page.inc_mapcount();
-            crate::mm::rmap::page_record_mapping(
+            crate::mm::hotpath::page_record_mapping(
                 new_page,
                 mm as *const _ as usize,
                 virt_addr as usize,

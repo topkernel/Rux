@@ -415,7 +415,7 @@ pub fn dump_latched_maps_taskctx() {
             // range prints as one line.
             let exec = v.flags().is_executable();
             let writable_file = !exec
-                && matches!(v.vma_type(), crate::mm::vma::VmaType::FileBacked)
+                && matches!(v.vma_type(), crate::mm::types::VmaType::FileBacked)
                 && v.flags().is_writable();
             if !exec && !writable_file {
                 continue;
@@ -932,7 +932,7 @@ pub fn sleep_snapshot() {
                                     if looks_code {
                                         if let Some(vm) = vm.as_ref() {
                                             if let Some(v) =
-                                                vm.find(crate::mm::page::VirtAddr::new(w as usize))
+                                                vm.find(crate::mm::types::VirtAddr::new(w as usize))
                                             {
                                                 if v.flags().is_executable() {
                                                     let _ = write!(scan, " {:#x}", w);
@@ -3408,7 +3408,7 @@ pub fn user_task_park_stack_w(
         if v < 0x1000 || v > 0x7fff_ffff_ffff {
             continue;
         }
-        if let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) {
+        if let Some(vm) = vmas.find(crate::mm::types::VirtAddr::new(v as usize)) {
             let off = vm.offset() + (v as usize - vm.start().as_usize());
             // Instruction bytes at the frame (Session F's byte-match method:
             // search these bytes at fileoff in the debugfs-extracted .so).

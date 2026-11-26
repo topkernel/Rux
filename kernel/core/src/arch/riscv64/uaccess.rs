@@ -151,7 +151,7 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 /// resolved. Only handles resolvable cases; genuinely bad ranges still
 /// return false so callers report EFAULT.
 fn fault_in_write(start: *mut u8, len: usize) -> bool {
-    use crate::mm::page::VirtAddr as PageVirtAddr;
+    use crate::mm::types::VirtAddr as PageVirtAddr;
     use crate::arch::mm::memory_layout::VirtAddr as ArchVirtAddr;
 
     let task = match crate::sched::hotpath::current() {

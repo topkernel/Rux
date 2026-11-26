@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for vmemmap layout invariants.
-//! Copied from: kernel/core/src/mm/vmemmap.rs
+//! Copied from: kernel/core/src/mm/hotpath.rs (vmemmap section), its types from kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 

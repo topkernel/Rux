@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::mm::vma::VmaFlags;
+use crate::mm::types::VmaFlags;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_vma_flags() {

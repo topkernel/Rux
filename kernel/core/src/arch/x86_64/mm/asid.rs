@@ -322,8 +322,8 @@ pub fn switch_root(ppn: u64, asid: u16) {
         }
         return;
     }
-    if crate::mm::page_desc::descs_published()
-        && !crate::mm::phys_valid((ppn << 12) as usize)
+    if crate::mm::hotpath::descs_published()
+        && !crate::mm::hotpath::phys_valid((ppn << 12) as usize)
     {
         static BADP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         if BADP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {

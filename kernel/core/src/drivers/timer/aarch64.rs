@@ -160,7 +160,7 @@ pub fn timer_interrupt_handler() {
     increment_jiffies();
 
     // 1.5 vDSO time-data page refresh
-    crate::mm::vdso::vdso_data_tick();
+    crate::mm::hotpath::vdso_data_tick();
 
     // 2. Raise Timer softirq for TCP timer processing (gated on table
     //    occupancy — see the riscv64 twin / sc184)

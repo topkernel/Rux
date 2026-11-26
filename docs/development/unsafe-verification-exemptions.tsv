@@ -50,3 +50,7 @@ kernel/src/sched/side_edges.rs	2	0	pass 1b (seed-core-design 2c.3): the file was
 kernel/core/src/sched/reapdrain.rs	2	0	regions moved to sched/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/process/task_ref.rs	5	0	regions moved to process/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/process/mod.rs	2	0	regions moved to process/hotpath.rs by the pass-2 merge (annotations carried by id; the file is now the three-line flip)
+kernel/core/src/mm/buddy_allocator.rs	23	0	regions moved to mm/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
+kernel/core/src/mm/page_desc.rs	8	0	regions moved to mm/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
+kernel/core/src/mm/pglist.rs	3	0	regions moved to mm/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
+kernel/core/src/mm/vdso.rs	19	0	regions moved to mm/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)

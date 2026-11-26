@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for memblock region arithmetic.
-//! Copied from: kernel/core/src/mm/memblock.rs
+//! Copied from: kernel/core/src/mm/hotpath.rs (memblock section), its types from kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 

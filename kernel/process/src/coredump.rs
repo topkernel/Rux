@@ -283,7 +283,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
 /// `task` is the current task in its exit path (fdtable + mm still alive).
 pub fn do_coredump(task: &Task, sig: i32) -> bool {
     use crate::fs::vfs::file_open;
-    use crate::mm::mm_struct::MmFlags;
+    use crate::mm::types::MmFlags;
 
     // Gate 1: dumpability — SUID_DUMP_DISABLE (setuid binaries, prctl)
     // suppresses the dump.
@@ -318,7 +318,7 @@ pub fn do_coredump(task: &Task, sig: i32) -> bool {
             if !f.is_readable() {
                 continue;
             }
-            if vma.vma_type() == crate::mm::vma::VmaType::Device {
+            if vma.vma_type() == crate::mm::types::VmaType::Device {
                 continue;
             }
             let mut pf = crate::fs::elf::PF_R;

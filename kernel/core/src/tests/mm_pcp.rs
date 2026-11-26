@@ -23,10 +23,10 @@
 //! this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::mm::page_alloc::{alloc_pages, free_pages};
-use crate::mm::pcp::{PCP_BATCH, PCP_DOUBLE_FREE, PCP_HITS, PCP_MISSES, cached_pages_total};
-use crate::mm::pglist::first_online_node;
-use crate::mm::zone::GfpFlags;
+use crate::mm::hotpath::{alloc_pages, free_pages};
+use crate::mm::{types::PCP_BATCH, hotpath::PCP_DOUBLE_FREE, hotpath::PCP_HITS, hotpath::PCP_MISSES, hotpath::cached_pages_total};
+use crate::mm::hotpath::first_online_node;
+use crate::mm::types::GfpFlags;
 use core::sync::atomic::Ordering;
 use super::test_group_start;
 

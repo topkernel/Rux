@@ -929,7 +929,7 @@ tracepoints! {
     render |args: &[u64; TRACE_ARGS]| {
         let pfn = args[0];
         let page = if pfn != u64::MAX {
-            crate::mm::page_desc::pfn_to_page(pfn as usize) as u64
+            crate::mm::hotpath::pfn_to_page(pfn as usize) as u64
         } else {
             0
         };
@@ -956,7 +956,7 @@ tracepoints! {
              \tfield:unsigned int order;\toffset:16;\tsize:4;\tsigned:0;\n",
     call (pfn: u64, order: u32),
     render |args: &[u64; TRACE_ARGS]| {
-        let page = crate::mm::page_desc::pfn_to_page(args[0] as usize) as u64;
+        let page = crate::mm::hotpath::pfn_to_page(args[0] as usize) as u64;
         format!("page={:#x} pfn={:#x} order={}", page, args[0], args[1] as u32)
     };
 

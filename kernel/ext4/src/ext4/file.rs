@@ -96,7 +96,7 @@ enum DioReadDst<'a> {
     /// buffered fast path), so unpinned pages (pin holes) keep the
     /// staged-path semantics byte-for-byte.
     User {
-        pins: &'a crate::mm::gup::PinnedUserPages,
+        pins: &'a crate::mm::types::PinnedUserPages,
         va: usize,
     },
 }
@@ -1616,7 +1616,7 @@ pub(crate) enum DioWriteSrc<'a> {
     /// ext4_file_write_dio_user_vfs), so gathers never touch user
     /// memory and never fault.
     User {
-        pins: &'a crate::mm::gup::PinnedUserPages,
+        pins: &'a crate::mm::types::PinnedUserPages,
         va: usize,
     },
 }
@@ -3634,7 +3634,7 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
         // diotest2/5 testblock 1: buffered write + O_DIRECT read,
         // read/write comparison failed).
         if !buf.is_empty() {
-            let ps = crate::mm::PAGE_SIZE as u64;
+            let ps = crate::mm::types::PAGE_SIZE as u64;
             let first_index = offset / ps;
             let last_index = (offset + buf.len() as u64 - 1) / ps;
             super::file::ext4_flush_dirty_inode(inode, first_index, last_index);
@@ -3776,7 +3776,7 @@ fn ext4_dio_read_gup_core(
     fs: &crate::ext4::Ext4FileSystem,
     inode: &crate::ext4::inode::Ext4Inode,
     offset: u64,
-    pins: &crate::mm::gup::PinnedUserPages,
+    pins: &crate::mm::types::PinnedUserPages,
     va: usize,
     to_read: usize,
 ) -> Option<usize> {
@@ -3803,7 +3803,7 @@ pub fn ext4_file_read_dio_user_vfs(file: &File, dst: *mut u8, count: usize) -> O
         return None;
     }
     // Pin BEFORE the io_lock (the fault-in may sleep/allocate).
-    let pins = crate::mm::gup::pin_user_pages(dst as usize, count, false)?;
+    let pins = crate::mm::hotpath::pin_user_pages(dst as usize, count, false)?;
 
     let _pos_guard = file.io_lock.guard();
     let offset = file.get_pos() as u64;
@@ -3851,7 +3851,7 @@ pub fn ext4_file_pread_dio_user_vfs(
     if !fs.device.has_async_read_sg() {
         return None;
     }
-    let pins = crate::mm::gup::pin_user_pages(dst as usize, count, false)?;
+    let pins = crate::mm::hotpath::pin_user_pages(dst as usize, count, false)?;
 
     let _io_guard = file.io_lock.guard();
     let file_size = ext4_inode.get_size();
@@ -3913,7 +3913,7 @@ pub fn ext4_fault_populate_cache(file: &File, offset: u64) -> bool {
             fs,
             ext4_inode,
             offset,
-            ReadDst::Discard(crate::mm::PAGE_SIZE),
+            ReadDst::Discard(crate::mm::types::PAGE_SIZE),
             ra_state
         ),
         Ok(n) if n > 0
@@ -4326,7 +4326,7 @@ fn ext4_dio_write_gup_run(
         return None;
     }
     // Pin BEFORE any ext4 lock (faults may sleep/allocate).
-    let pins = crate::mm::gup::pin_user_pages(src as usize, count, true)?;
+    let pins = crate::mm::hotpath::pin_user_pages(src as usize, count, true)?;
     if pins.pinned_pages() != pins.page_count() {
         // Pin hole: request-granularity fallback (module doc above).
         return None;
@@ -4531,8 +4531,8 @@ fn ext4_buffered_write(
     let fs_id = fs as *const crate::ext4::Ext4FileSystem as u64;
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
-    let ps = crate::mm::PAGE_SIZE as u64;
-    let psu = crate::mm::PAGE_SIZE;
+    let ps = crate::mm::types::PAGE_SIZE as u64;
+    let psu = crate::mm::types::PAGE_SIZE;
 
     // EAGER-ENOSPC gate (falloc-wedge lane, 2026-11-16): an EXTENDING
     // write on a zero-free fs fails BEFORE any size publication or page
@@ -5622,8 +5622,8 @@ fn flush_run(
     done_out: &mut [(u64, u64, bool)],
     flusher: &mut SpanFlusher,
 ) {
-    let ps = crate::mm::PAGE_SIZE as u64;
-    let psu = crate::mm::PAGE_SIZE;
+    let ps = crate::mm::types::PAGE_SIZE as u64;
+    let psu = crate::mm::types::PAGE_SIZE;
     let size = inode.get_size();
     let off0 = run[0].0 * ps;
 
@@ -6191,7 +6191,7 @@ fn ext4_file_read_at_vfs(file: &File, offset: u64, buf: &mut [u8]) -> isize {
     // sc105 attribution: page-shaped positional reads (<= 1 page at a
     // block boundary) are the mmap demand-fault signature. Time them so
     // KILLDUMP can state the fault path's share of the launcher burn.
-    let fault_like = buf.len() <= crate::mm::PAGE_SIZE && offset % fs_block_size_of(file) == 0;
+    let fault_like = buf.len() <= crate::mm::types::PAGE_SIZE && offset % fs_block_size_of(file) == 0;
     let t0 = if fault_like { fault_tsc_now() } else { 0 };
     let ret = ext4_file_read_at_vfs_inner(file, offset, buf);
     if fault_like {
@@ -6224,7 +6224,7 @@ fn fs_block_size_of(file: &File) -> u64 {
     {
         return fs.block_size as u64;
     }
-    crate::mm::PAGE_SIZE as u64
+    crate::mm::types::PAGE_SIZE as u64
 }
 
 fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isize {

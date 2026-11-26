@@ -18,7 +18,7 @@
 use core::sync::atomic::Ordering;
 
 use rux::process::{types::Task, types::TaskState, hotpath::TIF_MEMDIE};
-use rux::mm::mm_struct::MmFlags;
+use rux::mm::types::MmFlags;
 use crate::sync::spinlock::Spinlock;
 
 // ==================== Constants ====================
@@ -101,7 +101,7 @@ pub fn oom_badness(task: &Task, totalpages: u64) -> u64 {
 }
 
 /// Score with a pre-pinned mm (caller holds the Arc reference).
-fn oom_badness_mm(task: &Task, mm: &rux::mm::mm_struct::MmStruct, totalpages: u64) -> u64 {
+fn oom_badness_mm(task: &Task, mm: &rux::mm::types::MmStruct, totalpages: u64) -> u64 {
     // Skip if MMF_OOM_DISABLE is set
     if mm.has_flag(MmFlags::MMF_OOM_DISABLE) {
         return 0;
@@ -157,7 +157,7 @@ fn select_bad_process(oc: &mut OomControl) {
     use rux::process::hotpath::{pid_hash_for_each_task, pid_hash_lookup_pinned};
 
     // Phase 1: bucket-locked collection with the cheap per-task filters.
-    let mut candidates: alloc::vec::Vec<(u32, alloc::sync::Arc<rux::mm::mm_struct::MmStruct>)> =
+    let mut candidates: alloc::vec::Vec<(u32, alloc::sync::Arc<rux::mm::types::MmStruct>)> =
         alloc::vec::Vec::new();
     pid_hash_for_each_task(|task| {
 
@@ -491,11 +491,11 @@ pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
 
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = rux::mm::pglist::first_online_node() {
+    if let Some(node) = rux::mm::hotpath::first_online_node() {
         for zt in [
-            rux::mm::zone::ZoneType::ZoneNormal,
-            rux::mm::zone::ZoneType::ZoneDma32,
-            rux::mm::zone::ZoneType::ZoneDma,
+            rux::mm::types::ZoneType::ZoneNormal,
+            rux::mm::types::ZoneType::ZoneDma32,
+            rux::mm::types::ZoneType::ZoneDma,
         ] {
             if let Some(zone) = node.zone(zt) {
                 if zone.is_initialized() {
@@ -535,11 +535,11 @@ pub fn kernel_fault_oom_kill() -> bool {
     }
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = rux::mm::pglist::first_online_node() {
+    if let Some(node) = rux::mm::hotpath::first_online_node() {
         for zt in [
-            rux::mm::zone::ZoneType::ZoneNormal,
-            rux::mm::zone::ZoneType::ZoneDma32,
-            rux::mm::zone::ZoneType::ZoneDma,
+            rux::mm::types::ZoneType::ZoneNormal,
+            rux::mm::types::ZoneType::ZoneDma32,
+            rux::mm::types::ZoneType::ZoneDma,
         ] {
             if let Some(zone) = node.zone(zt) {
                 if zone.is_initialized() {
@@ -565,11 +565,11 @@ pub fn kernel_fault_oom_kill() -> bool {
 pub fn sysrq_oom_kill() -> bool {
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = rux::mm::pglist::first_online_node() {
+    if let Some(node) = rux::mm::hotpath::first_online_node() {
         for zt in [
-            rux::mm::zone::ZoneType::ZoneNormal,
-            rux::mm::zone::ZoneType::ZoneDma32,
-            rux::mm::zone::ZoneType::ZoneDma,
+            rux::mm::types::ZoneType::ZoneNormal,
+            rux::mm::types::ZoneType::ZoneDma32,
+            rux::mm::types::ZoneType::ZoneDma,
         ] {
             if let Some(zone) = node.zone(zt) {
                 if zone.is_initialized() {

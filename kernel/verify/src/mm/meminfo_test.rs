@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for memory threshold and usage calculations.
-//! Copied from: kernel/core/src/mm/meminfo.rs
+//! Copied from: kernel/core/src/mm/hotpath.rs (meminfo section), its types from kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 

@@ -5875,7 +5875,7 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
                 &crate::fs::ext4::EXT4_INODE_OPS as *const _,
             ));
             if is_ext4 {
-                let ps = crate::mm::PAGE_SIZE as i64;
+                let ps = crate::mm::types::PAGE_SIZE as i64;
                 let first = (offset / ps) as u64;
                 let last = ((offset + nbytes - 1) / ps) as u64;
                 crate::fs::ext4::file::ext4_flush_dirty_inode(inode, first, last);

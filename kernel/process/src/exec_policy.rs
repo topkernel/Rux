@@ -452,13 +452,13 @@ pub fn do_execve_elf(
     // shared frame (no CoW fault ever fires — users only read it) or a
     // snapshot, both of which interpolate correctly from rdcycle.
     {
-        let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
+        let (data_paddr, code_paddr) = crate::mm::hotpath::vdso_pages_phys();
         // user_ppn is the freshly created page-table root; the physical
         // frames are the aligned 4 KiB vDSO statics
         // (INV-PROC-EXEC-VDSO-1).
         crate::r#unsafe::exec_map_user_region_static(
             user_ppn,
-            crate::mm::vdso::VDSO_BASE,
+            crate::mm::hotpath::VDSO_BASE,
             data_paddr,
             4096,
             PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
@@ -466,7 +466,7 @@ pub fn do_execve_elf(
         );
         crate::r#unsafe::exec_map_user_region_static(
             user_ppn,
-            crate::mm::vdso::VDSO_BASE + 4096,
+            crate::mm::hotpath::VDSO_BASE + 4096,
             code_paddr,
             4096,
             PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
@@ -484,7 +484,7 @@ pub fn do_execve_elf(
     // freeing them; see mm/vdso.rs.
     #[cfg(feature = "x86_64")]
     {
-        let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
+        let (data_paddr, code_paddr) = crate::mm::hotpath::vdso_pages_phys();
         // SAFETY: user_ppn is the freshly created page-table root; the
         // physical frames are the aligned 4 KiB vDSO statics; flags are
         // valid user PTE bits (data RO, code RX — executable by NOT
@@ -498,14 +498,14 @@ pub fn do_execve_elf(
         // own image mapping.
         crate::r#unsafe::exec_map_user_region_static(
             user_ppn,
-            crate::mm::vdso::VDSO_BASE,
+            crate::mm::hotpath::VDSO_BASE,
             data_paddr,
             4096,
             PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
         );
         crate::r#unsafe::exec_map_user_region_static(
             user_ppn,
-            crate::mm::vdso::VDSO_BASE + 4096,
+            crate::mm::hotpath::VDSO_BASE + 4096,
             code_paddr,
             4096,
             PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
@@ -869,7 +869,7 @@ pub fn do_execve_elf(
         // syscalls per OH boot move to userspace (~3 µs -> ~20 ns each).
         // riscv64 stays disabled (statics outside the linear map).
         #[cfg(feature = "x86_64")]
-        (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()),
+        (AT_SYSINFO_EHDR, crate::mm::hotpath::vdso_ehdr()),
     ];
 
     for (typ, val) in auxv {
@@ -1019,7 +1019,7 @@ pub fn do_execve_elf(
 
     // Add stack VMA with GROWSDOWN flag
     {
-        use crate::mm::vma::{Vma, VmaFlags, VmaOrigin, VmaType};
+        use crate::mm::types::{Vma, VmaFlags, VmaOrigin, VmaType};
         // `stack_top` here is the argv-slop-adjusted value (raw top - 256,
         // NOT page aligned). VirtAddr::new SILENTLY FLOORS to page
         // granularity, so the VMA used to end one page below the mapped
@@ -1039,8 +1039,8 @@ pub fn do_execve_elf(
             VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN
                 | if exec_stack_exec { VmaFlags::EXEC } else { 0 };
         let mut stack_vma = Vma::new(
-            crate::mm::page::VirtAddr::new(stack_bottom as usize),
-            crate::mm::page::VirtAddr::new(stack_top_page as usize),
+            crate::mm::types::VirtAddr::new(stack_bottom as usize),
+            crate::mm::types::VirtAddr::new(stack_top_page as usize),
             VmaFlags::from_bits(stack_vma_flags),
         );
         stack_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC_STACK));
@@ -1096,8 +1096,8 @@ pub fn do_execve_elf(
                     // lives on the pinned vm_file instead of an fd number
                     // (which exec closes and userspace could reuse).
                     let mut vma = Vma::new(
-                        crate::mm::page::VirtAddr::new(vma_start as usize),
-                        crate::mm::page::VirtAddr::new(vma_end as usize),
+                        crate::mm::types::VirtAddr::new(vma_start as usize),
+                        crate::mm::types::VirtAddr::new(vma_end as usize),
                         vma_flags,
                     );
                     vma.set_type(VmaType::FileBacked);
@@ -1199,8 +1199,8 @@ pub fn do_execve_elf(
                         // mprotect's whole-range coverage checks).
                         if seg_start > prev_end {
                             let mut filler = Vma::new(
-                                crate::mm::page::VirtAddr::new(prev_end as usize),
-                                crate::mm::page::VirtAddr::new(seg_start as usize),
+                                crate::mm::types::VirtAddr::new(prev_end as usize),
+                                crate::mm::types::VirtAddr::new(seg_start as usize),
                                 VmaFlags::from_bits(VmaFlags::PRIVATE),
                             );
                             filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
@@ -1214,8 +1214,8 @@ pub fn do_execve_elf(
                         if phdr.is_executable() { seg_flags.insert(VmaFlags::EXEC); }
                         seg_flags.insert(VmaFlags::PRIVATE);
                         let mut vma = Vma::new(
-                            crate::mm::page::VirtAddr::new(seg_start as usize),
-                            crate::mm::page::VirtAddr::new(seg_end as usize),
+                            crate::mm::types::VirtAddr::new(seg_start as usize),
+                            crate::mm::types::VirtAddr::new(seg_end as usize),
                             seg_flags,
                         );
                         vma.set_type(VmaType::FileBacked);
@@ -1242,8 +1242,8 @@ pub fn do_execve_elf(
                 let span_end = interp_base + interp_size;
                 if added_any && span_end > prev_end {
                     let mut filler = Vma::new(
-                        crate::mm::page::VirtAddr::new(prev_end as usize),
-                        crate::mm::page::VirtAddr::new(span_end as usize),
+                        crate::mm::types::VirtAddr::new(prev_end as usize),
+                        crate::mm::types::VirtAddr::new(span_end as usize),
                         VmaFlags::from_bits(VmaFlags::PRIVATE),
                     );
                     filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
@@ -1256,8 +1256,8 @@ pub fn do_execve_elf(
                 if !added_any {
                     let interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
                     let mut interp_vma = Vma::new(
-                        crate::mm::page::VirtAddr::new(interp_base as usize),
-                        crate::mm::page::VirtAddr::new(span_end as usize),
+                        crate::mm::types::VirtAddr::new(interp_base as usize),
+                        crate::mm::types::VirtAddr::new(span_end as usize),
                         interp_flags,
                     );
                     interp_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));

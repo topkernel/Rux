@@ -4,13 +4,13 @@
 //!
 //! VMA Manager non-overlap and correctness invariant tests.
 //!
-//! Types copied from: kernel/core/src/mm/vma.rs, kernel/core/src/mm/page.rs
+//! Types copied from: kernel/core/src/mm/types.rs
 
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
 // ============================================================================
-// Copied types from kernel/core/src/mm/page.rs
+// Copied types from kernel/core/src/mm/types.rs
 // ============================================================================
 
 pub const PAGE_SIZE: usize = 4096;
@@ -33,7 +33,7 @@ impl VirtAddr {
 }
 
 // ============================================================================
-// Copied types from kernel/core/src/mm/vma.rs
+// Copied types from kernel/core/src/mm/types.rs
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
