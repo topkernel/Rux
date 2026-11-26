@@ -6,13 +6,21 @@
 riscv64 kernel (strong or debug ELF) with the pbench probe (or the
 p2fonly futex suite) as init and collect the PBENCH lines.
 
-Machine class copies `make run` (test/run-qemu defaults): virt, TCG
-thread=multi, rv64, 2G, SMP2, virtio-blk-pci, serial to file. The
-probe is a glibc-static build (no riscv64 musl toolchain in-tree);
-rdcycle fronts rdtsc_ (pbench.c guards by arch).
+Machine class mirrors the riscv64 suite boot (unittest-boot-riscv.py)
+plus zicond: virt, TCG, rv64,zbb/zba/zbs/zicond, 1G, SMP2,
+virtio-blk-pci, serial to file, snapshot mode (file.locking=off) — no
+KVM on an x86 host for a riscv64 guest. The probe is a scalar
+in-tree-musl build (-march=rv64gc_zicsr: no RVV — the kernel never
+enables sstatus.VS, so vector instructions SIGILL) and times with
+`csrr rd, time` (pbench.c guards by arch; rdtime tracks kernel mtime,
+rdcycle drifts under TCG).
+
+Output is the x86 driver's contract (same-parsing consumers): every
+`PBENCH ...` serial line printed as `[probe] ...`; success = exit 0
+after `PBENCH DONE rc=0`; rc 1 panic / 2 build-image / 3 timeout.
 
 Usage: ./pbench_boot_rv.py [--kernel PATH] [--tag NAME] [--timeout 900]
-       [--smp 2] [--mem 2G] [--p2f] [--append-extra "a=b"]
+       [--smp 2] [--mem 1G] [--p2f] [--append-extra "a=b"]
 """
 import argparse
 import os
@@ -40,9 +48,29 @@ WORK = os.path.join(WT, "work")
 SIZE_MB = 256
 
 
+def foreign_qemus():
+    try:
+        out = subprocess.run(["pgrep", "-c", "qemu-system"], capture_output=True,
+                             text=True).stdout.strip()
+        return int(out) if out else 0
+    except Exception:
+        return -1
+
+
 def build_probe(out, src, extra=None):
+    if not os.path.exists(src):
+        # probe sources are delivered through the tracked archive (the
+        # 2026-11-02 test-case rule: test/ carries no loose sources);
+        # restore on demand, same as make test does.
+        r = subprocess.run([os.path.join(WT, "scripts", "extract-probes.sh")],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(src):
+            print("[build] probe source missing: %s (extract failed rc=%d)"
+                  % (src, r.returncode))
+            return False
     if not os.path.exists(os.path.join(MUSL, "lib", "libc.a")):
-        print("[build] riscv64 musl missing: run toolchain/build-musl.sh")
+        print("[build] riscv64 musl missing: run toolchain/build-musl.sh "
+              "(or symlink a worktree's toolchain/riscv64-rux-linux-musl)")
         return False
     libs = [os.path.join(MUSL, "lib", "crt1.o"),
             os.path.join(MUSL, "lib", "libc.a")]
@@ -84,7 +112,7 @@ def main():
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)
     ap.add_argument("--tag", default="rvpb1")
     ap.add_argument("--smp", type=int, default=2)
-    ap.add_argument("--mem", default="2G")
+    ap.add_argument("--mem", default="1G")   # suite machine class (1G)
     ap.add_argument("--p2f", action="store_true",
                     help="stage the p2fonly futex suite as init")
     ap.add_argument("--probe-bin", default=None,
@@ -100,13 +128,13 @@ def main():
     if args.probe_bin:
         import shutil as _sh
         _sh.copyfile(args.probe_bin, probe)
-    elif not build_probe(probe, os.path.join(HERE, "pbench.c")):
+    elif not build_probe(probe, os.path.join(WT, "test", "pbench.c")):
         return 2
     arm = None
     init_path = "/test/pbench"
     if args.p2f:
         arm = os.path.join(WORK, "pbench_p2f-rv")
-        if not build_probe(arm, os.path.join(HERE, "pbench_p2f_arm.c")):
+        if not build_probe(arm, os.path.join(WT, "test", "pbench_p2f_arm.c")):
             return 2
     img = os.path.join(WORK, "pbench-rv-%s.img" % args.tag)
     init_path = build_image(img, probe, arm, "pbench_p2f")
@@ -119,23 +147,30 @@ def main():
     append = "root=/dev/vda rw init=%s console=ttyS0" % init_path
     if args.append_extra:
         append += " " + args.append_extra
-    # Ubuntu glibc-static carries zbb/zba/zbs/zicond AND RVV code (gcc
-    # 15 / glibc 2.4x baseline: vse64.v in pthread start_thread paths);
-    # make-run's zbb/zba/zbs class is not enough for the probe binary.
+    # Suite cpu class PLUS zicond+zcb: the probe links the in-tree musl
+    # (built rv64gc_zicsr, scalar) with the DISTRO gcc's libgcc for the
+    # soft-fp routines musl printf reaches (__multf3, __floatunsitf on
+    # every %f path), and that libgcc carries a wider ISA: czero.eqz
+    # (Zicond) and c.zext.w (Zcb) both SIGILLed before the flags were
+    # added (run-1 epc 0x1a22a insn16=0x56b3 = czero.eqz low halfword;
+    # run-2 epc 0x1b8f2 insn16=0x9d71 = c.zext.w). The full battery
+    # completes under qemu-riscv64 -cpu with exactly this set, user
+    # mode pre-validation 2026-11-26. The old v=true,vlen=256,elen=64
+    # flags stay dropped: the probe is scalar and the kernel never
+    # enables sstatus.VS, so vector hardware was dead weight.
+    # -snapshot: rootfs writes go to a QEMU temp overlay that dies with
+    # the VM (the image itself is per-run disposable, but the
+    # discipline costs nothing); file.locking=off per image-store policy.
     cmd = [QEMU, "-M", "virt", "-accel", "tcg,thread=multi",
-           "-cpu", "rv64,zbb=true,zba=true,zbs=true,zicond=true,v=true,vlen=256,elen=64",
-           "-m", args.mem, "-smp", str(args.smp), "-nographic",
+           "-cpu", "rv64,zbb=true,zba=true,zbs=true,zicond=true,zcb=true",
+           "-m", args.mem, "-smp", str(args.smp), "-display", "none",
            "-serial", "file:" + serial,
+           "-snapshot",
            "-drive", "file=%s,if=none,id=rootfs,format=raw,file.locking=off" % img,
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", args.kernel, "-append", append]
-    try:
-        foreign = subprocess.run(["pgrep", "-c", "qemu-system"],
-                                 capture_output=True, text=True).stdout.strip()
-    except Exception:
-        foreign = -1
-    print("[boot] tag=%s smp=%s mem=%s foreign_qemus=%s"
-          % (args.tag, args.smp, args.mem, foreign))
+    print("[boot] tag=%s accel=tcg,thread=multi smp=%d mem=%s foreign_qemus=%d"
+          % (args.tag, args.smp, args.mem, foreign_qemus()))
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
