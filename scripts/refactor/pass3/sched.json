@@ -1,0 +1,337 @@
+{
+ "sub": "sched",
+ "target": "kernel/core/src/sched",
+ "imports_rs": [
+  "use super::hotpath::{cpu_state_mut, free_task_slot, task_page_unmark};",
+  "use super::hotpath::{FREED_RING_HEAD, FREED_TASK_RING, IN_TASK_FREE, TASK_POISON};",
+  "use super::types::ReapClaim;",
+  "use crate::process::types::SchedPolicy;",
+  "use crate::println;"
+ ],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "find": "fn task_page_unmark(ptr: *mut u8) {",
+   "replace": "pub(crate) fn task_page_unmark(ptr: *mut u8) {",
+   "why": "task_slot_poison_and_free (unsafe.rs) releases the ownership bit at the end of the poison window"
+  },
+  {
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "find": "static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);",
+   "replace": "pub(crate) static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);",
+   "why": "task_slot_poison_and_free (unsafe.rs) takes the ring slot index"
+  }
+ ],
+ "moves": [
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "task",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d0e3ad9d40cd",
+   "inv": "INV-SCE-2",
+   "section": "auto-trait proofs (Send / Sync)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SCE-2: shared read view of the claim's Task (unreachable-but-mapped; the claim owns the free). The block text is unchanged; only the method's home moved.",
+   "impl_owner": "ReapClaim"
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "unsafe impl Send for ReapClaim",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "f5f80fc5288f",
+   "inv": "INV-RD-CLAIM",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RD-CLAIM: the claim's NonNull<Task> is dereferenced only by the reaper under the reap lock (exclusive ownership; PENDING/GRACE_BATCH statics exist through this Send)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "unsafe impl Sync for GlobalRunQueue",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "f87e25390061",
+   "inv": "INV-SENDSYNC-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SENDSYNC-1: every GlobalRunQueue access goes through the queue's raw spinlock (or the IRQs-off switch window); Sync is the raw-lock proof, same as every other queue handle in this subsystem."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "grq_current_fp",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c79b33f13d4f",
+   "inv": "INV-SCE-3",
+   "section": "arch register and CSR reads (F-REG rows)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SCE-3: this read feeds the GRQ holder crime-scene dump (IRREDUCIBLE F-REG-1, contract in the doc above).",
+   "callmap": [
+    {
+     "find": "        GRQ_SITE_FP[cpu].store(grq_current_fp(), core::sync::atomic::Ordering::Relaxed);",
+     "replace": "        GRQ_SITE_FP[cpu].store(crate::sched::r#unsafe::grq_current_fp(), core::sync::atomic::Ordering::Relaxed);"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "clear_trap_scratch",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2ba80962d86a",
+   "inv": "INV-SCE-10",
+   "section": "arch register and CSR reads (F-REG rows)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SCE-10: one-shot boot CSR write (IRREDUCIBLE F-REG-3, contract in the doc above); the callers run pre-scheduler.",
+   "callmap": [
+    {
+     "find": "        clear_trap_scratch();",
+     "replace": "        crate::sched::r#unsafe::clear_trap_scratch();"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "idle_guard_sp",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a3b9f6d66557",
+   "inv": "INV-SCE-1",
+   "section": "arch register and CSR reads (F-REG rows)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SCE-1: read-only sp read for the idle-depth guard (IRREDUCIBLE F-REG-2, contract in the comment above the x86 arm).",
+   "callmap": [
+    {
+     "find": "            let sp = idle_guard_sp() as u64;",
+     "replace": "            let sp = crate::sched::r#unsafe::idle_guard_sp() as u64;"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "idle_guard_sp",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "38e77e20c54f",
+   "inv": "INV-SCE-1",
+   "section": "arch register and CSR reads (F-REG rows)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SCE-1: read-only sp read for the idle-depth guard (IRREDUCIBLE F-REG-2)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "idle_guard_sp",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "9013c4d1ac95",
+   "inv": "INV-SCE-1",
+   "section": "arch register and CSR reads (F-REG rows)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SCE-1: read-only sp read for the idle-depth guard (IRREDUCIBLE F-REG-2)."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "init",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d11d0bc6c937",
+   "inv": "INV-SCE-4",
+   "section": "idle-task construction (INV-SCE-4)",
+   "name": "init_idle_cpu",
+   "params": "cpu: usize, boot_cpu: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sched::r#unsafe::init_idle_cpu(cpu, boot_cpu);",
+   "doc": [
+    "One CPU's idle-task construction: the body of sched::init's",
+    "pre-secondary loop (collected by pass 3)."
+   ],
+   "contract": [
+    "`cpu < MAX_CPUS`; the slot is written exactly once, before any",
+    "secondary schedules (INV-SCE-4). `boot_cpu` additionally clears the",
+    "trap scratch, installs the thread pointer and wires the per-CPU",
+    "current/idle pointers."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "alloc_task_slot",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4be52eaa7455",
+   "inv": "INV-TL-1",
+   "section": "task slot lifecycle (INV-TL-1 / INV-TL-2)",
+   "name": "task_slot_alloc",
+   "params": "layout: core::alloc::Layout",
+   "ret": "*mut u8",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "crate::sched::r#unsafe::task_slot_alloc(layout)",
+   "inline": true,
+   "doc": [
+    "Raw take of one Task slot page's bytes (the alloc half of the",
+    "slot lifecycle, collected by pass 3)."
+   ],
+   "contract": [
+    "`layout` is `Layout::new::<Task>()` (non-zero size). The raw",
+    "allocator is used because the slot keeps raw-pointer identity",
+    "through the lifecycle (Round-B typed-handle conversion pending);",
+    "null means exhaustion and the caller checks immediately, then",
+    "casts to `*mut Task` (INV-TL-1)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "alloc_task_slot",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "ec8d090e5f5c",
+   "inv": "INV-TL-1",
+   "section": "task slot lifecycle (INV-TL-1 / INV-TL-2)",
+   "name": "task_slot_dealloc_raw",
+   "params": "task_ptr: *mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "            crate::sched::r#unsafe::task_slot_dealloc_raw(task_ptr);",
+   "doc": [
+    "Return a never-initialized slot to the raw allocator (the pid-take",
+    "failure path of alloc_task_slot, collected by pass 3)."
+   ],
+   "contract": [
+    "`task_ptr` came from task_slot_alloc with `Layout::new::<Task>()`",
+    "and no observer can hold it yet: nothing was published, the page",
+    "is still pre-init raw memory (INV-TL-1)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "alloc_task_slot",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "018d0a73c2ef",
+   "inv": "INV-TL-1",
+   "section": "task slot lifecycle (INV-TL-1 / INV-TL-2)",
+   "name": "task_slot_init",
+   "params": "task_ptr: *mut Task, pid: u32",
+   "ret": "bool",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "    if !crate::sched::r#unsafe::task_slot_init(task_ptr, pid) {\n        return None;\n    }",
+   "doc": [
+    "In-place construction of a fresh slot (the init half of the slot",
+    "lifecycle, collected by pass 3)."
+   ],
+   "contract": [
+    "`task_ptr` is a fresh non-null task_slot_alloc page and `pid` is",
+    "the pid taken for it. `new_task_at` initializes in place before",
+    "any publish (the first publish is the caller's pid_hash_insert).",
+    "Returns false on failure; the caller then routes the page through",
+    "free_task_slot so it leaves POISONED, never raw (R48), after",
+    "releasing the pid (INV-TL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "            free_task_slot(task_ptr);\n            return None;\n        }\n        crate::process::hotpath::pid_hash_insert(task_ptr);",
+     "replace": "            free_task_slot(task_ptr);\n            false\n        } else {\n            crate::process::hotpath::pid_hash_insert(task_ptr);\n            true\n        }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "free_task_slot",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "233ea92ad9fc",
+   "inv": "INV-TL-2",
+   "section": "task slot lifecycle (INV-TL-1 / INV-TL-2)",
+   "name": "task_drop_in_place",
+   "params": "task_ptr: *mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sched::r#unsafe::task_drop_in_place(task_ptr);",
+   "doc": [
+    "Run the Task's field destructors (the release half of the slot",
+    "lifecycle, collected by pass 3)."
+   ],
+   "contract": [
+    "`task_ptr` points at a FULLY initialized task: new_task_at's only",
+    "failure return precedes any Drop-bearing field, and the",
+    "fork/kthread unwind plus release_task/free_dead_member paths all",
+    "operate on fully initialized tasks (the call-site audit lives in",
+    "hotpath.rs above the caller). Runs the field destructors (INV-TL-2)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "free_task_slot",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "4cc09ac957f5",
+   "inv": "INV-TL-2",
+   "section": "task slot lifecycle (INV-TL-1 / INV-TL-2)",
+   "name": "task_slot_poison_and_free",
+   "params": "task_ptr: *mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sched::r#unsafe::task_slot_poison_and_free(task_ptr);",
+   "doc": [
+    "Close a Task slot: volatile-poison state/pid at the compile-time",
+    "offsets, ring-record the pid, release the ownership bit, hand the",
+    "page back (collected by pass 3)."
+   ],
+   "contract": [
+    "`task_ptr` names a task whose release path just ran (drop_in_place",
+    "above); every write below goes through a pointer the type system",
+    "already considers dead \u2014 that IS the poison discipline (the",
+    "R47/R12-4 guards read these words to refuse stale wakes). Volatile",
+    "stores at the compile-time offsets (task_offsets::TASK_STATE/",
+    "TASK_PID), the paint is bounded, the dealloc closes the window",
+    "(INV-TL-2 poison window; the ledger row is GAP \u2014 no harness yet)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/sched/hotpath.rs",
+   "owner": "scheduler_tick",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e5e9604b1a44",
+   "inv": "INV-SCE-1",
+   "section": "tick stack canary (INV-SCE-1)",
+   "name": "tick_stack_canary",
+   "params": "t: *mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sched::r#unsafe::tick_stack_canary(t);",
+   "doc": [
+    "The tick's per-CPU stack-canary check for the current task",
+    "(collected by pass 3): one volatile read plus a first-hit",
+    "diagnostic print."
+   ],
+   "contract": [
+    "`t` is this CPU's current task pointer (the tick just read",
+    "`current()`); the access is a read-only volatile scan of the",
+    "canary word at `kernel_stack_bottom()` and a budget-gated",
+    "first-hit report (INV-SCE-2 diagnostic read; the write below",
+    "repairs the smashed canary in place, the same word the check",
+    "read)."
+   ]
+  }
+ ],
+ "moved_fns": [
+  "cpu_idle_loop"
+ ]
+}

@@ -27,6 +27,11 @@ use crate::process::types::Task;
 
 use super::types::SchedEntity;
 use super::types::GlobalRunQueue;
+use super::hotpath::{cpu_state_mut, free_task_slot, task_page_unmark};
+use super::hotpath::{FREED_RING_HEAD, FREED_TASK_RING, IN_TASK_FREE, TASK_POISON};
+use super::types::ReapClaim;
+use crate::process::types::SchedPolicy;
+use crate::println;
 
 // ---------------------------------------------------------------------------
 // INV-SCE-4: the per-CPU idle-task storages
@@ -1281,3 +1286,404 @@ impl<T, const N: usize> EvRing<T, N> {
 // publication) is the same lock-free discipline the printk ring uses;
 // at most one writer owns a slot at a time.
 unsafe impl<T, const N: usize> Sync for EvRing<T, N> {}
+
+// ==========================================================================
+// pass 3 (seed-core §2c.5): sched's collected unsafe — the inline
+// blocks of the subsystem's mechanism files, one contract each.
+// ==========================================================================
+
+// ------------ arch register and CSR reads (F-REG rows) ------------
+
+/// Read the current frame pointer (rbp on x86_64, s0 on riscv64,
+/// x29 on aarch64).
+///
+/// IRREDUCIBLE F-ROW (F-REG-1): there is no safe shape for reading a
+/// CPU register — Rust exposes no intrinsic for rbp/s0/x29 and the
+/// register file is outside the language's memory model. The reference
+/// kernel reaches the same value in C via
+/// `__builtin_frame_address(0)` (gcc lowers it to the identical
+/// `mov rbp` / `mv s0` / `mov x29`), used by its frame-pointer
+/// stackwalker (`arch/arm64/kernel/stacktrace.c`, x86
+/// `dumpstack.c`'s fp path); this read feeds the GRQ crime-scene
+/// backtrace, the same consumer. Contract: read-only, `nomem` +
+/// `nostack` + `preserves_flags` — no memory, stack or flag effect,
+/// so the only soundness requirement is that the output register is
+/// written, which the operand enforces.
+/// INV-SCE-3: this read feeds the GRQ holder crime-scene dump (IRREDUCIBLE F-REG-1, contract in the doc above).
+#[inline(always)]
+pub(crate) fn grq_current_fp() -> u64 {
+    let fp: u64;
+    #[cfg(feature = "x86_64")]
+    // F-REG-1 (x86_64): mov rbp — the reference's __builtin_frame_address(0).
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(feature = "riscv64")]
+    // F-REG-1 (riscv64): mv s0 — same lowered builtin.
+    unsafe {
+        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(feature = "aarch64")]
+    // F-REG-1 (aarch64): mov x29 — same lowered builtin.
+    unsafe {
+        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    fp
+}
+/// Clear the trap-entry scratch register (riscv64 `sscratch`; no-op
+/// elsewhere — x86_64 keeps per-CPU state in memory, not a scratch reg).
+///
+/// IRREDUCIBLE F-ROW (F-REG-3): CSR state has no safe Rust access —
+/// the reference's `arch/riscv/kernel/entry.S` writes the same
+/// `csrw sscratch, zero` on the usermode-entry paths (the scratch
+/// register holds the kernel tp across user execution; zeroing here
+/// establishes the boot-time convention before the first userspace
+/// entry). Contract: a CSR write with no memory effect; the one-shot
+/// boot ordering is guaranteed by the caller (init, pre-scheduler).
+/// INV-SCE-10: one-shot boot CSR write (IRREDUCIBLE F-REG-3, contract in the doc above); the callers run pre-scheduler.
+#[inline]
+pub(crate) fn clear_trap_scratch() {
+    #[cfg(feature = "riscv64")]
+    // F-REG-3 (riscv64): csrw sscratch, zero — entry.S usermode-entry setup.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
+    }
+}
+    // IRREDUCIBLE F-ROW (F-REG-2) for all three arch arms below: the
+    // live stack pointer has no safe read — the reference kernel keeps
+    // a `current_stack_pointer` definition per arch for exactly this
+    // (arch/x86/include/asm/stacktrace.h, riscv/entry.S's sp, arm64's
+    // current_stack_pointer global); Rust's equivalent is this asm!
+    // read. Consumer: the idle-stack-overflow guard (same shape as the
+    // reference's TASK_SIZE-bounded stack check). Contract: read-only,
+    // nomem + nostack; the output operand is the only effect.
+    /// INV-SCE-1: read-only sp read for the idle-depth guard (IRREDUCIBLE F-REG-2, contract in the comment above the x86 arm).
+    #[cfg(feature = "x86_64")]
+    pub(crate) fn idle_guard_sp() -> usize {
+        let sp: usize;
+        // F-REG-2 (x86_64): mov rsp.
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
+        sp
+    }
+    /// INV-SCE-1: read-only sp read for the idle-depth guard (IRREDUCIBLE F-REG-2).
+    #[cfg(feature = "riscv64")]
+    pub(crate) fn idle_guard_sp() -> usize {
+        let sp: usize;
+        // F-REG-2 (riscv64): mv sp.
+        unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
+        sp
+    }
+    /// INV-SCE-1: read-only sp read for the idle-depth guard (IRREDUCIBLE F-REG-2).
+    #[cfg(feature = "aarch64")]
+    pub(crate) fn idle_guard_sp() -> usize {
+        let sp: usize;
+        // F-REG-2 (aarch64): mov sp.
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
+        sp
+    }
+
+// ------------ tick stack canary (INV-SCE-1) ------------
+
+/// The tick's per-CPU stack-canary check for the current task
+/// (collected by pass 3): one volatile read plus a first-hit
+/// diagnostic print.
+///
+/// # Contract (INV-SCE-1)
+/// `t` is this CPU's current task pointer (the tick just read
+/// `current()`); the access is a read-only volatile scan of the
+/// canary word at `kernel_stack_bottom()` and a budget-gated
+/// first-hit report (INV-SCE-2 diagnostic read; the write below
+/// repairs the smashed canary in place, the same word the check
+/// read).
+#[inline(always)]
+pub(crate) fn tick_stack_canary(t: *mut Task) {
+        unsafe {
+            let t = crate::sched::r#unsafe::task_shared(t);
+            let bottom = t.kernel_stack_bottom();
+            if bottom != 0 {
+                let v = core::ptr::read_volatile(bottom as *const u64);
+                static REPORTED: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                if v != 0xCAFE_F00D_DEAD_BEEF
+                    && v != 0
+                    && !REPORTED.swap(true, core::sync::atomic::Ordering::AcqRel)
+                {
+                    use crate::console::putchar;
+                    const MSG: &[u8] = b"TICK-CANARY pid=";
+                    for &b in MSG { putchar(b); }
+                    let pid = crate::sched::r#unsafe::task_shared(t).pid();
+                    let mut vv = pid as usize;
+                    if vv == 0 { putchar(b'0'); }
+                    let mut dd = [0u8; 10]; let mut kk = 0;
+                    while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                    while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                    const M2: &[u8] = b" v=0x";
+                    for &b in M2 { putchar(b); }
+                    let mut sh = 64;
+                    while sh > 0 { sh -= 4; let nb = ((v >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    putchar(b'\n');
+                    // R18-6: consistency — bottom vs live kernel_stack.
+                    const M0: &[u8] = b" bottom=0x";
+                    for &b in M0 { putchar(b); }
+                    {
+                        let b2 = bottom;
+                        let mut sh0 = 64;
+                        while sh0 > 0 { sh0 -= 4; let nb = ((b2 >> sh0) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    }
+                    const M6: &[u8] = b" ks=0x";
+                    for &b in M6 { putchar(b); }
+                    {
+                        let ks = match crate::sched::r#unsafe::task_shared(t).get_kernel_stack() { Some(p) => p as usize, None => 0 };
+                        let mut sh = 64;
+                        while sh > 0 { sh -= 4; let nb = ((ks >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    }
+                    putchar(b'\n');
+                    // R18-5: the interrupted epc — if the smash is fresh,
+                    // the victim was executing in the deep chain RIGHT NOW.
+                    const M5: &[u8] = b" epc=0x";
+                    for &b in M5 { putchar(b); }
+                    {
+                        use crate::arch::trap::current_pt_regs;
+                        use crate::arch::pt_regs::PtRegs;
+                        let pr = current_pt_regs() as *const PtRegs;
+                        if !pr.is_null() {
+                            let e = crate::sched::r#unsafe::current_trap_ip();
+                            let mut sh = 64;
+                            while sh > 0 { sh -= 4; let nb = ((e >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                        }
+                    }
+                    putchar(b'\n');
+                    // R18-4: frame count + deepest symbols at smash time.
+                    let mut frames = 0u32;
+                    crate::debug::hotpath::walk_stack_trace(&mut |pc, _fp| {
+                        frames += 1;
+                        if frames <= 6 {
+                            const M3: &[u8] = b" f=0x";
+                            for &b in M3 { putchar(b); }
+                            let mut sh = 64;
+                            while sh > 0 { sh -= 4; let nb = ((pc >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                        }
+                    });
+                    const M4: &[u8] = b" frames=";
+                    for &b in M4 { putchar(b); }
+                    let mut vv = frames;
+                    if vv == 0 { putchar(b'0'); }
+                    let mut dd = [0u8; 6]; let mut kk = 0;
+                    while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                    while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                    putchar(b'\n');
+                    // repair so we report once
+                    core::ptr::write_volatile(bottom as *mut u64, 0xCAFE_F00D_DEAD_BEEF);
+                }
+            }
+        }
+}
+
+
+// ------------ task slot lifecycle (INV-TL-1 / INV-TL-2) ------------
+
+/// Raw take of one Task slot page's bytes (the alloc half of the
+/// slot lifecycle, collected by pass 3).
+///
+/// # Contract (INV-TL-1)
+/// `layout` is `Layout::new::<Task>()` (non-zero size). The raw
+/// allocator is used because the slot keeps raw-pointer identity
+/// through the lifecycle (Round-B typed-handle conversion pending);
+/// null means exhaustion and the caller checks immediately, then
+/// casts to `*mut Task` (INV-TL-1).
+#[inline(always)]
+pub(crate) fn task_slot_alloc(layout: core::alloc::Layout) -> *mut u8 {
+unsafe { alloc::alloc::alloc(layout) }
+}
+
+/// Return a never-initialized slot to the raw allocator (the pid-take
+/// failure path of alloc_task_slot, collected by pass 3).
+///
+/// # Contract (INV-TL-1)
+/// `task_ptr` came from task_slot_alloc with `Layout::new::<Task>()`
+/// and no observer can hold it yet: nothing was published, the page
+/// is still pre-init raw memory (INV-TL-1).
+#[inline(always)]
+pub(crate) fn task_slot_dealloc_raw(task_ptr: *mut Task) {
+            unsafe { alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>()); }
+}
+
+/// In-place construction of a fresh slot (the init half of the slot
+/// lifecycle, collected by pass 3).
+///
+/// # Contract (INV-TL-1)
+/// `task_ptr` is a fresh non-null task_slot_alloc page and `pid` is
+/// the pid taken for it. `new_task_at` initializes in place before
+/// any publish (the first publish is the caller's pid_hash_insert).
+/// Returns false on failure; the caller then routes the page through
+/// free_task_slot so it leaves POISONED, never raw (R48), after
+/// releasing the pid (INV-TL-1).
+#[inline(always)]
+pub(crate) fn task_slot_init(task_ptr: *mut Task, pid: u32) -> bool {
+    unsafe {
+        if !Task::new_task_at(task_ptr, pid, SchedPolicy::Normal) {
+            // R10-9: stack allocation failed — discard the slot cleanly.
+            crate::api::process::free_pid(pid);
+            // R48: new_task_at already wrote state=TASK_NEW (R52; was
+            // RUNNING) and pid=<pid> over any poison left by the page's
+            // previous life BEFORE it failed — a raw dealloc here would
+            // return an UNPOISONED,
+            // valid-looking Task page to the buddy, disarming every
+            // R15-6/R33/R47 freed-page guard (a stale wake would then
+            // sail through the pid check, read a runnable-looking state,
+            // and reach the wake path — pre-R52 it read RUNNING and the
+            // R46 heal re-enqueued the half-initialized task: on_cpu=false,
+            // on_rq=false, state=RUNNING was exactly the phantom shape;
+            // TASK_NEW now refuses every wake route, and the poison keeps
+            // the pid check as the first-line drop).
+            // Route through free_task_slot so the page leaves POISONED at
+            // the compile-time offsets and the slot hits FREED_TASK_RING.
+            free_task_slot(task_ptr);
+            false
+        } else {
+            crate::process::hotpath::pid_hash_insert(task_ptr);
+            true
+        }
+    }
+}
+
+/// Run the Task's field destructors (the release half of the slot
+/// lifecycle, collected by pass 3).
+///
+/// # Contract (INV-TL-2)
+/// `task_ptr` points at a FULLY initialized task: new_task_at's only
+/// failure return precedes any Drop-bearing field, and the
+/// fork/kthread unwind plus release_task/free_dead_member paths all
+/// operate on fully initialized tasks (the call-site audit lives in
+/// hotpath.rs above the caller). Runs the field destructors (INV-TL-2).
+#[inline(always)]
+pub(crate) fn task_drop_in_place(task_ptr: *mut Task) {
+        unsafe {
+            core::ptr::drop_in_place(task_ptr);
+        }
+}
+
+/// Close a Task slot: volatile-poison state/pid at the compile-time
+/// offsets, ring-record the pid, release the ownership bit, hand the
+/// page back (collected by pass 3).
+///
+/// # Contract (INV-TL-2)
+/// `task_ptr` names a task whose release path just ran (drop_in_place
+/// above); every write below goes through a pointer the type system
+/// already considers dead — that IS the poison discipline (the
+/// R47/R12-4 guards read these words to refuse stale wakes). Volatile
+/// stores at the compile-time offsets (task_offsets::TASK_STATE/
+/// TASK_PID), the paint is bounded, the dealloc closes the window
+/// (INV-TL-2 poison window; the ledger row is GAP — no harness yet).
+#[inline(always)]
+pub(crate) fn task_slot_poison_and_free(task_ptr: *mut Task) {
+        unsafe {
+            let slot = task_ptr as *mut u8;
+            let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
+            FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
+            // R47: poison state and pid at their COMPILE-TIME offsets
+            // (task_offsets::TASK_STATE/TASK_PID; currently 0x50/0x54). The
+            // previous hardcoded `slot.add(0x48)` u64 write predated the
+            // journal_handle/ti_on_cpu/task_refcnt insertion before `state`
+            // (the same +8 drift trap.rs R20 fixed for its own walk) and
+            // landed entirely inside ti_a2 — so every poison reader
+            // (Task::wake_up R15-6, enqueue_task_locked R15-6,
+            // ensure_linked_locked R41, trap.rs panic walk) checked fields
+            // that were never poisoned. Freed Task pages were
+            // indistinguishable from live ones, and the stale wakes those
+            // guards exist to drop proceeded to set_state(RUNNING == 0)
+            // into freed-then-reused pages — the positional 4-byte zero at
+            // the state word behind the phantom-RUNNING / recurrence-at-
+            // same-address signature (rounds 39-47 form-B). Two separate
+            // u32 writes (not one u64) so a future field inserted between
+            // state and pid cannot silently miss pid again.
+            core::ptr::write_volatile(
+                slot.add(crate::process::hotpath::TASK_STATE) as *mut u32,
+                TASK_POISON,
+            );
+            core::ptr::write_volatile(
+                slot.add(crate::process::hotpath::TASK_PID) as *mut u32,
+                TASK_POISON,
+            );
+            // (2026-11-23: the R83 freed-header paint loop that lived here
+            // retired with debug/r83hunt.rs — its only reader was the hunt's
+            // audit/dump; the R47/R12-4 state/pid poison above is what the
+            // stale-wake guards read and it is unchanged.)
+            // R69: release the ownership bit and tell the heap's free-side
+            // audit that THIS free is the legitimate one (anything else
+            // freeing a live Task page is the double-handoff engine).
+            task_page_unmark(slot);
+            IN_TASK_FREE.store(true, core::sync::atomic::Ordering::Release);
+            alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
+            IN_TASK_FREE.store(false, core::sync::atomic::Ordering::Release);
+        }
+}
+
+
+// ------------ idle-task construction (INV-SCE-4) ------------
+
+/// One CPU's idle-task construction: the body of sched::init's
+/// pre-secondary loop (collected by pass 3).
+///
+/// # Contract (INV-SCE-4)
+/// `cpu < MAX_CPUS`; the slot is written exactly once, before any
+/// secondary schedules (INV-SCE-4). `boot_cpu` additionally clears the
+/// trap scratch, installs the thread pointer and wires the per-CPU
+/// current/idle pointers.
+#[inline(always)]
+pub(crate) fn init_idle_cpu(cpu: usize, boot_cpu: usize) {
+        unsafe {
+            let idle_ptr = crate::sched::r#unsafe::idle_task_ptr(cpu);
+            Task::new_idle_at(idle_ptr);
+
+            crate::process::hotpath::pid_hash_insert(idle_ptr);
+
+            if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
+                (*idle_ptr).thread_mut().sp = stack_top as u64;
+            } else {
+                // HOTPATH-PRINT: boot-time one-shot (init allocation failure).
+            println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
+            }
+
+            (*idle_ptr).set_ti_cpu(cpu as i32);
+
+            // Store pointer for assembly secondary_start
+            crate::sched::r#unsafe::secondary_idle_publish(cpu, idle_ptr as usize);
+
+            if cpu == boot_cpu {
+                clear_trap_scratch();
+                crate::arch::cpu::set_thread_id(idle_ptr as u64);
+
+                let pcpu = cpu_state_mut(cpu);
+                pcpu.idle = idle_ptr;
+                pcpu.current = idle_ptr;
+            }
+        }
+}
+
+
+// ------------ auto-trait proofs (Send / Sync) ------------
+
+impl ReapClaim {
+    /// Shared read view for the ladder's checks (the INV-SCE-2
+    /// contract: unreachable-but-mapped; the claim keeps the page
+    /// alive by postponing the free).
+    /// INV-SCE-2: shared read view of the claim's Task (unreachable-but-mapped; the claim owns the free). The block text is unchanged; only the method's home moved.
+    #[inline]
+    pub(crate) fn task(&self) -> &Task {
+        // SAFETY: the claim owns the free; until into_free runs the
+        // page is mapped and immutable to everyone else (DEAD,
+        // unlinked) — the same argument every task_shared caller
+        // makes, now with the obligation typed.
+        unsafe { self.0.as_ref() }
+    }
+}
+// ReapClaim carries a NonNull<Task> (the terminal-switch protocol's
+// page-identity TCB handle); PendingReap wraps the claim, so this Send
+// is what lets the PENDING/GRACE_BATCH statics exist (INV-RD-CLAIM).
+// SAFETY: the claim's NonNull is only dereferenced by the reaper under
+// the reap lock; ownership is exclusive (no concurrent access).
+/// INV-RD-CLAIM: the claim's NonNull<Task> is dereferenced only by the reaper under the reap lock (exclusive ownership; PENDING/GRACE_BATCH statics exist through this Send).
+unsafe impl Send for ReapClaim {}
+/// INV-SENDSYNC-1: every GlobalRunQueue access goes through the queue's raw spinlock (or the IRQs-off switch window); Sync is the raw-lock proof, same as every other queue handle in this subsystem.
+unsafe impl Sync for GlobalRunQueue {}

@@ -1659,114 +1659,114 @@ d24f73957def	kernel/core/src/safety/slot.rs	get	93		INV:INV-SLOT-1
 1a2f60f52721	kernel/core/src/safety/slot.rs	get_mut_locked	108		INV:INV-SLOT-1
 13bd250ef78b	kernel/core/src/sbi.rs	sbi_system_reset	62	asm	INV:F16
 c330d3bb7877	kernel/core/src/sbi.rs	send_ipi	98	asm	INV:F16
-d0e3ad9d40cd	kernel/core/src/sched/hotpath.rs	task	3140		INV:INV-SCE-2
-f5f80fc5288f	kernel/core/src/sched/hotpath.rs	<module>	3171		INV:INV-RD-CLAIM
-f87e25390061	kernel/core/src/sched/hotpath.rs	<module>	5620		INV:INV-SENDSYNC-1
-c79b33f13d4f	kernel/core/src/sched/hotpath.rs	grq_current_fp	6084	asm	INV:INV-SCE-3
-c2e2172c221f	kernel/core/src/sched/hotpath.rs	grq_current_fp	6089	asm	INV:INV-SCE-3
-3e0709ca40ff	kernel/core/src/sched/hotpath.rs	grq_current_fp	6094	asm	INV:INV-SCE-3
-2ba80962d86a	kernel/core/src/sched/hotpath.rs	clear_trap_scratch	7401	asm	INV:INV-SCE-10
-d11d0bc6c937	kernel/core/src/sched/hotpath.rs	init	7434		INV:INV-SCE-4
-4be52eaa7455	kernel/core/src/sched/hotpath.rs	alloc_task_slot	7589	ptr-ops	INV:INV-TL-1
-ec8d090e5f5c	kernel/core/src/sched/hotpath.rs	alloc_task_slot	7599	ptr-ops	INV:INV-TL-1
-018d0a73c2ef	kernel/core/src/sched/hotpath.rs	alloc_task_slot	7606		INV:INV-TL-1
-233ea92ad9fc	kernel/core/src/sched/hotpath.rs	free_task_slot	8018		INV:INV-TL-2
-4cc09ac957f5	kernel/core/src/sched/hotpath.rs	free_task_slot	8031	volatile,ptr-ops	GAP
-e5e9604b1a44	kernel/core/src/sched/hotpath.rs	scheduler_tick	10931	volatile,ptr-ops	INV:INV-SCE-1
-a3b9f6d66557	kernel/core/src/sched/hotpath.rs	idle_guard_sp	12547	asm	INV:INV-SCE-1
-38e77e20c54f	kernel/core/src/sched/hotpath.rs	idle_guard_sp	12554	asm	INV:INV-SCE-1
-9013c4d1ac95	kernel/core/src/sched/hotpath.rs	idle_guard_sp	12561	asm	INV:INV-SCE-1
-32b7c5cbc3b4	kernel/core/src/sched/unsafe.rs	idle_task_ptr	53		INV:INV-SCE-4
-e60b37709add	kernel/core/src/sched/unsafe.rs	idle_task_storage_base	62		INV:INV-SCE-4
-e0cbddd56e69	kernel/core/src/sched/unsafe.rs	task_mut	92		INV:INV-SCE-1
-768bf35e4c65	kernel/core/src/sched/unsafe.rs	task_shared	108		INV:INV-SCE-2
-3eedb1acca63	kernel/core/src/sched/unsafe.rs	grq_stage	151		INV:INV-SCE-3
-6d0ab7beb473	kernel/core/src/sched/unsafe.rs	grq_ref	169		INV:INV-SCE-3
-a3a931e7357e	kernel/core/src/sched/unsafe.rs	grq_mut	182		INV:INV-SCE-3
-e95764a7967e	kernel/core/src/sched/unsafe.rs	task_poison_pair_volatile	194	volatile,ptr-ops	INV:INV-TL-2
-1897c09b729c	kernel/core/src/sched/unsafe.rs	task_pid_volatile	215	volatile,ptr-ops	INV:INV-SCE-2
-527333002c93	kernel/core/src/sched/unsafe.rs	task_ownership_qword	232	volatile,ptr-ops	INV:INV-SCE-2
-b2157372db54	kernel/core/src/sched/unsafe.rs	current_trap_ip	253		INV:INV-SCE-11
-6a422c10ec97	kernel/core/src/sched/unsafe.rs	current_task_mut	270		INV:INV-SCE-11
-0df4c46ba34b	kernel/core/src/sched/unsafe.rs	arch_context_switch	293		INV:INV-SCE-5
-3f582c0cba5b	kernel/core/src/sched/unsafe.rs	task_borrow	303		INV:INV-SCE-2
-b70b3b1a9973	kernel/core/src/sched/unsafe.rs	cgroup_node_ref	318		INV:INV-SCE-8
-a84179e6f556	kernel/core/src/sched/unsafe.rs	pt_regs_at_top	333	ptr-ops	INV:INV-SCE-9
-7f4e26bd3fc3	kernel/core/src/sched/unsafe.rs	list_next	350		INV:INV-SCE-7
-61cdb27f9505	kernel/core/src/sched/unsafe.rs	task_of_rt_list	359	ptr-ops	INV:INV-SCE-7
-520092129602	kernel/core/src/sched/unsafe.rs	rt_list_add	368		INV:INV-SCE-7
-f54c8d4fe1f3	kernel/core/src/sched/unsafe.rs	rt_list_add_tail	376		INV:INV-SCE-7
-8124dcd909ea	kernel/core/src/sched/unsafe.rs	rt_list_del	384		INV:INV-SCE-7
-65f82e8a8ef7	kernel/core/src/sched/unsafe.rs	rt_list_linked	394	ptr-ops	INV:INV-SCE-7
-694f66163ab5	kernel/core/src/sched/unsafe.rs	linked_at	493		INV:INV-SCE-6
-ccaf18d9863a	kernel/core/src/sched/unsafe.rs	detach_at	504		INV:INV-SCE-6
-9b99ea531eb5	kernel/core/src/sched/unsafe.rs	rb_nil	537		INV:INV-SCE-6
-fbdd9a87f386	kernel/core/src/sched/unsafe.rs	node_of_task	547	ptr-ops	INV:INV-SCE-6
-e369c3714add	kernel/core/src/sched/unsafe.rs	task_of_node	555	ptr-ops	INV:INV-SCE-6
-be1a810bd955	kernel/core/src/sched/unsafe.rs	node_key	564	ptr-ops	INV:INV-SCE-6
-50356c866f11	kernel/core/src/sched/unsafe.rs	node_key	565		INV:INV-SCE-6
-2f412a1fe807	kernel/core/src/sched/unsafe.rs	subtree_min	616		INV:INV-SCE-6
-c1c34e12fb42	kernel/core/src/sched/unsafe.rs	next	631		INV:INV-SCE-6
-f09bc34e7157	kernel/core/src/sched/unsafe.rs	next	633		INV:INV-SCE-6
-fdad9b29ccc9	kernel/core/src/sched/unsafe.rs	next	636		INV:INV-SCE-6
-146dc044f9de	kernel/core/src/sched/unsafe.rs	next	637		INV:INV-SCE-6
-f2df938dfe21	kernel/core/src/sched/unsafe.rs	next	639		INV:INV-SCE-6
-97663e56716e	kernel/core/src/sched/unsafe.rs	rotate_left	651		INV:INV-SCE-6
-e1fda550f66a	kernel/core/src/sched/unsafe.rs	rotate_left	652		INV:INV-SCE-6
-bb95114cd292	kernel/core/src/sched/unsafe.rs	rotate_left	653		INV:INV-SCE-6
-bd5e4fe599ab	kernel/core/src/sched/unsafe.rs	rotate_left	654		INV:INV-SCE-6
-e128b9333661	kernel/core/src/sched/unsafe.rs	rotate_left	656		INV:INV-SCE-6
-2bba9426fc20	kernel/core/src/sched/unsafe.rs	rotate_left	657		INV:INV-SCE-6
-6b308954ed29	kernel/core/src/sched/unsafe.rs	rotate_left	660		INV:INV-SCE-6
-697e6838bfe9	kernel/core/src/sched/unsafe.rs	rotate_left	661		INV:INV-SCE-6
-7b1eace2af71	kernel/core/src/sched/unsafe.rs	rotate_left	663		INV:INV-SCE-6
-6942d86ab289	kernel/core/src/sched/unsafe.rs	rotate_left	665		INV:INV-SCE-6
-daafc6d92b84	kernel/core/src/sched/unsafe.rs	rotate_left	666		INV:INV-SCE-6
-12ebbe263c74	kernel/core/src/sched/unsafe.rs	rotate_right	672		INV:INV-SCE-6
-be847fb9be38	kernel/core/src/sched/unsafe.rs	rotate_right	673		INV:INV-SCE-6
-1cd4808464dd	kernel/core/src/sched/unsafe.rs	rotate_right	674		INV:INV-SCE-6
-5acfd649be58	kernel/core/src/sched/unsafe.rs	rotate_right	675		INV:INV-SCE-6
-52180ff1adea	kernel/core/src/sched/unsafe.rs	rotate_right	677		INV:INV-SCE-6
-8aadd6d65be3	kernel/core/src/sched/unsafe.rs	rotate_right	678		INV:INV-SCE-6
-54f0d58648a5	kernel/core/src/sched/unsafe.rs	rotate_right	681		INV:INV-SCE-6
-d9f8c6357914	kernel/core/src/sched/unsafe.rs	rotate_right	682		INV:INV-SCE-6
-f51b365b6ece	kernel/core/src/sched/unsafe.rs	rotate_right	684		INV:INV-SCE-6
-5c2b42e5b27b	kernel/core/src/sched/unsafe.rs	rotate_right	686		INV:INV-SCE-6
-7e8c7ed5104c	kernel/core/src/sched/unsafe.rs	rotate_right	687		INV:INV-SCE-6
-84f874092151	kernel/core/src/sched/unsafe.rs	insert	700		INV:INV-SCE-6
-0633ccf73118	kernel/core/src/sched/unsafe.rs	insert	707		INV:INV-SCE-6
-eeee5bac2da9	kernel/core/src/sched/unsafe.rs	insert	708		INV:INV-SCE-6
-9725b83fadf6	kernel/core/src/sched/unsafe.rs	insert	710		INV:INV-SCE-6
-566ca1b98b61	kernel/core/src/sched/unsafe.rs	insert	720		INV:INV-SCE-6
-4e3f356e6be1	kernel/core/src/sched/unsafe.rs	insert	721		INV:INV-SCE-6
-435b28fa5be8	kernel/core/src/sched/unsafe.rs	insert	723		INV:INV-SCE-6
-c6b32b0661a7	kernel/core/src/sched/unsafe.rs	insert	726		INV:INV-SCE-6
-e1924fd7dcad	kernel/core/src/sched/unsafe.rs	insert	727		INV:INV-SCE-6
-b5e36d29e41c	kernel/core/src/sched/unsafe.rs	insert	728		INV:INV-SCE-6
-740a292f8a8d	kernel/core/src/sched/unsafe.rs	insert	730		INV:INV-SCE-6
-4dea4a9e8721	kernel/core/src/sched/unsafe.rs	insert	732		INV:INV-SCE-6
-4f472e47acea	kernel/core/src/sched/unsafe.rs	insert	733		INV:INV-SCE-6
-196cec56f286	kernel/core/src/sched/unsafe.rs	insert_fixup	745		INV:INV-SCE-6
-51a38950871f	kernel/core/src/sched/unsafe.rs	erase	793		INV:INV-SCE-6
-84beefb4bbf1	kernel/core/src/sched/unsafe.rs	erase	796		INV:INV-SCE-6
-e9cef0ebdda4	kernel/core/src/sched/unsafe.rs	erase	811		INV:INV-SCE-1
-e4711c2e71f9	kernel/core/src/sched/unsafe.rs	kid	921		INV:INV-SCE-1
-a2b13b46940f	kernel/core/src/sched/unsafe.rs	erase_fixup	928		INV:INV-SCE-1
-101a5acd10fb	kernel/core/src/sched/unsafe.rs	bh	1098		GAP
-53f9cd8d3f66	kernel/core/src/sched/unsafe.rs	bh	1103		GAP
-efde6d1d4857	kernel/core/src/sched/unsafe.rs	debug_black_height	1121		GAP
-397ffd151e2d	kernel/core/src/sched/unsafe.rs	grq_ptr_shared	1135		INV:INV-SCE-3
-5efa030b04fc	kernel/core/src/sched/unsafe.rs	grq_ptr_mut	1143	ptr-ops	INV:INV-SCE-3
-24408285af00	kernel/core/src/sched/unsafe.rs	per_cpu_shared	1163		INV:INV-SCE-10
-c8ee81d524b2	kernel/core/src/sched/unsafe.rs	per_cpu_mut	1173		INV:INV-SCE-10
-3c7ba3cdf4cf	kernel/core/src/sched/unsafe.rs	secondary_idle_publish	1190		INV:INV-SCE-4
-716cc69baac7	kernel/core/src/sched/unsafe.rs	secondary_idle_table_base	1197		INV:INV-SCE-4
-454df1c16a83	kernel/core/src/sched/unsafe.rs	secondary_idle_task	1203		INV:INV-SCE-4
-1e1b6cf41dc4	kernel/core/src/sched/unsafe.rs	<module>	1230		GAP
-664bbf5753e9	kernel/core/src/sched/unsafe.rs	<module>	1232		GAP
-d1096a2a47c2	kernel/core/src/sched/unsafe.rs	evring_slot_mut	1250		INV:INV-SCHED-EVRING-1
-5ec0131706a1	kernel/core/src/sched/unsafe.rs	evring_slot_ref	1265		INV:INV-SCHED-EVRING-1
-794fb5e978ec	kernel/core/src/sched/unsafe.rs	<module>	1283		GAP
+eb64d7757ab1	kernel/core/src/sched/unsafe.rs	idle_task_ptr	58		INV:INV-SCE-4
+3ba7ae83a6e1	kernel/core/src/sched/unsafe.rs	idle_task_storage_base	67		INV:INV-SCE-4
+7521e792f13a	kernel/core/src/sched/unsafe.rs	task_mut	97		INV:INV-SCE-1
+bc335719b669	kernel/core/src/sched/unsafe.rs	task_shared	113		INV:INV-SCE-2
+e879a7636656	kernel/core/src/sched/unsafe.rs	grq_stage	156		INV:INV-SCE-3
+7b9ed722bbf2	kernel/core/src/sched/unsafe.rs	grq_ref	174		INV:INV-SCE-3
+82f5c9c4cbe8	kernel/core/src/sched/unsafe.rs	grq_mut	187		INV:INV-SCE-3
+0323c9cc63d7	kernel/core/src/sched/unsafe.rs	task_poison_pair_volatile	199	volatile,ptr-ops	INV:INV-TL-2
+8eacc2353ab7	kernel/core/src/sched/unsafe.rs	task_pid_volatile	220	volatile,ptr-ops	INV:INV-SCE-2
+4b610dbcb996	kernel/core/src/sched/unsafe.rs	task_ownership_qword	237	volatile,ptr-ops	INV:INV-SCE-2
+5b65c9ff4360	kernel/core/src/sched/unsafe.rs	current_trap_ip	258		INV:INV-SCE-11
+753e5cfa2b0a	kernel/core/src/sched/unsafe.rs	current_task_mut	275		INV:INV-SCE-11
+db46397f3585	kernel/core/src/sched/unsafe.rs	arch_context_switch	298		INV:INV-SCE-5
+9b1e30f4e954	kernel/core/src/sched/unsafe.rs	task_borrow	308		INV:INV-SCE-2
+ae0d4aaf0224	kernel/core/src/sched/unsafe.rs	cgroup_node_ref	323		INV:INV-SCE-8
+209ff77ac2b0	kernel/core/src/sched/unsafe.rs	pt_regs_at_top	338	ptr-ops	INV:INV-SCE-9
+9573fb125a8e	kernel/core/src/sched/unsafe.rs	list_next	355		INV:INV-SCE-7
+d0fe06128885	kernel/core/src/sched/unsafe.rs	task_of_rt_list	364	ptr-ops	INV:INV-SCE-7
+bdbbb5f017f6	kernel/core/src/sched/unsafe.rs	rt_list_add	373		INV:INV-SCE-7
+90efce4e9421	kernel/core/src/sched/unsafe.rs	rt_list_add_tail	381		INV:INV-SCE-7
+6b8c70d505ab	kernel/core/src/sched/unsafe.rs	rt_list_del	389		INV:INV-SCE-7
+7b27370dc26c	kernel/core/src/sched/unsafe.rs	rt_list_linked	399	ptr-ops	INV:INV-SCE-7
+02886471c71f	kernel/core/src/sched/unsafe.rs	linked_at	498		INV:INV-SCE-6
+a61ecece3259	kernel/core/src/sched/unsafe.rs	detach_at	509		INV:INV-SCE-6
+2775ccfb8b09	kernel/core/src/sched/unsafe.rs	rb_nil	542		INV:INV-SCE-6
+302e686d5517	kernel/core/src/sched/unsafe.rs	node_of_task	552	ptr-ops	INV:INV-SCE-6
+9f4a6a03133b	kernel/core/src/sched/unsafe.rs	task_of_node	560	ptr-ops	INV:INV-SCE-6
+08cb7e970ce6	kernel/core/src/sched/unsafe.rs	node_key	569	ptr-ops	INV:INV-SCE-6
+62f35adffdc5	kernel/core/src/sched/unsafe.rs	node_key	570		INV:INV-SCE-6
+c3139df84f83	kernel/core/src/sched/unsafe.rs	subtree_min	621		INV:INV-SCE-6
+c7e5d5577369	kernel/core/src/sched/unsafe.rs	next	636		INV:INV-SCE-6
+636013015c3c	kernel/core/src/sched/unsafe.rs	next	638		INV:INV-SCE-6
+7fa6f6907ab4	kernel/core/src/sched/unsafe.rs	next	641		INV:INV-SCE-6
+21a66a0445d0	kernel/core/src/sched/unsafe.rs	next	642		INV:INV-SCE-6
+b23a3678749f	kernel/core/src/sched/unsafe.rs	next	644		INV:INV-SCE-6
+dd86b1d89c24	kernel/core/src/sched/unsafe.rs	rotate_left	656		INV:INV-SCE-6
+2b45e02ffbf7	kernel/core/src/sched/unsafe.rs	rotate_left	657		INV:INV-SCE-6
+c4524a302ea2	kernel/core/src/sched/unsafe.rs	rotate_left	658		INV:INV-SCE-6
+972b215a0150	kernel/core/src/sched/unsafe.rs	rotate_left	659		INV:INV-SCE-6
+8dd75a7c7233	kernel/core/src/sched/unsafe.rs	rotate_left	661		INV:INV-SCE-6
+f21d394ad465	kernel/core/src/sched/unsafe.rs	rotate_left	662		INV:INV-SCE-6
+f05a19895019	kernel/core/src/sched/unsafe.rs	rotate_left	665		INV:INV-SCE-6
+a9176927f2b8	kernel/core/src/sched/unsafe.rs	rotate_left	666		INV:INV-SCE-6
+6f15756ca1c1	kernel/core/src/sched/unsafe.rs	rotate_left	668		INV:INV-SCE-6
+d249c0acca91	kernel/core/src/sched/unsafe.rs	rotate_left	670		INV:INV-SCE-6
+d60b511b9993	kernel/core/src/sched/unsafe.rs	rotate_left	671		INV:INV-SCE-6
+9ac10a612f86	kernel/core/src/sched/unsafe.rs	rotate_right	677		INV:INV-SCE-6
+952fba50d690	kernel/core/src/sched/unsafe.rs	rotate_right	678		INV:INV-SCE-6
+84e7007d64d2	kernel/core/src/sched/unsafe.rs	rotate_right	679		INV:INV-SCE-6
+b83edc8adcf6	kernel/core/src/sched/unsafe.rs	rotate_right	680		INV:INV-SCE-6
+37da8b32cfc0	kernel/core/src/sched/unsafe.rs	rotate_right	682		INV:INV-SCE-6
+5459a068b286	kernel/core/src/sched/unsafe.rs	rotate_right	683		INV:INV-SCE-6
+5f15742c8bea	kernel/core/src/sched/unsafe.rs	rotate_right	686		INV:INV-SCE-6
+da3abfd80d46	kernel/core/src/sched/unsafe.rs	rotate_right	687		INV:INV-SCE-6
+b70c53e62350	kernel/core/src/sched/unsafe.rs	rotate_right	689		INV:INV-SCE-6
+e483e30db43b	kernel/core/src/sched/unsafe.rs	rotate_right	691		INV:INV-SCE-6
+8ba9e1c466f2	kernel/core/src/sched/unsafe.rs	rotate_right	692		INV:INV-SCE-6
+0100e3df35b3	kernel/core/src/sched/unsafe.rs	insert	705		INV:INV-SCE-6
+fdc27faa9b3e	kernel/core/src/sched/unsafe.rs	insert	712		INV:INV-SCE-6
+488673c08c10	kernel/core/src/sched/unsafe.rs	insert	713		INV:INV-SCE-6
+af75c29622c8	kernel/core/src/sched/unsafe.rs	insert	715		INV:INV-SCE-6
+6945f353e682	kernel/core/src/sched/unsafe.rs	insert	725		INV:INV-SCE-6
+3c7ca97ef218	kernel/core/src/sched/unsafe.rs	insert	726		INV:INV-SCE-6
+c2460981378b	kernel/core/src/sched/unsafe.rs	insert	728		INV:INV-SCE-6
+083adfd7824b	kernel/core/src/sched/unsafe.rs	insert	731		INV:INV-SCE-6
+bce6ee36521f	kernel/core/src/sched/unsafe.rs	insert	732		INV:INV-SCE-6
+58336856b347	kernel/core/src/sched/unsafe.rs	insert	733		INV:INV-SCE-6
+5d247d5c970e	kernel/core/src/sched/unsafe.rs	insert	735		INV:INV-SCE-6
+8e5952ae1c66	kernel/core/src/sched/unsafe.rs	insert	737		INV:INV-SCE-6
+2ced36d0cc96	kernel/core/src/sched/unsafe.rs	insert	738		INV:INV-SCE-6
+cb37c78a78b6	kernel/core/src/sched/unsafe.rs	insert_fixup	750		INV:INV-SCE-6
+89d50f8922fa	kernel/core/src/sched/unsafe.rs	erase	798		INV:INV-SCE-6
+9d63a0e95380	kernel/core/src/sched/unsafe.rs	erase	801		INV:INV-SCE-6
+28bb04464ea4	kernel/core/src/sched/unsafe.rs	erase	816		INV:INV-SCE-1
+d973a103e8b3	kernel/core/src/sched/unsafe.rs	kid	926		INV:INV-SCE-1
+63fa62aa7bb3	kernel/core/src/sched/unsafe.rs	erase_fixup	933		INV:INV-SCE-1
+f52b13f9dcff	kernel/core/src/sched/unsafe.rs	bh	1103		GAP
+27c9d88b6dd0	kernel/core/src/sched/unsafe.rs	bh	1108		GAP
+6b36d665cf56	kernel/core/src/sched/unsafe.rs	debug_black_height	1126		GAP
+0efd7f0c28ac	kernel/core/src/sched/unsafe.rs	grq_ptr_shared	1140		INV:INV-SCE-3
+63f3fc19633b	kernel/core/src/sched/unsafe.rs	grq_ptr_mut	1148	ptr-ops	INV:INV-SCE-3
+e5f75261e043	kernel/core/src/sched/unsafe.rs	per_cpu_shared	1168		INV:INV-SCE-10
+781c20b1a8b5	kernel/core/src/sched/unsafe.rs	per_cpu_mut	1178		INV:INV-SCE-10
+b3f1354ad15f	kernel/core/src/sched/unsafe.rs	secondary_idle_publish	1195		INV:INV-SCE-4
+9ae794e76662	kernel/core/src/sched/unsafe.rs	secondary_idle_table_base	1202		INV:INV-SCE-4
+d0feca515efe	kernel/core/src/sched/unsafe.rs	secondary_idle_task	1208		INV:INV-SCE-4
+11e4a2a4fd10	kernel/core/src/sched/unsafe.rs	<module>	1235		GAP
+f65bfd6a5801	kernel/core/src/sched/unsafe.rs	<module>	1237		GAP
+7316a5337a3a	kernel/core/src/sched/unsafe.rs	evring_slot_mut	1255		INV:INV-SCHED-EVRING-1
+dcb15eda35c0	kernel/core/src/sched/unsafe.rs	evring_slot_ref	1270		INV:INV-SCHED-EVRING-1
+f3c8e0c3db0e	kernel/core/src/sched/unsafe.rs	<module>	1288		GAP
+7583e9596977	kernel/core/src/sched/unsafe.rs	grq_current_fp	1318	asm	INV:INV-SCE-3
+398cd019efbc	kernel/core/src/sched/unsafe.rs	grq_current_fp	1323	asm	INV:INV-SCE-3
+feeec0e6dffa	kernel/core/src/sched/unsafe.rs	grq_current_fp	1328	asm	INV:INV-SCE-3
+95cac94ce532	kernel/core/src/sched/unsafe.rs	clear_trap_scratch	1348	asm	INV:INV-SCE-10
+ad7a147eaa83	kernel/core/src/sched/unsafe.rs	idle_guard_sp	1365	asm	INV:INV-SCE-1
+c26d36fa4f57	kernel/core/src/sched/unsafe.rs	idle_guard_sp	1373	asm	INV:INV-SCE-1
+9a0eb3b04908	kernel/core/src/sched/unsafe.rs	idle_guard_sp	1381	asm	INV:INV-SCE-1
+04bdfebcb729	kernel/core/src/sched/unsafe.rs	tick_stack_canary	1400	volatile,ptr-ops	INV:INV-SCE-1
+73d538ca7ad5	kernel/core/src/sched/unsafe.rs	task_slot_alloc	1496		INV:INV-TL-1
+406c7c940374	kernel/core/src/sched/unsafe.rs	task_slot_dealloc_raw	1508	ptr-ops	INV:INV-TL-1
+7574b8aaa76f	kernel/core/src/sched/unsafe.rs	task_slot_init	1523		INV:INV-TL-1
+86ba1fdb84be	kernel/core/src/sched/unsafe.rs	task_drop_in_place	1561		INV:INV-TL-2
+17bd76e7cca3	kernel/core/src/sched/unsafe.rs	task_slot_poison_and_free	1580	volatile,ptr-ops	GAP
+3f2329bda596	kernel/core/src/sched/unsafe.rs	init_idle_cpu	1635		INV:INV-SCE-4
+2c5f1b4fe93b	kernel/core/src/sched/unsafe.rs	task	1678		INV:INV-SCE-2
+36738ea5b984	kernel/core/src/sched/unsafe.rs	<module>	1687		INV:INV-RD-CLAIM
+bccbcacf7b7e	kernel/core/src/sched/unsafe.rs	<module>	1689		INV:INV-SENDSYNC-1
 d8e30375e0d8	kernel/core/src/security/cap_lsm.rs	call	33		INV:INV-STATIC-CELL-1
 aa5b56591a15	kernel/core/src/security/cap_lsm.rs	call	45		INV:INV-STATIC-CELL-1
 9be73f07473d	kernel/core/src/security/lsm.rs	register_lsm	116		INV:INV-STATIC-CELL-1

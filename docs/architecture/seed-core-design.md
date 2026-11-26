@@ -927,7 +927,11 @@ source file.
    rewrite of an earlier lane can be replayed when a later one merges.
 3. **Collect the scattered unsafe** (§2c.5), per subsystem, its own
    lane, with the gate assertion added as soon as the first subsystem
-   is clean.
+   is clean. PILOT LANDED 2026-11-26 (p23-p3sched): sched collected —
+   `sched/hotpath.rs` holds zero unsafe keywords, the whole-core gate
+   (`scripts/core_unsafe_gate.py`) runs rc=0 on the allowance list, and
+   the per-lane recipe is `scripts/refactor/pass3.py` with the spec in
+   `scripts/refactor/pass3/sched.json`.
 
 Pass 1 and 2 are verifiable by one criterion: the compiled kernel is
 unchanged apart from symbol names. Pass 3 changes the code and takes
