@@ -321,7 +321,7 @@ pub fn free_user_page_tables(
 ) {
     use crate::mm::hotpath::phys_valid;
 
-    crate::debug::memwatch::FUT_CALLS.fetch_add(1, Ordering::Relaxed);
+    crate::debug::hotpath::FUT_CALLS.fetch_add(1, Ordering::Relaxed);
     // Serialize against fork's copy walk and COW/demand faults on any mm
     // (PTE lock; the freed frames are immediately reusable).
     let _pte_guard = lock.lock_irqsave();
@@ -432,7 +432,7 @@ fn release_user_leaf_mm(entry: PageTableEntry) {
         if page.is_mapped() {
             crate::mm::hotpath::page_remove_rmap(page);
         }
-        page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
+        page.put_page_site(crate::debug::hotpath::S_TEARDOWN_RV);
     }
 }
 
@@ -938,7 +938,7 @@ pub fn setup_device_mappings() {
             use core::fmt::Write;
             let ttbr1: u64;
             unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) };
-            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::types::ConsoleWriter::new();
             let _ = write!(
                 w,
                 "devmap: phys {:#x}+{:#x} -> va {:#x}: {} blocks (pools l1/l2/l3 {}/{}/{}, ttbr1={:#x})\n",

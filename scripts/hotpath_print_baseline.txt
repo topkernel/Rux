@@ -11,5 +11,6 @@ kernel/core/src/mm/page_alloc.rs 0
 kernel/core/src/mm/pglist.rs 19
 kernel/core/src/signal.rs 15
 kernel/core/src/sched/hotpath.rs 3
+kernel/core/src/debug/hotpath.rs 104
 kernel/core/src/arch/riscv64/trap.rs 0
 kernel/core/src/arch/x86_64/trap.rs 0

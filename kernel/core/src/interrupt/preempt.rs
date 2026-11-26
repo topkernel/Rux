@@ -204,7 +204,7 @@ pub fn preempt_count_add(val: i32) {
         {
             let c0 = task.preempt_count();
             if val == PREEMPT_OFFSET {
-                crate::debug::leakorigin::note_acquire(
+                crate::debug::hotpath::note_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(1),
@@ -212,7 +212,7 @@ pub fn preempt_count_add(val: i32) {
             } else if val == HARDIRQ_OFFSET {
                 // s14 hardirq shadow: with irq_enter #[track_caller],
                 // Location::caller() names the trap dispatch site.
-                crate::debug::leakorigin::note_hardirq_acquire(
+                crate::debug::hotpath::note_hardirq_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(HARDIRQ_OFFSET),
@@ -220,7 +220,7 @@ pub fn preempt_count_add(val: i32) {
             } else {
                 // phantom-bits softirq shadow: names the +0x100 booker
                 // (__do_softirq bracket or SeqLock::write).
-                crate::debug::leakorigin::note_softirq_acquire(
+                crate::debug::hotpath::note_softirq_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(SOFTIRQ_OFFSET),
@@ -248,9 +248,9 @@ pub fn preempt_count_add_at(
         {
             let c0 = task.preempt_count();
             if val == PREEMPT_OFFSET {
-                crate::debug::leakorigin::note_acquire(task, loc, c0.wrapping_add(1));
+                crate::debug::hotpath::note_acquire(task, loc, c0.wrapping_add(1));
             } else {
-                crate::debug::leakorigin::note_hardirq_acquire(
+                crate::debug::hotpath::note_hardirq_acquire(
                     task,
                     loc,
                     c0.wrapping_add(HARDIRQ_OFFSET),
@@ -372,7 +372,7 @@ pub fn irq_enter() {
             }
         }
     }
-    crate::debug::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
+    crate::debug::hotpath::zone_hardirq_enter(); // syscost probe (no-op when off)
 }
 
 /// Per-CPU stack of the tasks that booked +HARDIRQ_OFFSET, one slot per
@@ -610,7 +610,7 @@ pub fn irq_exit() {
             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
         }
     }
-    crate::debug::syscost::zone_hardirq_exit(); // syscost probe (iret frame boundary; no-op when off)
+    crate::debug::hotpath::zone_hardirq_exit(); // syscost probe (iret frame boundary; no-op when off)
 }
 
 // ============================================================================
@@ -772,13 +772,13 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     }
     putchar(b'\n');
     if soft_orphan {
-        crate::debug::leakorigin::report_softirq_origin(
+        crate::debug::hotpath::report_softirq_origin(
             b"BIT-ORPHAN-SOFTIRQ",
             task,
         );
     }
     if hard_orphan {
-        crate::debug::leakorigin::report_hardirq_origin(
+        crate::debug::hotpath::report_hardirq_origin(
             b"BIT-ORPHAN-HARDIRQ",
             task,
         );

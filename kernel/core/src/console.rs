@@ -216,7 +216,7 @@ impl Uart {
         // is staged for the persistent record. One relaxed load on the
         // disarmed path (the UART store dominates this function either
         // way).
-        crate::debug::pstore::sink(c);
+        crate::debug::hotpath::sink(c);
 
         #[cfg(feature = "aarch64")]
         // SAFETY: uart_virt_addr() is the PL011 fixmap VA once the early
@@ -253,7 +253,7 @@ impl Uart {
             // (EFLAGS): an IF=1 putc must not touch the zone stack (it
             // is preemptible and can migrate); an IF=0 putc cannot
             // migrate, so the push/pop pair is balanced by construction.
-            let probe = crate::debug::syscost::on();
+            let probe = crate::debug::hotpath::on();
             let t0 = if probe {
                 crate::arch::cpu::read_counter()
             } else {
@@ -261,7 +261,7 @@ impl Uart {
             };
             let if0 = probe && !crate::arch::cpu::get_interrupts_state();
             if if0 {
-                crate::debug::syscost::zone_uart_push();
+                crate::debug::hotpath::zone_uart_push();
             }
             let mut polls: u64 = 0;
             'putc: {
@@ -319,11 +319,11 @@ impl Uart {
                  write_reg(COM1_BASE, UART_THR, c) ;
             }
             if if0 {
-                crate::debug::syscost::zone_uart_pop();
+                crate::debug::hotpath::zone_uart_pop();
             }
             if probe {
                 let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
-                crate::debug::syscost::uart_putc_note(dt, polls, if0);
+                crate::debug::hotpath::uart_putc_note(dt, polls, if0);
             }
         }
     }
@@ -345,7 +345,7 @@ impl Uart {
         }
         // pstore-lite must still see every byte (plain stores, no IO).
         for &b in bytes {
-            crate::debug::pstore::sink(b);
+            crate::debug::hotpath::sink(b);
         }
         #[cfg(feature = "riscv64")]
         {
@@ -385,11 +385,11 @@ impl Uart {
         #[cfg(feature = "x86_64")]
         {
             const FIFO_BURST: usize = 16;
-            let probe = crate::debug::syscost::on();
+            let probe = crate::debug::hotpath::on();
             let t0 = if probe { crate::arch::cpu::read_counter() } else { 0 };
             let if0 = probe && !crate::arch::cpu::get_interrupts_state();
             if if0 {
-                crate::debug::syscost::zone_uart_push();
+                crate::debug::hotpath::zone_uart_push();
             }
             let mut polls: u64 = 0;
             let mut consumed: usize = 0;
@@ -448,11 +448,11 @@ impl Uart {
                 consumed += chunk.len();
             }
             if if0 {
-                crate::debug::syscost::zone_uart_pop();
+                crate::debug::hotpath::zone_uart_pop();
             }
             if probe {
                 let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
-                crate::debug::syscost::uart_putc_note(dt, polls, if0);
+                crate::debug::hotpath::uart_putc_note(dt, polls, if0);
             }
         }
     }
@@ -673,7 +673,7 @@ fn uart_rx_debug_magic(c: u8) {
         if next == MAGIC.len() {
             DUMP_MAGIC_POS.store(0, Ordering::Relaxed);
             crate::drivers::virtio::vw_report("dump");
-            crate::debug::taskdump::dump_all_tasks("uart-magic");
+            crate::debug::hotpath::dump_all_tasks("uart-magic");
             crate::ipc::binder::binder_dfx_dump();
         }
     }
@@ -693,7 +693,7 @@ fn uart_rx_debug_magic(c: u8) {
         LEDGER_MAGIC_POS.store(next, Ordering::Relaxed);
         if next == LMAGIC.len() {
             LEDGER_MAGIC_POS.store(0, Ordering::Relaxed);
-            crate::debug::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
+            crate::debug::hotpath::PENDING.store(true, core::sync::atomic::Ordering::Release);
         }
     }
 
@@ -1154,7 +1154,7 @@ pub fn init_irq() {
                 core::sync::atomic::AtomicBool::new(false);
             if !FIRST_RX.swap(true, core::sync::atomic::Ordering::Relaxed) {
                 use core::fmt::Write;
-                let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                let mut w = crate::debug::types::ConsoleWriter::new();
                 let _ = write!(w, "PL011: first RX irq, {} bytes\n", received);
             }
             UART_READ_WAITQ.wake_up_one();
@@ -1196,7 +1196,7 @@ pub fn init_irq() {
     // chain hangs on this arm result.
     {
         use core::fmt::Write;
-        let mut w = crate::debug::backtrace::ConsoleWriter::new();
+        let mut w = crate::debug::types::ConsoleWriter::new();
         let _ = write!(w, "PL011: RX irq {}\n",
             if UART_IRQ_ARMED.load(Ordering::Acquire) { "registered" } else { "FAILED" });
     }

@@ -227,7 +227,7 @@ pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
                 static RIP: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if RIP.fetch_add(1, Ordering::Relaxed) < 200 {
-                    use crate::debug::taskdump::putc_brief as putchar;
+                    use crate::debug::hotpath::putc_brief as putchar;
                     for &b in b"RESCHED-IPI-RECV cpu=0 rip=0x" {
                         putchar(b);
                     }

@@ -860,15 +860,15 @@ impl BuddyAllocator {
                     // x86_64 — the debug scribble module is x86-only).
                     #[cfg(feature = "x86_64")]
                     if crate::trace::EVENT_SCRIBBLE.armed() {
-                        let frames = crate::debug::scribble::audit_frames();
-                        crate::debug::scribble::audit_record(
-                            crate::debug::scribble::AUDIT_KIND_HANDOFF,
+                        let frames = crate::debug::hotpath::scribble::audit_frames();
+                        crate::debug::hotpath::scribble::audit_record(
+                            crate::debug::hotpath::scribble::AUDIT_KIND_HANDOFF,
                             addr as u64,
                             order as u32,
                             &frames,
                         );
                     }
-                    crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R18-1 double-handoff
+                    crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE); // R18-1 double-handoff
                 }
                 return addr as *mut u8;
             }
@@ -905,15 +905,15 @@ impl BuddyAllocator {
                 // the deferred audit printer (rux:scribble (retired debug=scribble), x86_64).
                 #[cfg(feature = "x86_64")]
                 if crate::trace::EVENT_SCRIBBLE.armed() {
-                    let frames = crate::debug::scribble::audit_frames();
-                    crate::debug::scribble::audit_record(
-                        crate::debug::scribble::AUDIT_KIND_DOUBLE_FREE,
+                    let frames = crate::debug::hotpath::scribble::audit_frames();
+                    crate::debug::hotpath::scribble::audit_record(
+                        crate::debug::hotpath::scribble::AUDIT_KIND_DOUBLE_FREE,
                         addr as u64,
                         order as u32,
                         &frames,
                     );
                 }
-                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
+                crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
                 // R17-A3: kind follows the bitmap (the authoritative free
                 // state), not the leader-only `free` byte.
                 let kind = if self.page_is_free(page_idx) { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
@@ -978,7 +978,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // before the note call (see below). -O0 riscv64 frames keep
         // s0 = frame TOP: [s0-8] = own saved ra, [s0-0x10] = caller's s0,
         // so walking from s0 yields [ra-into-__rust_alloc, callers...].
-        let mw_s0: u64 = crate::debug::backtrace::current_frame_pointer();
+        let mw_s0: u64 = crate::debug::hotpath::current_frame_pointer();
 
         // Opportunistic reclamation of time-deferred frees (see
         // mm/deferred_free.rs): one relaxed load on the fast path; the
@@ -1034,8 +1034,8 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
         // The GlobalAlloc main path — RawVec finish_grow lands here for
         // sizes above the small_alloc classes.
-        let _aw = crate::debug::allocwatch::guard(
-            crate::debug::allocwatch::SITE_BUDDY,
+        let _aw = crate::debug::hotpath::guard(
+            crate::debug::hotpath::SITE_BUDDY,
             0,
         );
         let ptr = self.alloc_blocks(order);
@@ -1049,17 +1049,17 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         if !ptr.is_null() {
             trace_kmalloc_at(mw_s0, ptr as u64, size, PAGE_SIZE << order);
         }
-        if !ptr.is_null() && crate::debug::memwatch::armed() {
-            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
-                [0; crate::debug::memwatch::SITE_FRAMES];
+        if !ptr.is_null() && crate::debug::hotpath::memwatch_armed() {
+            let mut mw_frames: [u64; crate::debug::types::SITE_FRAMES] =
+                [0; crate::debug::types::SITE_FRAMES];
             // f[0] = own saved ra (== the ra at entry, before any helper
             // could clobber the register), f[1..] = the s0 chain above.
             // s0 is callee-saved, so the walk stays valid even here, after
             // alloc_blocks().
             unsafe {
-                crate::debug::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+                crate::debug::hotpath::walk_fp_chain(mw_s0, &mut mw_frames);
             }
-            crate::debug::memwatch::note_alloc(
+            crate::debug::hotpath::note_alloc(
                 ptr,
                 self.heap_start.load(Ordering::Relaxed),
                 size,
@@ -1082,16 +1082,16 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // DEBUG memwatch leak hunt (see the method-level comment below for the
         // chain shape). The walk is gated: disabled = zero added work on the
         // realloc hot path; enabled = 12-frame pointer chase per realloc.
-        let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
-            [0; crate::debug::memwatch::SITE_FRAMES];
-        if crate::debug::memwatch::armed() {
-            let mut fp: u64 = crate::debug::backtrace::current_frame_pointer();
+        let mut mw_frames: [u64; crate::debug::types::SITE_FRAMES] =
+            [0; crate::debug::types::SITE_FRAMES];
+        if crate::debug::hotpath::memwatch_armed() {
+            let mut fp: u64 = crate::debug::hotpath::current_frame_pointer();
             // f[0] = return address out of this method (into __rust_realloc);
             // f[1..] ascend the caller chain through the growth machinery.
             unsafe {
-                crate::debug::memwatch::walk_fp_chain(fp, &mut mw_frames);
+                crate::debug::hotpath::walk_fp_chain(fp, &mut mw_frames);
             }
-            crate::debug::memwatch::note_realloc(new_size, &mw_frames);
+            crate::debug::hotpath::note_realloc(new_size, &mw_frames);
         }
 
         // Default GlobalAlloc::realloc behavior.
@@ -1150,7 +1150,7 @@ fn trace_kmalloc_at(s0: u64, ptr: u64, bytes_req: usize, bytes_alloc: usize) {
     // SAFETY: s0 is GlobalAlloc::alloc's own fp (captured at entry,
     // callee-saved); the walk reads only kernel frames.
     unsafe {
-        crate::debug::memwatch::walk_fp_chain(s0, &mut frames);
+        crate::debug::hotpath::walk_fp_chain(s0, &mut frames);
     }
     crate::trace::trace_kmalloc(
         crate::trace::alloc_call_site(&frames),
@@ -1170,12 +1170,12 @@ fn trace_kfree_at(ptr: u64) {
     if !crate::trace::EVENT_KFREE.armed() {
         return;
     }
-    let s0 = crate::debug::backtrace::current_frame_pointer();
+    let s0 = crate::debug::hotpath::current_frame_pointer();
     let mut frames = [0u64; 8];
     // SAFETY: s0 is current_frame_pointer() read in THIS frame, the
     // dealloc twin of the alloc capture.
     unsafe {
-        crate::debug::memwatch::walk_fp_chain(s0, &mut frames);
+        crate::debug::hotpath::walk_fp_chain(s0, &mut frames);
     }
     crate::trace::trace_kfree(crate::trace::alloc_call_site(&frames), ptr);
 }
@@ -1202,8 +1202,8 @@ impl BuddyAllocator {
         // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
         // Runs NESTED under the small_alloc class lock (class -> buddy
         // order) — a stamp pair names the whole frozen chain.
-        let _aw = crate::debug::allocwatch::guard(
-            crate::debug::allocwatch::SITE_BUDDY,
+        let _aw = crate::debug::hotpath::guard(
+            crate::debug::hotpath::SITE_BUDDY,
             0,
         );
         let ptr = self.alloc_blocks(0);
@@ -1225,8 +1225,8 @@ impl BuddyAllocator {
         }
         let _guard = self.lock.lock_irqsave();
         // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-        let _aw = crate::debug::allocwatch::guard(
-            crate::debug::allocwatch::SITE_BUDDY,
+        let _aw = crate::debug::hotpath::guard(
+            crate::debug::hotpath::SITE_BUDDY,
             0,
         );
         self.free_blocks(ptr, 0);
@@ -1264,7 +1264,7 @@ impl BuddyAllocator {
         let heap_end = self.heap_end.load(Ordering::Acquire);
 
         if ptr_addr < heap_start || ptr_addr >= heap_end {
-            crate::debug::memwatch::DEALLOC_OUTSIDE.fetch_add(1, Ordering::Relaxed);
+            crate::debug::hotpath::DEALLOC_OUTSIDE.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_OUT_OF_WINDOW, ptr_addr, self.size_to_order(size.max(align)), 0, 0);
             return;
         }
@@ -1285,21 +1285,21 @@ impl BuddyAllocator {
             && !crate::sched::hotpath::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
             && crate::sched::hotpath::task_page_is_owned(ptr)
         {
-            let frames = crate::debug::scribble::audit_frames();
-            crate::debug::scribble::audit_record(
-                crate::debug::scribble::AUDIT_KIND_FREE_LIVE,
+            let frames = crate::debug::hotpath::scribble::audit_frames();
+            crate::debug::hotpath::scribble::audit_record(
+                crate::debug::hotpath::scribble::AUDIT_KIND_FREE_LIVE,
                 ptr_addr as u64,
                 order as u32,
                 &frames,
             );
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE); // R69 free-of-live
             refused_free_note(FR_TASK_LIVE, ptr_addr, order, 0, 0);
             return;
         }
 
         // Check if order exceeds BUDDY_MAX_ORDER
         if order > BUDDY_MAX_ORDER {
-            crate::debug::memwatch::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
+            crate::debug::hotpath::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_ORDER_TOO_BIG, ptr_addr, order, 0, 0);
             return;
         }
@@ -1310,20 +1310,20 @@ impl BuddyAllocator {
         // carry consistent metadata, splicing bogus blocks into the
         // doubly-linked freelist.
         if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
-            crate::debug::memwatch::DEALLOC_MISALIGNED.fetch_add(1, Ordering::Relaxed);
+            crate::debug::hotpath::DEALLOC_MISALIGNED.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_UNALIGNED, ptr_addr, order, 0, 0);
             return;
         }
 
         let _guard = self.lock.lock_irqsave();
         // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-        let _aw = crate::debug::allocwatch::guard(
-            crate::debug::allocwatch::SITE_BUDDY,
+        let _aw = crate::debug::hotpath::guard(
+            crate::debug::hotpath::SITE_BUDDY,
             0,
         );
         self.free_blocks(ptr, order);
         drop(_guard);
-        crate::debug::memwatch::note_free(
+        crate::debug::hotpath::note_free(
             ptr,
             self.heap_start.load(Ordering::Relaxed),
             size,
@@ -2914,7 +2914,7 @@ impl Page {
         let r = self._refcount.fetch_add(1, Ordering::AcqRel) + 1;
         // mmforensics (early-put hunt): record the take on cache frames —
         // a no-op (one relaxed load) unless the switch is armed.
-        crate::debug::mmforensics::note_ref(self as *const Page, 0, 0, r - 1);
+        crate::debug::hotpath::note_ref(self as *const Page, 0, 0, r - 1);
         r
     }
 
@@ -2929,7 +2929,7 @@ impl Page {
                 // Would underflow — refuse to decrement
                 // Note: intentionally no log here to avoid printk during page table
                 // teardown, which can deadlock on mm/ring buffer/ext4 locks.
-                crate::debug::driftwatch::PUT_UNDERFLOW
+                crate::debug::hotpath::PUT_UNDERFLOW
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return -1;
             }
@@ -2953,11 +2953,11 @@ impl Page {
     pub fn put_page_site(&self, site: usize) -> i32 {
         let r = self.put_page();
         if r == 0 {
-            crate::debug::driftwatch::note_zero_put(site);
+            crate::debug::hotpath::note_zero_put(site);
         }
         // mmforensics (early-put hunt): record the drop on cache frames —
         // a no-op (one relaxed load) unless the switch is armed.
-        crate::debug::mmforensics::note_ref(self as *const Page, 1, site as u8, r + 1);
+        crate::debug::hotpath::note_ref(self as *const Page, 1, site as u8, r + 1);
         r
     }
 
@@ -4191,8 +4191,8 @@ impl VmaManager {
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
         // mmprof (cmdline mmprof=1): tree-add attempt counter (merges and
         // rejects visible from the delta against the other mmprof slots).
-        if crate::debug::mmprof::on() {
-            crate::debug::mmprof::bump(crate::debug::mmprof::S_VMAADD, 1);
+        if crate::debug::hotpath::mmprof_on() {
+            crate::debug::hotpath::mmprof_bump(crate::debug::hotpath::S_VMAADD, 1);
         }
         let start = vma.start();
         let end = vma.end();
@@ -5167,8 +5167,8 @@ pub fn kmalloc(size: usize) -> *mut u8 {
     // if the handler also allocates memory.
     let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock_irqsave();
     // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-    let _aw = crate::debug::allocwatch::guard(
-        crate::debug::allocwatch::SITE_SLAB,
+    let _aw = crate::debug::hotpath::guard(
+        crate::debug::hotpath::SITE_SLAB,
         cache_idx as u8,
     );
     let ptr = cache.alloc(SlabAllocator::pages());
@@ -5216,8 +5216,8 @@ pub fn kfree(ptr: *mut u8) {
     for i in 0..NUM_CACHES {
         let mut cache = SLAB_ALLOCATOR.caches[i].lock_irqsave();
         // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-        let _aw = crate::debug::allocwatch::guard(
-            crate::debug::allocwatch::SITE_SLAB,
+        let _aw = crate::debug::hotpath::guard(
+            crate::debug::hotpath::SITE_SLAB,
             i as u8,
         );
         if cache.free(ptr, SlabAllocator::pages()) {
@@ -5645,7 +5645,7 @@ impl MmStruct {
         // Leg-17 leak census: creation-side twin of memwatch::MM_DROPS —
         // both gated on User spaces so live_mm = MM_NEWS - MM_DROPS.
         if space_type == PageTableType::User {
-            crate::debug::memwatch::MM_NEWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::hotpath::MM_NEWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
 
         let vma_manager = VmaManager::new();
@@ -6573,15 +6573,15 @@ impl Drop for MmStruct {
         // The VMA tree itself is released with the struct. RSS/LRU stats
         // are already drained by that PTE walk.
         if self.space_type == PageTableType::User {
-            crate::debug::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::hotpath::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
             // forkprof (cmdline forkprof=1): drop-phase split — VMA
             // release / grace wait / page-table free.
-            let fp = crate::debug::forkprof::on();
+            let fp = crate::debug::hotpath::forkprof_on();
             if fp {
-                crate::debug::forkprof::bump(crate::debug::forkprof::S_MM_DROPS, 1);
+                crate::debug::hotpath::forkprof_bump(crate::debug::hotpath::S_MM_DROPS, 1);
             }
-            let fp_t_vma = if fp { crate::debug::forkprof::now() } else { 0 };
+            let fp_t_vma = if fp { crate::debug::hotpath::forkprof_now() } else { 0 };
 
             // ===== SysV shm detach (exactly once, Linux exit_mmap parity) =====
             // nattch must drop exactly once per mm, at the point its address
@@ -6636,7 +6636,7 @@ impl Drop for MmStruct {
                 ranges
             };
             if fp {
-                crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_VMAFREE, fp_t_vma);
+                crate::debug::hotpath::add(crate::debug::hotpath::P_DROP_VMAFREE, fp_t_vma);
             }
 
             // ===== Grace-period wait: hold off the free under raw borrowers =====
@@ -6652,7 +6652,7 @@ impl Drop for MmStruct {
             // softirq — e.g. an OOM-scan Arc dropped under a pid-hash
             // bucket lock): those callers are restructured to drop outside
             // their locks, this is the belt-and-braces guard.
-            let fp_t_rcu = if fp { crate::debug::forkprof::now() } else { 0 };
+            let fp_t_rcu = if fp { crate::debug::hotpath::forkprof_now() } else { 0 };
             if crate::interrupt::preempt::preempt_count() == 0
                 && crate::arch::cpu::get_interrupts_state()
             {
@@ -6664,7 +6664,7 @@ impl Drop for MmStruct {
                 crate::sync::hotpath::synchronize_rcu_bounded_pollfirst(1500, "mm-drop");
             }
             if fp {
-                crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_RCU, fp_t_rcu);
+                crate::debug::hotpath::add(crate::debug::hotpath::P_DROP_RCU, fp_t_rcu);
             }
 
             // Teardown-context witness (FUT-STALE family): a teardown in a
@@ -6708,7 +6708,7 @@ impl Drop for MmStruct {
                 }
             }
 
-            let fp_t_pt = if fp { crate::debug::forkprof::now() } else { 0 };
+            let fp_t_pt = if fp { crate::debug::hotpath::forkprof_now() } else { 0 };
             // The dying mm's OWN PteLock (INV-LOCK-7): uncontended by
             // construction here (last-Arc + synchronize_rcu drain), so
             // the teardown chunks never queue behind a live mm's
@@ -6716,7 +6716,7 @@ impl Drop for MmStruct {
             // wrapper was vestigial).
             crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd, &vma_ranges);
             if fp {
-                crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_PTFREE, fp_t_pt);
+                crate::debug::hotpath::add(crate::debug::hotpath::P_DROP_PTFREE, fp_t_pt);
             }
         }
     }
@@ -7983,7 +7983,7 @@ impl Zone {
                 // Reads the frame-pointer chain of the current stack
                 // (INV-MM-2 diag arm: this CPU's own stack).
                 {
-                    let s0 = crate::debug::backtrace::current_frame_pointer();
+                    let s0 = crate::debug::hotpath::current_frame_pointer();
                     super::r#unsafe::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {
@@ -7998,7 +7998,7 @@ impl Zone {
             // bounded reverse scan of every live tree for links naming
             // this pfn (the stale-pointer origin). Runs BEFORE the zone
             // lock is taken; internally gated + rate-limited.
-            crate::debug::mmforensics::capture_frame(pfn, "raw-free-live-table");
+            crate::debug::hotpath::capture_frame(pfn, "raw-free-live-table");
             // mmforensics fix (2026-11-15): REFUSE the free and QUARANTINE
             // the frame. The capture evidence (pfn 0x6bd1 boot) showed the
             // old print-then-free behavior is the double-availability
@@ -8053,7 +8053,7 @@ impl Zone {
                     // lock; raw putchar / printk here can wedge the
                     // console path (same discipline as the heap
                     // buddy's R43 tripwires).
-                    crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+                    crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
                     DOUBLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
@@ -8065,8 +8065,8 @@ impl Zone {
         // collision. Silent + taint + counter (zone lock held — same
         // discipline as R15-3 above).
         if crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64) {
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
-            crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
             return;
         }
         // Member-state invariant for high-order frees (review 4.4):
@@ -9197,16 +9197,16 @@ fn gfp_migratetype(g: GfpFlags) -> i32 {
 /// valid at -O0) and feeds the page-level site table in debug::memwatch —
 /// net growth per call-site is the physical-page leak signature.
 pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
-    let phys = if !crate::debug::memwatch::armed() {
+    let phys = if !crate::debug::hotpath::memwatch_armed() {
         alloc_pages_inner(gfp_flags, order)
     } else {
-        let mw_s0: u64 = crate::debug::backtrace::current_frame_pointer();
+        let mw_s0: u64 = crate::debug::hotpath::current_frame_pointer();
         let phys = alloc_pages_inner(gfp_flags, order);
         if phys != 0 {
-            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
-                [0; crate::debug::memwatch::SITE_FRAMES];
+            let mut mw_frames: [u64; crate::debug::types::SITE_FRAMES] =
+                [0; crate::debug::types::SITE_FRAMES];
             super::r#unsafe::walk_fp_chain(mw_s0, &mut mw_frames);
-            crate::debug::memwatch::note_page_alloc(phys, order, &mw_frames);
+            crate::debug::hotpath::note_page_alloc(phys, order, &mw_frames);
         }
         phys
     };
@@ -9285,7 +9285,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 }
                 // Leg-15 pace: one tick per slowpath entry (zone fastpath
                 // failed), rux:schb (retired debug=schb)-gated counter only.
-                crate::debug::schb::note_slow();
+                crate::debug::hotpath::note_slow();
 
                 // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
                 // waking kswapd alone loses the race — the faulting task
@@ -9563,7 +9563,7 @@ pub fn oom_forensic_dump(site: &str) {
     // Full accounting ledger first (debug/ledger.rs): where every managed
     // page went at this moment — the census + counter reconciliation that
     // attributes the "out of memory" to a category (or to drift).
-    super::super::debug::ledger::dump(&alloc::format!("oom: {}", site));
+    super::super::debug::hotpath::dump(&alloc::format!("oom: {}", site));
 
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
@@ -9821,7 +9821,7 @@ pub fn oom_forensic_dump(site: &str) {
                 }
             }
         }
-        crate::debug::ledger::oomfx_line(
+        crate::debug::hotpath::oomfx_line(
             zf as u64,
             zw as u64,
             zm as u64,
@@ -9982,9 +9982,9 @@ fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
 /// cache-backed leaf: the cache's release paths never run through
 /// put_page.
 pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
-    use crate::debug::driftwatch;
+    use crate::debug::hotpath;
     use core::sync::atomic::Ordering::Relaxed;
-    driftwatch::PCACHE_LEAF_PHANTOM_PUT.fetch_add(1, Relaxed);
+    hotpath::PCACHE_LEAF_PHANTOM_PUT.fetch_add(1, Relaxed);
     static REPORTS: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
     let n = REPORTS.fetch_add(1, Relaxed);
@@ -9995,7 +9995,7 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
             phys,
             site
         );
-        crate::debug::backtrace::dump_stack();
+        crate::debug::hotpath::dump_stack();
     } else if (n + 1) % 4096 == 0 {
         // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
         crate::pr_err!(
@@ -10007,14 +10007,14 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
     // the moment the mapping's descriptor reference is proven missing.
     // The ref-transition ring replay in the capture names the path that
     // consumed it early. Takes no locks (PTE-lock context is fine).
-    crate::debug::mmforensics::capture_frame(phys >> 12, "pcache-phantom-put");
+    crate::debug::hotpath::capture_frame(phys >> 12, "pcache-phantom-put");
     // Intentionally NO free: the page cache owns the frame.
     // QUARANTINE (mmforensics lane): the mapping's reference was consumed
     // early — the frame is (or is about to be) double-tracked. Mark it so
     // no free path can ever hand it to a new owner while the surviving
     // references (cache entry, stale PTEs) still name it.
     crate::arch::mm::mmu_init::PtLedger::poison_table((phys >> 12) as u64);
-    crate::debug::driftwatch::MM_POISONED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::hotpath::MM_POISONED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free contiguous physical pages
@@ -10023,7 +10023,7 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
 /// - `addr`: Physical address of the first page
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
-    use crate::debug::driftwatch as dw;
+    use crate::debug::hotpath as dw;
     if addr == 0 {
         dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
@@ -10061,12 +10061,12 @@ pub fn free_pages(addr: usize, order: usize) {
                     pd_ref.map(|p| p.mapcount()).unwrap_or(0),
                     crate::process::hotpath::current_pid()
                 );
-                crate::debug::backtrace::dump_stack();
+                crate::debug::hotpath::dump_stack();
             }
             // mmforensics (early-put hunt): a free of a still-mapped
             // frame is the premature-free face of the same producer
             // family — capture names the frame and its referees.
-            crate::debug::mmforensics::capture_frame(phys_to_pfn(addr), "free-while-mapped");
+            crate::debug::hotpath::capture_frame(phys_to_pfn(addr), "free-while-mapped");
             return;
         }
     }
@@ -10102,13 +10102,13 @@ pub fn free_pages(addr: usize, order: usize) {
                         p.refcount(),
                         crate::process::hotpath::current_pid()
                     );
-                    crate::debug::backtrace::dump_stack();
+                    crate::debug::hotpath::dump_stack();
                 }
-                crate::debug::mmforensics::capture_frame(
+                crate::debug::hotpath::capture_frame(
                     phys_to_pfn(addr),
                     "free-of-live-cache-entry",
                 );
-                crate::debug::driftwatch::MM_POISON_FREES
+                crate::debug::hotpath::MM_POISON_FREES
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return;
             }
@@ -10235,7 +10235,7 @@ pub fn free_pages(addr: usize, order: usize) {
                         pfn, order, owner_pid, owner_va, dying, root,
                         TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
                     );
-                    crate::debug::backtrace::dump_stack();
+                    crate::debug::hotpath::dump_stack();
                     dw::FREE_REFUSED_TEXT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
@@ -10259,7 +10259,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     // DEBUG memwatch: attribute the free back to the site that stamped this
     // block (page-level leak accounting — see debug::memwatch).
-    crate::debug::memwatch::note_page_free(addr, order);
+    crate::debug::hotpath::note_page_free(addr, order);
 
     let pfn = phys_to_pfn(addr);
 
@@ -11188,7 +11188,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // (the arch's PhysAddr: `PhysAddr` alone is types.rs's in this file)
     let vmemmap_virt = phys_to_virt(crate::arch::mm::PhysAddr::new(vmemmap_phys as u64));
     {
-        let mut w = crate::debug::backtrace::ConsoleWriter::new();
+        let mut w = crate::debug::types::ConsoleWriter::new();
         use core::fmt::Write;
     }
     // vmemmap_virt points to the reserved physical region returned by
@@ -11764,8 +11764,8 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     if crate::interrupt::preempt::in_interrupt() {
         let cache = &CACHES[ci];
         let _g = cache.lock.lock_irqsave();
-        let _aw = crate::debug::allocwatch::guard(
-            crate::debug::allocwatch::SITE_SMALL_ALLOC,
+        let _aw = crate::debug::hotpath::guard(
+            crate::debug::hotpath::SITE_SMALL_ALLOC,
             ci as u8,
         );
         let p = alloc_locked(ci, heap_start);
@@ -11821,8 +11821,8 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     // holder's own tick is dead at IF=0 — see debug/allocwatch.rs) + the
     // section-duration meter (lb268: one bounded section held 300 ms of
     // real KVM execution — name the cost class).
-    let _aw = crate::debug::allocwatch::guard(
-        crate::debug::allocwatch::SITE_SMALL_ALLOC,
+    let _aw = crate::debug::hotpath::guard(
+        crate::debug::hotpath::SITE_SMALL_ALLOC,
         ci as u8,
     );
     let _t0 = crate::arch::cpu::read_time();
@@ -11855,7 +11855,7 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     drop(_aw);
     drop(_g);
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
-    if crate::debug::allocwatch::armed() {
+    if crate::debug::hotpath::armed() {
         let d = crate::arch::cpu::read_time().wrapping_sub(_t0);
         let prev = cache.slow_max_cyc.load(Ordering::Relaxed);
         if d > prev {
@@ -11896,7 +11896,7 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     while cur != 0 {
         walked += 1;
         if walked > 8192 {
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
             break;
         }
@@ -12002,7 +12002,7 @@ pub fn free(addr: usize) -> bool {
     let ci_guess = peek.cls as usize;
     if ci_guess >= CLASSES.len() {
         // Header garbage (transient or corrupt): consume, taint.
-        crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+        crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
         return true;
     }
 
@@ -12081,7 +12081,7 @@ pub fn free(addr: usize) -> bool {
                 // hands out is page-header-validated at flush time.
                 mag.len = 0;
                 MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
-                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+                crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             }
             let mut snap: [usize; MAG_DEPTH] = [0; MAG_DEPTH];
             let mut n = 0usize;
@@ -12097,7 +12097,7 @@ pub fn free(addr: usize) -> bool {
             }
             if dropped > 0 {
                 MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
-                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+                crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             }
             Step::SnapFlush { snap, n }
         })
@@ -12154,8 +12154,8 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     let mut nret = 0usize;
     let _g = cache.lock.lock_irqsave();
     // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-    let _aw = crate::debug::allocwatch::guard(
-        crate::debug::allocwatch::SITE_SMALL_ALLOC,
+    let _aw = crate::debug::hotpath::guard(
+        crate::debug::hotpath::SITE_SMALL_ALLOC,
         ci as u8,
     );
     for &addr in entries {
@@ -12163,7 +12163,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
         let hdr = hdr_of(page);
         if hdr.magic != HDR_MAGIC || hdr.cls as usize != ci {
             // Reclaimed/re-created under us — no valid object can exist.
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             continue;
         }
         let off = addr - page - fo;
@@ -12171,13 +12171,13 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             // Foreign/misaligned pointer into a live slab page: consume
             // it — the buddy free would destroy the page's 500-odd
             // neighbours.
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             continue;
         }
         if hdr.free_count as usize >= objs_per_page {
             // Double free — refuse, but consume it (do not also
             // buddy-free).
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             continue;
         }
         super::r#unsafe::sa_write_u16(addr, hdr.free_head);
@@ -12201,7 +12201,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             while cur != 0 {
                 steps += 1;
                 if steps > 8192 {
-                    crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+                    crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
                     cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
@@ -12305,7 +12305,7 @@ pub fn audit_class_locks() -> u8 {
 }
 
 pub fn census_peek(ci: usize, per_page: usize) {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
     if ci >= CLASSES.len() {
         return;
     }
@@ -12328,8 +12328,8 @@ pub fn census_peek(ci: usize, per_page: usize) {
     let mut seen_total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
     // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-    let _aw = crate::debug::allocwatch::guard(
-        crate::debug::allocwatch::SITE_SMALL_ALLOC,
+    let _aw = crate::debug::hotpath::guard(
+        crate::debug::hotpath::SITE_SMALL_ALLOC,
         ci as u8,
     );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
@@ -12402,7 +12402,7 @@ pub fn census_peek(ci: usize, per_page: usize) {
 ///               c256 record family from the sc238 census)
 ///   userva/kheap/small-first : first-qword range buckets
 pub fn census_peek3(ci: usize) {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
     if ci >= CLASSES.len() {
         return;
     }
@@ -12433,8 +12433,8 @@ pub fn census_peek3(ci: usize) {
     let mut total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
     // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-    let _aw = crate::debug::allocwatch::guard(
-        crate::debug::allocwatch::SITE_SMALL_ALLOC,
+    let _aw = crate::debug::hotpath::guard(
+        crate::debug::hotpath::SITE_SMALL_ALLOC,
         ci as u8,
     );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
@@ -12503,7 +12503,7 @@ pub fn census_peek3(ci: usize) {
 
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
     taskdump_raw_line(b"SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed\n");
     let alias = MAG_ALIAS_EVENTS.load(Ordering::Relaxed);
     if alias > 0 {
@@ -14828,13 +14828,13 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             let ppn = pfn as u64;
             if crate::arch::mm::mmu_init::PtLedger::is_live_table(ppn) {
                 crate::arch::mm::mmu_init::PtLedger::poison_table(ppn);
-                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
-                crate::debug::driftwatch::MM_POISONED.fetch_add(1, Ordering::Relaxed);
-                crate::debug::mmforensics::capture_frame(pfn, "pcp-raw-free-live-table");
+                crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
+                crate::debug::hotpath::MM_POISONED.fetch_add(1, Ordering::Relaxed);
+                crate::debug::hotpath::capture_frame(pfn, "pcp-raw-free-live-table");
                 return true; // handled: leaked, never cached
             }
             if crate::arch::mm::mmu_init::PtLedger::is_poisoned(ppn) {
-                crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
+                crate::debug::hotpath::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
                 return true; // handled: quarantined frames never re-enter
             }
         }
@@ -14844,7 +14844,7 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             // R15-3 stance. No printk from this path (free contexts hold
             // locks; floods wedge the console — sc83 discipline).
             PCP_DOUBLE_FREE.fetch_add(1, Ordering::Relaxed);
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             return true;
         }
         // In use -> cached.

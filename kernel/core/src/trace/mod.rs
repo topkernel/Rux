@@ -3698,7 +3698,7 @@ fn fmt_trace_marker(args: &[u64; TRACE_ARGS]) -> String {
 pub fn ps_render(addr: u64) -> String {
     let sym_offset = option_enabled(&OPT_SYM_OFFSET);
     let sym_addr = option_enabled(&OPT_SYM_ADDR);
-    let mut out = match crate::debug::ksyms::lookup(addr) {
+    let mut out = match crate::debug::hotpath::lookup(addr) {
         Some((name, sym, size)) => {
             if sym_offset {
                 if size > 0 {
@@ -3956,7 +3956,7 @@ fn plumbing_verdict(f: u64) -> (bool, bool) {
     }
     // Cold path (first sight of this frame): resolve + classify once.
     // SAFETY-free: ksyms::lookup is a plain sorted-table search.
-    let verdict = match crate::debug::ksyms::lookup(f) {
+    let verdict = match crate::debug::hotpath::lookup(f) {
         Some((name, _, _)) => {
             let is_rux = name.starts_with("rux::") || name.starts_with("<rux::");
             let mut plumb = name.contains("mm::buddy_allocator")

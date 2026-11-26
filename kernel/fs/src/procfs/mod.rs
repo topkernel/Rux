@@ -629,7 +629,7 @@ self.create_dynamic_file("cgroups", || {
         self.create_dynamic_file("interrupts", interrupts::generate);
         // Cached-read cost anatomy (rux:filerd (retired debug=filerd) probe; counters are inert
         // unless the switch armed them).
-        self.create_dynamic_file("filerd", crate::debug::filerd::generate);
+        self.create_dynamic_file("filerd", crate::debug::hotpath::generate);
         // Per-CPU time accounting + system counters (Linux layout).
         self.create_dynamic_file("stat", stat::generate);
         // The kernel symbol table (Linux layout).
@@ -1298,7 +1298,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
     // Retired: the probe lives behind the existing OH hunt-print master
     // gate (rux:ohhunt (retired debug=ohhunt)) and is budgeted, so an ordinary boot is silent
     // while a hunt can still arm it.
-    if crate::debug::switches::oh_hunt_prints_on()
+    if crate::debug::hotpath::oh_hunt_prints_on()
         && (path.contains("cgroup") || path.contains("self/") || path.contains("mountinfo"))
         && current_pid() == 1
     {

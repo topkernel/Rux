@@ -1423,7 +1423,7 @@ mod rtt_census {
     /// ConsoleWriter print.
     pub fn snapshot() {
         use core::fmt::Write as _;
-        let mut w = crate::debug::backtrace::ConsoleWriter::new();
+        let mut w = crate::debug::types::ConsoleWriter::new();
         let mut line = |tag: char, c: &Comp| {
             let n = c.n.load(core::sync::atomic::Ordering::Relaxed);
             let ms = c.sum_us.load(core::sync::atomic::Ordering::Relaxed) / 1000;
@@ -1772,7 +1772,7 @@ fn stage_thread_error(
         static DUP_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::types::ConsoleWriter::new();
             use core::fmt::Write as _;
             let _ = writeln!(
                 w,
@@ -3172,7 +3172,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     }
     // rux:schb (retired debug=schb): record the new proc for the heartbeat's SC-PROC drain
     // (no-op unless the switch is armed; never any I/O on this path).
-    crate::debug::schb::note_proc_open(pid);
+    crate::debug::hotpath::note_proc_open(pid);
     // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
     // once per binder-using process start — on OH boots that is nearly
     // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
@@ -3345,7 +3345,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                         printed = deaths.clone();
                     }
                     for (desc, cookie) in printed {
-                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::types::ConsoleWriter::new();
                         use core::fmt::Write as _;
                         let _ = writeln!(
                             w,
@@ -3582,7 +3582,7 @@ fn dead_reply_to_sender(
             // symbol) and wedged lb48/lb50/lb51. All death-event taps
             // that run under WORLD print through the lockless batched
             // ConsoleWriter instead (same discipline as SLOW-TXN).
-            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::types::ConsoleWriter::new();
             use core::fmt::Write as _;
             let _ = writeln!(
                 w,
@@ -3626,7 +3626,7 @@ fn dead_reply_to_sender(
                 static DRS2_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if DRS2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::types::ConsoleWriter::new();
                     use core::fmt::Write as _;
                     let _ = writeln!(
                         w,
@@ -3661,7 +3661,7 @@ fn dead_reply_to_sender(
             static DRS3_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if DRS3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                let mut w = crate::debug::types::ConsoleWriter::new();
                 use core::fmt::Write as _;
                 let _ = writeln!(
                     w,
@@ -3728,7 +3728,7 @@ fn send_failed_reply(
                 static SFR_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if SFR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::types::ConsoleWriter::new();
                     use core::fmt::Write as _;
                     let _ = writeln!(
                         w,
@@ -4307,7 +4307,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                             .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                             < 120
                                         {
-                                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                                            let mut w = crate::debug::types::ConsoleWriter::new();
                                             use core::fmt::Write as _;
                                             let _ = writeln!(
                                                 w,
@@ -6073,7 +6073,7 @@ fn binder_thread_write(
                                             .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                             .map(|q| q.pid)
                                             .unwrap_or(0);
-                                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                                        let mut w = crate::debug::types::ConsoleWriter::new();
                                         use core::fmt::Write as _;
                                         let _ = writeln!(
                                             w,
@@ -6121,7 +6121,7 @@ fn binder_thread_write(
                                         .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                         .map(|q| q.pid)
                                         .unwrap_or(0);
-                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::types::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,
@@ -6380,7 +6380,7 @@ fn binder_transaction(
                     static M7_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if M7_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::types::ConsoleWriter::new();
                         use core::fmt::Write as _;
                         let _ = writeln!(
                             w,
@@ -6460,7 +6460,7 @@ fn binder_transaction(
                                     None => "?",
                                 }
                             }
-                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::types::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
@@ -6775,7 +6775,7 @@ fn binder_transaction(
                         static GUARD_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::types::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let depth = st.txn_stack.len();
                             // SAFETY: reads of the top txn under WORLD.
@@ -8246,7 +8246,7 @@ fn binder_transaction(
                                 if RP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                     < 20
                                 {
-                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::types::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     // SAFETY: reads under WORLD.
                                     let top = rth.txn_stack.last();
@@ -8290,7 +8290,7 @@ fn binder_transaction(
                         static RPUSH_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if RPUSH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800 {
-                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::types::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
@@ -9767,7 +9767,7 @@ fn binder_thread_read(
                                             parcel = s;
                                         }
                                     }
-                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::types::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,
@@ -9796,7 +9796,7 @@ fn binder_thread_read(
                                 static IRD_N: core::sync::atomic::AtomicUsize =
                                     core::sync::atomic::AtomicUsize::new(0);
                                 if IRD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::types::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,

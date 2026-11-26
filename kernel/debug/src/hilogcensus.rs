@@ -24,7 +24,7 @@
 use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 
-use crate::debug::hilogcensus::{on, KmsgSender, KMSG, KMSG_SLOTS};
+use crate::debug::{hotpath::hilogcensus_on, types::KmsgSender, hotpath::KMSG, hotpath::KMSG_SLOTS};
 
 const COMM: usize = 16;
 const TAG: usize = 16;
@@ -168,7 +168,7 @@ static PRE_SLOT: [AtomicU32; crate::config::MAX_CPUS] =
 /// Hook half 1 (BEFORE the owned send): parse the gathered datagram,
 /// claim/refresh the sender slot, record bytes + tag.
 pub fn unix_send_pre(gathered: &[u8]) {
-    if !on() {
+    if !hilogcensus_on() {
         return;
     }
     let (spid, scomm): (u32, [u8; COMM]) = match crate::sched::hotpath::current() {
@@ -248,7 +248,7 @@ fn bump_tag(tags: &[TagSlot; 4], tag: &[u8; TAG], content: &[u8]) {
 /// Hook half 2 (AFTER the owned send): record the outcome by kernel
 /// return value (>=0 delivered, -11 EAGAIN, else error).
 pub fn unix_send_post(ret: isize) {
-    if !on() {
+    if !hilogcensus_on() {
         return;
     }
     let cpu = crate::arch::cpu_id() as usize;
@@ -296,7 +296,7 @@ fn tag_str(t: &TagSlot) -> alloc::string::String {
 /// Periodic dump (syscost cadence + shutdown cascade) — the
 /// DebugHooks `hilog_dump` row body.
 pub fn dump() {
-    if !on() {
+    if !hilogcensus_on() {
         return;
     }
     let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;

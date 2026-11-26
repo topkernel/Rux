@@ -245,7 +245,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         let pc = crate::interrupt::preempt::preempt_count();
         if pc < 0 {
             use core::fmt::Write;
-            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::types::ConsoleWriter::new();
             let _ = write!(w,
                 "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
                 crate::sched::hotpath::get_current_pid(), pc);
@@ -376,7 +376,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 let cross_stack = !current.is_in_kernel_stack(regs.sp as usize);
                 if dying && cross_stack {
                     use core::fmt::Write;
-                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::types::ConsoleWriter::new();
                     let _ = write!(w,
                         "trap: STALE-CONTEXT-PARK pid={} epc={:#x} sp={:#x} (dead task, foreign stack)\n",
                         current.pid(), regs.epc, regs.sp);

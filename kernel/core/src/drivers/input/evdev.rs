@@ -294,7 +294,7 @@ pub fn push_event(&self, event: InputEvent) {
                         event.code,
                         event.value
                     );
-                    crate::debug::taskdump::taskdump_raw_line(line.as_bytes());
+                    crate::debug::hotpath::taskdump_raw_line(line.as_bytes());
                 }
             }
         }
@@ -831,7 +831,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
         .collect();
     let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::hotpath::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
     // obs-hygiene: line-atomic funnel instead of per-byte raw writes.
-    crate::debug::taskdump::taskdump_raw_line(s.as_bytes());
+    crate::debug::hotpath::taskdump_raw_line(s.as_bytes());
 }
 
 /// evdev close function
@@ -1761,7 +1761,7 @@ impl HuntLine {
         // obs-hygiene: the burst rides the taskdump funnel's emit-lock
         // coordination (one atomic write vs printk records too — the
         // kmsg-flood splice class), not the bare per-byte raw writes.
-        crate::debug::taskdump::line_atomic_write(&self.buf[..self.n]);
+        crate::debug::hotpath::line_atomic_write(&self.buf[..self.n]);
         self.n = 0;
     }
 }
@@ -1792,7 +1792,7 @@ fn itt_msg(msg: &[u8]) {
         st.buf[at] = b;
         st.n = at + 1;
         if b == b'\n' || st.n == st.buf.len() {
-            crate::debug::taskdump::line_atomic_write(&st.buf[..st.n]);
+            crate::debug::hotpath::line_atomic_write(&st.buf[..st.n]);
             st.n = 0;
         }
     }

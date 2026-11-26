@@ -2218,7 +2218,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     // RETIRED (probe-retire): unconditional (3 lines per ub2404 boot);
     // behind the existing OH hunt-print master gate (rux:ohhunt (retired debug=ohhunt)) like the
     // rest of the uevent-hunt family.
-    if crate::debug::switches::oh_hunt_prints_on() {
+    if crate::debug::hotpath::oh_hunt_prints_on() {
         static UEC_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
@@ -2802,7 +2802,7 @@ pub fn param_stall_dump() {
     }
     // …and the last 48 syscalls of pid 1 — the userspace loop's actual
     // behavior at the stall (needs rux:sysforensic (retired debug=sysforensic) to be recording).
-    crate::debug::taskdump::dump_syscall_ring_for(1);
+    crate::debug::hotpath::dump_syscall_ring_for(1);
     // SAFETY: read-only diagnostic walk of pid 1's fdtable.
     let tk = ::process::r#unsafe::borrow_task(task);
     let fdtable = match tk.try_fdtable_mut() {
@@ -3293,7 +3293,7 @@ fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
         pid as i32,
         &comm16,
         epfd,
-        crate::debug::spinwatch::last_report_n(),
+        crate::debug::hotpath::last_report_n(),
     );
     let mut entries = epoll.entries.lock();
     let head = entries.init_once();
@@ -3807,7 +3807,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             let count = ready_events.len().min(maxevents as usize);
             // spinwatch: a fast EVENT-carrying return round (a permanently
             // ready fd spins the waiter just as hard as a broken timeout).
-            if crate::debug::spinwatch::record() {
+            if crate::debug::hotpath::record() {
                 spinwatch_dump_interest(epoll, epfd);
             }
             // events_ptr validated with access_ok; copy_out is the
@@ -3835,7 +3835,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
                 .unwrap_or(true);
             if expired {
-                if crate::debug::spinwatch::record() {
+                if crate::debug::hotpath::record() {
                     spinwatch_dump_interest(epoll, epfd);
                 }
                 return 0;

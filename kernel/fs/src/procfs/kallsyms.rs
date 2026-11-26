@@ -44,9 +44,9 @@ const KSYM_NAME_LEN: usize = 128;
 /// Generate /proc/kallsyms content.
 pub fn generate() -> Vec<u8> {
     let mut out = String::new();
-    if crate::debug::ksyms::table_valid() {
-        for (idx, (_off, addr, _size, typ)) in crate::debug::ksyms::INDEX.iter().enumerate() {
-            let name = crate::debug::ksyms::symbol_name(idx);
+    if crate::debug::hotpath::table_valid() {
+        for (idx, (_off, addr, _size, typ)) in crate::debug::hotpath::INDEX.iter().enumerate() {
+            let name = crate::debug::hotpath::symbol_name(idx);
             // Linux prints the symbol name verbatim (fs/proc/kallsyms.c)
             // — the demangled Rust name IS the name; no prefix is added —
             // truncated to KSYM_NAME_LEN-1 visible chars (Linux parity:

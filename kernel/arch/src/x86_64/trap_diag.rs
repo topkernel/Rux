@@ -1009,5 +1009,5 @@ pub fn scribble_foreign_entry(
         scribble_put_hex(t);
     }
     scribble_put_str(b"\n");
-    crate::debug::scribble::ring_dump();
+    crate::debug::hotpath::scribble::ring_dump();
 }

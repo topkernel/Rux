@@ -11,7 +11,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::debug::fsw::*;
+use crate::debug::hotpath::*;
 
 fn v(c: &AtomicU64) -> u64 {
     c.load(Ordering::Relaxed)
@@ -19,7 +19,7 @@ fn v(c: &AtomicU64) -> u64 {
 
 /// Print the counter snapshot (cumulative since boot).
 pub fn dump() {
-    if !crate::debug::fsw::on() {
+    if !crate::debug::hotpath::fsw_on() {
         return; // shutdown-path dump hook: silent when the probe is off
     }
     let secs = crate::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;

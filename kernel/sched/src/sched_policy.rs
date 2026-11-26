@@ -149,7 +149,7 @@ pub(crate) fn rt_wedge_dump_tick(cpu: usize) {
     if cpu != 0 || crate::cmdline::get_param("rt2xdbg").as_deref() != Some("1") {
         return;
     }
-    use crate::debug::taskdump::putc_brief as putchar;
+    use crate::debug::hotpath::putc_brief as putchar;
     fn ph(mut v: u64) {
         for _ in 0..16 {
             let n = (v >> 60) as u8;
@@ -257,7 +257,7 @@ pub(crate) fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
                 static TLN: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if TLN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                    use crate::debug::taskdump::putc_brief as putchar;
+                    use crate::debug::hotpath::putc_brief as putchar;
                     for &b in b"RT-THROTTLE-LIFT cpu=0\n" { putchar(b); }
                 }
             }
@@ -279,7 +279,7 @@ pub(crate) fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
                     static TSN: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if TSN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                        use crate::debug::taskdump::putc_brief as putchar;
+                        use crate::debug::hotpath::putc_brief as putchar;
                         for &b in b"RT-THROTTLE-SET cpu=0\n" { putchar(b); }
                     }
                 }
@@ -347,7 +347,7 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     {
         return;
     }
-    use crate::debug::taskdump::putc_brief as putchar;
+    use crate::debug::hotpath::putc_brief as putchar;
     fn ph(mut v: u64) {
         let mut buf = [0u8; 16];
         let mut n = 0;
@@ -1003,7 +1003,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
                 static SOR: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if SOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                    use crate::debug::taskdump::putc_brief as putchar;
+                    use crate::debug::hotpath::putc_brief as putchar;
                     for &b in b"SOR-REARM-RISK-RETRY owner=" { putchar(b); }
                     let mut v = skip_owner as u64;
                     for _ in 0..4 {
@@ -1219,7 +1219,7 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
             }
             let claim = task.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
             if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
-                crate::debug::scribble::double_seed(task_ptr, me as u64, owner_slot, claim);
+                crate::debug::hotpath::scribble::double_seed(task_ptr, me as u64, owner_slot, claim);
             }
         }
         // R74 (riscv64 double-run seed tripwire, always on): same check as
@@ -1258,7 +1258,7 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
         }
         // Scribble hunter: record the pick (rux:scribble (retired debug=scribble)).
         #[cfg(feature = "x86_64")]
-        crate::debug::scribble::ring_log(
+        crate::debug::hotpath::scribble::ring_log(
             crate::arch::cpu_id() as usize,
             1,
             task_ptr as u64,
@@ -1421,16 +1421,16 @@ pub(crate) fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: &mut Task) ->
     {
         const MSG: &[u8] = b"R41-STALE-ONRQ healed pid=0x";
         for &b in MSG {
-            crate::debug::taskdump::putc_brief(b);
+            crate::debug::hotpath::putc_brief(b);
         }
         let v = task.pid() as u64;
         let mut sh = 64;
         while sh > 0 {
             sh -= 4;
             let nb = ((v >> sh) & 0xF) as u8;
-            crate::debug::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            crate::debug::hotpath::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
         }
-        crate::debug::taskdump::putc_brief(b'\n');
+        crate::debug::hotpath::putc_brief(b'\n');
     }
     match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
@@ -1578,7 +1578,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         SchedPolicy::Fifo | SchedPolicy::Rr => {
             // Scribble hunter: record the class insert (rux:scribble (retired debug=scribble)).
             #[cfg(feature = "x86_64")]
-            crate::debug::scribble::ring_log(
+            crate::debug::hotpath::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 3,
                 task_ptr as u64,
@@ -1634,7 +1634,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         SchedPolicy::Normal | SchedPolicy::Batch => {
             // Scribble hunter: record the class insert (rux:scribble (retired debug=scribble)).
             #[cfg(feature = "x86_64")]
-            crate::debug::scribble::ring_log(
+            crate::debug::hotpath::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 3,
                 task_ptr as u64,
@@ -1698,9 +1698,9 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
                 static ENQC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if ENQC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                    use crate::debug::taskdump::putc_brief as putchar;
+                    use crate::debug::hotpath::putc_brief as putchar;
                     fn pdec2(mut v: u64) {
-                        use crate::debug::taskdump::putc_brief as p;
+                        use crate::debug::hotpath::putc_brief as p;
                         let mut buf = [0u8; 20];
                         let mut n = 0;
                         if v == 0 {
@@ -1980,7 +1980,7 @@ pub fn ww_record(task: *mut Task, code: u32) {
     if code == WW_EV_WAKE_OK {
         static WWT_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         if WWT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             const M: &[u8] = b"\nWWTICK pid=";
             for &b in M {
                 putchar(b);
@@ -2913,7 +2913,7 @@ fn rt_try_poke_cpu(task: &Task, task_prio: u32, cpu: usize) -> bool {
                 static CSP: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if CSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    use crate::debug::taskdump::putc_brief as putchar;
+                    use crate::debug::hotpath::putc_brief as putchar;
                     fn ph(mut v: u64) {
                         for _ in 0..16 {
                             let n = (v >> 60) as u8;
@@ -3423,7 +3423,7 @@ pub(crate) fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshol
                         let c = claim as usize;
                         let tick_ms = cpu_tick_stale_ms(c);
                         let irq_ms =
-                            crate::debug::softlockup::cpu_irq_frozen_ms(c);
+                            crate::debug::hotpath::cpu_irq_frozen_ms(c);
                         if tick_ms < 5000 || irq_ms < 5000 {
                             static LC_N: core::sync::atomic::AtomicU32 =
                                 core::sync::atomic::AtomicU32::new(0);
@@ -3550,7 +3550,7 @@ pub(crate) fn orphan_watch_clear(task: *mut Task) {
 /// healthy runner; a frozen TOUCH_TS names a hart that stopped executing
 /// kernel code entirely.
 pub(crate) fn cpu_tick_stale_ms(cpu: usize) -> u64 {
-    let last = crate::debug::softlockup::last_touch_ns(cpu);
+    let last = crate::debug::hotpath::last_touch_ns(cpu);
     if last == 0 {
         return 0;
     }
@@ -3564,7 +3564,7 @@ fn r56_print_msg(msg: &[u8]) {
     // R34 discipline: callers may hold the GRQ and/or a PID-hash bucket
     // lock here — SBI/direct console writes only.
     for &b in msg {
-        crate::debug::taskdump::putc_brief(b)
+        crate::debug::hotpath::putc_brief(b)
     }
 }
 
@@ -3596,7 +3596,7 @@ pub(crate) fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
         }
     }
     for i in (0..n).rev() {
-        crate::debug::taskdump::putc_brief(buf[i])
+        crate::debug::hotpath::putc_brief(buf[i])
     }
     r56_print_msg(suffix);
 }
@@ -3754,7 +3754,7 @@ pub fn r56_report_switch_abort(cpu: usize, pid: u32) {
 /// with a global budget, direct-console (R34 discipline — the caller may
 /// not hold the GRQ, but the diag path must stay lock-free anyway).
 pub(crate) fn lp_idle_lie_report(cpu: usize) {
-    use crate::debug::taskdump::putc_brief as putchar;
+    use crate::debug::hotpath::putc_brief as putchar;
     static LP_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     static LP_LAST: [core::sync::atomic::AtomicU64; MAX_CPUS] =
@@ -3780,7 +3780,7 @@ pub(crate) fn lp_idle_lie_report(cpu: usize) {
     }
     LP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     fn pdec(mut v: u64) {
-        use crate::debug::taskdump::putc_brief as putchar;
+        use crate::debug::hotpath::putc_brief as putchar;
         let mut buf = [0u8; 20];
         let mut n = 0;
         if v == 0 {
@@ -3798,7 +3798,7 @@ pub(crate) fn lp_idle_lie_report(cpu: usize) {
         }
     }
     fn phex(v: u64) {
-        use crate::debug::taskdump::putc_brief as putchar;
+        use crate::debug::hotpath::putc_brief as putchar;
         for sh in (0..16u32).rev() {
             let nb = ((v >> (sh * 4)) & 0xF) as u8;
             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });

@@ -3888,7 +3888,7 @@ fn release_page_frame(pfn: usize) {
         && crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64)
     {
         use core::sync::atomic::Ordering::Relaxed;
-        crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Relaxed);
+        crate::debug::hotpath::MM_POISON_FREES.fetch_add(1, Relaxed);
         return;
     }
 
@@ -3896,7 +3896,7 @@ fn release_page_frame(pfn: usize) {
         && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
     {
         use core::sync::atomic::Ordering::Relaxed;
-        crate::debug::driftwatch::PCACHE_LIVE_PT_REFUSED
+        crate::debug::hotpath::PCACHE_LIVE_PT_REFUSED
             .fetch_add(1, Relaxed);
         static REPORTS: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -3906,20 +3906,20 @@ fn release_page_frame(pfn: usize) {
                 "page-cache release of LIVE PT frame pfn={:#x} REFUSED — leaking (double-owned cache entry; RAW-FREE cascade guard)",
                 pfn
             );
-            crate::debug::backtrace::dump_stack();
+            crate::debug::hotpath::dump_stack();
         }
         // mmforensics: deep capture at the producer-side refusal (the
         // capture takes no page-cache locks — it only reads descriptors,
         // rings and foreign trees — so running it from this lock-held
         // context is safe).
-        crate::debug::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
+        crate::debug::hotpath::capture_frame(pfn, "pcache-live-pt-refused");
         // QUARANTINE the frame (mmforensics lane): the capture evidence
         // showed such frames keep colliding with re-allocation for the
         // rest of the boot (one frame re-stamped by five trees); the
         // poison bit makes every later free of it impossible, so the
         // surviving references dangle inertly.
         crate::arch::mm::mmu_init::PtLedger::poison_table(pfn as u64);
-        crate::debug::driftwatch::MM_POISONED.fetch_add(1, Relaxed);
+        crate::debug::hotpath::MM_POISONED.fetch_add(1, Relaxed);
         // The caller has already removed the map entry and unlinked the
         // LRU member; the leaked frame is an untracked orphan. Its
         // stale PageCache descriptor is unreachable from the LRU walk,

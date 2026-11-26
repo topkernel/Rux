@@ -37,7 +37,7 @@ pub fn remote_backtrace(target: usize, why: &str) -> bool {
     while BT_DONE[target].load(Ordering::Acquire) != req {
         spins = spins.wrapping_add(1);
         if spins > 200_000_000 {
-            let mut w = crate::debug::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::types::ConsoleWriter::new();
             let _ = core::fmt::Write::write_fmt(
                 &mut w,
                 format_args!("REMOTE-BT[{}]: cpu={} TIMEOUT (not servicing IPIs)\n", why, target),
@@ -51,7 +51,7 @@ pub fn remote_backtrace(target: usize, why: &str) -> bool {
     let rsp = BT_RSP[target].load(Ordering::Relaxed);
     let rbp = BT_RBP[target].load(Ordering::Relaxed);
     let n = BT_NFRAMES[target].load(Ordering::Relaxed) as usize;
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     // Target's current task pid/comm (best-effort; comm is fixed-size
     // bytes, no allocation).
     let cur = crate::sched::hotpath::cpu_state(target).current;

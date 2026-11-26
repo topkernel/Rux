@@ -12,9 +12,9 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::debug::reaper::{
-    comm_str, decode_kernel_code, decode_si_code, decode_wstatus, secs, ExitRec, NameRec,
-    EXIT_MAP, EXIT_MAP_LEN, NAME_MAP, NAME_MAP_LEN,
+use crate::debug::{
+    hotpath::comm_str, hotpath::decode_kernel_code, hotpath::decode_si_code, hotpath::decode_wstatus, hotpath::secs, types::ExitRec, types::NameRec,
+    hotpath::EXIT_MAP, hotpath::EXIT_MAP_LEN, hotpath::NAME_MAP, hotpath::NAME_MAP_LEN,
 };
 
 /// Print budgets per arm (runaway pollers / exit storms must not eat

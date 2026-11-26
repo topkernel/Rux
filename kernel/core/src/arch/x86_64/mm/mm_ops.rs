@@ -167,8 +167,8 @@ impl MmStruct {
     ) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (this mm's
         // PTE section, INV-LOCK-7).
-        let mp = crate::debug::mmprof::on();
-        let mp_tw = if mp { crate::debug::mmprof::now() } else { 0 };
+        let mp = crate::debug::hotpath::mmprof_on();
+        let mp_tw = if mp { crate::debug::hotpath::mmprof_now() } else { 0 };
         let _pte_guard = pte_lock_for(self).lock();
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
@@ -322,7 +322,7 @@ impl MmStruct {
                     continue;
                 }
                 if mp {
-                    crate::debug::mmprof::bump(crate::debug::mmprof::S_UNPAGES, 1);
+                    crate::debug::hotpath::mmprof_bump(crate::debug::hotpath::S_UNPAGES, 1);
                 }
                 if raw & PageTableEntry::P == 0 {
                     // Swap entry (P=0 leaf): free the swap slot and clear
@@ -384,7 +384,7 @@ impl MmStruct {
                     }
                     if !leaf_is_ro {
                         let new_ref =
-                            page.put_page_site(crate::debug::driftwatch::S_UNMAP_X86);
+                            page.put_page_site(crate::debug::hotpath::S_UNMAP_X86);
                         if new_ref == 0 {
                             // Cache-backed leaf: the frame still belongs to
                             // the page cache — a zero put here is a phantom
@@ -471,9 +471,9 @@ impl MmStruct {
         );
 
         if mp {
-            crate::debug::mmprof::add(crate::debug::mmprof::MU_WALK, mp_tw);
+            crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MU_WALK, mp_tw);
         }
-        let mp_tt = if mp { crate::debug::mmprof::now() } else { 0 };
+        let mp_tt = if mp { crate::debug::hotpath::mmprof_now() } else { 0 };
         if !defer_tlb_flush {
             crate::arch::ipi::flush_tlb_others_mm(
                 self.tlb_cpu_mask(),
@@ -485,7 +485,7 @@ impl MmStruct {
             crate::arch::mm::asid::flush_tlb_all();
         }
         if mp {
-            crate::debug::mmprof::add(crate::debug::mmprof::MU_TLB, mp_tt);
+            crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MU_TLB, mp_tt);
         }
 
         Ok(())
@@ -553,7 +553,7 @@ impl MmStruct {
                     }
                     if !leaf_is_ro {
                         let new_ref =
-                            page.put_page_site(crate::debug::driftwatch::S_UNMAP_X86);
+                            page.put_page_site(crate::debug::hotpath::S_UNMAP_X86);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -628,7 +628,7 @@ impl MmStruct {
             }
             if !leaf_is_ro {
                 let new_ref =
-                    page.put_page_site(crate::debug::driftwatch::S_UNMAP_X86);
+                    page.put_page_site(crate::debug::hotpath::S_UNMAP_X86);
                 if new_ref == 0 {
                     // Cache-backed leaf: leak, never hand the live cache
                     // frame to the zone (pcachewedge lane).
@@ -1514,7 +1514,7 @@ pub fn copy_page_table_cow(
     use crate::mm::hotpath::page_desc;
 
     // forkprof scalars (armed check hoisted out of the PTE loop).
-    let fp_count = crate::debug::forkprof::on();
+    let fp_count = crate::debug::hotpath::forkprof_on();
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked — mirror of the
@@ -1678,7 +1678,7 @@ pub fn copy_page_table_cow(
                         let child_pt_phys = alloc_page_table()?;
                         let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
                         if fp_count {
-                            crate::debug::forkprof::bump(crate::debug::forkprof::S_COW_TABLES, 1);
+                            crate::debug::hotpath::forkprof_bump(crate::debug::hotpath::S_COW_TABLES, 1);
                         }
                         child_pmd_ref.set(
                             vpn2,
@@ -1840,7 +1840,7 @@ pub fn copy_page_table_cow(
                     // forkprof scalar: PTEs copied (hoisted armed check —
                     // one relaxed load when off).
                     if fp_count {
-                        crate::debug::forkprof::bump(crate::debug::forkprof::S_COW_PTES, 1);
+                        crate::debug::hotpath::forkprof_bump(crate::debug::hotpath::S_COW_PTES, 1);
                     }
                     pte_install_log(
                         child_root_ppn,
@@ -2067,7 +2067,7 @@ pub fn handle_cow_fault(
     // across COW cycles and eventually corrupts page reclaim / rmap
     // decisions.
     if let Some(p) = old_page {
-        p.put_page_site(crate::debug::driftwatch::S_COW_X86);
+        p.put_page_site(crate::debug::hotpath::S_COW_X86);
         p.dec_mapcount();
     }
 

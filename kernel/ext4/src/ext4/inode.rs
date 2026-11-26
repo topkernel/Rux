@@ -504,7 +504,7 @@ pub fn write_inode(
     inode: &Ext4Inode,
 ) -> Result<(), i32> {
     use rux::fs::bio;
-    crate::debug::fsw::note_write_inode();
+    crate::debug::hotpath::note_write_inode();
 
     if ino == 0 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
@@ -746,7 +746,7 @@ pub fn write_inode_disk(
     inode: &Ext4InodeOnDisk,
 ) -> Result<(), i32> {
     use rux::fs::bio;
-    crate::debug::fsw::note_write_inode();
+    crate::debug::hotpath::note_write_inode();
 
     if ino == 0 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());

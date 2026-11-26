@@ -10,7 +10,11 @@
 
 use core::sync::atomic::Ordering::Relaxed;
 
-use crate::debug::filerd::*;
+// generate stays local (this file's own pub fn — the glob shadowed it, an
+// import would collide); the counter statics are macro-generated in the
+// framework half, so they are not in the spec's export list and are spelled.
+use crate::debug::hotpath::{MISS_N, OUTER_N, OUTER_CYCLES, LOCK_CYCLES,
+    PIN_CYCLES, COPY_CYCLES, UNPIN_CYCLES, EPILOG_CYCLES};
 
 /// Estimate the RDTSC frequency by bracketing a ~10 ms window between
 /// the calibrated 10 MHz timekeeper and raw RDTSC.

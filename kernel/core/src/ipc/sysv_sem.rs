@@ -788,8 +788,8 @@ fn sem_max_idx() -> i32 {
 /// sys_semtimedop — Semaphore operations with timeout (NR 192)
 pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     // cctx probe (closegap lane): prelude / per-try / block-park sums.
-    let cc_t0 = crate::debug::cctx::now();
-    crate::debug::cctx::bump(&crate::debug::cctx::SM_N);
+    let cc_t0 = crate::debug::hotpath::cctx_now();
+    crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::SM_N);
     let semid = args[0] as i32;
     let sops_ptr = args[1] as *const SemBuf;
     let nsops = args[2] as usize;
@@ -919,7 +919,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
             return -(errno::EFBIG as i64);
         }
     }
-    crate::debug::cctx::add(&crate::debug::cctx::SM_PRE_NS, cc_t0);
+    crate::debug::hotpath::cctx_add(&crate::debug::hotpath::SM_PRE_NS, cc_t0);
 
     semop_blocking_loop(idx, semid, &sops, deadline, sub_jiffy_timeout)
 }
@@ -972,10 +972,10 @@ fn semop_blocking_loop(
     sub_jiffy_timeout: bool,
 ) -> i64 {
     'outer: loop {
-        let cc_t_try = crate::debug::cctx::now();
-        crate::debug::cctx::bump(&crate::debug::cctx::SM_TRY_N);
+        let cc_t_try = crate::debug::hotpath::cctx_now();
+        crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::SM_TRY_N);
         let result = try_apply_semops(idx, &sops, semid);
-        crate::debug::cctx::add(&crate::debug::cctx::SM_TRY_NS, cc_t_try);
+        crate::debug::hotpath::cctx_add(&crate::debug::hotpath::SM_TRY_NS, cc_t_try);
         match result {
             Ok(()) => return 0,
             Err(e) => {
@@ -1008,8 +1008,8 @@ fn semop_blocking_loop(
                             // cctx: the park itself (registration →
                             // schedule() return), opened here and closed
                             // after the loop-bottom continue.
-                            let cc_t_blk = crate::debug::cctx::now();
-                            crate::debug::cctx::bump(&crate::debug::cctx::SM_BLK_N);
+                            let cc_t_blk = crate::debug::hotpath::cctx_now();
+                            crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::SM_BLK_N);
                             // Check for signals
                             if crate::signal::signal_pending() {
                                 return -(errno::EINTR as i64);
@@ -1179,8 +1179,8 @@ fn semop_blocking_loop(
                             }
                             // Lost-park ring (rux:lostpark (retired debug=lostpark)): park-enter
                             // snapshot — pid, preempt_count, state bits.
-                            if crate::debug::lostpark::armed() {
-                                crate::debug::lostpark::record(
+                            if crate::debug::hotpath::lostpark_armed() {
+                                crate::debug::hotpath::lostpark_record(
                                     1,
                                     (*current).pid() as u64,
                                     (*current).preempt_count() as u32 as u64,
@@ -1189,8 +1189,8 @@ fn semop_blocking_loop(
                                 );
                             }
                             crate::sched::hotpath::schedule();
-                            if crate::debug::lostpark::armed() {
-                                crate::debug::lostpark::record(
+                            if crate::debug::hotpath::lostpark_armed() {
+                                crate::debug::hotpath::lostpark_record(
                                     2,
                                     (*current).pid() as u64,
                                     (*current).preempt_count() as u32 as u64,
@@ -1219,7 +1219,7 @@ fn semop_blocking_loop(
                                     entry.inner.wq.remove(current as *mut _);
                                 }
                             }
-                            crate::debug::cctx::add(&crate::debug::cctx::SM_BLK_NS, cc_t_blk);
+                            crate::debug::hotpath::cctx_add(&crate::debug::hotpath::SM_BLK_NS, cc_t_blk);
 
                             continue 'outer;
                         }
@@ -1420,7 +1420,7 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
         // Lost-park ring (rux:lostpark (retired debug=lostpark)): the value transition of a
         // successful apply — a=sem0 value, b=sem1 value (2-sem probe
         // sets; more/less record what exists).
-        if crate::debug::lostpark::armed() && sems.len() >= 1 {
+        if crate::debug::hotpath::lostpark_armed() && sems.len() >= 1 {
             let v0 = sems[0].value.load(Ordering::Relaxed) as u64;
             let n0 = sems[0].ncnt.load(Ordering::Relaxed) as u64;
             let v1 = if sems.len() >= 2 {
@@ -1433,7 +1433,7 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
             } else {
                 0
             };
-            crate::debug::lostpark::record(
+            crate::debug::hotpath::lostpark_record(
                 3,
                 caller_pid as u64,
                 v0 | (n0 << 8),

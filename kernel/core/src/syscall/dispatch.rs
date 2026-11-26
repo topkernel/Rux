@@ -184,7 +184,7 @@ pub fn lastsys_latch_arm() {
 
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
-    let sc_t0 = crate::debug::syscost::enter();
+    let sc_t0 = crate::debug::hotpath::enter();
     // The raw_syscalls:sys_enter / sys_exit tracepoints, recorded
     // through the generated typed call functions. (gap-net) The six-word
     // argument marshal is guarded by the armed check itself — the typed
@@ -224,10 +224,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // per-(nr, errno) census. Two compares when syscost is off.
         if rv < 0 && rv != -11 {
             let sc_args = syscall_get_arguments(regs);
-            crate::debug::syscost::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
+            crate::debug::hotpath::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
         }
     }
-    crate::debug::syscost::exit(sc_nr, sc_t0);
+    crate::debug::hotpath::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when
     // syscost off). x86_64 native nrs 47=recvmsg 45=recvfrom.
@@ -237,7 +237,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // recvmsg(fd, msg, flags) -> flags at a[2]; recvfrom(fd, buf,
         // len, flags, ...) -> flags at a[3].
         let flags = if sc_nr == 47 { a[2] } else { a[3] } as i32;
-        crate::debug::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
+        crate::debug::hotpath::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
     }
 }
 
@@ -593,7 +593,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // master gate (rux:ohhunt (retired debug=ohhunt)); the switch is checked only on the
     // EFAULT return path, so the hot path is untouched.
     if result == -(errno::EFAULT as i64)
-        && crate::debug::switches::oh_hunt_prints_on()
+        && crate::debug::hotpath::oh_hunt_prints_on()
     {
         static EFT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -619,7 +619,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // behind the existing OH hunt-print master gate (rux:ohhunt (retired debug=ohhunt)).
     if result == -(38i64)
         && !unknown_nr
-        && crate::debug::switches::oh_hunt_prints_on()
+        && crate::debug::hotpath::oh_hunt_prints_on()
     {
         static ENOSYS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);

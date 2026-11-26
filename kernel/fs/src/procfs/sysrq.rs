@@ -75,7 +75,7 @@ fn run_command(cmd: u8) {
             if let Ok(text) = core::str::from_utf8(&info) {
                 crate::println!("{}", text);
             }
-            crate::debug::memwatch::dump_mem();
+            crate::debug::hotpath::dump_mem();
         }
         // Make real-time tasks nice-able.
         b'n' => {
@@ -84,7 +84,7 @@ fn run_command(cmd: u8) {
         // Power the system off.
         b'o' => rux::api::process::force_power_off(),
         // Write the current registers and flags to the console.
-        b'p' => crate::debug::backtrace::dump_regs_inline(),
+        b'p' => crate::debug::hotpath::dump_regs_inline(),
         // Display the armed per-CPU high-resolution timer lists.
         b'q' => {
             crate::println!("sysrq: hrtimer lists are not supported");
@@ -102,7 +102,7 @@ fn run_command(cmd: u8) {
             }
         }
         // Write the current task list and task information to the console.
-        b't' => crate::debug::taskdump::dump_all_tasks("sysrq"),
+        b't' => crate::debug::hotpath::dump_all_tasks("sysrq"),
         // Remount all mounted filesystems read-only.
         b'u' => {
             crate::println!("sysrq: remounting read-only is not supported");
@@ -153,7 +153,7 @@ fn signal_all_except_init(sig: i32) {
 fn dump_all_cpu_stacks() {
     // The calling CPU's own backtrace, symbolized (Linux's 'l' prints
     // a backtrace per CPU; the other CPUs' stacks are scanned below).
-    crate::debug::backtrace::dump_stack();
+    crate::debug::hotpath::dump_stack();
     let currents = crate::sched::hotpath::grq_diag_cpu_currents();
     for (cpu, (pid, is_idle, task)) in currents.iter().enumerate() {
         if task.is_null() {

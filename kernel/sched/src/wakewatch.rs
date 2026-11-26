@@ -231,7 +231,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         static CYCP: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         if CYCP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             fn ph(mut v: u64) {
                 for _ in 0..16 {
                     let b = (v >> 60) as u8;
@@ -481,7 +481,7 @@ pub fn heartbeat() {
             && wake_n == last
             && crate::sched::types::GlobalRunQueue::grq_nr_running() == 0
         {
-            crate::debug::lostpark::dump_once(b"frozen");
+            crate::debug::hotpath::dump_once(b"frozen");
         }
     }
     crate::trace::trace_wwcensus(0, 0, wake_n, pick_n);
@@ -518,7 +518,7 @@ fn probe_prints_on() -> bool {
 
 fn ww_msg(msg: &[u8]) {
     for &b in msg {
-        crate::debug::taskdump::putc_brief(b);
+        crate::debug::hotpath::putc_brief(b);
     }
 }
 
@@ -536,7 +536,7 @@ fn ww_u64(mut v: u64) {
         }
     }
     for i in (0..n).rev() {
-        crate::debug::taskdump::putc_brief(buf[i]);
+        crate::debug::hotpath::putc_brief(buf[i]);
     }
 }
 
@@ -559,7 +559,7 @@ fn ww_hex(v: u64) {
         }
     }
     for i in (0..n).rev() {
-        crate::debug::taskdump::putc_brief(buf[i]);
+        crate::debug::hotpath::putc_brief(buf[i]);
     }
 }
 

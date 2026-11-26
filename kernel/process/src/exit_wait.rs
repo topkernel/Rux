@@ -437,11 +437,11 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Release task resources (kernel stack, Arc refs, PID)
                 // Note: remove_child is done inside release_task()
                 let fp_t_reap =
-                    if crate::debug::forkprof::on() { crate::debug::forkprof::now() } else { 0 };
+                    if crate::debug::hotpath::forkprof_on() { crate::debug::hotpath::forkprof_now() } else { 0 };
                 release_task(child_ptr);
                 if fp_t_reap != 0 {
-                    crate::debug::forkprof::add(crate::debug::forkprof::P_WT_REAP, fp_t_reap);
-                    crate::debug::forkprof::trace(crate::debug::forkprof::T_REAP_DONE, child_pid);
+                    crate::debug::hotpath::add(crate::debug::hotpath::P_WT_REAP, fp_t_reap);
+                    crate::debug::hotpath::trace(crate::debug::hotpath::T_REAP_DONE, child_pid);
                 }
 
                 return Ok(child_pid);
@@ -601,14 +601,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // forkprof: this schedule() returns only after the child
                 // ran + exited + woke us — it IS the fork->exit handoff.
                 let fp_t_ws =
-                    if crate::debug::forkprof::on() { crate::debug::forkprof::now() } else { 0 };
+                    if crate::debug::hotpath::forkprof_on() { crate::debug::hotpath::forkprof_now() } else { 0 };
                 if fp_t_ws != 0 {
-                    crate::debug::forkprof::trace(crate::debug::forkprof::T_SCHED_SLEEP, current_pid);
+                    crate::debug::hotpath::trace(crate::debug::hotpath::T_SCHED_SLEEP, current_pid);
                 }
                 crate::sched::hotpath::schedule();
                 if fp_t_ws != 0 {
-                    crate::debug::forkprof::add(crate::debug::forkprof::P_WT_SCHED, fp_t_ws);
-                    crate::debug::forkprof::trace(crate::debug::forkprof::T_SCHED_WAKE, current_pid);
+                    crate::debug::hotpath::add(crate::debug::hotpath::P_WT_SCHED, fp_t_ws);
+                    crate::debug::hotpath::trace(crate::debug::hotpath::T_SCHED_WAKE, current_pid);
                 }
 
                 // After wakeup: state is RUNNING (set by wake_up_process).

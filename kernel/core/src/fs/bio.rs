@@ -222,7 +222,7 @@ impl BufferHead {
                 &self.b_data,
             )?;
             self.clear_state_bit(BufferState::BH_Dirty);
-            crate::debug::fsw::note_dev_write();
+            crate::debug::hotpath::note_dev_write();
         }
         Ok(())
     }
@@ -677,9 +677,9 @@ impl BlockCache {
                 {
                     crate::api::ext4::exthunt_evict_done(vkey.2, sync_rc);
                 }
-                crate::debug::fsw::note_evict(true);
+                crate::debug::hotpath::note_evict(true);
             } else {
-                crate::debug::fsw::note_evict(false);
+                crate::debug::hotpath::note_evict(false);
             }
             // SAFETY: victim is unhashed + unlinked + unpinnable; the
             // Box::into_raw from insertion is reclaimed exactly once.
@@ -770,7 +770,7 @@ impl BlockCache {
             let mut lru = self.lru.lock_irqsave();
             Self::remove_from_lru(&mut lru, victim);
         }
-        crate::debug::fsw::note_drop_block();
+        crate::debug::hotpath::note_drop_block();
         // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
         unsafe { let _ = Box::from_raw(victim); }
         self.count.fetch_sub(1, Ordering::Release);
@@ -948,7 +948,7 @@ impl BlockCache {
             ) {
                 return None;
             }
-            crate::debug::fsw::note_dev_read();
+            crate::debug::hotpath::note_dev_read();
 
             bh.set_device(device);
             bh.set_state_bit(BufferState::BH_Uptodate);
@@ -1478,7 +1478,7 @@ pub fn bh_is_dirty(bh: &*mut BufferHead) -> bool {
 }
 
 pub fn bread(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
-    crate::debug::fsw::note_bread();
+    crate::debug::hotpath::note_bread();
     get_block_cache().get(device, blocknr)
 }
 
@@ -2862,10 +2862,10 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     // null-safe outside task ctx).
     let journal_active = !crate::fs::journal_seam::current_handle_raw().is_null();
     if journal_active {
-        crate::debug::fsw::note_sync_dirty_skip();
+        crate::debug::hotpath::note_sync_dirty_skip();
         return Ok(());
     }
-    crate::debug::fsw::note_sync_dirty();
+    crate::debug::hotpath::note_sync_dirty();
     // Ordered-publication guard: this buffer may be a pending entry/post
     // block whose order constraints a plain sync would violate. Satisfy
     // THIS block's constraints first (per-block closure — the journal
@@ -2895,7 +2895,7 @@ pub fn sync_buffers() -> Result<(), i32> {
     // Durability point: ordered publications must go out first (a plain
     // hash-order drain could persist an entry block before its metadata).
     let _ = flush_publications();
-    crate::debug::fsw::note_sync_all();
+    crate::debug::hotpath::note_sync_all();
     get_block_cache().sync_all()
 }
 
@@ -3123,7 +3123,7 @@ pub fn publication_batch_drain() {
         !pend.is_empty() && pend.len() >= PUB_BATCH
     };
     if over {
-        crate::debug::fsw::note_pub_batch();
+        crate::debug::hotpath::note_pub_batch();
         // Whole queue, append order (pre -> entry -> post per record).
         // No ext4 locks are held by this path (PENDING is a leaf lock;
         // the I/O runs lock-free), so this cannot deadlock against the
@@ -3180,14 +3180,14 @@ pub fn publication_defer(
             cookie: publication_cookie(),
         });
         over_hiwat = pend.len() > PUB_HIGH_WATER;
-        crate::debug::fsw::note_pub_qmax(pend.len());
+        crate::debug::hotpath::note_pub_qmax(pend.len());
     }
     if over_hiwat {
         // Bounded ordered drain by the backlog's own producer (see
         // PUB_HIGH_WATER). No locks are held here and this runs in the
         // creator's syscall context, exactly where the old synchronous
         // barrier used to run.
-        crate::debug::fsw::note_pub_hiwat();
+        crate::debug::hotpath::note_pub_hiwat();
         let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
     }
     id
@@ -3214,10 +3214,10 @@ pub fn publication_defer_entry_only(
             cookie: publication_cookie(),
         });
         over_hiwat = pend.len() > PUB_HIGH_WATER;
-        crate::debug::fsw::note_pub_qmax(pend.len());
+        crate::debug::hotpath::note_pub_qmax(pend.len());
     }
     if over_hiwat {
-        crate::debug::fsw::note_pub_hiwat();
+        crate::debug::hotpath::note_pub_hiwat();
         let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
     }
     id
@@ -3537,7 +3537,7 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
             }
             return Ok(());
         }
-        crate::debug::fsw::note_pub_scoped(mine.len());
+        crate::debug::hotpath::note_pub_scoped(mine.len());
 
         // One plan per device (a task may publish on several mounted
         // filesystems; blocks and obligations are device-keyed, so the
@@ -3630,7 +3630,7 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
         pend.set_list(snapshot);
         return Ok(());
     }
-    crate::debug::fsw::note_pub_cstr();
+    crate::debug::hotpath::note_pub_cstr();
 
     let mut plan = WritePlan::new();
     plan.note_queue_entries(&snapshot, dev);
@@ -3703,7 +3703,7 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
         if batch.is_empty() {
             return Ok(());
         }
-        crate::debug::fsw::note_pub_flush(batch.len());
+        crate::debug::hotpath::note_pub_flush(batch.len());
         let mut first_err: i32 = 0;
         for p in &batch {
             for &b in &p.pre {

@@ -231,7 +231,7 @@ fn validated_read_base() -> usize {
 fn guard_armed() -> bool {
     #[cfg(feature = "x86_64")]
     {
-        crate::debug::wildwatch::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
+        crate::debug::hotpath::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
     }
     #[cfg(not(feature = "x86_64"))]
     {

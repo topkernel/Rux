@@ -50,7 +50,7 @@ pub fn exit_robust_list(t: &Task) {
     }
     #[cfg(feature = "debug-futex-trace")]
     {
-        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ROBUST-EXIT pid=");
         taskdump_dec(t.pid() as u64);
         taskdump_raw_line(b" head=");
@@ -171,7 +171,7 @@ pub fn exit_clear_child_tid(t: &mut Task) {
     let mm_id = crate::sync::futex::task_futex_mm_id(t);
     #[cfg(feature = "debug-futex-trace")]
     {
-        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX CLEARTID-EXIT pid=");
         taskdump_dec(t.pid() as u64);
         taskdump_raw_line(b" u=");
@@ -226,9 +226,9 @@ pub fn kill_other_threads(current: &Task) {
             if crate::trace::EVENT_WWCENSUS.armed()
                 && m_raw as *const Task != current as *const Task
             {
-                use crate::debug::taskdump::putc_brief as putchar;
+                use crate::debug::hotpath::putc_brief as putchar;
                 fn pd(mut v: u64) {
-                    use crate::debug::taskdump::putc_brief as p;
+                    use crate::debug::hotpath::putc_brief as p;
                     let mut buf = [0u8; 20];
                     let mut n = 0;
                     if v == 0 { p(b'0'); return; }
@@ -590,19 +590,19 @@ fn free_dead_member(claim: crate::sched::types::ReapClaim) -> Option<crate::sche
         {
             if spins == 0 {
                 let cur_pid = crate::sched::hotpath::current().map(|c| c.pid()).unwrap_or(0);
-                crate::debug::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
-                crate::debug::taskdump::taskdump_dec(cur_pid as u64);
-                crate::debug::taskdump::taskdump_raw_line(b" member=");
-                crate::debug::taskdump::taskdump_dec(m.pid() as u64);
-                crate::debug::taskdump::taskdump_raw_line(b" state=0x");
+                crate::debug::hotpath::taskdump_raw_line(b"FDM-WAIT sweeper=");
+                crate::debug::hotpath::taskdump_dec(cur_pid as u64);
+                crate::debug::hotpath::taskdump_raw_line(b" member=");
+                crate::debug::hotpath::taskdump_dec(m.pid() as u64);
+                crate::debug::hotpath::taskdump_raw_line(b" state=0x");
                 let st = m.state().bits() as u64;
                 let mut sh: i32 = 32;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((st >> sh) & 0xF) as u8;
-                    crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                    crate::debug::hotpath::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
                 }
-                crate::debug::taskdump::taskdump_raw_line(b"\n");
+                crate::debug::hotpath::taskdump_raw_line(b"\n");
             }
             if crate::timer::get_jiffies()
                 .wrapping_sub(armed_at)
@@ -637,13 +637,13 @@ fn free_dead_member(claim: crate::sched::types::ReapClaim) -> Option<crate::sche
             let claim = m
                 .running_on_cpu
                 .load(core::sync::atomic::Ordering::Acquire);
-            crate::debug::taskdump::taskdump_raw_line(b"FDM-DEFER #");
-            crate::debug::taskdump::taskdump_dec((n + 1) as u64);
-            crate::debug::taskdump::taskdump_raw_line(b" member=");
-            crate::debug::taskdump::taskdump_dec(m.pid() as u64);
-            crate::debug::taskdump::taskdump_raw_line(b" claim=");
-            crate::debug::taskdump::taskdump_dec(claim as u64);
-            crate::debug::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
+            crate::debug::hotpath::taskdump_raw_line(b"FDM-DEFER #");
+            crate::debug::hotpath::taskdump_dec((n + 1) as u64);
+            crate::debug::hotpath::taskdump_raw_line(b" member=");
+            crate::debug::hotpath::taskdump_dec(m.pid() as u64);
+            crate::debug::hotpath::taskdump_raw_line(b" claim=");
+            crate::debug::hotpath::taskdump_dec(claim as u64);
+            crate::debug::hotpath::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
         }
         return Some(claim);
     }
@@ -1215,23 +1215,23 @@ fn release_task_storage(claim: crate::sched::types::ReapClaim) {
                 core::sync::atomic::AtomicU32::new(0);
             let n = RTS_DEFER_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 64 {
-                crate::debug::taskdump::taskdump_raw_line(
+                crate::debug::hotpath::taskdump_raw_line(
                     b"RTS-DEFER (storage free deferred; owner still switching) pid=",
                 );
-                crate::debug::taskdump::taskdump_dec(t.pid() as u64);
-                crate::debug::taskdump::taskdump_raw_line(b" on_cpu=");
-                crate::debug::taskdump::taskdump_dec(t.on_cpu() as u64);
-                crate::debug::taskdump::taskdump_raw_line(b" swout=");
-                crate::debug::taskdump::taskdump_dec(
+                crate::debug::hotpath::taskdump_dec(t.pid() as u64);
+                crate::debug::hotpath::taskdump_raw_line(b" on_cpu=");
+                crate::debug::hotpath::taskdump_dec(t.on_cpu() as u64);
+                crate::debug::hotpath::taskdump_raw_line(b" swout=");
+                crate::debug::hotpath::taskdump_dec(
                     crate::sched::hotpath::switching_out_names(task) as u64,
                 );
-                crate::debug::taskdump::taskdump_raw_line(b" tsd=");
-                crate::debug::taskdump::taskdump_dec(
+                crate::debug::hotpath::taskdump_raw_line(b" tsd=");
+                crate::debug::hotpath::taskdump_dec(
                     t.terminal_switch_done.load(core::sync::atomic::Ordering::Acquire) as u64,
                 );
-                crate::debug::taskdump::taskdump_raw_line(b" st=");
-                crate::debug::taskdump::taskdump_dec(t.state().bits() as u64);
-                crate::debug::taskdump::taskdump_raw_line(b" slot=");
+                crate::debug::hotpath::taskdump_raw_line(b" st=");
+                crate::debug::hotpath::taskdump_dec(t.state().bits() as u64);
+                crate::debug::hotpath::taskdump_raw_line(b" slot=");
                 let mut slot_pid = u32::MAX;
                 for c in 0..crate::config::MAX_CPUS {
                     let cur = crate::sched::hotpath::cpu_state(c).current;
@@ -1240,8 +1240,8 @@ fn release_task_storage(claim: crate::sched::types::ReapClaim) {
                         break;
                     }
                 }
-                crate::debug::taskdump::taskdump_dec(slot_pid as u64);
-                crate::debug::taskdump::taskdump_raw_line(b"\n");
+                crate::debug::hotpath::taskdump_dec(slot_pid as u64);
+                crate::debug::hotpath::taskdump_raw_line(b"\n");
             }
             // Hand the retry the reaper's ownership: re-park the task on
             // the reaping task's dead_threads list. The drain ladder

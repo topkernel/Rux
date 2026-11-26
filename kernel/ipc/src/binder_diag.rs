@@ -453,7 +453,7 @@ pub fn dump_latched_maps_taskctx() {
         }
         drop(vm);
         if dumped_ok {
-            crate::debug::taskdump::defer_emit_line(outf);
+            crate::debug::hotpath::defer_emit_line(outf);
             // Same insert-by-value discipline as the softirq path.
             let mut dslot = (tgid as usize) % VMA_DUMPED_DONE.len();
             for (i, d) in VMA_DUMPED_DONE.iter().enumerate() {
@@ -1033,7 +1033,7 @@ pub fn sleep_snapshot() {
                         }
                     }
                 }
-                let stk = crate::debug::taskdump::parked_kstack_syms(tk);
+                let stk = crate::debug::hotpath::parked_kstack_syms(tk);
                 if !stk.is_empty() {
                     out.push_str(&stk);
                 }
@@ -1107,7 +1107,7 @@ pub fn sleep_snapshot() {
                 }
             }
             let (chunk, tail) = rest.split_at(cut);
-            crate::debug::taskdump::defer_emit_line(alloc::string::String::from(chunk));
+            crate::debug::hotpath::defer_emit_line(alloc::string::String::from(chunk));
             rest = tail;
         }
     }
@@ -1409,7 +1409,7 @@ pub fn txn_hang_audit() {
                 let samgr = binder_sareg_samgr_pid();
                 if samgr != 0 {
                     use core::fmt::Write;
-                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::types::ConsoleWriter::new();
                     let mut n = 0usize;
                     crate::sched::hotpath::for_each_task_try(|task| {
                         // SAFETY: diagnostic reads under the
@@ -1573,7 +1573,7 @@ pub fn txn_hang_audit() {
     let comm_of = |p: *mut crate::process::types::Task| -> &str {
         crate::r#unsafe::diag_task_comm(p)
     };
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     use core::fmt::Write as _;
     for h in &hung {
         let srv = crate::process::hotpath::find_task_by_pid(h.stid);
@@ -1775,7 +1775,7 @@ pub fn txn_hang_audit() {
                     )
                     .is_ok()
             {
-                crate::debug::taskdump::dump_all_tasks("txn-hang-20s");
+                crate::debug::hotpath::dump_all_tasks("txn-hang-20s");
                 // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
                 // -> wait_for_used_interruptible, 441 s): capture the
                 // virtio ring state at the hang moment — at_device vs
@@ -1799,38 +1799,38 @@ pub fn txn_hang_audit() {
         // entry frame mislabels the file (seen on sc314A wave-1).
         #[cfg(feature = "x86_64")]
         let fam = if matches!(sys, 2 | 257 | 437) {
-            Some(crate::debug::pathstash::OP_OPEN)
+            Some(crate::debug::hotpath::OP_OPEN)
         } else if matches!(sys, 1 | 20) {
-            Some(crate::debug::pathstash::OP_WRITE)
+            Some(crate::debug::hotpath::OP_WRITE)
         } else if matches!(sys, 74 | 75) {
-            Some(crate::debug::pathstash::OP_SYNC)
+            Some(crate::debug::hotpath::OP_SYNC)
         } else if matches!(sys, 77 | 76) {
             // x86_64 ABI: 77 ftruncate, 76 truncate (leg-36B).
-            Some(crate::debug::pathstash::OP_TRUNC)
+            Some(crate::debug::hotpath::OP_TRUNC)
         } else {
             None
         };
         #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         let fam = if matches!(sys, 56 | 24) {
-            Some(crate::debug::pathstash::OP_OPEN)
+            Some(crate::debug::hotpath::OP_OPEN)
         } else if matches!(sys, 64 | 66) {
-            Some(crate::debug::pathstash::OP_WRITE)
+            Some(crate::debug::hotpath::OP_WRITE)
         } else if matches!(sys, 82 | 83) {
-            Some(crate::debug::pathstash::OP_SYNC)
+            Some(crate::debug::hotpath::OP_SYNC)
         } else if matches!(sys, 46 | 45) {
             // asm-generic: 46 ftruncate, 45 truncate (leg-36B).
-            Some(crate::debug::pathstash::OP_TRUNC)
+            Some(crate::debug::hotpath::OP_TRUNC)
         } else {
             None
         };
         if let Some(want) = fam {
-            if let Some((op, p)) = crate::debug::pathstash::lookup_file(h.stid) {
+            if let Some((op, p)) = crate::debug::hotpath::lookup_file(h.stid) {
                 if op == want {
                     let opn = match op {
-                        crate::debug::pathstash::OP_OPEN => "open",
-                        crate::debug::pathstash::OP_WRITE => "write",
-                        crate::debug::pathstash::OP_SYNC => "sync",
-                        crate::debug::pathstash::OP_TRUNC => "truncate",
+                        crate::debug::hotpath::OP_OPEN => "open",
+                        crate::debug::hotpath::OP_WRITE => "write",
+                        crate::debug::hotpath::OP_SYNC => "sync",
+                        crate::debug::hotpath::OP_TRUNC => "truncate",
                         _ => "?",
                     };
                     let _ = writeln!(
@@ -2248,7 +2248,7 @@ pub fn bwr_park_audit() {
         let (_, sys, a0, a1, a2) = entry_frame(top);
         Some((sys, a0, a1, a2))
     };
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     use core::fmt::Write as _;
     let mut printed = 0usize;
     let mut idle_readers = 0usize;
@@ -2618,7 +2618,7 @@ pub fn bwr_park_audit() {
                                     "FUXWATCH2-CHAIN word={:#x} (live contended FFRT mutex)",
                                     w2
                                 );
-                                crate::debug::taskdump::ensure_defer_thread();
+                                crate::debug::hotpath::ensure_defer_thread();
                             }
                         }
                         alloc::format!(" mscan[{}]", t)
@@ -3318,7 +3318,7 @@ pub fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// Writes through the caller's ConsoleWriter — pr_warn from the censusd
 /// audit context is dropped (the missing FUXPARK-ARM prints class).
 pub fn user_task_park_stack(task: *mut crate::process::types::Task) {
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     user_task_park_stack_w(task, &mut w);
 }
 
@@ -3366,7 +3366,7 @@ pub fn census_tgid_due(gate: usize, tgid: u32, now: u32, interval: u32) -> bool 
 
 pub fn user_task_park_stack_w(
     task: *mut crate::process::types::Task,
-    w: &mut crate::debug::backtrace::ConsoleWriter,
+    w: &mut crate::debug::types::ConsoleWriter,
 ) {
     use core::fmt::Write as _;
     if task.is_null() {

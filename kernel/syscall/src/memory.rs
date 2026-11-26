@@ -311,8 +311,8 @@ fn vmap_budget_line(line: impl FnOnce()) {
 }
 
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
-    let mp = crate::debug::mmprof::on();
-    let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
+    let mp = crate::debug::hotpath::mmprof_on();
+    let mp_t0 = if mp { crate::debug::hotpath::mmprof_now() } else { 0 };
     // hp89: whole-call mm-surgery section (see MmStruct::mm_surgery) —
     // the MAP_FIXED teardown+install arm and the perf/binder ring
     // placement+install run as multi-step surgery.
@@ -321,9 +321,9 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mmap_inner(args);
     if mp {
-        crate::debug::mmprof::add(crate::debug::mmprof::M_TOTAL, mp_t0);
+        crate::debug::hotpath::mmprof_add(crate::debug::hotpath::M_TOTAL, mp_t0);
         if ret > 0 {
-            crate::debug::mmprof::bucket_len(args[1] as usize, mp_t0);
+            crate::debug::hotpath::bucket_len(args[1] as usize, mp_t0);
         }
     }
     {
@@ -347,7 +347,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // comm scan + fdtable path lookup + print ran on EVERY appspawn-
     // family mmap (~456 lines in the pre-launcher window alone, each
     // costing UART emit + hilogd drain).
-    if ret > 0 && crate::debug::switches::oh_hunt_prints_on() {
+    if ret > 0 && crate::debug::hotpath::oh_hunt_prints_on() {
         let comm = rux::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -416,15 +416,15 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // mmprof (cmdline mmprof=1, oh-launcher perf handoff): placement
     // scalars + issuer attribution (the whole-syscall bracket lives in
     // the sys_mmap wrapper so early EINVAL returns still count).
-    let mp = crate::debug::mmprof::on();
+    let mp = crate::debug::hotpath::mmprof_on();
     if mp {
-        crate::debug::mmprof::bump_comm();
+        crate::debug::hotpath::bump_comm();
         if args[3] as u32 & map::MAP_FIXED != 0 || args[3] as u32 & 0x100000 != 0 {
-            crate::debug::mmprof::bump(crate::debug::mmprof::S_FIXED, 1);
+            crate::debug::hotpath::mmprof_bump(crate::debug::hotpath::S_FIXED, 1);
         } else if args[0] == 0 {
-            crate::debug::mmprof::bump(crate::debug::mmprof::S_ANON0, 1);
+            crate::debug::hotpath::mmprof_bump(crate::debug::hotpath::S_ANON0, 1);
         } else {
-            crate::debug::mmprof::bump(crate::debug::mmprof::S_HINT, 1);
+            crate::debug::hotpath::mmprof_bump(crate::debug::hotpath::S_HINT, 1);
         }
     }
 
@@ -469,7 +469,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     if fd >= 0
         && map_flags & map::MAP_ANONYMOUS == 0
         && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED
-        && crate::debug::switches::oh_hunt_prints_on()
+        && crate::debug::hotpath::oh_hunt_prints_on()
     {
         static SHARED_FILE_MMAPS: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
@@ -1577,11 +1577,11 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
-    let mp = crate::debug::mmprof::on();
-    let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
+    let mp = crate::debug::hotpath::mmprof_on();
+    let mp_t0 = if mp { crate::debug::hotpath::mmprof_now() } else { 0 };
     let ret = sys_mprotect_inner(args);
     if mp {
-        crate::debug::mmprof::add(crate::debug::mmprof::MP_TOTAL, mp_t0);
+        crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MP_TOTAL, mp_t0);
     }
     // CFI-shadow hunt (perm-denied lane): OH musl's cross-DSO CFI fill
     // mprotects PROT_READ slices out of a 2GB PROT_NONE reserve and then
@@ -1870,13 +1870,13 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // can interleave between them.
             // mmprof: the write-guard acquire wait + the coverage/EACCES
             // walk (mmprof=1; the guard spans the whole syscall body).
-            let mp2 = crate::debug::mmprof::on();
-            let mp_t_lock = if mp2 { crate::debug::mmprof::now() } else { 0 };
+            let mp2 = crate::debug::hotpath::mmprof_on();
+            let mp_t_lock = if mp2 { crate::debug::hotpath::mmprof_now() } else { 0 };
             let mut vma_mgr = addr_space.vma_write();
             if mp2 {
-                crate::debug::mmprof::add(crate::debug::mmprof::MP_LOCK, mp_t_lock);
+                crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MP_LOCK, mp_t_lock);
             }
-            let mp_t_cover = if mp2 { crate::debug::mmprof::now() } else { 0 };
+            let mp_t_cover = if mp2 { crate::debug::hotpath::mmprof_now() } else { 0 };
 
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
@@ -1986,10 +1986,10 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
 
             // mmprof: coverage+EACCES walk done.
             if mp2 {
-                crate::debug::mmprof::add(crate::debug::mmprof::MP_COVER, mp_t_cover);
-                crate::debug::mmprof::bump(crate::debug::mmprof::S_MPPAGES, ((length + 4095) / 4096) as u64);
+                crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MP_COVER, mp_t_cover);
+                crate::debug::hotpath::mmprof_bump(crate::debug::hotpath::S_MPPAGES, ((length + 4095) / 4096) as u64);
             }
-            let mp_t_pte = if mp2 { crate::debug::mmprof::now() } else { 0 };
+            let mp_t_pte = if mp2 { crate::debug::hotpath::mmprof_now() } else { 0 };
 
             // Get page table root
             let root_ppn = addr_space.root_ppn();
@@ -2081,14 +2081,14 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // Flush TLB after updating PTE permissions (still under the
             // PTE lock so no stale entry survives the section).
             if mp2 {
-                crate::debug::mmprof::add(crate::debug::mmprof::MP_PTE, mp_t_pte);
+                crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MP_PTE, mp_t_pte);
             }
-            let mp_t_tlb = if mp2 { crate::debug::mmprof::now() } else { 0 };
+            let mp_t_tlb = if mp2 { crate::debug::hotpath::mmprof_now() } else { 0 };
             // sfence.vma — flush_tlb_all is a safe fn (vestigial wrapper
             // removed).
             crate::arch::mm::asid::flush_tlb_all();
             if mp2 {
-                crate::debug::mmprof::add(crate::debug::mmprof::MP_TLB, mp_t_tlb);
+                crate::debug::hotpath::mmprof_add(crate::debug::hotpath::MP_TLB, mp_t_tlb);
             }
             drop(_pte_guard);
 
