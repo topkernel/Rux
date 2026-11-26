@@ -119,3 +119,4 @@ kernel/core/src/debug/taskdump.rs	5	0	regions moved to debug/hotpath.rs by the p
 kernel/core/src/debug/wildwatch.rs	10	0	regions moved to debug/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/sched/hotpath.rs	16	0	seed-core pass 3 pilot (p23-p3sched): all 16 regions collected into sched/unsafe.rs with annotations carried; hotpath.rs holds zero unsafe keyword(s) (core_unsafe_gate strict rc=0)
 kernel/core/src/mm/hotpath.rs	53	0	pass-3 (seed-core 2c.5) collection: the 53 annotated inline regions moved into mm/unsafe.rs (30 recovered by moved-item pairing in the re-bank, the rest re-annotated with their INV contracts by the spec); the file holds zero unsafe keywords now — scripts/core_unsafe_gate.py --strict clean
+kernel/core/src/drivers/hotpath.rs	76	0	regions moved to drivers/unsafe.rs by the pass-3 merge (annotations carried by id)

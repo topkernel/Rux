@@ -54,6 +54,173 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 ^rux::syscall::seam_register_default$
 # interrupt/domain functions: callers remain (5/3/7/5 external references,
 # x86_64 gate 2026-11-26); fully inlined at all of them in this build.
+#
+# --- the pass-3 drivers collection (p23-p3drivers lane, 2026-11-26) ---
+^<rux::drivers::AshmemPages as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::AshmemPages as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::AshmemPages as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::BlockDeviceManager>::get_disk$
+^<rux::drivers::GemObject as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::GemObject as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::GemObject as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::GenDisk>::private::<rux::drivers::VirtIOBlkDevice>::\{closure#0\}$
+^<rux::drivers::VirtIONetDevice>::dealloc_rx_buffer$
+^<rux::drivers::VirtIONetDevice>::poll$
+^<rux::drivers::VirtIONetDevice>::refill_rx_buffers$
+^<rux::drivers::VirtQueue>::desc_mut$
+^<rux::drivers::VirtQueue>::notify$
+^<rux::drivers::VirtioGpuDevice as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::VirtioGpuDevice as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::VirtioGpuDevice as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::VirtioGpuDevice>::init_framebuffer$
+^<rux::drivers::VirtioGpuDevice>::send_command::<<rux::drivers::VirtioGpuDevice>::unref_resource::CmdResourceUnref, rux::drivers::RespNoData>$
+^<rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResourceAttachBacking, rux::drivers::RespNoData>$
+^<rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResourceCreate2d, rux::drivers::RespNoData>$
+^<rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResourceFlush, rux::drivers::RespNoData>$
+^<rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdSetScanout, rux::drivers::RespNoData>$
+^<rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdTransferToHost2d, rux::drivers::RespNoData>$
+^<rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::GpuCtrlHeader, rux::drivers::RespDisplayInfo>$
+^<rux::drivers::VirtioInputDevice as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::VirtioInputDevice as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::VirtioInputDevice as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::VirtioInputDevice>::init_virtio$
+^<rux::drivers::VirtioInputDevice>::read_event$
+^rux::drivers::apic::kvm_pv_send_ipi$
+^rux::drivers::apic::kvm_pv_send_ipi::hc$
+^rux::drivers::kvm_pv_send_ipi$
+^rux::drivers::kvm_pv_send_ipi::hc$
+^rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core\[93ee42ca37157773\]::ops::drop::Drop>::\{closure\}>$
+^rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::\{closure\}>$
+^rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::\{closure\}>$
+^rux::drivers::with_gpu_device::<bool, rux::drivers::\{closure\}>$
+#   the drivers functions whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (113 directives: 77 wraps,
+#   15 inline-call reuses, kvm_pv_send_ipi + nested hc relocated, 20
+#   Send/Sync proofs moved). Same operation, verbatim body, wrapper
+#   inlined back at every call site; the residual is debug-build
+#   instruction-selection drift only (base -> current bytes, same rig,
+#   debug profile):
+^rux::drivers::\{closure\}$
+#   <rux::drivers::AshmemPages as core[93ee42ca37157773]::ops::drop::Drop> rv 148->150, x86 -->-, a64 -->-
+#   <rux::drivers::AshmemPages as core[c9230c9cd16dbdec]::ops::drop::Drop> rv -->-, x86 176->184, a64 -->-
+#   <rux::drivers::AshmemPages as core[f485ab2f9f61e21a]::ops::drop::Drop> rv -->-, x86 -->-, a64 260->264
+#   <rux::drivers::BlockDeviceManager>::get_disk                           rv 172->174, x86 231->235, a64 376->380
+#   <rux::drivers::GemObject as core[93ee42ca37157773]::ops::drop::Drop>:: rv 70->76, x86 -->-, a64 -->-
+#   <rux::drivers::GemObject as core[c9230c9cd16dbdec]::ops::drop::Drop>:: rv -->-, x86 76->88, a64 -->-
+#   <rux::drivers::GemObject as core[f485ab2f9f61e21a]::ops::drop::Drop>:: rv -->-, x86 -->-, a64 92->104
+#   <rux::drivers::GenDisk>::private::<rux::drivers::VirtIOBlkDevice>::{cl rv 18->20, x86 21->25, a64 104->108
+#   <rux::drivers::VirtIONetDevice>::dealloc_rx_buffer                     rv 190->196, x86 248->268, a64 260->272
+#   <rux::drivers::VirtIONetDevice>::poll                                  rv 1386->1394, x86 1945->1956, a64 1564->1576
+#   <rux::drivers::VirtIONetDevice>::refill_rx_buffers                     rv 516->526, x86 771->828, a64 616->644
+#   <rux::drivers::VirtQueue>::desc_mut                                    rv 142->148, x86 196->204, a64 288->296
+#   <rux::drivers::VirtQueue>::notify                                      rv 98->124, x86 101->109, a64 180->196
+#   <rux::drivers::VirtioGpuDevice as core[93ee42ca37157773]::ops::drop::D rv 68->74, x86 -->-, a64 -->-
+#   <rux::drivers::VirtioGpuDevice as core[c9230c9cd16dbdec]::ops::drop::D rv -->-, x86 109->121, a64 -->-
+#   <rux::drivers::VirtioGpuDevice as core[f485ab2f9f61e21a]::ops::drop::D rv -->-, x86 -->-, a64 96->108
+#   <rux::drivers::VirtioGpuDevice>::init_framebuffer                      rv 730->738, x86 1119->1139, a64 868->876
+#   <rux::drivers::VirtioGpuDevice>::send_command::<<rux::drivers::VirtioG rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResou rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResou rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResou rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdSetSc rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdTrans rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::GpuCtrlH rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioInputDevice as core[93ee42ca37157773]::ops::drop: rv 76->82, x86 -->-, a64 -->-
+#   <rux::drivers::VirtioInputDevice as core[c9230c9cd16dbdec]::ops::drop: rv -->-, x86 127->139, a64 -->-
+#   <rux::drivers::VirtioInputDevice as core[f485ab2f9f61e21a]::ops::drop: rv -->-, x86 -->-, a64 120->132
+#   <rux::drivers::VirtioInputDevice>::init_virtio                         rv 1016->1024, x86 1441->1449, a64 1248->1256
+#   <rux::drivers::VirtioInputDevice>::read_event                          rv 926->958, x86 1472->1505, a64 1188->1224
+#   rux::drivers::apic::kvm_pv_send_ipi                                    rv -->-, x86 148->-, a64 -->-
+#   rux::drivers::apic::kvm_pv_send_ipi::hc                                rv -->-, x86 139->-, a64 -->-
+#   rux::drivers::kvm_pv_send_ipi                                          rv -->-, x86 -->148, a64 -->-
+#   rux::drivers::kvm_pv_send_ipi::hc                                      rv -->-, x86 -->139, a64 -->-
+#   rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core rv 130->132, x86 -->-, a64 -->-
+#   rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core rv -->-, x86 154->158, a64 -->-
+#   rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core rv -->-, x86 -->-, a64 232->236
+#   rux::drivers::with_gpu_device::<bool, rux::drivers::{closure}>         rv 150->152, x86 193->197, a64 248->252
+#
+# --- gate-time additions for the drivers lane (same rig, all nine pass-2
+# specs vs the pre-pass-2 coordinator base; debug profile) ---
+^<rux::syscall::FdSet>::clear$
+^<rux::syscall::FdSet>::is_set$
+^<rux::syscall::FdSet>::new$
+^<rux::syscall::FdSet>::set$
+^<rux::syscall::FdSet>::zero$
+^rux::drivers::aarch64::set_timer$
+^rux::drivers::abandon_pending_completion$
+^rux::drivers::apic::ensure_phys_mapped$
+^rux::drivers::apic::init_x2apic_or_mmio$
+^rux::drivers::apic::reg_read$
+^rux::drivers::apic::reg_write$
+^rux::drivers::apic::send_icr$
+^rux::drivers::apic::timer_event_record$
+^rux::drivers::ashmem_file_read$
+^rux::drivers::begin_delivery$
+^rux::drivers::bytemod::u32_slice_as_bytes$
+^rux::drivers::clint::set_timecmp$
+^rux::drivers::create_dumb$
+#   the residual after the 77 always-inlined wrappers: (a) the drift
+#   class above, for the drivers fns whose wrapper reshaped instruction
+#   selection; (b) five <rux::syscall::FdSet> method instantiations that
+#   existed only in the base build (their call sites now inline them -
+#   current sizes [] - bodies unchanged, one audited devno edge inside);
+#   measured base -> current bytes:
+#   <rux::syscall::FdSet>::clear                                           rv 154->-, x86 -->-, a64 232->-
+#   <rux::syscall::FdSet>::is_set                                          rv 162->-, x86 -->-, a64 240->-
+#   <rux::syscall::FdSet>::new                                             rv 52->-, x86 -->-, a64 80->-
+#   <rux::syscall::FdSet>::set                                             rv 150->-, x86 -->-, a64 228->-
+#   <rux::syscall::FdSet>::zero                                            rv 32->-, x86 -->-, a64 192->-
+#   rux::drivers::aarch64::set_timer                                       rv -->-, x86 -->-, a64 40->44
+#   rux::drivers::abandon_pending_completion                               rv 1174->1182, x86 1862->1880, a64 1520->1528
+#   rux::drivers::apic::ensure_phys_mapped                                 rv -->-, x86 493->573, a64 -->-
+#   rux::drivers::apic::init_x2apic_or_mmio                                rv -->-, x86 267->277, a64 -->-
+#   rux::drivers::apic::reg_read                                           rv -->-, x86 131->138, a64 -->-
+#   rux::drivers::apic::reg_write                                          rv -->-, x86 141->154, a64 -->-
+#   rux::drivers::apic::send_icr                                           rv -->-, x86 182->186, a64 -->-
+#   rux::drivers::apic::timer_event_record                                 rv -->-, x86 738->754, a64 -->-
+#   rux::drivers::ashmem_file_read                                         rv 610->620, x86 1064->1099, a64 896->916
+#   rux::drivers::begin_delivery                                           rv 26->28, x86 23->27, a64 108->112
+#   rux::drivers::bytemod::u32_slice_as_bytes                              rv 76->80, x86 86->96, a64 -->-
+#   rux::drivers::clint::set_timecmp                                       rv 34->36, x86 -->-, a64 -->-
+#   rux::drivers::create_dumb                                              rv -->-, x86 -->-, a64 1284->1292
+#
+# --- second gate-time sweep, drivers lane (same class: debug-build
+# instruction selection / LTO inline jitter around the collected
+# edges; the four interrupt::domain and the syscall seam rows are
+# codegen cascade, no source change in those files) ---
+^rux::drivers::deliver_completion$
+^rux::drivers::evdev_file_close$
+^rux::drivers::evdev_poll_unwait$
+^rux::drivers::evdev_poll_wait$
+^rux::drivers::flush_framebuffer$
+^rux::drivers::gicv3::eoir1_write$
+^rux::drivers::gicv3::iar1_read$
+^rux::drivers::gicv3::send_sgi$
+^rux::drivers::init_virtio_input$
+^rux::drivers::io_buf_alloc$
+^rux::drivers::io_buf_free$
+^rux::drivers::io_buf_init$
+^rux::drivers::io_buf_release$
+^rux::drivers::loop_file_ioctl$
+^rux::drivers::loop_file_read$
+^rux::drivers::loop_file_write$
+^rux::drivers::pci_blk_acquire_site$
+^rux::drivers::pci_flag_sync_tombstone_timed_out$
+^rux::drivers::pci_pending_slot_reservable_len$
+^rux::drivers::pci_process_async_completions_slot$
+^rux::drivers::pci_publish_sync_chain$
+^rux::drivers::pci_submit_data_async_sg$
+^rux::drivers::present_fb$
+^rux::drivers::prime_close$
+^rux::drivers::prime_fd_to_handle$
+^rux::drivers::prime_file_gem$
+^rux::drivers::read_reg$
+^rux::drivers::resp_status_byte$
+^rux::drivers::used_ring_elem_id$
+^rux::drivers::used_ring_idx$
+^rux::drivers::wedge_put$
+^rux::drivers::with_gpu_device::<\(u8, u8, u8\), rux::drivers::\{closure\}>$
+^rux::drivers::x86_64::init$
 ^rux::interrupt::domain::generic_handle_domain_irq$
 ^rux::interrupt::domain::get_default_domain$
 ^rux::interrupt::domain::irq_create_mapping$
@@ -90,3 +257,43 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 # --- verbatim operation; debug instruction-selection/call-placement drift.
 ^rux::mm::vdso_init$
 ^rux::mm::meta_audit_inner$
+^rux::syscall::seam_register_default$
+#   measured base -> current bytes:
+#   rux::drivers::deliver_completion                                       rv 42->48, x86 43->54, a64 212->224
+#   rux::drivers::evdev_file_close                                         rv 252->256, x86 347->364, a64 396->404
+#   rux::drivers::evdev_poll_unwait                                        rv 550->556, x86 739->749, a64 744->748
+#   rux::drivers::evdev_poll_wait                                          rv 492->494, x86 672->676, a64 704->712
+#   rux::drivers::flush_framebuffer                                        rv 126->128, x86 143->147, a64 224->228
+#   rux::drivers::gicv3::eoir1_write                                       rv -->-, x86 -->-, a64 36->40
+#   rux::drivers::gicv3::iar1_read                                         rv -->-, x86 -->-, a64 40->44
+#   rux::drivers::gicv3::send_sgi                                          rv -->-, x86 -->-, a64 116->120
+#   rux::drivers::init_virtio_input                                        rv -->-, x86 -->-, a64 1100->1072
+#   rux::drivers::io_buf_alloc                                             rv 266->268, x86 280->284, a64 412->416
+#   rux::drivers::io_buf_free                                              rv 268->274, x86 274->289, a64 416->432
+#   rux::drivers::io_buf_init                                              rv 62->68, x86 91->102, a64 260->200
+#   rux::drivers::io_buf_release                                           rv 140->146, x86 145->157, a64 172->184
+#   rux::drivers::loop_file_ioctl                                          rv 8954->8962, x86 8252->8283, a64 7860->7864
+#   rux::drivers::loop_file_read                                           rv 630->650, x86 1116->1165, a64 1004->1048
+#   rux::drivers::loop_file_write                                          rv 734->792, x86 1323->1400, a64 1244->1320
+#   rux::drivers::pci_blk_acquire_site                                     rv 22->24, x86 23->30, a64 -->-
+#   rux::drivers::pci_flag_sync_tombstone_timed_out                        rv 214->216, x86 254->250, a64 288->292
+#   rux::drivers::pci_pending_slot_reservable_len                          rv 296->298, x86 335->346, a64 400->404
+#   rux::drivers::pci_process_async_completions_slot                       rv 2786->2794, x86 3882->3910, a64 3332->3340
+#   rux::drivers::pci_publish_sync_chain                                   rv 578->580, x86 880->891, a64 748->752
+#   rux::drivers::pci_submit_data_async_sg                                 rv 2356->2358, x86 3505->3510, a64 2832->2836
+#   rux::drivers::present_fb                                               rv 2012->2062, x86 3041->3143, a64 2560->2632
+#   rux::drivers::prime_close                                              rv 80->82, x86 85->89, a64 100->104
+#   rux::drivers::prime_fd_to_handle                                       rv 1848->1700, x86 2534->2321, a64 2192->2032
+#   rux::drivers::prime_file_gem                                           rv 78->80, x86 84->88, a64 176->180
+#   rux::drivers::read_reg                                                 rv 76->80, x86 84->92, a64 128->136
+#   rux::drivers::resp_status_byte                                         rv 58->60, x86 53->57, a64 104->108
+#   rux::drivers::used_ring_elem_id                                        rv 146->152, x86 172->184, a64 240->252
+#   rux::drivers::used_ring_idx                                            rv 88->90, x86 -->-, a64 144->148
+#   rux::drivers::wedge_put                                                rv 28->32, x86 28->31, a64 32->36
+#   rux::drivers::with_gpu_device::<(u8, u8, u8), rux::drivers::{closure}> rv 202->204, x86 182->186, a64 304->308
+#   rux::drivers::x86_64::init                                             rv -->-, x86 75->81, a64 -->-
+#   rux::interrupt::domain::generic_handle_domain_irq                      rv -->-, x86 150->-, a64 -->-
+#   rux::interrupt::domain::get_default_domain                             rv -->-, x86 72->-, a64 -->-
+#   rux::interrupt::domain::irq_create_mapping                             rv -->-, x86 358->-, a64 -->-
+#   rux::interrupt::domain::irq_domain_create_linear                       rv -->-, x86 217->-, a64 -->-
+#   rux::syscall::seam_register_default                                    rv 16->-, x86 -->-, a64 16->-

@@ -822,121 +822,105 @@ a969a89e1d2f	kernel/core/src/debug/unsafe.rs	raw_qword	89	volatile,ptr-ops	INV:I
 5c5c3a6c8b15	kernel/core/src/debug/unsafe.rs	raw_u32	100	volatile,ptr-ops	INV:INV-FOR-2
 b1cad1f0c0ea	kernel/core/src/debug/unsafe.rs	location	112	ptr-ops	INV:INV-FOR-3
 d32cfa7674b0	kernel/core/src/debug/unsafe.rs	location_ref	120		INV:INV-FOR-3
-0d264deae088	kernel/core/src/drivers/hotpath.rs	iar1_read	233	asm	INV:INV-MMIO-1
-70b1af9dbc02	kernel/core/src/drivers/hotpath.rs	eoir1_write	242	asm	INV:INV-MMIO-1
-d164ed8443ef	kernel/core/src/drivers/hotpath.rs	send_sgi	262	asm	INV:INV-MMIO-1
-d3757d84beb6	kernel/core/src/drivers/hotpath.rs	enable_cpu_interface	426	asm	INV:INV-MMIO-1
-9238a8157018	kernel/core/src/drivers/hotpath.rs	read_time	1062	asm	INV:F5
-b03ce47a9488	kernel/core/src/drivers/hotpath.rs	set_timecmp	1085		INV:F5
-dacb0f778567	kernel/core/src/drivers/hotpath.rs	reg_read	1203		INV:F5
-0601cdb4a3fc	kernel/core/src/drivers/hotpath.rs	reg_read	1213	volatile,ptr-ops	INV:F5
-dae8daf83943	kernel/core/src/drivers/hotpath.rs	reg_write	1222		INV:F5
-9cc3f66cb891	kernel/core/src/drivers/hotpath.rs	reg_write	1228	volatile,ptr-ops	INV:F5
-92147e223643	kernel/core/src/drivers/hotpath.rs	kvm_pv_send_ipi	1375	asm	INV:F5
-dd8943d69fd5	kernel/core/src/drivers/hotpath.rs	kvm_pv_send_ipi	1405		INV:F5
-7a7046ef2923	kernel/core/src/drivers/hotpath.rs	send_icr	1431		INV:F5
-54942913c252	kernel/core/src/drivers/hotpath.rs	tick_arm_ra	1632	asm	INV:F5
-deb9d0a6bc9a	kernel/core/src/drivers/hotpath.rs	ensure_phys_mapped	2083		INV:INV-MMIO-1
-a3efc92bf35d	kernel/core/src/drivers/hotpath.rs	this_lapic_id_raw	2361		INV:INV-MMIO-1
-99d317430210	kernel/core/src/drivers/hotpath.rs	init_x2apic_or_mmio	2403		INV:INV-MMIO-1
-f300f0c1ece8	kernel/core/src/drivers/hotpath.rs	init_x2apic_or_mmio	2417		INV:INV-MMIO-1
-018ee9d7ff8c	kernel/core/src/drivers/hotpath.rs	init_x2apic_or_mmio	2421		INV:INV-MMIO-1
-f5b482f105d5	kernel/core/src/drivers/hotpath.rs	init_secondary	2486		INV:INV-MMIO-1
-03fed1689bef	kernel/core/src/drivers/hotpath.rs	set_timer_stimecmp	2669	asm	INV:F5
-5204389c3b43	kernel/core/src/drivers/hotpath.rs	init	3186		INV:F5
-4ee893abfed8	kernel/core/src/drivers/hotpath.rs	set_timer	4019	asm	INV:F5
-bf3a69abc5ae	kernel/core/src/drivers/hotpath.rs	read_reg	4143	volatile,ptr-ops	INV:INV-MMIO-1
-1ea4aa6c5847	kernel/core/src/drivers/hotpath.rs	<module>	4256		GAP
-9fdd9167c27e	kernel/core/src/drivers/hotpath.rs	<module>	4257		GAP
-0935f7cfe86a	kernel/core/src/drivers/hotpath.rs	private	4311	ptr-ops	INV:INV-BLKDEV-3
-7771f7d416a5	kernel/core/src/drivers/hotpath.rs	<module>	4382		GAP
-b0b40eddc9b6	kernel/core/src/drivers/hotpath.rs	<module>	4383		GAP
-759e1fd11b83	kernel/core/src/drivers/hotpath.rs	get_disk	4426	ptr-ops	INV:INV-BLKDEV-1
-e041964ba8b7	kernel/core/src/drivers/hotpath.rs	<module>	5447		GAP
-d6c11e9b1f33	kernel/core/src/drivers/hotpath.rs	<module>	5450		GAP
-7770cd8601bb	kernel/core/src/drivers/hotpath.rs	<module>	6426		GAP
-650f5aa80af7	kernel/core/src/drivers/hotpath.rs	io_buf_alloc	6455	ptr-ops	INV:INV-BLKDEV-2
-2235a5beff16	kernel/core/src/drivers/hotpath.rs	io_buf_alloc	6461		INV:INV-BLKDEV-2
-eaf0dfb06162	kernel/core/src/drivers/hotpath.rs	io_buf_free	6476	ptr-ops	INV:INV-BLKDEV-2
-9450bde4a4a3	kernel/core/src/drivers/hotpath.rs	io_buf_free	6483		INV:INV-BLKDEV-2
-d39cf5f26067	kernel/core/src/drivers/hotpath.rs	io_buf_init	6498	ptr-ops	GAP
-aa4b9b75cd90	kernel/core/src/drivers/hotpath.rs	io_buf_release	6524		INV:INV-SAFECALL-1
-dd08017f8611	kernel/core/src/drivers/hotpath.rs	begin_delivery	6537		INV:INV-SAFECALL-1
-bad1f04fadf3	kernel/core/src/drivers/hotpath.rs	deliver_completion	6546		INV:INV-SAFECALL-1
-28338b3ddac3	kernel/core/src/drivers/hotpath.rs	pci_blk_acquire_site	6628	asm	INV:INV-SAFECALL-1
-6542bc03aa6b	kernel/core/src/drivers/hotpath.rs	pci_blk_acquire_site	6634	asm	INV:INV-SAFECALL-1
-5ac796daaa4e	kernel/core/src/drivers/hotpath.rs	wedge_put	6650		INV:INV-SAFECALL-1
-bfcfbc814067	kernel/core/src/drivers/hotpath.rs	<module>	6929		GAP
-678cc925a2e3	kernel/core/src/drivers/hotpath.rs	pci_pending_slot_reservable_len	7280		INV:F7
-dbca3bd100f4	kernel/core/src/drivers/hotpath.rs	pci_publish_sync_chain	7320		INV:F7
-de329f41e7ce	kernel/core/src/drivers/hotpath.rs	pci_flag_sync_tombstone_timed_out	7367		INV:F7
-8c03bc3e26e0	kernel/core/src/drivers/hotpath.rs	abandon_pending_completion	7429		INV:F7
-6f83859efe39	kernel/core/src/drivers/hotpath.rs	abandon_pending_completion	7521		INV:F7
-f190918f6ded	kernel/core/src/drivers/hotpath.rs	pci_submit_data_async_sg	7771		GAP
-94b938abb36d	kernel/core/src/drivers/hotpath.rs	pci_process_async_completions_slot	8384		GAP
-8510e9c8cfec	kernel/core/src/drivers/hotpath.rs	pci_process_async_completions_slot	8419		GAP
-a04b416e7827	kernel/core/src/drivers/hotpath.rs	get_pci_gen_disk_at	8993		GAP
-61e0d0f1da1e	kernel/core/src/drivers/hotpath.rs	<module>	9370		GAP
-51d2292110dc	kernel/core/src/drivers/hotpath.rs	<module>	9371		GAP
-c80a5894ae57	kernel/core/src/drivers/hotpath.rs	used_ring_idx	9389	volatile,ptr-ops	INV:INV-DMA-3
-d18a88ddce80	kernel/core/src/drivers/hotpath.rs	used_ring_elem_id	9402	volatile,ptr-ops	INV:INV-DMA-3
-ccf2bad68487	kernel/core/src/drivers/hotpath.rs	resp_status_byte	9424	volatile	INV:INV-DMA-3
-3b13ceccf713	kernel/core/src/drivers/hotpath.rs	notify	9636	asm	INV:INV-DMA-3
-21284905d5c3	kernel/core/src/drivers/hotpath.rs	notify	9652	asm	INV:INV-DMA-3
-5c741aaee2cb	kernel/core/src/drivers/hotpath.rs	notify	9658	volatile,ptr-ops	INV:INV-DMA-3
-1aa46122d722	kernel/core/src/drivers/hotpath.rs	notify	9682	asm	INV:INV-DMA-3
-1b914b49d8c2	kernel/core/src/drivers/hotpath.rs	notify	9689	asm	INV:INV-DMA-3
-1fddde9075bc	kernel/core/src/drivers/hotpath.rs	desc_mut	10674		INV:INV-DMA-2
-e3b234e3ae86	kernel/core/src/drivers/hotpath.rs	avail_header_mut	10687		INV:INV-DMA-2
-cc1bcda7b327	kernel/core/src/drivers/hotpath.rs	<module>	12873		GAP
-04f303eeaf7a	kernel/core/src/drivers/hotpath.rs	<module>	12878		GAP
-3e9ed68c4d38	kernel/core/src/drivers/hotpath.rs	<module>	13036		GAP
-79cfd464ed11	kernel/core/src/drivers/hotpath.rs	poll	13528	raw-construct,ptr-ops	INV:INV-KPTR-3
-51b0049bb920	kernel/core/src/drivers/hotpath.rs	dealloc_rx_buffer	13596	ptr-ops	INV:INV-KPTR-3
-bcb4845079c0	kernel/core/src/drivers/hotpath.rs	refill_rx_buffers	13628	ptr-ops	INV:INV-KPTR-3
-cbec77b5dfca	kernel/core/src/drivers/hotpath.rs	refill_rx_buffers	13640		INV:INV-KPTR-3
-6ae02563cb55	kernel/core/src/drivers/hotpath.rs	flush_framebuffer	14131		INV:INV-SLOT-1
-8302007790cc	kernel/core/src/drivers/hotpath.rs	with_gpu_device	14150		INV:INV-SLOT-1
-d819eac3197e	kernel/core/src/drivers/hotpath.rs	<module>	14174		GAP
-eeb772436dda	kernel/core/src/drivers/hotpath.rs	<module>	14175		GAP
-c918f731f33f	kernel/core/src/drivers/hotpath.rs	<module>	14441		GAP
-e74a05112970	kernel/core/src/drivers/hotpath.rs	<module>	14442		GAP
-572f2dcf2e70	kernel/core/src/drivers/hotpath.rs	init_framebuffer	14630		INV:INV-MMIO-1
-ce904819159f	kernel/core/src/drivers/hotpath.rs	send_command	15022		GAP
-310cfbf9bfea	kernel/core/src/drivers/hotpath.rs	send_command	15029	ptr-ops	GAP
-56449180eb49	kernel/core/src/drivers/hotpath.rs	send_command	15031	ptr-ops	GAP
-30c3b14ff307	kernel/core/src/drivers/hotpath.rs	send_command	15084	asm	GAP
-a39bf7deebf6	kernel/core/src/drivers/hotpath.rs	send_command	15154	ptr-ops	GAP
-356be0afba49	kernel/core/src/drivers/hotpath.rs	send_command	15175		GAP
-df04d83306b5	kernel/core/src/drivers/hotpath.rs	drop	15221		INV:INV-DMA-3
-c4cee12cf526	kernel/core/src/drivers/hotpath.rs	init_virtio_input	15470		GAP
-44c1bd6d6f2d	kernel/core/src/drivers/hotpath.rs	<module>	16069		GAP
-7dde1d6fc2c0	kernel/core/src/drivers/hotpath.rs	<module>	16070		GAP
-7a8acc9a59b5	kernel/core/src/drivers/hotpath.rs	init_virtio	16147		GAP
-2310b81041e4	kernel/core/src/drivers/hotpath.rs	read_event	16344	volatile	GAP
-fec3bb02d6e9	kernel/core/src/drivers/hotpath.rs	drop	16497	ptr-ops	GAP
-caee36ab741d	kernel/core/src/drivers/hotpath.rs	device_of_file	17061	ptr-ops	INV:INV-SREF-1
-96e7302141fa	kernel/core/src/drivers/hotpath.rs	node_of_file	17141	ptr-ops	INV:INV-SREF-1
-c7f6b83cf6ae	kernel/core/src/drivers/hotpath.rs	evdev_file_close	17315	ptr-ops	INV:INV-CHARDEV-PRIV-1
-ce8c3455bcb2	kernel/core/src/drivers/hotpath.rs	evdev_file_close	17331	ptr-ops	INV:INV-CHARDEV-PRIV-1
-5257632ec97b	kernel/core/src/drivers/hotpath.rs	evdev_poll_wait	17417		INV:INV-KTASK-1
-cf31fc50cd47	kernel/core/src/drivers/hotpath.rs	evdev_poll_unwait	17462		INV:INV-KTASK-1
-0221856f9d31	kernel/core/src/drivers/hotpath.rs	loop_devno_of	18821	ptr-ops	INV:INV-BLKDEV-2
-f2508dba7c2a	kernel/core/src/drivers/hotpath.rs	loop_file_read	18855	ptr-ops	INV:INV-BLKDEV-2
-ffb2b025fcbd	kernel/core/src/drivers/hotpath.rs	loop_file_write	18902	ptr-ops	INV:INV-BLKDEV-2
-fc2c304d4039	kernel/core/src/drivers/hotpath.rs	loop_file_ioctl	19024	ptr-ops	INV:INV-CHARDEV-PRIV-1
-715923b8566e	kernel/core/src/drivers/hotpath.rs	drop	19487		GAP
-f352fdfaa2c7	kernel/core/src/drivers/hotpath.rs	ashmem_file_read	19659	ptr-ops	INV:INV-FS-FILEPRIV-1
-a226cdd9bf47	kernel/core/src/drivers/hotpath.rs	ashmem_mmap	20069		INV:INV-FS-FILEPRIV-1
-410caff7796d	kernel/core/src/drivers/hotpath.rs	<module>	20662		GAP
-3431f9aca1a0	kernel/core/src/drivers/hotpath.rs	<module>	20663		GAP
-079949e138b0	kernel/core/src/drivers/hotpath.rs	drop	20675		GAP
-8709748e9913	kernel/core/src/drivers/hotpath.rs	prime_close	20756	ptr-ops	INV:F9
-991829f4fc72	kernel/core/src/drivers/hotpath.rs	prime_file_gem	20853	ptr-ops	INV:F9
-5ae9f499f7e4	kernel/core/src/drivers/hotpath.rs	u32_slice_as_bytes	20895	raw-construct,ptr-ops	INV:F9
-2600a08b3a1a	kernel/core/src/drivers/hotpath.rs	create_dumb	21706		INV:F9
-554b0f02c655	kernel/core/src/drivers/hotpath.rs	prime_fd_to_handle	21897	volatile,ptr-ops	INV:F9
-26dd132566cd	kernel/core/src/drivers/hotpath.rs	present_fb	22111	volatile,ptr-ops	GAP
+377863d7ad4f	kernel/core/src/drivers/unsafe.rs	gem_arc_box_take	74	ptr-ops	INV:F9
+9195927697d4	kernel/core/src/drivers/unsafe.rs	gem_arc_clone	84	ptr-ops	INV:F9
+ac6e39a6fd19	kernel/core/src/drivers/unsafe.rs	u32_slice_as_u8	94	raw-construct,ptr-ops	INV:F9
+e6110c41244c	kernel/core/src/drivers/unsafe.rs	drm_scan_screen	105	volatile,ptr-ops	INV:F9
+0a916223330f	kernel/core/src/drivers/unsafe.rs	drm_scan_present	139	volatile,ptr-ops	GAP
+6728519dd869	kernel/core/src/drivers/unsafe.rs	<module>	179		GAP
+e55bd5b0f552	kernel/core/src/drivers/unsafe.rs	<module>	181		GAP
+4d81feadf6e5	kernel/core/src/drivers/unsafe.rs	<module>	183		GAP
+4bad57d456fc	kernel/core/src/drivers/unsafe.rs	<module>	185		GAP
+4d5b29f59881	kernel/core/src/drivers/unsafe.rs	<module>	187		GAP
+e9ff516aa69d	kernel/core/src/drivers/unsafe.rs	<module>	191		GAP
+d4290b9e7f88	kernel/core/src/drivers/unsafe.rs	<module>	195		GAP
+714eb85b6235	kernel/core/src/drivers/unsafe.rs	<module>	197		GAP
+a997ec9c209b	kernel/core/src/drivers/unsafe.rs	<module>	199		GAP
+e280abb970af	kernel/core/src/drivers/unsafe.rs	<module>	201		GAP
+14ea8f249e89	kernel/core/src/drivers/unsafe.rs	<module>	207		GAP
+b81cca8eb74c	kernel/core/src/drivers/unsafe.rs	<module>	209		GAP
+2aa9a04780a5	kernel/core/src/drivers/unsafe.rs	<module>	211		GAP
+28d2710faebf	kernel/core/src/drivers/unsafe.rs	<module>	213		GAP
+5804a7322006	kernel/core/src/drivers/unsafe.rs	<module>	215		GAP
+beab7708edd7	kernel/core/src/drivers/unsafe.rs	<module>	217		GAP
+febe621bb900	kernel/core/src/drivers/unsafe.rs	<module>	219		GAP
+c9e62d01cb54	kernel/core/src/drivers/unsafe.rs	<module>	221		GAP
+1ef2f3f50b66	kernel/core/src/drivers/unsafe.rs	<module>	225		GAP
+0d1a9e8ab571	kernel/core/src/drivers/unsafe.rs	<module>	227		GAP
+eac92331ce83	kernel/core/src/drivers/unsafe.rs	page_put_is_last	240		GAP
+2b6b495f976c	kernel/core/src/drivers/unsafe.rs	ashmem_read_copy_chunk	251	ptr-ops	INV:INV-FS-FILEPRIV-1
+817d06a51275	kernel/core/src/drivers/unsafe.rs	ashmem_flush_tlb_all	264		INV:INV-FS-FILEPRIV-1
+b839317eeed7	kernel/core/src/drivers/unsafe.rs	loop_bh_read_into	279	ptr-ops	INV:INV-BLKDEV-2
+68f163a16675	kernel/core/src/drivers/unsafe.rs	loop_bh_write_from	296	ptr-ops	INV:INV-BLKDEV-2
+ffe18810a2d4	kernel/core/src/drivers/unsafe.rs	input_bh_tasklet_init	323		GAP
+3bd42fe5f29b	kernel/core/src/drivers/unsafe.rs	input_event_read	334	volatile	GAP
+37a33e761c7d	kernel/core/src/drivers/unsafe.rs	input_buffer_dealloc	345		GAP
+0e7e1cefdcb1	kernel/core/src/drivers/unsafe.rs	park_task_pid	358		INV:INV-KTASK-1
+6eac8be51ebd	kernel/core/src/drivers/unsafe.rs	devno_of_private	369	ptr-ops	INV:INV-SREF-1
+d1a8adf15c41	kernel/core/src/drivers/unsafe.rs	devno_box_take	379	ptr-ops	INV:INV-CHARDEV-PRIV-1
+772bdcdf382a	kernel/core/src/drivers/unsafe.rs	gpu_flush	393		INV:INV-SLOT-1
+4d148f037d01	kernel/core/src/drivers/unsafe.rs	gpu_device_ref	403		INV:INV-SLOT-1
+5df41ed9bc1c	kernel/core/src/drivers/unsafe.rs	dma_zeroed_alloc	414		INV:INV-MMIO-1
+93a1ef48fab0	kernel/core/src/drivers/unsafe.rs	gpu_ctrl_alloc	424		GAP
+ce32bec8cc91	kernel/core/src/drivers/unsafe.rs	gpu_ctrl_resp_half	434		GAP
+2e27069ab118	kernel/core/src/drivers/unsafe.rs	gpu_ctrl_cmd_copy	444	ptr-ops	GAP
+831dcf7e8c20	kernel/core/src/drivers/unsafe.rs	gpu_ctrl_fence_riscv64	457	asm	GAP
+ac4230c0e148	kernel/core/src/drivers/unsafe.rs	gpu_ctrl_resp_copy	469	ptr-ops	GAP
+5e4ec46f0dee	kernel/core/src/drivers/unsafe.rs	layout_dealloc	487		INV:INV-DMA-3
+c7a159454e18	kernel/core/src/drivers/unsafe.rs	rx_hdr_slice	505	raw-construct,ptr-ops	INV:INV-KPTR-3
+89b777700813	kernel/core/src/drivers/unsafe.rs	rx_buffer_dealloc	517	ptr-ops	INV:INV-KPTR-3
+9bffd14d53d8	kernel/core/src/drivers/unsafe.rs	rx_buffer_alloc	534	ptr-ops	INV:INV-KPTR-3
+88b1826d24f8	kernel/core/src/drivers/unsafe.rs	vring_used_idx	547	volatile,ptr-ops	INV:INV-DMA-3
+2b046b693446	kernel/core/src/drivers/unsafe.rs	vring_used_elem_id	557	volatile,ptr-ops	INV:INV-DMA-3
+5b4cb8ed32c9	kernel/core/src/drivers/unsafe.rs	resp_status_read	570	volatile	INV:INV-DMA-3
+c914ccd98af2	kernel/core/src/drivers/unsafe.rs	virtio_notify_sie_save	583	asm	INV:INV-DMA-3
+7ea724eb6fa6	kernel/core/src/drivers/unsafe.rs	virtio_notify_fence_wo	604	asm	INV:INV-DMA-3
+cd99ad120e98	kernel/core/src/drivers/unsafe.rs	virtio_notify_mmio	618	volatile,ptr-ops	INV:INV-DMA-3
+3994bd1262c5	kernel/core/src/drivers/unsafe.rs	virtio_notify_fence_iorw	641	asm	INV:INV-DMA-3
+b8ea58cebb98	kernel/core/src/drivers/unsafe.rs	virtio_notify_sie_restore	655	asm	INV:INV-DMA-3
+16272dcf2e1b	kernel/core/src/drivers/unsafe.rs	vq_desc_mut	671		INV:INV-DMA-2
+516004f4d804	kernel/core/src/drivers/unsafe.rs	vq_avail_mut	682		INV:INV-DMA-2
+28fcc23cfa17	kernel/core/src/drivers/unsafe.rs	io_buf_park_pop_head	697	ptr-ops	INV:INV-BLKDEV-2
+adc1eccbd050	kernel/core/src/drivers/unsafe.rs	io_buf_heap_alloc	707		INV:INV-BLKDEV-2
+930b85bef20f	kernel/core/src/drivers/unsafe.rs	io_buf_park_store_head	719	ptr-ops	INV:INV-BLKDEV-2
+b09682246f38	kernel/core/src/drivers/unsafe.rs	io_buf_heap_dealloc	728		INV:INV-BLKDEV-2
+ad49f718d08d	kernel/core/src/drivers/unsafe.rs	io_buf_split_init	741	ptr-ops	GAP
+045734062ffb	kernel/core/src/drivers/unsafe.rs	io_buf_nonpool_dealloc	762		INV:INV-SAFECALL-1
+3ec033dbf05b	kernel/core/src/drivers/unsafe.rs	completion_begin_delivery	773		INV:INV-SAFECALL-1
+cbe4a7f7ada0	kernel/core/src/drivers/unsafe.rs	completion_deliver	783		INV:INV-SAFECALL-1
+f3e41a5b7531	kernel/core/src/drivers/unsafe.rs	completion_wait_deliveries	798		INV:F7
+c92f0647c905	kernel/core/src/drivers/unsafe.rs	pciblk_site_ra_riscv64	810	asm	INV:INV-SAFECALL-1
+a286ce6a6096	kernel/core/src/drivers/unsafe.rs	pciblk_site_ra_x86_64	825	asm	INV:INV-SAFECALL-1
+ff19e3a9be09	kernel/core/src/drivers/unsafe.rs	wedge_console_put	840		INV:INV-SAFECALL-1
+ed765e3b9c46	kernel/core/src/drivers/unsafe.rs	pci_pending_table_ref	851		INV:F7
+6c1f4e980fc0	kernel/core/src/drivers/unsafe.rs	pci_pending_table_mut	863		INV:F7
+e49848d95fcb	kernel/core/src/drivers/unsafe.rs	pending_begin_delivery_walk	876		GAP
+1a036a349816	kernel/core/src/drivers/unsafe.rs	gen_disk_private_ref	893	ptr-ops	INV:INV-BLKDEV-3
+cb1a7f0bfc3c	kernel/core/src/drivers/unsafe.rs	gen_disk_ref	904	ptr-ops	INV:INV-BLKDEV-1
+83f381694f8e	kernel/core/src/drivers/unsafe.rs	gicv3_iar1_read	920	asm	INV:INV-MMIO-1
+212e2b114d5b	kernel/core/src/drivers/unsafe.rs	gicv3_eoir1_write	932	asm	INV:INV-MMIO-1
+4c3e1657047d	kernel/core/src/drivers/unsafe.rs	gicv3_sgi1r_write	947	asm	INV:INV-MMIO-1
+309a786efdc4	kernel/core/src/drivers/unsafe.rs	gicv3_cpu_interface_enable	964	asm	INV:INV-MMIO-1
+cf007054f4e0	kernel/core/src/drivers/unsafe.rs	apic_reg_read_msr	993		INV:F5
+760e9d9d5c02	kernel/core/src/drivers/unsafe.rs	apic_reg_read_mmio	1005	volatile,ptr-ops	INV:F5
+914edf777dda	kernel/core/src/drivers/unsafe.rs	apic_reg_write_msr	1016		INV:F5
+eaa39649c677	kernel/core/src/drivers/unsafe.rs	apic_reg_write_mmio	1027	volatile,ptr-ops	INV:F5
+681d19fa8573	kernel/core/src/drivers/unsafe.rs	kvm_pv_send_ipi	1047	asm	INV:F5
+a86c8ffc015a	kernel/core/src/drivers/unsafe.rs	kvm_pv_send_ipi	1077		INV:F5
+4057d8a02c0c	kernel/core/src/drivers/unsafe.rs	apic_x2apic_icr_write	1090		INV:F5
+98ca1468a191	kernel/core/src/drivers/unsafe.rs	tick_arm_ra_read	1102	asm	INV:F5
+711346405112	kernel/core/src/drivers/unsafe.rs	map_firmware_range_linear	1122		INV:INV-MMIO-1
+f8f2ee607267	kernel/core/src/drivers/unsafe.rs	apic_read_id_raw	1141		INV:INV-MMIO-1
+70f9716ad324	kernel/core/src/drivers/unsafe.rs	apic_base_enable_extd	1153		INV:INV-MMIO-1
+82d5acc21353	kernel/core/src/drivers/unsafe.rs	apic_svr_read	1171		INV:INV-MMIO-1
+d476416822b2	kernel/core/src/drivers/unsafe.rs	apic_base_clear_extd	1182		INV:INV-MMIO-1
+58bb066a8dac	kernel/core/src/drivers/unsafe.rs	apic_init_secondary_base	1196		INV:INV-MMIO-1
+61a93096a8e9	kernel/core/src/drivers/unsafe.rs	goldfish_rtc_reg_read	1212	volatile,ptr-ops	INV:INV-MMIO-1
+e92a839b3583	kernel/core/src/drivers/unsafe.rs	timer_riscv64_read_time	1226	asm	INV:F5
+a04736f55527	kernel/core/src/drivers/unsafe.rs	timer_riscv64_sbi_set_timer	1246		INV:F5
+8f0f774ce1c8	kernel/core/src/drivers/unsafe.rs	timer_riscv64_stimecmp_set	1260	asm	INV:F5
+70f628257e34	kernel/core/src/drivers/unsafe.rs	pit_ch0_square_wave_init	1278		INV:F5
+9baba92f8c2d	kernel/core/src/drivers/unsafe.rs	timer_aarch64_arm	1295	asm	INV:F5
 14ab24c4b2fb	kernel/core/src/fs/hotpath.rs	<module>	439	ptr-ops	INV:INV-FILE-CELL-1
 6f8ab4956f41	kernel/core/src/fs/hotpath.rs	file_arc_try_clone	447		INV:INV-FILE-ARC-1
 a4b17d788b40	kernel/core/src/fs/hotpath.rs	file_arc_try_clone	452		INV:INV-FILE-ARC-1

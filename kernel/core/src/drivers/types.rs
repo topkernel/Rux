@@ -332,7 +332,7 @@ pub(crate) struct PciBlkGuard {
 }
 
 /// Pending async I/O request for MMIO VirtIO.
-pub(super) struct PendingIo {
+pub(crate) struct PendingIo {
     /// Completion token to signal when done. NULL = TOMBSTONE: the entry
     /// exists only to keep the chain's descriptor window reserved until
     /// the completion walker consumes the chain's used-ring entry. Used
