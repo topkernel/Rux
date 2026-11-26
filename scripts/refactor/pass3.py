@@ -157,7 +157,8 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and masked[j:j + 5] in ("impl ", "fn ", "trai", "exter"):
+        elif j < len(masked) and any(masked.startswith(p, j)
+                                     for p in ("impl ", "fn ", "trai", "exter")):
             brace = find_body_brace(masked, j)
             if brace >= 0:
                 hits.append((m.start(), match_brace(masked, brace) + 1))
@@ -557,8 +558,12 @@ def verify(sub, base_rev, manifest_path):
         for l in m.get("fn_lines", []):
             claimed_added[l.rstrip()] += 1
     for e in man["file_edits"]:
-        claimed_removed[e["find"].rstrip()] += 1
-        claimed_added[e["replace"].rstrip()] += 1
+        # a source_edit may carry a multi-line find/replace; its claim is
+        # the per-line decomposition (the aggregate diff is per line)
+        for l in e["find"].split("\n"):
+            claimed_removed[l.rstrip()] += 1
+        for l in e["replace"].split("\n"):
+            claimed_added[l.rstrip()] += 1
     for l in man["imports_rs"]:
         claimed_added[l.rstrip()] += 1
     claimed_added["#![forbid(unsafe_code)]"] += len(man["forbid"])
