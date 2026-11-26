@@ -1,0 +1,1752 @@
+{
+ "sub": "debug",
+ "target": "kernel/core/src/debug",
+ "imports_rs": [
+  "use core::mem::size_of;",
+  "use core::panic::Location;",
+  "use core::sync::atomic::Ordering;",
+  "use core::sync::atomic::AtomicU32;",
+  "#[cfg(feature = \"x86_64\")]",
+  "use crate::debug::types::ReportBuf;",
+  "#[cfg(feature = \"x86_64\")]",
+  "use crate::arch::mm::pagetable::PageTableEntry;",
+  "use crate::debug::hotpath::leakorigin_slot_of;",
+  "use crate::debug::types::RecordHeader;",
+  "use crate::debug::hotpath::PPAGE_TABLE_ENTRIES;",
+  "use crate::debug::hotpath::plausible_fp;",
+  "use crate::debug::hotpath::{MAGIC, N, PATHSTASH_SLOTS, PSTORE_RAM_SIZE, SINK, SINK_AT, SINK_SIZE, VERSION, memwatch_put_dec, memwatch_put_hex, taskdump_raw_line};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use crate::debug::hotpath::scribble::{BADIRET_ANNOUNCED, DIVERGE, GS_FIX_ANNOUNCED, HEADER_HIT_ANNOUNCED, HEAP_WINDOW, HITS, OFF_FS, OFF_GS, OFF_ONCPU, OFF_RET, OFF_SP, OFF_THREAD, PARK, PARK_PID1, PARK_SWEEP, REG_COUNT, REPORT_LOCK, REPORT_LEN, REPORT_POS, REPORT_BUF, REPORTING, SCRIBBLE_SLOTS, SLOTS, VERIFY_EVERY, VERIFY_TICK, audit_drain, gen_of, hash_of, pin_park_check, put_dec, put_hex, puts, ring_dump, scribble_badiret_fixups, scribble_gs_fixups, scribble_park, scribble_seed_park, slot_of};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use crate::debug::hotpath::x86::{CANARY_MAGIC, table_virt};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use crate::arch::mm::memory_layout::KERNEL_MAP;"
+ ],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const OFF_THREAD: usize = core::mem::offset_of!(Task, thread);",
+   "replace": "    pub(crate) const OFF_THREAD: usize = core::mem::offset_of!(Task, thread);",
+   "why": "moved scribble bodies read the field offsets"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const OFF_FS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, fs_base);",
+   "replace": "    pub(crate) const OFF_FS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, fs_base);",
+   "why": "moved scribble bodies read the field offsets"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const OFF_GS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, gs_base);",
+   "replace": "    pub(crate) const OFF_GS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, gs_base);",
+   "why": "moved scribble bodies read the field offsets"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const OFF_SP: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp);",
+   "replace": "    pub(crate) const OFF_SP: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp);",
+   "why": "moved scribble bodies read the field offsets"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const OFF_RET: usize =",
+   "replace": "    pub(crate) const OFF_RET: usize =",
+   "why": "moved scribble bodies read the field offsets"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const OFF_ONCPU: usize = core::mem::offset_of!(Task, ti_on_cpu);",
+   "replace": "    pub(crate) const OFF_ONCPU: usize = core::mem::offset_of!(Task, ti_on_cpu);",
+   "why": "moved double_seed reads the ownership-word offset"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static SLOTS: [ScribbleSlot; SCRIBBLE_SLOTS] = [const {",
+   "replace": "    pub(crate) static SLOTS: [ScribbleSlot; SCRIBBLE_SLOTS] = [const {",
+   "why": "moved scribble engines read the shadow-slot table"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static REG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);",
+   "replace": "    pub(crate) static REG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);",
+   "why": "moved register counts registrations"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static VERIFY_TICK: AtomicU32 = AtomicU32::new(0);",
+   "replace": "    pub(crate) static VERIFY_TICK: AtomicU32 = AtomicU32::new(0);",
+   "why": "moved verify paces itself"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const VERIFY_EVERY: u32 = 4;",
+   "replace": "    pub(crate) const VERIFY_EVERY: u32 = 4;",
+   "why": "moved verify paces itself"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    const CANARY_MAGIC: u64 = 0x5749_4c44_5741_5453;",
+   "replace": "    pub(crate) const CANARY_MAGIC: u64 = 0x5749_4c44_5741_5453;",
+   "why": "moved fill_canary computes the canary pattern"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static DIVERGE: AtomicU32 = AtomicU32::new(0);",
+   "replace": "    pub(crate) static DIVERGE: AtomicU32 = AtomicU32::new(0);",
+   "why": "moved slot_divergence rate-limits itself"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static GS_FIX_ANNOUNCED: AtomicBool = AtomicBool::new(false);",
+   "replace": "    pub(crate) static GS_FIX_ANNOUNCED: AtomicBool = AtomicBool::new(false);",
+   "why": "moved verify announce latches"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);",
+   "replace": "    pub(crate) static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);",
+   "why": "moved verify announce latches"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);",
+   "replace": "    pub(crate) static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);",
+   "why": "moved verify header-canary latch"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static REPORTING: AtomicBool = AtomicBool::new(false);",
+   "replace": "    pub(crate) static REPORTING: AtomicBool = AtomicBool::new(false);",
+   "why": "moved report writers gate the buffer mirror"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static REPORT_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);",
+   "replace": "    pub(crate) static REPORT_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);",
+   "why": "moved report writers track the buffer cursor"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    static REPORT_LOCK: AtomicBool = AtomicBool::new(false);",
+   "replace": "    pub(crate) static REPORT_LOCK: AtomicBool = AtomicBool::new(false);",
+   "why": "moved report writers take the report lock"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn pin_park_check(task: *mut Task) {",
+   "replace": "    pub(crate) fn pin_park_check(task: *mut Task) {",
+   "why": "moved register calls the pin-park probe"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn puts(s: &[u8]) {",
+   "replace": "    pub(crate) fn puts(s: &[u8]) {",
+   "why": "moved scribble reporters print through the raw helpers"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn put_hex(v: u64) {",
+   "replace": "    pub(crate) fn put_hex(v: u64) {",
+   "why": "moved scribble reporters print through the raw helpers"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn put_dec(mut v: u64) {",
+   "replace": "    pub(crate) fn put_dec(mut v: u64) {",
+   "why": "moved scribble reporters print through the raw helpers"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn slot_of(task: *mut Task) -> Option<usize> {",
+   "replace": "    pub(crate) fn slot_of(task: *mut Task) -> Option<usize> {",
+   "why": "moved register/quiesce/verify probe the shadow table"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn hash_of(task: usize) -> usize {",
+   "replace": "    pub(crate) fn hash_of(task: usize) -> usize {",
+   "why": "moved register probes the shadow table"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn gen_of(idx: usize) -> u32 {",
+   "replace": "    pub(crate) fn gen_of(idx: usize) -> u32 {",
+   "why": "moved verify reads the seqlock generation"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    fn table_virt(phys: u64) -> *mut crate::arch::mm::pagetable::PageTable {",
+   "replace": "    pub(crate) fn table_virt(phys: u64) -> *mut crate::arch::mm::pagetable::PageTable {",
+   "why": "moved resolve_phys translates table phys through it"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "mod x86 {",
+   "replace": "pub(crate) mod x86 {",
+   "why": "the moved wildwatch helpers live outside, so the module must be pathable"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "fn memwatch_put_dec(v: u64) {",
+   "replace": "pub(crate) fn memwatch_put_dec(v: u64) {",
+   "why": "moved kroot_pollution prints through it"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "fn memwatch_put_hex(v: u64) {",
+   "replace": "pub(crate) fn memwatch_put_hex(v: u64) {",
+   "why": "moved kroot_pollution prints through it"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "const MAGIC: u64 = u64::from_le_bytes(*b\"RUXPST02\");",
+   "replace": "pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b\"RUXPST02\");",
+   "why": "moved pstore_commit stamps the header magic"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "const VERSION: u32 = 2;",
+   "replace": "pub(crate) const VERSION: u32 = 2;",
+   "why": "moved pstore_commit stamps the header version"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "const SINK_SIZE: usize = 16 * 1024;",
+   "replace": "pub(crate) const SINK_SIZE: usize = 16 * 1024;",
+   "why": "moved pstore_commit drains the staged sink"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "static SINK: [AtomicU8Cell; SINK_SIZE] = [const { AtomicU8Cell::new() }; SINK_SIZE];",
+   "replace": "pub(crate) static SINK: [AtomicU8Cell; SINK_SIZE] = [const { AtomicU8Cell::new() }; SINK_SIZE];",
+   "why": "moved pstore_commit drains the staged sink"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "static SINK_AT: AtomicUsize = AtomicUsize::new(0);",
+   "replace": "pub(crate) static SINK_AT: AtomicUsize = AtomicUsize::new(0);",
+   "why": "moved pstore_commit drains the staged sink"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "fn leakorigin_slot_of(task: *mut crate::process::types::Task) -> &'static LoSlot {",
+   "replace": "pub(crate) fn leakorigin_slot_of(task: *mut crate::process::types::Task) -> &'static LoSlot {",
+   "why": "moved note_release/report_acquire_divergent probe the leak-origin slots"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "const N: usize = 8;",
+   "replace": "pub(crate) const N: usize = 8;",
+   "why": "moved pathstash views index the slot table"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "static mut PATHSTASH_SLOTS: [Slot; N] = [const {",
+   "replace": "pub(crate) static mut PATHSTASH_SLOTS: [Slot; N] = [const {",
+   "why": "moved pathstash views index the slot table"
+  },
+  {
+   "file": "kernel/core/src/debug/types.rs",
+   "find": "pub(super) struct RecordHeader {",
+   "replace": "pub(crate) struct RecordHeader {",
+   "why": "exposed by the pub(crate) pstore wrappers/leakorigin_slot_of"
+  },
+  {
+   "file": "kernel/core/src/debug/types.rs",
+   "find": "pub(super) struct AtomicU8Cell(pub(super) core::sync::atomic::AtomicU8);",
+   "replace": "pub(crate) struct AtomicU8Cell(pub(super) core::sync::atomic::AtomicU8);",
+   "why": "exposed by the pub(crate) SINK static"
+  },
+  {
+   "file": "kernel/core/src/debug/types.rs",
+   "find": "pub(super) struct HeadWriter {",
+   "replace": "pub(crate) struct HeadWriter {",
+   "why": "exposed by the pub(crate) pstore_commit signature"
+  },
+  {
+   "file": "kernel/core/src/debug/types.rs",
+   "find": "pub(super) struct LoSlot {",
+   "replace": "pub(crate) struct LoSlot {",
+   "why": "exposed by the pub(crate) leakorigin_slot_of signature"
+  },
+  {
+   "file": "kernel/core/src/debug/types.rs",
+   "find": "pub(super) struct Slot {",
+   "replace": "pub(crate) struct Slot {",
+   "why": "exposed by the pub(crate) PATHSTASH_SLOTS static"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};",
+   "replace": "    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}; pub use crate::debug::r#unsafe::{crash_report, double_seed, quiesce, register, slot_divergence, task_plausible, verify, verify_consistency}; use crate::debug::r#unsafe::{putc, rd};",
+   "why": "re-export the collected scribble engines so the module's call sites (internal and the arch consumers') are unchanged"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    use crate::arch::mm::pagetable::PageTableEntry;",
+   "replace": "    use crate::arch::mm::pagetable::PageTableEntry; use crate::debug::r#unsafe::{canary_qword_read, canary_selftest_fire, enable_write_protect, fill_canary, kernel_pa_offset, page_table_virt_raw, wild_link_aliases};",
+   "why": "the wildwatch arming/verify path now calls the collected unsafe.rs edges"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "use super::types::{FrozenAnswer};",
+   "replace": "use super::types::{FrozenAnswer}; pub use super::r#unsafe::{caller_return_address, current_frame_pointer, note_release, walk_fp_chain};",
+   "why": "re-export the collected frame-pointer walkers and note_release so hotpath-level and external call paths are unchanged"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "    unsafe { audit(now) };",
+   "replace": "    audit(now);",
+   "why": "audit is a safe fn (single-auditor heartbeat CAS): the unsafe block around the call is redundant \u2014 drop it instead of moving it"
+  },
+  {
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "find": "pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {",
+   "replace": "#[allow(unused_imports)] pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {",
+   "why": "walk_read's fn-local PageTableWalker import goes unused once the walk edge moves to unsafe.rs (a deletion edit cannot be expressed uniquely here)"
+  }
+ ],
+ "moves": [
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "current_frame_pointer",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "66f141d5b071",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "vis": "pub",
+   "inv_note": "INV:F2: pure register reads (s0/rbp/x29) of the running CPU's own frame pointer; no memory access."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "caller_return_address",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "53b15dde0def",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "vis": "pub",
+   "inv_note": "INV:F2: reads the live ra/LR (register or [rbp+8]/[x29+8] with frame pointers forced on); no stores."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "unwind_frame",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "449988204749",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F2: caller validated `fp` (kernel range, aligned); the two frame-word reads are the standard unwind operation.",
+   "callmap": [
+    {
+     "find": "        if let Some((ret_addr, next_fp)) = unwind_frame(fp) {",
+     "replace": "        if let Some((ret_addr, next_fp)) = crate::debug::r#unsafe::unwind_frame(fp) {"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "save_regs",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7cc8c9536e74",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "save_regs_aarch64",
+   "params": "regs: &mut [u64; 31]",
+   "ret": "",
+   "call": "    crate::debug::r#unsafe::save_regs_aarch64(&mut regs);",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"aarch64\")]",
+   "doc": [
+    "aarch64: capture x0..x30 into the dump array (x0 at slot 0)."
+   ],
+   "contract": [
+    "`regs` is a 31-slot stack buffer; the asm stores into it and touches no other memory."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "save_regs",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "1459c1cb15e2",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "save_regs_riscv64",
+   "params": "regs: &mut [u64; 31]",
+   "ret": "",
+   "call": "    crate::debug::r#unsafe::save_regs_riscv64(&mut regs);",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"riscv64\")]",
+   "doc": [
+    "riscv64: save x1..x31 into the dump array."
+   ],
+   "contract": [
+    "`regs` is a 31-slot stack buffer; the asm stores into it and touches no other memory."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "save_regs",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "6b26596b8147",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "save_regs_x86_64",
+   "params": "regs: &mut [u64; 31]",
+   "ret": "",
+   "call": "    crate::debug::r#unsafe::save_regs_x86_64(&mut regs);",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "doc": [
+    "x86_64: spill the callee-saved GPRs (push/spill/pop)."
+   ],
+   "contract": [
+    "`regs` is a 31-slot stack buffer; the pushes are balanced by the rsp adjustment, so only this scratch is touched."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump_csrs",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2b0439438b18",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "csr_quad_read_riscv",
+   "params": "",
+   "ret": "(u64, u64, u64, u64)",
+   "call": "    let (sstatus, scause, stval, sepc) = crate::debug::r#unsafe::csr_quad_read_riscv();",
+   "vis": "pub(crate)",
+   "callmap": [
+    {
+     "find": "    let (sstatus, scause, stval, sepc): (u64, u64, u64, u64);",
+     "replace": ""
+    }
+   ],
+   "attr": "#[cfg(feature = \"riscv64\")]",
+   "doc": [
+    "Read (sstatus, scause, stval, sepc) in one asm block."
+   ],
+   "contract": [
+    "Valid at any privilege the kernel runs in (S-mode CSR reads); no memory access."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let (sstatus, scause, stval, sepc): (u64, u64, u64, u64);\n    unsafe {"
+    }
+   ],
+   "body_suffix": "\n\n    (sstatus, scause, stval, sepc)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump_csrs",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "a3b627ddd40f",
+   "inv": "F2",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "csr_quad_read_aarch64",
+   "params": "",
+   "ret": "(u64, u64, u64, u64)",
+   "call": "    let (esr, elr, far, spsr) = crate::debug::r#unsafe::csr_quad_read_aarch64();",
+   "vis": "pub(crate)",
+   "callmap": [
+    {
+     "find": "    let (esr, elr, far, spsr): (u64, u64, u64, u64);",
+     "replace": ""
+    }
+   ],
+   "attr": "#[cfg(feature = \"aarch64\")]",
+   "doc": [
+    "Read (esr_el1, elr_el1, far_el1, spsr_el1) in one asm block."
+   ],
+   "contract": [
+    "Pure system-register reads, valid in any context; no memory access."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let (esr, elr, far, spsr): (u64, u64, u64, u64);\n    unsafe {"
+    }
+   ],
+   "body_suffix": "\n\n    (esr, elr, far, spsr)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "register_debugfs_knobs",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1bde27361095",
+   "inv": null,
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "provoke_pagefault_read",
+   "params": "p: *const u64",
+   "ret": "u64",
+   "call": "crate::debug::r#unsafe::provoke_pagefault_read(p)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "The provoke-oops pagefault read: one volatile read at the NULL-adjacent probe address."
+   ],
+   "contract": [
+    "`p` is the deliberate-fault probe address (0x10); the read has no fixup entry, so the oops policy fires. Unreachable when it does."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "register_debugfs_knobs",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "12ade06d877a",
+   "inv": null,
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "provoke_illegal_riscv",
+   "params": "",
+   "ret": "",
+   "call": "                    crate::debug::r#unsafe::provoke_illegal_riscv();",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"riscv64\")]",
+   "doc": [
+    "The provoke-oops illegal-instruction fault (riscv64)."
+   ],
+   "contract": [
+    "Deliberate fault: a machine-mode CSR access from S-mode traps IllegalInstruction."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "register_debugfs_knobs",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "9ad3cc977661",
+   "inv": null,
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "provoke_illegal_x86",
+   "params": "",
+   "ret": "",
+   "call": "                    crate::debug::r#unsafe::provoke_illegal_x86();",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "doc": [
+    "The provoke-oops illegal-instruction fault (x86_64)."
+   ],
+   "contract": [
+    "Deliberate fault: ud2 is reserved for traps (the BUG instruction)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "frozen_ipi_probe",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7f8965d4b7d1",
+   "inv": "F18",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "name": "gs_percpu_magic_read",
+   "params": "",
+   "ret": "u64",
+   "call": "    let gs_magic_q = crate::debug::r#unsafe::gs_percpu_magic_read();",
+   "vis": "pub(crate)",
+   "callmap": [
+    {
+     "find": "    let gs_magic_q: u64;",
+     "replace": ""
+    }
+   ],
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "doc": [
+    "Read this CPU's PerCpu.magic via %gs (the percpu misdirection canary)."
+   ],
+   "contract": [
+    "A plain data read of the ACTIVE GS base \u2014 exactly what the trap stubs do; runs in IPI context on the frozen CPU."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let gs_magic_q: u64;\n    unsafe {"
+    }
+   ],
+   "body_suffix": "\n    gs_magic_q"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "frozen_ipi_probe",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "32d50b969c6b",
+   "inv": "F18",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "call": "crate::debug::r#unsafe::location_ref(pr)"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "walk_fp_chain",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "216a274febcf",
+   "inv": "F3",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "vis": "pub",
+   "inv_note": "INV:F3: the validated walk \u2014 fp/range checks before each volatile read; a stale or corrupt chain terminates the walk."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "walk_fp_chain",
+   "kind": "unsafe-fn",
+   "ordinal": 1,
+   "base_id": "6e7127d5b2f5",
+   "inv": "F3",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "vis": "pub",
+   "inv_note": "INV:F3: the AAPCS64 twin \u2014 same plausibility discipline, [fp]=saved x29, [fp+8]=lr."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "walk_fp_chain",
+   "kind": "unsafe-fn",
+   "ordinal": 2,
+   "base_id": "72cca045f3a2",
+   "inv": "F3",
+   "section": "frame-pointer walk, register/CSR reads and debugfs provoques (INV:F2)",
+   "vis": "pub",
+   "inv_note": "INV:F3: the SysV twin \u2014 same plausibility discipline, [rbp]=saved rbp, [rbp+8]=return address."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "walk_read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "951de59e2f8e",
+   "inv": "F10",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "ptw_walk",
+   "params": "root: u64, va: u64",
+   "ret": "Option<(u64, u64)>",
+   "call": "crate::debug::r#unsafe::ptw_walk(root, va)",
+   "vis": "pub(crate)",
+   "attr": "#[allow(dead_code)]",
+   "inline": true,
+   "doc": [
+    "The one audited PageTableWalker edge for the debug family."
+   ],
+   "contract": [
+    "INV-DFXWALK-1: `root` is the diagnosed task's own mm root; the backend walk is the arch contract (caller holds the address space)."
+   ],
+   "body_edits": [
+    {
+     "find": "PageTableWalker::walk(root, va)",
+     "replace": "crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "walk_read",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "24014cca9ce9",
+   "inv": "F10",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "read_volatile_t<T: Copy>",
+   "params": "addr: usize",
+   "ret": "T",
+   "call": "crate::debug::r#unsafe::read_volatile_t(base.as_usize() + (va & 0xfff) as usize)",
+   "vis": "pub(crate)",
+   "attr": "#[allow(dead_code)]",
+   "inline": true,
+   "doc": [
+    "Diagnostic volatile read of one `T: Copy` through the linear map."
+   ],
+   "contract": [
+    "INV-DFXWALK-1: `addr` is the linear-map byte address the walk above resolved; the read covers RAM the linear map maps."
+   ],
+   "body_edits": [
+    {
+     "find": "(base.as_usize() + (va & 0xfff) as usize)",
+     "replace": "addr"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_ref",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7fb345159c6a",
+   "inv": "F18",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "page_view",
+   "params": "page: *const crate::mm::types::Page",
+   "ret": "&'static crate::mm::types::Page",
+   "call": "crate::debug::r#unsafe::page_view(page)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "Shared view of a page descriptor the caller is operating on."
+   ],
+   "contract": [
+    "INV:F18: read-only descriptor access on the diagnostic path; the caller holds the page's refcount."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "capture_frame",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dcbb00e9dfa3",
+   "inv": "F18",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "page_desc_report",
+   "params": "page: *const crate::mm::types::Page",
+   "ret": "",
+   "call": "        crate::debug::r#unsafe::page_desc_report(page);",
+   "vis": "pub(crate)",
+   "doc": [
+    "Print one frame's page-descriptor state (buddy + page-cache view) on the mmforensics capture path."
+   ],
+   "contract": [
+    "INV:F18: read-only descriptor access inside the mapped vmemmap span; rate-limited by the caller."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_page_alloc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ab246d7bb75c",
+   "inv": "F3",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "ppage_stamp_slot",
+   "params": "table: *mut [core::sync::atomic::AtomicU8; PPAGE_TABLE_ENTRIES], i: usize, sid: usize",
+   "ret": "",
+   "call": "        crate::debug::r#unsafe::ppage_stamp_slot(table, i, sid);",
+   "vis": "pub(crate)",
+   "doc": [
+    "Stamp a phys-page site id into the PFN->site table."
+   ],
+   "contract": [
+    "INV:F3: `table` is the allocated ppage site table (non-null checked by the caller), `i < PPAGE_TABLE_ENTRIES` (loop-bounded), sid <= PSITE_SLOTS."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_page_free",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "efe883ef126f",
+   "inv": "F3",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "ppage_slot_load",
+   "params": "table: *mut [core::sync::atomic::AtomicU8; PPAGE_TABLE_ENTRIES], first: usize",
+   "ret": "u8",
+   "call": "crate::debug::r#unsafe::ppage_slot_load(table, first)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "Load a phys-page site id from the PFN->site table."
+   ],
+   "contract": [
+    "INV:F3: `table` non-null checked by the caller; `i` is the tracked_index result (< PPAGE_TABLE_ENTRIES)."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_page_free",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "56411083fb75",
+   "inv": "F3",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "call": "crate::debug::r#unsafe::ppage_stamp_slot(table, i, 0);"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "kroot_pollution",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "949eb2f9c1df",
+   "inv": "F3",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F3: read-only walk of the shared kernel root (ROOT_PAGE_TABLE) \u2014 diagnostic noise under concurrency is acceptable by design.",
+   "callmap": [
+    {
+     "find": "    kroot_pollution();",
+     "replace": "    crate::debug::r#unsafe::kroot_pollution();"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0f05a6eb9544",
+   "inv": "F18",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "leak_page_counts3",
+   "params": "page: *const crate::mm::types::Page",
+   "ret": "(i32, bool, bool)",
+   "call": "crate::debug::r#unsafe::leak_page_counts3(page)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "(refcount, on-freelist, reserved) of one page descriptor for the census scan."
+   ],
+   "contract": [
+    "INV:F18: read-only descriptor access inside the mapped vmemmap span; the flags atomics are the same ones every other reader uses lock-free."
+   ],
+   "body_edits": [
+    {
+     "find": "PageFlag::OnFreelist",
+     "replace": "crate::mm::types::PageFlag::OnFreelist"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "0c87195dcbe2",
+   "inv": "F18",
+   "section": "mm diagnostic edges (INV:F3 / INV:F10 / INV:F18)",
+   "name": "leak_page_flags4",
+   "params": "page: *const crate::mm::types::Page",
+   "ret": "(bool, bool, bool, bool)",
+   "call": "crate::debug::r#unsafe::leak_page_flags4(page)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "(anonymous, cow, mapped, lru) of one page descriptor for the census scan."
+   ],
+   "contract": [
+    "INV:F18: read-only descriptor access inside the mapped vmemmap span."
+   ],
+   "body_edits": [
+    {
+     "find": "PageFlag::Lru",
+     "replace": "crate::mm::types::PageFlag::Lru"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "audit_frames",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8e409593b00c",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "call": "(crate::debug::r#unsafe::raw_qword(fp + 8), crate::debug::r#unsafe::raw_qword(fp))"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "task_plausible",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e715b9bc1b69",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: read-only probes of scheduler header fields; the range check keeps us inside mapped memory for both known task classes (kernel image / heap).",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "double_seed",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8b8a2e515c20",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: diagnostic header reads of the double-run seed task (GRQ held by the caller).",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "putc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ab3d42ad113b",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: the static report buffer is bounded by the len check and only written under REPORTING; the console byte path is lock-free.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump_qwords",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "31edfc3f7ed3",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: diagnostic volatile reads of kernel memory for the hex dump; printed, never dereferenced further.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "rd",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3b1c28d14807",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: diagnostic volatile read of a live Task field (byte offsets captured at registration).",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "register",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "23abb2f36efa",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: read-only probes of the just-built task (pid, kernel stack bottom) under the scribble switch.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "quiesce",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "da1ea2897e07",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: the task's context is fully saved at the quiesce point; reads of its parked pt_regs are diagnostic.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "verify",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "151bf67e0f02",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: quiescent-sleeper reads only (on-CPU and mid-switch tasks are skipped), stable read sets under the seqlock generation discipline; all field reads diagnostic.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "verify_gs",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c0a2443b6d61",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "name": "gs_triple_read",
+   "params": "",
+   "ret": "(u32, u64, u64)",
+   "call": "crate::debug::r#unsafe::gs_triple_read()",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "inline": true,
+   "doc": [
+    "(gs:[0] cpu id, KERNEL_GS_BASE, KERNEL_GS_BASE.shadow) in one probe."
+   ],
+   "contract": [
+    "One %gs-relative u32 read plus two MSR reads; MSR reads are data-safe at any privilege."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "verify_consistency",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "53af50a68bf1",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: read-only probes of live task scheduling fields; the GRQ trylock is held, so pick/dequeue/publish windows are closed.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "slot_divergence",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "12a09944e539",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: diagnostic header reads; the pages are live task structs (slot-prev vs hardware-current divergence report).",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "unsafe impl Sync for ReportBuf",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "982597398f09",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "inv_note": "INV:F1: ReportBuf is only ever written under REPORTING/REPORT_LOCK (the report writers' bounded-spin protocol) and read by gdb offline; Sync is the raw-shared-static proof for that discipline.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "crash_report",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0ba53018ba83",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: diagnostic reads of the faulting frame, the task the hardware runs and the slot table \u2014 one CPU at a time via REPORT_LOCK.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c281989493f3",
+   "inv": "F1",
+   "section": "scribble: the byte-scribble hunter (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: diagnostic reads of the scribble victim's shadow and live fields under REPORT_LOCK.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "arm",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "49fcc98b3a53",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "name": "wild_link_aliases",
+   "params": "start: usize, len: usize, ok_pages: &mut usize, fail_pages: &mut usize, guarded_aliases: &mut usize",
+   "ret": "",
+   "call": "        wild_link_aliases(start, len, &mut ok_pages, &mut fail_pages, &mut guarded_aliases);",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "doc": [
+    "Guard the guard-cluster's VAs in every alias: the kernel-half image mapping, the linear-map alias and (under 2GB) the low identity alias."
+   ],
+   "contract": [
+    "The only linking store per split is one aligned 8-byte store; concurrent readers stay consistent under either mapping. Runs pre-SMP from debug::init on the BSP."
+   ],
+   "body_edits": [
+    {
+     "find": "ok_pages += 1",
+     "replace": "*ok_pages += 1"
+    },
+    {
+     "find": "fail_pages += 1",
+     "replace": "*fail_pages += 1"
+    },
+    {
+     "find": "protect_page(lin as usize) {\n                    guarded_aliases += 1;",
+     "replace": "protect_page(lin as usize) {\n                    *guarded_aliases += 1;"
+    },
+    {
+     "find": "protect_page(phys as usize) {\n                        guarded_aliases += 1;",
+     "replace": "protect_page(phys as usize) {\n                        *guarded_aliases += 1;"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "arm",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "ad6ccdc68e59",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "name": "canary_selftest_fire",
+   "params": "victim: *mut u64",
+   "ret": "",
+   "call": "crate::debug::r#unsafe::canary_selftest_fire(victim)",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "inline": true,
+   "doc": [
+    "The wildwatch-selftest deliberate store onto the RO guard page."
+   ],
+   "contract": [
+    "Deliberate wild-store emulation \u2014 this store MUST page-fault (the attribution chain's trigger); if control returns, the tripwire is broken."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "enable_write_protect",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "bd9b34dac958",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: one CR0.WP read-modify-write; WP is a boot-time-static bit (ring-0 stores ignore page RW bits while it is clear).",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "fill_canary",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0ff87b28eb7c",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: kernel .bss page written once (pattern fill) before RO arming.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "verify",
+   "kind": "block",
+   "ordinal": 11,
+   "base_id": "ec16fb3a05e8",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "call": "crate::debug::r#unsafe::canary_selftest_fire(victim)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "verify",
+   "kind": "block",
+   "ordinal": 12,
+   "base_id": "8931216815eb",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "name": "canary_qword_read",
+   "params": "page: *const u64, i: usize",
+   "ret": "u64",
+   "call": "crate::debug::r#unsafe::canary_qword_read(page, i)",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "inline": true,
+   "doc": [
+    "Read one canary qword for the DMA-writer verification pass."
+   ],
+   "contract": [
+    "INV:F1: registered armed kernel page (the guard cluster's canary page); read-only."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "table_virt",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "07957e23a93b",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "name": "kernel_pa_offset",
+   "params": "",
+   "ret": "usize",
+   "call": "crate::debug::r#unsafe::kernel_pa_offset()",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "inline": true,
+   "doc": [
+    "The boot-constant VMA-LMA offset (KERNEL_MAP)."
+   ],
+   "contract": [
+    "Read-only access of a value written once during mmu init, before any wildwatch code runs."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "table_virt",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "0816f89fee75",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "name": "page_table_virt_raw",
+   "params": "phys: u64",
+   "ret": "*mut crate::arch::mm::pagetable::PageTable",
+   "call": "crate::debug::r#unsafe::page_table_virt_raw(phys)",
+   "vis": "pub(crate)",
+   "attr": "#[cfg(feature = \"x86_64\")]",
+   "inline": true,
+   "doc": [
+    "Arch table-phys -> VA translation (the arch helper)."
+   ],
+   "contract": [
+    "Same contract as the arch helper: `phys` names a page-table page the kernel owns."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "resolve_phys",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c3f0592f6c3e",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: read-only walk of the shared kernel root (PML4->PDPT->PD->PTE); table pages live in the early pool or the image.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "protect_page",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "c06ea235a5c9",
+   "inv": "F1",
+   "section": "wildwatch: the wild-write tripwire (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf if needed. SAFETY (caller): runs pre-SMP from debug::init on the BSP; the linking store is one aligned 8-byte store, so old and new translations are both consistent for concurrent readers.",
+   "attr_add": "#[cfg(feature = \"x86_64\")]"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "early_scan",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "681730feb7f8",
+   "inv": "F4",
+   "section": "pstore: the panic record (INV:F4)",
+   "name": "record_header_at",
+   "params": "virt: *mut u8",
+   "ret": "&'static crate::debug::types::RecordHeader",
+   "call": "crate::debug::r#unsafe::record_header_at(virt)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "View the panic-record header at the region base."
+   ],
+   "contract": [
+    "INV:F4: the region is reserved RAM mapped by the linear map; the header reads are plain loads of memory no writer touches (the previous boot is gone)."
+   ],
+   "body_edits": [
+    {
+     "find": "virt as *const RecordHeader",
+     "replace": "virt as *const crate::debug::types::RecordHeader"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "early_scan",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "9b9f11f37f57",
+   "inv": "F4",
+   "section": "pstore: the panic record (INV:F4)",
+   "name": "clear_record_magic",
+   "params": "virt: *mut u8",
+   "ret": "",
+   "call": "    crate::debug::r#unsafe::clear_record_magic(virt);",
+   "vis": "pub(crate)",
+   "doc": [
+    "Clear only the record magic \u2014 this boot owns the region."
+   ],
+   "contract": [
+    "INV:F4: same reserved region; after early_scan's magic check no other writer exists until the next panic."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "read_record",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "000311b11ed9",
+   "inv": "F4",
+   "section": "pstore: the panic record (INV:F4)",
+   "call": "crate::debug::r#unsafe::record_header_at(virt)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "read_record",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "a8af52bb1976",
+   "inv": "F4",
+   "section": "pstore: the panic record (INV:F4)",
+   "name": "record_payload",
+   "params": "virt: *mut u8, length: usize",
+   "ret": "&'static [u8]",
+   "call": "crate::debug::r#unsafe::record_payload(virt, length)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "The previous boot's record payload bytes."
+   ],
+   "contract": [
+    "INV:F4: reserved, mapped, owned by this boot since early_scan cleared the magic; `length` is header-bounded."
+   ],
+   "body_edits": [
+    {
+     "find": "size_of::<RecordHeader>()",
+     "replace": "core::mem::size_of::<crate::debug::types::RecordHeader>()"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "write_record",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a35739a18b06",
+   "inv": "F4",
+   "section": "pstore: the panic record (INV:F4)",
+   "name": "pstore_commit",
+   "params": "kind: u32, hw: &crate::debug::types::HeadWriter, virt: *mut u8",
+   "ret": "",
+   "call": "    crate::debug::r#unsafe::pstore_commit(kind, hw, virt);",
+   "vis": "pub(crate)",
+   "doc": [
+    "Commit the panic record: head bytes, staged report, printk tail, then the header (magic last)."
+   ],
+   "contract": [
+    "INV:F4: reserved, mapped RAM owned by this dying boot; nothing else touches it (the other CPUs are stopped or on their way; a racing capture at worst interleaves bytes \u2014 the record is a forensic artifact, not a protocol)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_acquire",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "13276f1f9690",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "name": "sched_slot_current",
+   "params": "cpu: usize",
+   "ret": "usize",
+   "call": "crate::debug::r#unsafe::sched_slot_current(cpu as usize)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "Volatile racy diagnostic read of a CPU's sched slot current."
+   ],
+   "contract": [
+    "INV:F1: the sched slot is written by its owning CPU under the GRQ; this read is a racy diagnostic (value treated as data)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_acquire",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "b51e5326c47a",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "name": "t_state_dead",
+   "params": "task: *const crate::process::types::Task",
+   "ret": "bool",
+   "call": "crate::debug::r#unsafe::t_state_dead(task)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "Stale-task state-is-dead probe (INV-FOR-1 twin)."
+   ],
+   "contract": [
+    "INV-FOR-1: read-only view of a possibly-freed task; the caller treats the answer as best-effort diagnostics."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_acquire",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "cc48b8a1d6bc",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_pid(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_acquire",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "27f415e7f00c",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_pid(task)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_acquire",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "258ce5ff6060",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "name": "t_state_bits",
+   "params": "task: *const crate::process::types::Task",
+   "ret": "u32",
+   "call": "crate::debug::r#unsafe::t_state_bits(task)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "Stale-task state-bits probe (INV-FOR-1 twin)."
+   ],
+   "contract": [
+    "INV-FOR-1: read-only view of a possibly-freed task; the caller treats the value as best-effort diagnostics."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_acquire_divergent",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8e0f0c2cbfd9",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "vis": "pub(crate)",
+   "inv_note": "INV:F1: diagnostic scalar reads of stable Task fields; `task` is current on this CPU (pinned by execution), `slot_task` was this CPU's slot content moments before.",
+   "callmap": [
+    {
+     "find": "                report_acquire_divergent(task, loc, cpu, slot_task);",
+     "replace": "                crate::debug::r#unsafe::report_acquire_divergent(task, loc, cpu, slot_task);"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_release",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2c559f88ca70",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "vis": "pub",
+   "inv_note": "INV:F1: diagnostic reads of the leak-origin slot and the releaser task's header fields; budgeted direct console (R34)."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "note_softirq_acquire",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "f2f01678e69c",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::sched_slot_current(cpu as usize)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_hardirq_origin",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "297dcdcad6c6",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_pid(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_softirq_origin",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "327f1d194b63",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_pid(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_softirq_origin",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "fef40eb2432d",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_preempt_count(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "check_user_return",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "91802527fda6",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_preempt_count(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_parked_site",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "fda8a7e448c7",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_preempt_count(tp)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_parked_site",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "1bc05caea2f8",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_preempt_count(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_incumbent_site",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5f3f83fddaf2",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_preempt_count(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_outermost",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "763def664cde",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_pid(task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "emit",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2a5b46d20e08",
+   "inv": "F1",
+   "section": "locktrace: leak-origin and phantom-booking probes (INV:F1)",
+   "call": "crate::debug::r#unsafe::t_pid(task)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "stash_file",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4cfb16082f83",
+   "inv": "F18",
+   "section": "pathstash slot views (INV:F18)",
+   "name": "stash_slot_for",
+   "params": "tid: u32",
+   "ret": "&'static mut crate::debug::types::Slot",
+   "call": "crate::debug::r#unsafe::stash_slot_for(tid)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "The writing half of this task's stash slot."
+   ],
+   "contract": [
+    "INV:F18: diagnostic write into a static slot; this task is the only writer for its tid slot, publication ordered via tid/len."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "lookup_file",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4a42364d6f6f",
+   "inv": "F18",
+   "section": "pathstash slot views (INV:F18)",
+   "name": "stash_slot_at",
+   "params": "i: usize",
+   "ret": "&'static crate::debug::types::Slot",
+   "call": "crate::debug::r#unsafe::stash_slot_at(i)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "The reading half of a stash slot (static-derived 'static borrow)."
+   ],
+   "contract": [
+    "INV:F18: diagnostic read of the static slot table; the 'static borrow derives from the static itself and the bytes are utf8-checked by the caller."
+   ],
+   "body_edits": [
+    {
+     "find": ".cast::<Slot>()",
+     "replace": ".cast::<crate::debug::types::Slot>()"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "report_hung_task",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "49cc724d9349",
+   "inv": "F18",
+   "section": "stale-task adoption edges (INV:F18)",
+   "name": "task_view",
+   "params": "p: *const crate::process::types::Task",
+   "ret": "Option<crate::process::types::TaskBorrow>",
+   "call": "crate::debug::r#unsafe::task_view(p)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "Adopt a possibly-stale task handle as a TaskBorrow view (TaskBorrow's short-read contract)."
+   ],
+   "contract": [
+    "INV:F18 (one adopt edge): the handle came from a diagnostic producer that captured a live task; the view is read-only for fields stable until the struct's final put."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump_all_tasks",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "07b27c25fe7b",
+   "inv": "F18",
+   "section": "stale-task adoption edges (INV:F18)",
+   "call": "crate::debug::r#unsafe::task_view(cur)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump_all_tasks",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "9e8ce2be3e8c",
+   "inv": "F18",
+   "section": "stale-task adoption edges (INV:F18)",
+   "call": "crate::debug::r#unsafe::task_view(t)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "dump_frozen_cpu_truth",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ca43e8a03d7f",
+   "inv": "F18",
+   "section": "stale-task adoption edges (INV:F18)",
+   "call": "crate::debug::r#unsafe::task_view(t)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/debug/hotpath.rs",
+   "owner": "oops",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "b0cb9ae840fb",
+   "inv": "F18",
+   "section": "pstore: the panic record (INV:F4)",
+   "name": "putchar_no_lock_raw",
+   "params": "b: u8",
+   "ret": "",
+   "call": "crate::debug::r#unsafe::putchar_no_lock_raw(b)",
+   "vis": "pub(crate)",
+   "inline": true,
+   "doc": [
+    "One raw console byte on the oops report path."
+   ],
+   "contract": [
+    "INV:F18: raw console byte, no locking, no allocation (the oops path may run with anything held)."
+   ]
+  }
+ ],
+ "moved_fns": [
+  "current_frame_pointer",
+  "caller_return_address",
+  "unwind_frame",
+  "walk_fp_chain",
+  "kroot_pollution",
+  "task_plausible",
+  "double_seed",
+  "putc",
+  "dump_qwords",
+  "rd",
+  "register",
+  "quiesce",
+  "verify",
+  "verify_consistency",
+  "slot_divergence",
+  "crash_report",
+  "report",
+  "enable_write_protect",
+  "fill_canary",
+  "resolve_phys",
+  "protect_page",
+  "report_acquire_divergent",
+  "note_release"
+ ]
+}

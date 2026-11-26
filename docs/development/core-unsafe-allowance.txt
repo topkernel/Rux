@@ -97,7 +97,6 @@ kernel/core/src/cov.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyw
 # pruned (file gone): kernel/core/src/drivers/timer/x86_64.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 # pruned (file gone): kernel/core/src/drivers/virtio/mod.rs	pre-collection state at baseline f8e6eb94d: 24 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 # pruned (file gone): kernel/core/src/drivers/virtio/queue.rs	pre-collection state at baseline f8e6eb94d: 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/fs/hotpath.rs	pre-collection state at baseline f8e6eb94d: 258 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/init.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/initrd.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/interrupt/irqdesc.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
@@ -107,12 +106,9 @@ kernel/core/src/io_uring/mod.rs	pre-collection state at baseline f8e6eb94d: 13 u
 kernel/core/src/ipc/hotpath.rs	pre-collection state at baseline f8e6eb94d: 42 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/lib.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/list.rs	pre-collection state at baseline f8e6eb94d: 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/mm/hotpath.rs	pre-collection state at baseline f8e6eb94d: 53 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/module/mod.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/net/hotpath.rs	pre-collection state at baseline f8e6eb94d: 29 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/perf/mod.rs	pre-collection state at baseline f8e6eb94d: 40 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/printk.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/process/hotpath.rs	pre-collection state at baseline f8e6eb94d: 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/safety/bytes.rs	pre-collection state at baseline f8e6eb94d: 11 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/safety/call.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/safety/dma.rs	pre-collection state at baseline f8e6eb94d: 11 unsafe keyword(s) to collect into the subsystem's unsafe.rs
@@ -127,7 +123,6 @@ kernel/core/src/security/lsm.rs	pre-collection state at baseline f8e6eb94d: 4 un
 kernel/core/src/security/mod.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/signal.rs	pre-collection state at baseline f8e6eb94d: 13 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/signal_unsafe.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/sync/hotpath.rs	pre-collection state at baseline f8e6eb94d: 95 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/tests/fdtable.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/tests/framebuffer.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/tests/listhead.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
@@ -152,5 +147,5 @@ kernel/core/src/timer.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe ke
 kernel/core/src/timer/nohz.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/timer/wheel.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/trace/mod.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/debug/hotpath.rs	pass-3 pending: the debug flip collected the subsystem into hotpath.rs; its 101 unsafe keyword(s) await the debug pass-3 lane
-kernel/core/src/drivers/hotpath.rs	pass-3 pending: the drivers flip collected the subsystem into hotpath.rs (inline timer/intc modules included); its 115 unsafe keyword(s) await the drivers pass-3 lane
+# retired 2026-11-27 (the debug pass-3 merge emptied the file): kernel/core/src/debug/hotpath.rs	pass-3 pending: the debug flip collected the subsystem into hotpath.rs; its 101 unsafe keyword(s) await the debug pass-3 lane
+# retired 2026-11-27 (drivers pass-3 emptied the file): kernel/core/src/drivers/hotpath.rs	pass-3 pending: the drivers flip collected the subsystem into hotpath.rs (inline timer/intc modules included); its 115 unsafe keyword(s) await the drivers pass-3 lane

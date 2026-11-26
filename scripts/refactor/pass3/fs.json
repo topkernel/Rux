@@ -1,0 +1,3517 @@
+{
+ "sub": "fs",
+ "target": "kernel/core/src/fs",
+ "imports_rs": [
+  "use alloc::boxed::Box;",
+  "use alloc::sync::Arc;",
+  "use alloc::vec::Vec;",
+  "use core::cell::UnsafeCell;",
+  "use core::sync::atomic::Ordering;",
+  "use crate::arch::mm::{PhysAddr, phys_to_virt};",
+  "use crate::list::ListHead;",
+  "use crate::mm::hotpath::pfn_to_phys;",
+  "use crate::process::types::Task;",
+  "use crate::fs::types::{",
+  "    AnonDevMap, AssertingSyncArc, BigMemoTable, BlockCache, BufferHead,",
+  "    BufferState, CacheEntry, Dentry, DentryCache, DevNo, ElfError,",
+  "    EpollWakeShard, FileChunk, FileFlags, FileOpKind, FileOps, FastFd,",
+  "    FdTable, FsRegistry, FsStruct, InodeCache, InodeMode, LruState,",
+  "    MemFileContent, SignalfdWakeRegistry, SuperBlock, VfsMount,",
+  "    VfsMountInternal,",
+  "};",
+  "use super::hotpath::{",
+  "    ANON_DEV_MAP, ANON_DEV_NEXT, ANON_DEV_WRITE, FILE_BUFFER_CHUNK,",
+  "    get_file_fd, ino_events, notify_file, phys_to_virt_ptr,",
+  "    wait_buffer_io_done,",
+  "};"
+ ],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "        unsafe { &*self.dentry.get() }.as_ref()",
+   "replace": "        crate::fs::r#unsafe::file_dentry(self)",
+   "why": "get_dentry: the write-once dentry-cell read rides the existing file_dentry edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "        if let Some(inode) = unsafe { &*self.inode.get() }.as_ref() {",
+   "replace": "        if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(self) {",
+   "why": "positional_capable: inode-cell read via the file_inode_arc_ref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {\n    if let Some(ref inode) = unsafe { &*file.inode.get() } {",
+   "replace": "fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {\n    if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(file) {",
+   "why": "reg_file_read: inode-cell read via the file_inode_arc_ref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "fn reg_file_write(file: &File, buf: &[u8]) -> isize {\n    if let Some(ref inode) = unsafe { &*file.inode.get() } {",
+   "replace": "fn reg_file_write(file: &File, buf: &[u8]) -> isize {\n    if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(file) {",
+   "why": "reg_file_write: inode-cell read via the file_inode_arc_ref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {",
+   "replace": "    let file_size = if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(file) {",
+   "why": "reg_file_lseek: inode-cell read via the file_inode_arc_ref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "            unsafe { Arc::increment_strong_count(src) };\n            let dup_arc = unsafe { Arc::from_raw(src) };",
+   "replace": "            let dup_arc = crate::fs::r#unsafe::arc_clone_claimed(src);",
+   "why": "dup2_fd: the published-slot clone pair collapses to one audited edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    unsafe { get_file_fd(fd) }",
+   "replace": "    get_file_fd(fd)",
+   "why": "get_file_fd_safe: the wrapped fn is safe; the vacuous unsafe goes"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "        unsafe {\n            data.set_len(PAGE_SIZE);\n        }",
+   "replace": "        crate::fs::r#unsafe::vec_set_len_uninit(&mut data, PAGE_SIZE);",
+   "why": "Page::from_bytes: pre-sized set_len via the staging edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    fn new_chunk() -> Vec<u8> {\n        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);\n        unsafe {\n            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);\n            c.set_len(FILE_BUFFER_CHUNK);\n        }\n        c",
+   "replace": "    fn new_chunk() -> Vec<u8> {\n        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);\n        crate::fs::r#unsafe::vec_zero_set_len(&mut c, FILE_BUFFER_CHUNK);\n        c",
+   "why": "FileBuffer::new_chunk: zero+set_len via the fresh-chunk edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);\n        unsafe {\n            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);\n            c.set_len(FILE_BUFFER_CHUNK);\n        }",
+   "replace": "        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);\n        crate::fs::r#unsafe::vec_zero_set_len(&mut c, FILE_BUFFER_CHUNK);",
+   "why": "FileChunk::new: zero+set_len via the fresh-chunk edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "            unsafe {\n                let _ = Box::from_raw(self.bh);\n            }",
+   "replace": "            crate::fs::r#unsafe::boxed_drop(self.bh);",
+   "why": "CacheEntry::drop: Box reclaim via the audited boxed_drop edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                    unsafe {\n                        if let Some(pp) = prev {\n                            (*pp).hash_next = (*cp).hash_next;\n                        } else {\n                            bucket.head = (*cp).hash_next;\n                        }\n                    }",
+   "replace": "                    if let Some(pp) = prev {\n                        crate::fs::r#unsafe::raw_ref_mut(pp).hash_next =\n                            crate::fs::r#unsafe::raw_ref(cp).hash_next;\n                    } else {\n                        bucket.head = crate::fs::r#unsafe::raw_ref(cp).hash_next;\n                    }",
+   "why": "evict_one: bucket-chain unhash relink via the deref edges"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                unsafe {\n                    (*victim).hash_next = bucket.head;\n                }",
+   "replace": "                crate::fs::r#unsafe::raw_ref_mut(victim).hash_next = bucket.head;",
+   "why": "evict_one: pinned-victim relink via the deref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                unsafe {\n                    (*cp).evicting = true;\n                    if let Some(pp) = prev {\n                        (*pp).hash_next = (*cp).hash_next;\n                    } else {\n                        bucket.head = (*cp).hash_next;\n                    }\n                }",
+   "replace": "                crate::fs::r#unsafe::raw_ref_mut(cp).evicting = true;\n                if let Some(pp) = prev {\n                    crate::fs::r#unsafe::raw_ref_mut(pp).hash_next =\n                        crate::fs::r#unsafe::raw_ref(cp).hash_next;\n                } else {\n                    bucket.head = crate::fs::r#unsafe::raw_ref(cp).hash_next;\n                }",
+   "why": "drop_block: evict-mark + unhash relink via the deref edges"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                            unsafe {\n                                let prev_entry = &mut *prev.unwrap();\n                                prev_entry.hash_next = entry.hash_next;\n                                (*entry_ptr).hash_next = bucket.head;\n                            }",
+   "replace": "                            let prev_entry =\n                                crate::fs::r#unsafe::raw_ref_mut(prev.unwrap());\n                            prev_entry.hash_next = entry.hash_next;\n                            crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next =\n                                bucket.head;",
+   "why": "BlockCache::get: chain relink via the deref edges"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                // Insert at hash chain head\n                // SAFETY: entry_ptr is the freshly Box::into_raw'd entry;\n                // bucket lock held (INV-BIO-ENTRY relink write).\n                unsafe {\n                    (*entry_ptr).hash_next = bucket.head;\n                }",
+   "replace": "                // Insert at hash chain head\n                crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next = bucket.head;",
+   "why": "BlockCache::get: hash-chain head insert via the deref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                }\n                // SAFETY: fresh Box::into_raw entry; bucket lock held\n                // (INV-BIO-ENTRY relink write).\n                unsafe {\n                    (*entry_ptr).hash_next = bucket.head;\n                }",
+   "replace": "                }\n                // SAFETY: fresh Box::into_raw entry; bucket lock held\n                // (INV-BIO-ENTRY relink write).\n                crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next = bucket.head;",
+   "why": "get_zero_impl: hash-chain head insert via the deref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                let next = unsafe {\n                    let next = (*entry_ptr).hash_next;\n                    let _ = Box::from_raw(entry_ptr);\n                    next\n                };",
+   "replace": "                let next = {\n                    let next = crate::fs::r#unsafe::raw_ref(entry_ptr).hash_next;\n                    crate::fs::r#unsafe::boxed_drop(entry_ptr);\n                    next\n                };",
+   "why": "BlockCache::invalidate: chain drain via the deref edges"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                        unsafe {\n                            (*entry_ptr).evicting = true;\n                            match prev {\n                                Some(pp) => (*pp).hash_next = next,\n                                None => bucket.head = next,\n                            }\n                        }",
+   "replace": "                        crate::fs::r#unsafe::raw_ref_mut(entry_ptr).evicting = true;\n                        match prev {\n                            Some(pp) => crate::fs::r#unsafe::raw_ref_mut(pp).hash_next = next,\n                            None => bucket.head = next,\n                        }",
+   "why": "invalidate_device: evict-mark + unhash relink via the deref edges"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                        unsafe {\n                            let prev_entry = &mut *prev.unwrap();\n                            prev_entry.hash_next = entry.hash_next;\n                            (*entry_ptr).hash_next = bucket.head;\n                        }",
+   "replace": "                        let prev_entry =\n                            crate::fs::r#unsafe::raw_ref_mut(prev.unwrap());\n                        prev_entry.hash_next = entry.hash_next;\n                        crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next =\n                            bucket.head;",
+   "why": "bread_async: chain relink via the deref edges"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                let mut bucket = cache.buckets[index].lock_irqsave();\n                // SAFETY: fresh Box::into_raw entry; bucket lock held\n                // (INV-BIO-ENTRY relink write).\n                unsafe {\n                    (*entry_ptr).hash_next = bucket.head;\n                }",
+   "replace": "                let mut bucket = cache.buckets[index].lock_irqsave();\n                // SAFETY: fresh Box::into_raw entry; bucket lock held\n                // (INV-BIO-ENTRY relink write).\n                crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next = bucket.head;",
+   "why": "bread_async: hash-chain head insert via the deref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    unsafe {\n        let bh_ref = &*bh;\n        bh_ref.sync()\n    }",
+   "replace": "    crate::fs::r#unsafe::raw_ref(bh).sync()",
+   "why": "sync_dirty_buffer: pinned-bh sync via the deref edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    unsafe {\n        crate::arch::uaccess::copy_to_user(\n            buf,\n            stat as *const Stat as *const u8,\n            core::mem::size_of::<Stat>(),\n        )\n    }",
+   "replace": "    crate::fs::r#unsafe::fs_copy_to_user(buf, stat as *const Stat as *const u8, size_of::<Stat>())",
+   "why": "copy_stat_to_user: non-x86 arm rides the same uaccess edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                unsafe { Arc::increment_strong_count(ptr) };\n                self.slots[slot].0.store(ptr, Ordering::Release);\n                return Some(unsafe { Arc::from_raw(ptr) });",
+   "replace": "                let cloned = crate::fs::r#unsafe::arc_clone_claimed(ptr);\n                self.slots[slot].0.store(ptr, Ordering::Release);\n                return Some(cloned);",
+   "why": "table_publish: clone pair via the audited clone edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "                unsafe { Arc::increment_strong_count(p) };\n                return Some(unsafe { Arc::from_raw(p) });",
+   "replace": "                return Some(crate::fs::r#unsafe::arc_clone_claimed(p));",
+   "why": "table_publish: existing-key clone pair via the audited clone edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    let inode = unsafe { &*file.inode.get() }.as_ref()?;",
+   "replace": "    let inode = crate::fs::r#unsafe::file_inode(file)?;",
+   "why": "shared_file_fault_page: inode-cell read via the file_inode edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    unsafe {\n        cache.insert(\n            fs_id,\n            ino,\n            page_index,\n            0,\n            core::slice::from_raw_parts(bounce, crate::mm::types::PAGE_SIZE),\n        );\n    }",
+   "replace": "    cache.insert(\n        fs_id,\n        ino,\n        page_index,\n        0,\n        crate::fs::r#unsafe::kernel_slice(bounce, crate::mm::types::PAGE_SIZE),\n    );",
+   "why": "shared_file_fault_page: bounce slice via the kernel_slice edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    Some(unsafe { data_of(file)?.pid })",
+   "replace": "    Some(data_of(file)?.pid)",
+   "why": "fdinfo_pid_of: data_of is a safe fn; the vacuous unsafe goes"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    match unsafe { data_of(_file) } {",
+   "replace": "    match data_of(_file) {",
+   "why": "pidfd_poll: data_of is a safe fn; the vacuous unsafe goes"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    unsafe {\n        *file.private_data.get() = Some(Box::into_raw(boxed) as *mut u8);\n    }",
+   "replace": "    crate::fs::r#unsafe::file_privdata_install_raw(&file, alloc::boxed::Box::into_raw(boxed) as *mut u8);",
+   "why": "make_detached_mount: single-owner handoff via the install edge"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "        unsafe {\n            let _ = self::close_file_fd(fd);\n        }",
+   "replace": "        let _ = self::close_file_fd(fd);",
+   "why": "file_open_tmpfile: close_file_fd is safe; the vacuous unsafe goes"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "fn phys_to_virt_ptr(phys: usize) -> *mut u8 {",
+   "replace": "pub(crate) fn phys_to_virt_ptr(phys: usize) -> *mut u8 {",
+   "why": "phys_to_virt_ptr: the collected frame-copy edges call it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "static ANON_DEV_NEXT: AtomicU32 = AtomicU32::new(1);",
+   "replace": "pub(crate) static ANON_DEV_NEXT: AtomicU32 = AtomicU32::new(1);",
+   "why": "ANON_DEV_NEXT: stat_dev_for_fs moved to unsafe.rs reads it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "static ANON_DEV_WRITE: Spinlock<()> = Spinlock::new(());",
+   "replace": "pub(crate) static ANON_DEV_WRITE: Spinlock<()> = Spinlock::new(());",
+   "why": "ANON_DEV_WRITE: stat_dev_for_fs moved to unsafe.rs reads it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {",
+   "replace": "pub(crate) fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {",
+   "why": "wait_buffer_io_done: bread_pin_settle moved to unsafe.rs calls it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    fn base_ptr(&mut self) -> *mut u8 {",
+   "replace": "    pub(crate) fn base_ptr(&mut self) -> *mut u8 {",
+   "why": "FileChunk::base_ptr: the collected chunk-slice edges call it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "    fn positional_capable(&self) -> bool {",
+   "replace": "    pub(crate) fn positional_capable(&self) -> bool {",
+   "why": "File::positional_capable: the moved read_at/write_at call it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "static ANON_DEV_MAP: core::sync::atomic::AtomicPtr<AnonDevMap> =",
+   "replace": "pub(crate) static ANON_DEV_MAP: core::sync::atomic::AtomicPtr<AnonDevMap> =",
+   "why": "ANON_DEV_MAP: stat_dev_for_fs moved to unsafe.rs reads it"
+  },
+  {
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "find": "use crate::timer::msecs_to_jiffies;",
+   "replace": "use crate::timer::msecs_to_jiffies;\nuse super::r#unsafe::{\n    bh_pinned, boxed_drop, boxed_mut, boxed_ref,\n    copy_into_page, copy_user_into_page, entry_ref, list_entry,\n    list_entry_mut, list_first, list_link_tail, list_next,\n    list_unlink, mem_file_content, mem_file_content_mut,\n    mem_file_take_owned, stat_dev_for_fs,\n};\npub use super::r#unsafe::bread_wait;\npub use super::r#unsafe::bh_data_mut;",
+   "why": "hotpath.rs: the free edges that moved to unsafe.rs (callers unchanged) + the bread_wait re-export for the ext4 crate"
+  }
+ ],
+ "forbid": [
+  "kernel/core/src/fs/hotpath.rs"
+ ],
+ "registry": [
+  "kernel/core/src/fs/hotpath.rs"
+ ],
+ "moves": [
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "file_arc_try_clone",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "14ab24c4b2fb",
+   "inv": "INV-FILE-ARC-1",
+   "section": "published-Arc lifecycle (INV-FILE-ARC-1)",
+   "inv_note": "INV-FILE-ARC-1: caller-pins + CAS-nonzero-or-clean-fail \u2014 conditional strong-count acquisition on a published File; the ArcInner strong-word offset is pinned by verify_arc_inner_layout below."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_file",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1ae10ca878d6",
+   "inv": "INV-FILE-ARC-1",
+   "section": "published-Arc lifecycle (INV-FILE-ARC-1)",
+   "name": "file_arc_try_clone_claimed",
+   "params": "p: *mut File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "            crate::fs::r#unsafe::file_arc_try_clone_claimed(p)",
+   "ret": "Option<Arc<File>>",
+   "doc": [
+    "Safe twin of the moved unsafe fn: one conditional strong-count",
+    "acquisition on a published File (the fd-table fget face)."
+   ],
+   "contract": [
+    "`p` was published by a writer from an owned Arc and the",
+    "ArcInner allocation is pinned across this call (a slot",
+    "reference or an fdreap-parked Weak); the CAS wins a",
+    "nonzero count or fails cleanly (INV-FILE-ARC-1)."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "verify_arc_inner_layout",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8ebe7b7de9bf",
+   "inv": "INV-FILE-ARC-1",
+   "section": "published-Arc lifecycle (INV-FILE-ARC-1)",
+   "inv_note": "INV-FILE-ARC-1: the boot-time pin of the ArcInner strong-word offset the fd family assumes.",
+   "callmap": [
+    {
+     "find": "    self::verify_arc_inner_layout();",
+     "replace": "    crate::fs::r#unsafe::verify_arc_inner_layout();"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "set_inode",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "894b65acf84d",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "call": "crate::fs::r#unsafe::file_inode_install(self, inode);"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "set_dentry",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ee945cbbbf1b",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_dentry_install",
+   "params": "file: &File, dentry: Arc<Dentry>",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_dentry_install(self, dentry);",
+   "doc": [
+    "Write-once install of the dentry cell (INV-FILE-CELL-1)."
+   ],
+   "contract": [
+    "`file` is not yet published to any fd table; the cell is",
+    "written exactly once at open/creation time and never",
+    "re-pointed (INV-FILE-CELL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "*self.dentry.get() = Some(dentry);",
+     "replace": "*file.dentry.get() = Some(dentry);"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "set_ops",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "87c5ecb7005c",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_ops_install",
+   "params": "file: &File, ops: &'static FileOps",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_ops_install(self, ops);",
+   "doc": [
+    "Write-once install of the ops cell (INV-FILE-CELL-1)."
+   ],
+   "contract": [
+    "`file` is not yet published; the ops cell is written once",
+    "at open/creation time (INV-FILE-CELL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "*self.ops.get() = Some(ops);",
+     "replace": "*file.ops.get() = Some(ops);"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_ops",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d8754067cc32",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_ops_ref",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_ops_ref(self)",
+   "ret": "Option<&'static FileOps>",
+   "doc": [
+    "Shared read of the write-once ops cell (INV-FILE-CELL-1)."
+   ],
+   "contract": [
+    "The cell was installed before publication and is never",
+    "re-pointed; a shared read through a live &File is",
+    "race-free (INV-FILE-CELL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { *self.ops.get() }",
+     "replace": "unsafe { *file.ops.get() }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_inode",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "61ca11146be2",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_inode_arc_ref",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_inode_arc_ref(self)",
+   "ret": "Option<&Arc<Inode>>",
+   "doc": [
+    "Shared read of the write-once inode cell, Arc view kept",
+    "(INV-FILE-CELL-1)."
+   ],
+   "contract": [
+    "The cell is written at open/creation time before the File",
+    "is published and never mutated afterwards; a shared read",
+    "through a shared borrow is race-free (INV-FILE-CELL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { &*self.inode.get() }.as_ref()",
+     "replace": "unsafe { &*file.inode.get() }.as_ref()"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "set_private_data",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a5b3a3973510",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_privdata_install_raw",
+   "params": "file: &File, data: *mut u8",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_privdata_install_raw(self, data);",
+   "doc": [
+    "Write-once install of the raw private-data slot",
+    "(INV-FS-FILEPRIV-1)."
+   ],
+   "contract": [
+    "`file` is not yet published (or the install runs in the",
+    "single-owner attach path); the slot is written once at",
+    "attach and otherwise mutated only by the close-path take",
+    "(INV-FS-FILEPRIV-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "*self.private_data.get() = Some(data);",
+     "replace": "*file.private_data.get() = Some(data);"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "private_data_ptr",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "6d34f32f64f6",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_privdata_ptr_raw",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_privdata_ptr_raw(self)",
+   "ret": "Option<*mut u8>",
+   "doc": [
+    "Opaque copy of the raw private-data slot value; dereferencing",
+    "is the caller's typed step (INV-FS-FILEPRIV-1)."
+   ],
+   "contract": [
+    "A plain load of a pointer-sized word; the value is handed",
+    "out as an opaque copy (INV-FS-FILEPRIV-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { *self.private_data.get() }",
+     "replace": "unsafe { *file.private_data.get() }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "clear_private_data",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3cc56efcb989",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_privdata_clear_raw",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_privdata_clear_raw(self);",
+   "doc": [
+    "Clear the raw private-data slot (the close-path null store)."
+   ],
+   "contract": [
+    "The store races no live handle: close is the last user of",
+    "this open file description (INV-FS-FILEPRIV-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { *self.private_data.get() = None }",
+     "replace": "unsafe { *file.private_data.get() = None }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "take_private_data",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ef5fed5781ff",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_privdata_take_raw",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::file_privdata_take_raw(self)",
+   "ret": "Option<*mut u8>",
+   "doc": [
+    "Take the raw private-data slot value out (close-path reclaim)."
+   ],
+   "contract": [
+    "Callers run in the release path where no shared reader can",
+    "race the cell; the take empties it exactly once",
+    "(INV-FS-FILEPRIV-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { (*self.private_data.get()).take() }",
+     "replace": "unsafe { (*file.private_data.get()).take() }"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "read",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "73e7a25607fa",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "write",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "84395df6813f",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "lseek",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "2fe076dc3b1f",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "read_at",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "ad36aadf642c",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "write_at",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "49288e72f577",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "close",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "315a24530e93",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "read_slice",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "75747cedfe90",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "write_slice",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8b1b331570ea",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "read_at_slice",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "81f3edf7605e",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "write_at_slice",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0127a83efdb9",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "lseek_op",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3b08ba879450",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "impl_owner": "File",
+   "inv_note": "INV-FILE-CELL-1: the write-once inode/dentry/ops cells behind the f_mode checks \u2014 the contracts live in the doc comments that moved with the fns."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2819ba2318c6",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "call": "crate::fs::r#unsafe::file_close(self);"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_stderr",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "e5985705a160",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File I/O entries (INV-FILE-CELL-1)",
+   "inv_note": "INV-FILE-CELL-1: vacuous unsafe \u2014 the body calls only the safe get_file_fd(2)."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a6c8afc1b203",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "name": "file_dentry_arc",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::file_dentry_arc(self)",
+   "inline": true,
+   "ret": "Option<Arc<Dentry>>",
+   "doc": [
+    "Arc clone of the write-once dentry cell (INV-FILE-CELL-1)."
+   ],
+   "contract": [
+    "The cell is written once at open time and read-only",
+    "afterwards; an ordinary Arc clone of the cell value",
+    "(INV-FILE-CELL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { (*self.dentry.get()).clone() }",
+     "replace": "unsafe { (*file.dentry.get()).clone() }"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "515b5e7e2646",
+   "inv": "INV-FILE-CELL-1",
+   "section": "File cell discipline (INV-FILE-CELL-1 / INV-FS-FILEPRIV-1)",
+   "call": "crate::fs::r#unsafe::file_inode_arc(self)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fork_from",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "619b08c1d56c",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "name": "arc_inc<T>",
+   "params": "p: *const T",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "                crate::fs::r#unsafe::arc_inc(p);",
+   "doc": [
+    "One strong-count increment on a LIVE published Arc::into_raw",
+    "pointer (the fd-table/pager slot increment edge)."
+   ],
+   "contract": [
+    "`p` was published by a writer from an owned Arc and the",
+    "caller's claim (slot lock, table lock, or walk claim) keeps",
+    "the allocation alive across the increment; every call site",
+    "names its pin in its SAFETY note (INV-FILE-CELL-1 /",
+    "INV-PC-CLAIM families)."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_file_borrow",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "41dfd4eac7d4",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(p as *const File)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "for_each_file",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "583ca92ceb5a",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "name": "fdslot_visit_published<F: FnMut(usize, &Arc<File>)>",
+   "params": "fd: usize, p: *mut File, f: &mut F",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "                    crate::fs::r#unsafe::fdslot_visit_published(fd, p, &mut f);",
+   "doc": [
+    "Temporary owning clone of a published slot occupant for the",
+    "duration of one callback (for_each_file's visit face)."
+   ],
+   "contract": [
+    "`p` is published by a writer and the table's reference is",
+    "held by the slot for the duration of the entry lock the",
+    "caller holds; the increment + from_raw + drop triple nets",
+    "a borrow of the slot's occupant (INV-FILE-CELL-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "f(fd, &file);",
+     "replace": "f(fd, &file);"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "close_fd",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e405b081b20f",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "call": "crate::fs::r#unsafe::arc_reclaim_owned(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "close_fd_report",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "afd048ad0a4d",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "call": "crate::fs::r#unsafe::arc_reclaim_owned(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "dup2_fd",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "342d8414f8b4",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "call": "crate::fs::r#unsafe::arc_reclaim_owned(prev)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "03544289ac36",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "call": "crate::fs::r#unsafe::arc_reclaim_owned(p)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "alloc_staging_buf",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "501d0e8c7e30",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "name": "vec_set_len_uninit<T>",
+   "params": "v: &mut Vec<T>, n: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "    crate::fs::r#unsafe::vec_set_len_uninit(&mut v, n);",
+   "doc": [
+    "set_len on a with_capacity vector whose bytes the caller fills",
+    "before any read (the staging-buffer edge)."
+   ],
+   "contract": [
+    "`v`'s capacity is at least `n` (with_capacity just ran);",
+    "the bytes are uninit until the caller fills them and no",
+    "read happens before that (INV-FILE-CELL-1 staging note)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "gather_append_user",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9971bd4cf28d",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "name": "gather_append_copy",
+   "params": "dst: &mut Vec<u8>, start: usize, src_user: usize, len: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "    if !crate::fs::r#unsafe::gather_append_copy(dst, start, src_user, len) {\n        return false;\n    }",
+   "ret": "bool",
+   "doc": [
+    "One copy_from_user into the reserved tail, then set_len (the",
+    "writev gather edge); false on fault with nothing exposed."
+   ],
+   "contract": [
+    "dst's capacity covers start..start+len (try_reserve_exact",
+    "just ran); copy_from_user fills all of it or the fn",
+    "returns false before set_len exposes any byte",
+    "(INV-FILE-CELL-1 gather note)."
+   ],
+   "body_suffix": "\n    true"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_file_fd_fast",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "96a8f6e1f3fb",
+   "inv": "INV-FILE-CELL-1",
+   "section": "fd-table published slots (INV-FILE-CELL-1)",
+   "name": "fd_fast_lookup",
+   "params": "cur: *mut Task, fd: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "    crate::fs::r#unsafe::fd_fast_lookup(cur, fd)",
+   "ret": "Option<FastFd>",
+   "doc": [
+    "__fdget's unshared fast path: borrowed-or-owned fd resolution",
+    "off a live task pointer (get_file_fd_fast's body)."
+   ],
+   "contract": [
+    "`cur` is the current task pointer (sched::current()); the",
+    "unshared table outlives the syscall, so the transmuted",
+    "'static borrow is gated on fdtable_unshared() (the doc",
+    "above the original fn; INV-FILE-CELL-1)."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "list_first",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5a2b41107c08",
+   "inv": "INV-SYSC-1",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-1: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "list_next",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a079a30d0cf3",
+   "inv": "INV-SYSC-1",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-1: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "list_link_tail",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "972e6053e23c",
+   "inv": "INV-SYSC-1",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-1: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "list_unlink",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "fc9641fc2181",
+   "inv": "INV-SYSC-1",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-1: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "boxed_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "be641cf7ee71",
+   "inv": "INV-SYSC-2",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-2: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "boxed_drop",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5b2fee092f70",
+   "inv": "INV-SYSC-2",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-2: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "list_entry_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "81b717c7265d",
+   "inv": "INV-SYSC-1",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-1: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "list_entry",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "78f39f3b01ba",
+   "inv": "INV-SYSC-1",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-1: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "boxed_ref",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "fc18a482ef6f",
+   "inv": "INV-SYSC-2",
+   "section": "syscall-container lists (INV-SYSC-1 / INV-SYSC-2)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SYSC-2: the list/box raw edges' registry-side contract (shard/registry lock or the caller's ownership/pin proof) rides the fn's own SAFETY note."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for File",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "3bcbe77a533f",
+   "inv": "INV-FILE-SEND-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "INV-FILE-SEND-1: File's Send/Sync are carried per-field \u2014 cells are write-once (INV-FILE-CELL-1), pos/cloexec/dirent_cache behind their locks, flags/f_owner/f_signum atomics, io_lock a real mutex. No field admits a data race through &File."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for File",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "a3db3c4685a5",
+   "inv": "INV-FILE-SEND-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "INV-FILE-SEND-1: same per-field discipline as the Sync proof."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for EpollWakeShard",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "f0412eb8959c",
+   "inv": "INV-SYSC-2",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "INV-SYSC-2: access only under the shard lock (moved from syscall/unsafe.rs with the types; same contract)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for SignalfdWakeRegistry",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "574100e96e9b",
+   "inv": "INV-SYSC-2",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "INV-SYSC-2: access only under the registry lock."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "stat_dev_for_fs",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2cc8d4fbe26e",
+   "inv": "INV-INODE-STATDEV-1",
+   "section": "anon device map (INV-INODE-STATDEV-1)",
+   "inv_note": "INV-INODE-STATDEV-1: the ANON_DEV_MAP snapshots are immutable once published and only replaced, never freed."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for Inode",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "ae78ec57c72e",
+   "inv": "INV-INODE-STATDEV-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "Inode's Send is carried per-field (atomics + lock-guarded state); no field admits a data race by move."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for Inode",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "5b96b369f5ce",
+   "inv": "INV-INODE-STATDEV-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "Inode's Sync is carried per-field (atomics + lock-guarded state); no field admits a data race through &Inode."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "update_cached_mode",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "6fc795bf7135",
+   "inv": "INV-INODE-STATDEV-1",
+   "section": "anon device map (INV-INODE-STATDEV-1)",
+   "name": "inode_mode_volatile_store",
+   "params": "ptr: *mut InodeMode, mode: InodeMode",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::inode_mode_volatile_store(ptr, mode);",
+   "doc": [
+    "One aligned u32 volatile store of the cached inode mode."
+   ],
+   "contract": [
+    "`ptr` names a live shared Inode's mode field; the store",
+    "is aligned and u32-sized, so concurrent readers observe",
+    "either the old or the new full word (INV-INODE-STATDEV-1)."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for InodeCache",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "e04ee565291d",
+   "inv": "INV-INODE-STATDEV-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "InodeCache is accessed only under ICACHE's spinlock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for InodeCache",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "2e73f8e2f522",
+   "inv": "INV-INODE-STATDEV-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "InodeCache is accessed only under ICACHE's spinlock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for VfsMountInternal",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "651a0c7a4bdd",
+   "inv": "INV-DENTRY-SEND-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "VfsMountInternal's mutable state is behind the mount-table locks."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for VfsMountInternal",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "7406e3f60cfd",
+   "inv": "INV-DENTRY-SEND-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "VfsMountInternal's shared state is behind the mount-table locks."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "dentry_arc_from_raw",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "35f2d48f17a1",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "inv_note": "INV-DENTRY-ADOPT-1: the audited adopt edge \u2014 increment + from_raw under a walk claim that blocks the retirement drain (contract in the doc above)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "inode_arc_from_raw",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "5229dfe5fa52",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "inv_note": "INV-DENTRY-ADOPT-1: the inode pointer mirror of the adopt edge (same claim discipline)."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "lookup_child_fast",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a83da41553ef",
+   "inv": "INV-DENTRY-ADOPT-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "name": "dentry_arc_adopt",
+   "params": "p: *const Dentry",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::dentry_arc_adopt(p)",
+   "inline": true,
+   "ret": "Arc<Dentry>",
+   "doc": [
+    "Safe twin of the moved unsafe adopt fn: re-adopt an owning Arc",
+    "from a claim-protected raw Dentry pointer."
+   ],
+   "contract": [
+    "`p` is non-null and pinned by the caller's walk claim,",
+    "which blocks the deferred-retirement drain; the increment",
+    "+ from_raw pair is the audited adopt (INV-DENTRY-ADOPT-1)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_inode_fast",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "92fbee71f72e",
+   "inv": "INV-DENTRY-ADOPT-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "name": "inode_arc_adopt",
+   "params": "p: *const Inode",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::inode_arc_adopt(p)",
+   "inline": true,
+   "ret": "Arc<Inode>",
+   "doc": [
+    "Safe twin of the moved unsafe adopt fn (inode mirror)."
+   ],
+   "contract": [
+    "`p` is non-null and kept alive by the inode slot or its",
+    "pending retire; the caller's claim blocks the drain",
+    "(INV-DENTRY-ADOPT-1)."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for BigMemoTable",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "bbcf131174af",
+   "inv": "INV-DENTRY-SEND-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "BigMemoTable slots are shared-memory seqlock cells; cross-thread access rides the seqlock/children-lock protocol."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for BigMemoTable",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "6cdf8959a942",
+   "inv": "INV-DENTRY-SEND-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "Same seqlock/children-lock protocol as the Send proof."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "memo_slot_read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7d2702669025",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "name": "raw_ref<'a, T>",
+   "params": "p: *const T",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::raw_ref(slot.data.get())",
+   "inline": true,
+   "ret": "&'a T",
+   "doc": [
+    "Shared read through a raw pointer the caller keeps valid (the",
+    "claimed-deref edge; the caller's claim/pin/lock is the liveness",
+    "proof \u2014 VFS walk claims, wlock-stable page-cache slots, seqlock",
+    "memo cells, pinned buffer heads)."
+   ],
+   "contract": [
+    "`p` is non-null, aligned for T, and stays valid for the",
+    "returned borrow's scope by the caller's proof (the block's",
+    "original SAFETY note names it per site: INV-VFS-WALK-1,",
+    "INV-PC-CLAIM, INV-DENTRY-MEMO-1, INV-SYSC-1/2, INV-SLOT-1,",
+    "INV-PIDFD-PIN-1, F11/F13 families)."
+   ],
+   "body_edits": [
+    {
+     "find": "&*slot.data.get()",
+     "replace": "&*p"
+    }
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for Dentry",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "6bf73e6475db",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "Dentry's Send is carried per-field \u2014 children/memo under their locks and seqlock, retirement banks under the drain lock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for Dentry",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "5e86bddae225",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "Same per-field discipline as the Send proof; no field races through a shared reference."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "lookup_child_walk",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e64303dea7b0",
+   "inv": "INV-DENTRY-ADOPT-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(big)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "refill_memo_locked",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "b08fb56fcffb",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "name": "raw_ref_mut<'a, T>",
+   "params": "p: *mut T",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::raw_ref_mut(slot.data.get())",
+   "inline": true,
+   "ret": "&'a mut T",
+   "doc": [
+    "Exclusive window through a raw pointer the caller exclusively",
+    "owns (twin of raw_ref; the caller's lock/ownership proof is the",
+    "exclusivity argument \u2014 children lock, bucket lock, drop-time",
+    "sole ownership)."
+   ],
+   "contract": [
+    "`p` is non-null, aligned for T, and no other borrow of the",
+    "target exists for the returned window by the caller's",
+    "proof (per-site SAFETY notes: INV-DENTRY-MEMO-1, INV-BIO",
+    "relink writes, close-path cells)."
+   ],
+   "body_edits": [
+    {
+     "find": "&mut *slot.data.get()",
+     "replace": "&mut *p"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "refill_memo_locked",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ea8c056f25d7",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(slot.data.get())"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "refill_memo_locked",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "98270912defd",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(big)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "refill_memo_locked",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "dd5ab39bdff6",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(bslot.data.get())"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "refill_memo_locked",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "567a65052dda",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref_mut(bslot.data.get())"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "big_memo_ensure_locked",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "35fd0ec250c2",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(cur).nslots"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "big_memo_ensure_locked",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "451d100a014b",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "name": "big_memo_replace",
+   "params": "cell: &UnsafeCell<Option<alloc::boxed::Box<BigMemoTable>>>, table: alloc::boxed::Box<BigMemoTable>",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::big_memo_replace(&self.big_memo, table)",
+   "inline": true,
+   "ret": "Option<alloc::boxed::Box<BigMemoTable>>",
+   "doc": [
+    "Swap the published big-memo table under the children lock."
+   ],
+   "contract": [
+    "The children lock the caller holds serializes this writer",
+    "against every other refill and the final Dentry drop",
+    "(post-quiescence); lock-free readers never touch the",
+    "ownership cell (INV-DENTRY-MEMO-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "(*self.big_memo.get()).replace(table)",
+     "replace": "(*cell.get()).replace(table)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "big_memo_ensure_locked",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "191cb9c23e65",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "dentry child memo (INV-DENTRY-MEMO-1 / INV-DENTRY-ADOPT-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(self.big_memo.get())"
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for DentryCache",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "148b06c760b2",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "DentryCache is accessed only under DCACHE's spinlock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for DentryCache",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "414611919c94",
+   "inv": "INV-DENTRY-MEMO-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "DentryCache is accessed only under DCACHE's spinlock."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "load_segment",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "bd5a4e288881",
+   "inv": "INV-CBYTES-2",
+   "section": "ELF load + page-frame buffers (INV-CBYTES-2 / INV-BUFCHUNK-1)",
+   "name": "elf_load_copy_segment",
+   "params": "vaddr: u64, data: &[u8], offset: usize, filesz: usize, memsz: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::elf_load_copy_segment(vaddr, data, offset, filesz, memsz)?;",
+   "ret": "Result<(), ElfError>",
+   "doc": [
+    "Copy one PT_LOAD segment's file bytes and zero its BSS tail",
+    "(the exec loader's destination-span edge)."
+   ],
+   "contract": [
+    "vaddr..vaddr+memsz is the destination span the caller's",
+    "address-space setup mapped for this PT_LOAD (exec maps",
+    "before loading) and offset..offset+filesz was bounds-",
+    "checked against data.len(); the BSS add is re-checked and",
+    "fails with InvalidSegment (INV-CBYTES-2)."
+   ],
+   "body_edits": [
+    {
+     "find": "let bss_start = vaddr.checked_add(filesz as u64).ok_or(ElfError::InvalidSegment)?;",
+     "replace": "let bss_start = match vaddr.checked_add(filesz as u64) { Some(a) => a, None => return Err(ElfError::InvalidSegment) };"
+    }
+   ],
+   "body_suffix": "\n    Ok(())"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "new",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "02e76da6c87e",
+   "inv": "INV-BUFCHUNK-1",
+   "section": "ELF load + page-frame buffers (INV-CBYTES-2 / INV-BUFCHUNK-1)",
+   "name": "vec_zero_set_len<T>",
+   "params": "v: &mut Vec<T>, n: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::vec_zero_set_len(&mut data, PAGE_SIZE);",
+   "doc": [
+    "Zero-fill a with_capacity vector's first n bytes and expose",
+    "them via set_len (the fresh page/chunk edge)."
+   ],
+   "contract": [
+    "`v`'s capacity is at least `n` (with_capacity just ran) so",
+    "set_len stays in bounds; the bytes are zeroed right here",
+    "(INV-CBYTES-2)."
+   ],
+   "body_edits": [
+    {
+     "find": "core::ptr::write_bytes(data.as_mut_ptr(), 0, PAGE_SIZE);",
+     "replace": "core::ptr::write_bytes(v.as_mut_ptr(), 0, n);"
+    },
+    {
+     "find": "data.set_len(PAGE_SIZE);",
+     "replace": "v.set_len(n);"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c4fb1dc3dbb3",
+   "inv": "INV-BUFCHUNK-1",
+   "section": "ELF load + page-frame buffers (INV-CBYTES-2 / INV-BUFCHUNK-1)",
+   "name": "chunk_read_slice<'a>",
+   "params": "chunk: &FileChunk, off: usize, n: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "            let src: &[u8] = crate::fs::r#unsafe::chunk_read_slice(&self.chunks[ci], co, n);",
+   "ret": "&'a [u8]",
+   "doc": [
+    "Shared byte-slice view of one heap chunk (FileBuffer read)."
+   ],
+   "contract": [
+    "The const cast is read-only and all FileBuffer access is",
+    "serialized by the inode data lock; off..off+n stays inside",
+    "the FILE_BUFFER_CHUNK-sized chunk (INV-BUFCHUNK-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "let src: &[u8] = unsafe {",
+     "replace": "unsafe {"
+    },
+    {
+     "find": "let fc = &self.chunks[ci] as *const FileChunk as *mut FileChunk;",
+     "replace": "let fc = chunk as *const FileChunk as *mut FileChunk;"
+    },
+    {
+     "find": "base.add(co)",
+     "replace": "base.add(off)"
+    },
+    {
+     "find": "            };",
+     "replace": "            }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "write",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3265d245f652",
+   "inv": "INV-BUFCHUNK-1",
+   "section": "ELF load + page-frame buffers (INV-CBYTES-2 / INV-BUFCHUNK-1)",
+   "name": "chunk_write_slice<'a>",
+   "params": "chunk: &mut FileChunk, off: usize, n: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "            let dst: &mut [u8] = crate::fs::r#unsafe::chunk_write_slice(&mut self.chunks[ci], co, n);",
+   "ret": "&'a mut [u8]",
+   "doc": [
+    "Exclusive byte-slice view of one heap chunk (FileBuffer write)."
+   ],
+   "contract": [
+    "The &mut window rides the inode data lock's serialization;",
+    "off..off+n stays inside the chunk (INV-BUFCHUNK-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "let dst: &mut [u8] = unsafe {",
+     "replace": "unsafe {"
+    },
+    {
+     "find": "let base = self.chunks[ci].base_ptr();",
+     "replace": "let base = chunk.base_ptr();"
+    },
+    {
+     "find": "base.add(co)",
+     "replace": "base.add(off)"
+    },
+    {
+     "find": "            };",
+     "replace": "            }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "resize",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "64705f1b5260",
+   "inv": "GAP",
+   "section": "ELF load + page-frame buffers (INV-CBYTES-2 / INV-BUFCHUNK-1)",
+   "name": "chunk_zero_tail",
+   "params": "chunk: &mut FileChunk, tail: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "                    crate::fs::r#unsafe::chunk_zero_tail(c, tail);",
+   "doc": [
+    "Zero the owned tail of a heap chunk past a shrink point."
+   ],
+   "contract": [
+    "Owned chunk under the inode data lock; the zeroed tail",
+    "stays inside the FILE_BUFFER_CHUNK-sized chunk (the GAP",
+    "row keeps its base accounting; harness pending)."
+   ],
+   "body_edits": [
+    {
+     "find": "c.base_ptr().add(tail)",
+     "replace": "chunk.base_ptr().add(tail)"
+    }
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for BufferHead",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "eab1b05a6111",
+   "inv": "INV-BLKDEV-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "BufferHead's mutable state (b_data) is protected by the BufferState spinlock; other fields are atomic or lock-held."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for BufferHead",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "8500361fb919",
+   "inv": "INV-BLKDEV-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "All shared mutable state is protected by the BufferState spinlock; b_data is only mutated under lock or single-threaded."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "new_uninit",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e7d7ec5f739e",
+   "inv": "INV-BLKDEV-1",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::vec_set_len_uninit(&mut b_data, size as usize);"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bh",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0399fb42ab0e",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(self.bh)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bh_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "df8bc5582596",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref_mut(self.bh)"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "entry_ref",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3bfaa9ad3b08",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "vis": "pub(crate)",
+   "inv_note": "F11 (INV-BIO-ENTRY): entries are Box::into_raw allocations that live while linked under their locks."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for BlockCache",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "66201cfce6b9",
+   "inv": "F11",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "BlockCache is only accessed via &self methods using internal locking (per-bucket + LRU spinlocks); raw pointers never escape without their lock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for BlockCache",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "245276a2d584",
+   "inv": "F11",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "All shared mutable state (hash buckets, LRU list) is protected by spinlocks; raw pointer access is always under the bucket lock."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "move_to_lru_head",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0d9fc2a28b12",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "impl_owner": "BlockCache",
+   "vis": "pub(crate)",
+   "inv_note": "F11 (INV-BIO-ENTRY): the lru lock is held; the entry and every neighbor it names are linked under the same lock."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "push_lru_head",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "40686264e2e2",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "impl_owner": "BlockCache",
+   "vis": "pub(crate)",
+   "inv_note": "F11 (INV-BIO-ENTRY): the lru lock is held; head is a linked entry."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "remove_from_lru",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c4197351be51",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "impl_owner": "BlockCache",
+   "vis": "pub(crate)",
+   "inv_note": "F11 (INV-BIO-ENTRY): the lru lock is held; prev/next are linked entries under the same lock."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "evict_one",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "96ba42d6c292",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref_mut(victim).evicting = true;"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "evict_one",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "82f6b8409895",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(victim)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "drop_block",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "d5c43730992c",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(victim);"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "ec43dacec8b0",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(entry_ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "14b5425aa18b",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(entry_ptr).bh"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_zero_impl",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "fc9fdd2a5d75",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(entry_ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_zero_impl",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "9070415b08ae",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(entry_ptr).bh"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "put",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a5e3d699e5ed",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "impl_owner": "BlockCache",
+   "inv_note": "F11 (INV-BIO-PIN): bh is a raw pointer handed out by get()/bread(); it names a live CacheEntry-owned BufferHead."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "invalidate_device",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "643a21499280",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(entry_ptr)"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bh_pinned",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "75f7f8b1e169",
+   "inv": "INV-SLOT-1",
+   "section": "buffer I/O wait (INV-SLOT-1 / INV-LOCK-6)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SLOT-1 (INV-BIO-PIN): pinned by the caller's refcount; non-null by the bread family's construction."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bh_data_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4339a072cd76",
+   "inv": "INV-SLOT-1",
+   "section": "buffer I/O wait (INV-SLOT-1 / INV-LOCK-6)",
+   "inv_note": "INV-SLOT-1 (INV-BIO-PIN): the one documented &mut b_data edge; the caller's pin excludes other borrows."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "wait_buffer_io_done",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3f8baeda7c9e",
+   "inv": "INV-SLOT-1",
+   "section": "buffer I/O wait (INV-SLOT-1 / INV-LOCK-6)",
+   "call": "crate::fs::r#unsafe::raw_ref(bh)"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bread_wait",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9bc31144007b",
+   "inv": "INV-LOCK-6",
+   "section": "buffer I/O wait (INV-SLOT-1 / INV-LOCK-6)",
+   "inv_note": "INV-LOCK-6 (INV-BIO-PIN): bh stays pinned by the owner's reference across the completion wait; the token check refuses misattributed completions."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bread_async",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "db7daacd1fa8",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "name": "bread_pin_settle",
+   "params": "entry_bh: *mut BufferHead",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "                        let (bh, status) = crate::fs::r#unsafe::bread_pin_settle(entry.bh);",
+   "ret": "(*mut BufferHead, i32)",
+   "doc": [
+    "Pin a cache-hit buffer and settle its in-flight I/O."
+   ],
+   "contract": [
+    "entry_bh passed the len guard (non-null, block-sized) and",
+    "is pinned before the bucket lock drops (INV-BIO-PIN)."
+   ],
+   "body_edits": [
+    {
+     "find": "let (bh, status) = unsafe {",
+     "replace": "unsafe {"
+    },
+    {
+     "find": "let bh = entry.bh;",
+     "replace": "let bh = entry_bh;"
+    },
+    {
+     "find": "                        };",
+     "replace": "                        }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bread_async",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "167ca601f6cc",
+   "inv": "GAP",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "name": "exthunt_rxbhit_probe",
+   "params": "hit_bh: *mut BufferHead, blocknr: u64",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "                    crate::fs::r#unsafe::exthunt_rxbhit_probe(hit_bh, blocknr);",
+   "doc": [
+    "Retired debug=exthunt probe: report a block-cache hit's buffer",
+    "pointer and first bytes."
+   ],
+   "contract": [
+    "hit_bh passed the b_data length guard above; the probe is",
+    "diagnostic-only (the GAP row keeps its base accounting)."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bread_async",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "425b8feec472",
+   "inv": "INV-LOCK-6",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(entry_ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bread_async",
+   "kind": "block",
+   "ordinal": 5,
+   "base_id": "8d579c35af25",
+   "inv": "INV-LOCK-6",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(entry_ptr).bh"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "bfree_multi",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0f7969d6ef59",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::boxed_drop(bh)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "as_slice",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0ce715fee7ab",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "name": "borrowed_dma_slice<'a>",
+   "params": "ptr: *const u8, len: &usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "                crate::fs::r#unsafe::borrowed_dma_slice(*ptr, len)",
+   "ret": "&'a [u8]",
+   "doc": [
+    "Shared slice view of a Borrowed DMA source (write-batch)."
+   ],
+   "contract": [
+    "ptr..*len names the caller's live, unmodified DMA source",
+    "for the submission window (the write-batch discipline;",
+    "F11). An empty length yields the empty slice."
+   ],
+   "body_edits": [
+    {
+     "find": "core::slice::from_raw_parts(*ptr, *len)",
+     "replace": "core::slice::from_raw_parts(ptr, *len)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "sync_dirty_blocks_batched",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e93af702e9d2",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(bh).is_dirty()"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "sync_dirty_buffer",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0a755092004d",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(bh)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "sync_block_ordered",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1978cabbf2b3",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(bh).sync()"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "with_block_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7ccb614eed85",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "&mut crate::fs::r#unsafe::raw_ref_mut(bh).b_data"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "with_block_mut",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "940fd744cde3",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(bh).set_state_bit(BufferState::BH_Dirty)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "with_block_deferred_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0b2baeff2da4",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "&mut crate::fs::r#unsafe::raw_ref_mut(bh).b_data"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "with_block_deferred_mut",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "7a8c4abd5f3d",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(bh).set_state_bit(BufferState::BH_Dirty)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "with_block",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2670b909257f",
+   "inv": "F11",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "&crate::fs::r#unsafe::raw_ref(bh).b_data"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "publication_capture_note_dirty",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3af81f805fa2",
+   "inv": "GAP",
+   "section": "block-cache chains (INV-BIO family / F11)",
+   "call": "crate::fs::r#unsafe::raw_ref(hptr as *const JournalCaptureState)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "get_vfs_root",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8f49d7c05831",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "name": "dentry_root_peek_clone",
+   "params": "p: *const Dentry",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        return crate::fs::r#unsafe::dentry_root_peek_clone(p);",
+   "ret": "Option<Arc<Dentry>>",
+   "doc": [
+    "Peek-clone of the published VFS root: one balanced increment,",
+    "the leaked count untouched."
+   ],
+   "contract": [
+    "`p` names the root dentry the mount state keeps alive for",
+    "the whole read (Arc::into_raw'd at publish); from_raw +",
+    "clone + forget nets exactly one new owning Arc",
+    "(INV-VFS-WALK-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "return Some(out);",
+     "replace": "Some(out)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mount_is_busy",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9310346a2945",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(t)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "11a86cffafb6",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(current_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "40ac638ca0d2",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(cur_inode_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "a5f72ddb0299",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "ddcb98bdef8f",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(cur_inode_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "cb4c8f02ebf7",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 5,
+   "base_id": "bbc29cb27b5a",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 6,
+   "base_id": "d7686b108559",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(ino_ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 7,
+   "base_id": "f062ea4bce79",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::dentry_arc_adopt(current_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 8,
+   "base_id": "7902c2771117",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(child_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 9,
+   "base_id": "fdaf4efc5248",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(inode_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 10,
+   "base_id": "fd046d03742d",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::dentry_arc_adopt(child_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 11,
+   "base_id": "5d3d5be182a4",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(current_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 12,
+   "base_id": "fd4d3c59f4c8",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(inode_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 13,
+   "base_id": "1949ea37d1d7",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::inode_arc_adopt(inode_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 14,
+   "base_id": "533ce1db954a",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::dentry_arc_adopt(current_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 15,
+   "base_id": "574fd2f29783",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(current_raw)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 16,
+   "base_id": "d3ea1c6c367e",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::inode_arc_adopt(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "path_lookup",
+   "kind": "block",
+   "ordinal": 17,
+   "base_id": "e036e26573d3",
+   "inv": "INV-VFS-WALK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::dentry_arc_adopt(current_raw)"
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mem_file_content",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "73e5a929f7f0",
+   "inv": "GAP",
+   "section": "memfile content (INV-MEMFILE-1)",
+   "vis": "pub(crate)",
+   "inv_note": "GAP row (INV-MEMFILE-1 in the SAFETY notes): the pointer, when present, is a live Box<MemFileContent> owned by this File; harness pending."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mem_file_content_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7b3e9296d9ce",
+   "inv": "GAP",
+   "section": "memfile content (INV-MEMFILE-1)",
+   "vis": "pub(crate)",
+   "inv_note": "GAP row (INV-MEMFILE-1 in the SAFETY notes): the pointer, when present, is a live Box<MemFileContent> owned by this File; harness pending."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mem_file_take_owned",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "857ca05bf7a6",
+   "inv": "GAP",
+   "section": "memfile content (INV-MEMFILE-1)",
+   "vis": "pub(crate)",
+   "inv_note": "GAP row (INV-MEMFILE-1 in the SAFETY notes): the pointer, when present, is a live Box<MemFileContent> owned by this File; harness pending."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for SuperBlock",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "ed627cc13369",
+   "inv": "INV-SBTYPE-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "SuperBlock's mutable state is behind the registry/sb locks."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for SuperBlock",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "8bafbce38b42",
+   "inv": "INV-SBTYPE-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "SuperBlock's shared state is behind the registry/sb locks."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for FsRegistry",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "f8bd9f9e2b8f",
+   "inv": "INV-SBTYPE-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "FsRegistry is accessed under its own spinlock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for FsRegistry",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "232eae157d86",
+   "inv": "INV-SBTYPE-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "FsRegistry is accessed under its own spinlock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for VfsMount",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "03a9a7c40904",
+   "inv": "INV-SENDSYNC-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "VfsMount rides the global mount-table lock discipline (INV-SENDSYNC-1 family)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for VfsMount",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "73e5e5f61520",
+   "inv": "INV-SENDSYNC-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "VfsMount rides the global mount-table lock discipline."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Send for FsStruct",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "389e242130c0",
+   "inv": "INV-SENDSYNC-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "FsStruct (files_struct) is shared only under its files lock (INV-SENDSYNC-1 family)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl Sync for FsStruct",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "3103b10b1eef",
+   "inv": "INV-SENDSYNC-1",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "FsStruct shared access is serialized by its files lock."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "copy_stat_to_user",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "64095419e50b",
+   "inv": "INV-UACCESS-SAFE-1",
+   "section": "user-access edges (INV-UACCESS-SAFE-1)",
+   "name": "fs_copy_to_user",
+   "params": "dst: *mut u8, src: *const u8, n: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::fs_copy_to_user(buf, &x as *const X86Stat as *const u8, size_of::<X86Stat>())",
+   "ret": "usize",
+   "doc": [
+    "copy_to_user with the caller's access_ok contract (the stat",
+    "family's face; the exception table makes faults safe)."
+   ],
+   "contract": [
+    "The caller validated dst with access_ok over the copied",
+    "size; the arch primitive faults safely via the exception",
+    "table and returns the uncopied count (INV-UACCESS-SAFE-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "crate::arch::uaccess::copy_to_user(\n                buf,\n                &x as *const X86Stat as *const u8,\n                core::mem::size_of::<X86Stat>(),\n            )",
+     "replace": "crate::arch::uaccess::copy_to_user(dst, src, n)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "pcache_dirty_histogram",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "b86648c3e838",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(p)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "claim_entry_arc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1ae110fcfd5a",
+   "inv": "INV-PC-CLAIM",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "name": "arc_clone_claimed<T>",
+   "params": "p: *const T",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "    crate::fs::r#unsafe::arc_clone_claimed(p)",
+   "ret": "Arc<T>",
+   "doc": [
+    "Owning clone of a published Arc::into_raw pointer: one strong-",
+    "count increment + from_raw (the pager/slot clone edge)."
+   ],
+   "contract": [
+    "`p` was published by a writer from an owned Arc and the",
+    "caller's claim keeps the allocation alive across the",
+    "increment; the pair nets one new owning Arc whose drop",
+    "balances the increment (INV-PC-CLAIM / INV-FILE-CELL-1",
+    "families \u2014 each call site names its pin)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fill_from",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3b865116824e",
+   "inv": "INV-PC-WIN",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "name": "frame_fill_from",
+   "params": "ptr: *mut u8, src: &[u8], copy_len: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::frame_fill_from(self.ptr, src, copy_len);",
+   "doc": [
+    "Copy into an owned frame window and zero the tail."
+   ],
+   "contract": [
+    "ptr is an owned PAGE_SIZE frame window; the bounded copy",
+    "plus tail zero stay inside the frame (INV-PC-WIN)."
+   ],
+   "body_edits": [
+    {
+     "find": "core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, copy_len);",
+     "replace": "core::ptr::copy_nonoverlapping(src.as_ptr(), ptr, copy_len);"
+    },
+    {
+     "find": "core::ptr::write_bytes(self.ptr.add(copy_len), 0, crate::mm::types::PAGE_SIZE - copy_len);",
+     "replace": "core::ptr::write_bytes(ptr.add(copy_len), 0, crate::mm::types::PAGE_SIZE - copy_len);"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "copy_frame_from",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "01dee2fc2c99",
+   "inv": "INV-PC-WIN",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "name": "frame_copy_from",
+   "params": "dst: *mut u8, src_phys: usize, copy_len: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::frame_copy_from(self.ptr, src_phys, copy_len);",
+   "doc": [
+    "Frame-to-frame copy from a physical address, tail zeroed."
+   ],
+   "contract": [
+    "Both frames are live and owned/locked by the caller's",
+    "call; the bounded copy plus tail zero stay inside the",
+    "PAGE_SIZE windows (INV-PC-WIN)."
+   ],
+   "body_edits": [
+    {
+     "find": "core::ptr::copy_nonoverlapping(src, self.ptr, copy_len);",
+     "replace": "core::ptr::copy_nonoverlapping(src, dst, copy_len);"
+    },
+    {
+     "find": "core::ptr::write_bytes(self.ptr.add(copy_len), 0, crate::mm::types::PAGE_SIZE - copy_len);",
+     "replace": "core::ptr::write_bytes(dst.add(copy_len), 0, crate::mm::types::PAGE_SIZE - copy_len);"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "copy_into_page",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3abae6142fc1",
+   "inv": "INV-PC-PAGECOPY",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-PC-PAGECOPY: the span is inside one frame by construction at every caller (the cursor arithmetic asserts it)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "copy_user_into_page",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ba5b538b96f4",
+   "inv": "INV-PC-PAGECOPY",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "vis": "pub(crate)",
+   "inv_note": "INV-PC-PAGECOPY: the frame is the call's private destination; the user source rides the exception-table primitive."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "probe_slot_ptr",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "64508ceeef72",
+   "inv": "INV-PC-CLAIM",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(p).key"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "table_find",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "6eebb6a30fd0",
+   "inv": "INV-PC-CLAIM",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(p).key"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "table_publish",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "0e6660e772a1",
+   "inv": "INV-PC-CLAIM",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(p).key"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "remove_entry",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "507027f25fab",
+   "inv": "INV-PC-CLAIM",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "name": "arc_reclaim_owned<T>",
+   "params": "p: *const T",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "            crate::fs::r#unsafe::arc_reclaim_owned(Arc::as_ptr(claimed))",
+   "ret": "Arc<T>",
+   "doc": [
+    "Reclaim an owning Arc from a raw pointer that carries an owning",
+    "count handed to the caller (Arc::into_raw, or a slot reference",
+    "the slot just detached)."
+   ],
+   "contract": [
+    "`p` carries one owning count transferred to the caller \u2014",
+    "from Arc::into_raw or from a just-tombstoned slot; the",
+    "returned Arc's drop releases exactly that count. A second",
+    "call on the same pointer double-frees (INV-PC-CLAIM /",
+    "INV-FILE-CELL-1 families \u2014 call sites name the handoff)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { Arc::from_raw(Arc::as_ptr(claimed)) }",
+     "replace": "unsafe { Arc::from_raw(p) }"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "flush_all_dirty",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "662af6e736ac",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "collect_wb_work",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c3eac736b5ba",
+   "inv": "INV-FRAME-1",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "evict_one_locked",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "284d5223eebc",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "evict_one_locked",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "aa80af0e5182",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::arc_reclaim_owned(ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "evict_one_locked",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "cb5c4126462f",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::raw_ref(ptr)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "evict_one_locked",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "f0fe5b79c3ec",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "call": "crate::fs::r#unsafe::arc_reclaim_owned(ptr)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "shared_file_fault_page",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "b592a34ec828",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "name": "bounce_zero_frame",
+   "params": "bounce_phys: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "    let bounce = crate::fs::r#unsafe::bounce_zero_frame(bounce_phys);",
+   "ret": "*mut u8",
+   "doc": [
+    "Zero a freshly allocated bounce frame and return its kernel",
+    "address."
+   ],
+   "contract": [
+    "bounce_phys is a freshly allocated page frame owned by",
+    "the call; the zero-fill covers exactly PAGE_SIZE bytes",
+    "of the frame's linear-map window (F13)."
+   ],
+   "body_edits": [
+    {
+     "find": "let bounce = unsafe {",
+     "replace": "unsafe {"
+    },
+    {
+     "find": "    };",
+     "replace": "    }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "shared_file_fault_page",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "78a5dd12db90",
+   "inv": "F13",
+   "section": "page-cache table (INV-PC-CLAIM / INV-PC-WIN / INV-PC-PAGECOPY / F13)",
+   "name": "file_read_at_raw",
+   "params": "file: &File, offset: u64, buf: *mut u8, count: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::file_read_at_raw(file, file_offset, bounce, crate::mm::types::PAGE_SIZE)",
+   "inline": true,
+   "ret": "isize",
+   "doc": [
+    "Raw-pointer read_at entry (the fault path's bounce-buffer face;",
+    "read_at validates its own file references)."
+   ],
+   "contract": [
+    "buf names `count` writable bytes (the fresh bounce frame)",
+    "and file is a live open description (F13)."
+   ],
+   "body_edits": [
+    {
+     "find": "file.read_at(file_offset, bounce, crate::mm::types::PAGE_SIZE)",
+     "replace": "file.read_at(offset, buf, count)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vtdev_close",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2ada8ec2503b",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vtdev_close",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "c85a8fa8a712",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "name": "box_take<T>",
+   "params": "p: *mut T",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::box_take(ptr as *mut super::types::DevNo)",
+   "inline": true,
+   "ret": "alloc::boxed::Box<T>",
+   "doc": [
+    "Reclaim the Box a single-owner slot handed over."
+   ],
+   "contract": [
+    "`p` came from Box::into_raw in the same file's attach path",
+    "and the caller owns it (close runs once; INV-VT-PRIV-1 /",
+    "INV-FS-FILEPRIV-1 families)."
+   ],
+   "body_edits": [
+    {
+     "find": "alloc::boxed::Box::from_raw(ptr as *mut super::types::DevNo)",
+     "replace": "alloc::boxed::Box::from_raw(p)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vtdev_close",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "84c19c1af05a",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_clear_raw(file)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "75c214c53a06",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "name": "vt_priv_minor",
+   "params": "file: &File",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "    let vt = crate::fs::r#unsafe::vt_priv_minor(file);",
+   "ret": "u32",
+   "doc": [
+    "The VT number this fd was opened against (minor 0 = the tty0",
+    "master view addressing the ACTIVE VT)."
+   ],
+   "contract": [
+    "private_data holds a leaked Box<DevNo> installed by",
+    "devfs_open (INV-VT-PRIV-1); None means the tty0 master."
+   ],
+   "body_edits": [
+    {
+     "find": "let vt = unsafe {",
+     "replace": "unsafe {"
+    },
+    {
+     "find": "    };",
+     "replace": "    }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "10b0e3fdf737",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "name": "fs_put_user_u32",
+   "params": "addr: *mut i32, v: i32",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::fs_put_user_u32(arg as *mut i32, found)",
+   "inline": true,
+   "ret": "bool",
+   "doc": [
+    "put_user of an i32 with the caller's access_ok contract."
+   ],
+   "contract": [
+    "addr was validated with access_ok(4); the arch primitive",
+    "faults safely via the exception table and returns success",
+    "(INV-UACCESS-SAFE-1 shape; the site's INV-VT-PRIV-1 names",
+    "the validated range)."
+   ],
+   "body_edits": [
+    {
+     "find": "crate::arch::uaccess::put_user(arg as *mut i32, found)",
+     "replace": "crate::arch::uaccess::put_user(addr, v)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "374560b3a96c",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::fs_copy_to_user(arg as *mut u8, buf.as_ptr(), 8)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "c9deb8767cde",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "name": "fs_copy_from_user",
+   "params": "dst: *mut u8, src: *const u8, n: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::fs_copy_from_user(buf.as_mut_ptr(), arg as *const u8, 8)",
+   "inline": true,
+   "ret": "usize",
+   "doc": [
+    "copy_from_user with the caller's access_ok contract."
+   ],
+   "contract": [
+    "src was validated with access_ok(n); the arch primitive",
+    "faults safely and returns the uncopied count",
+    "(INV-UACCESS-SAFE-1 shape; the site's INV-VT-PRIV-1 names",
+    "the validated range)."
+   ],
+   "body_edits": [
+    {
+     "find": "crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), arg as *const u8, 8)",
+     "replace": "crate::arch::uaccess::copy_from_user(dst, src, n)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "977c13b6082b",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::fs_copy_to_user(arg as *mut u8, buf.as_ptr(), 6)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 5,
+   "base_id": "14e4a23aead1",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "name": "fs_put_user_u8",
+   "params": "addr: *mut u8, v: u8",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::fs_put_user_u8(arg as *mut u8, 0u8)",
+   "inline": true,
+   "ret": "bool",
+   "doc": [
+    "put_user of a u8 with the caller's access_ok contract."
+   ],
+   "contract": [
+    "addr was validated with access_ok(1); the arch primitive",
+    "faults safely (INV-UACCESS-SAFE-1 shape)."
+   ],
+   "body_edits": [
+    {
+     "find": "crate::arch::uaccess::put_user(arg as *mut u8, 0u8)",
+     "replace": "crate::arch::uaccess::put_user(addr, v)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 6,
+   "base_id": "749e778df23a",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::fs_put_user_u8(arg as *mut u8, KB_101)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 7,
+   "base_id": "3ea72adfd807",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::fs_put_user_u32(arg as *mut i32, KD_MODE.load(Ordering::Acquire) as i32)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "vt_file_ioctl",
+   "kind": "block",
+   "ordinal": 8,
+   "base_id": "07a57cbcf475",
+   "inv": "INV-VT-PRIV-1",
+   "section": "vt private data (INV-VT-PRIV-1)",
+   "call": "crate::fs::r#unsafe::fs_put_user_u32(arg as *mut i32, KB_MODE.load(Ordering::Acquire) as i32)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "pin_leader",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4da022e942ea",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "name": "pidfd_lookup_pinned",
+   "params": "pid: u32",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::pidfd_lookup_pinned(pid)",
+   "inline": true,
+   "ret": "*mut Task",
+   "doc": [
+    "Pinned pid-hash lookup (the pidfd pin edge)."
+   ],
+   "contract": [
+    "pid_hash_lookup_pinned returns a pinned, valid Task or",
+    "null; the pin holds until task_put (INV-PIDFD-PIN-1)."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "pin_leader",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "ff70587e329c",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(t).group_leader_ptr()"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "pin_leader",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "b7adab751b40",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "name": "pidfd_leader_pin_swap",
+   "params": "leader: *mut Task, t: *mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "        crate::fs::r#unsafe::pidfd_leader_pin_swap(leader, t);",
+   "doc": [
+    "Pin the leader, drop the intermediate pin (the pidfd swap)."
+   ],
+   "contract": [
+    "group_leader_ptr() of a pinned task is in the same thread",
+    "ring (kept alive by the ring linkage discipline); the",
+    "refcnt fetch_add pins the leader before task_put releases",
+    "the intermediate pin (INV-PIDFD-PIN-1)."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "free_pidfd_data",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ec4fca878496",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::box_take(data)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "data_of",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2d6d0b7789ea",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "data_of",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "5d5fb2c76f81",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(p as *const PidFdData)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "resolve_alive",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "65d3fd12b199",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "name": "pidfd_hash_lookup",
+   "params": "pid: u32",
+   "attr": "#[inline(always)]",
+   "vis": "pub",
+   "call": "crate::fs::r#unsafe::pidfd_hash_lookup(data.pid)",
+   "inline": true,
+   "ret": "*mut Task",
+   "doc": [
+    "RCU pid-hash lookup (the pidfd identity check's read face)."
+   ],
+   "contract": [
+    "lookup runs under RCU; the caller compares against the",
+    "pinned pointer and never dereferences a mismatching",
+    "result (INV-PIDFD-PIN-1)."
+   ],
+   "body_edits": [
+    {
+     "find": "pid_hash_lookup(data.pid)",
+     "replace": "pid_hash_lookup(pid)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "resolve_alive",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "4b681de4402f",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(data.task as *const Task)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "target_exited",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d4c78c481d9d",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(data.task).state()"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "target_exited",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "c05ddd1b3d6e",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::pidfd_hash_lookup(data.pid).is_null()"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "pidfd_close",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d019a6b70bee",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "pidfd_close",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "b484d4f23845",
+   "inv": "INV-PIDFD-PIN-1",
+   "section": "pidfd (INV-PIDFD-PIN-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_clear_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_close",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dd61d32c6179",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_close",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "9cb54150a33f",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::box_take(p as *mut FsConfigContext)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_close",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "87bf2b5efdb1",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_clear_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_of",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "6c6782b7dc3d",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_of",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "a4a5332d3d47",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(p as *const FsConfigContext)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_of_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "01357a3af606",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "fsctx_of_mut",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "e983f3d913df",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::raw_ref_mut(p as *mut FsConfigContext)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mountfd_close",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "f394354da5da",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mountfd_close",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "17483455685e",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::box_take(p as *mut MountFd)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mountfd_close",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "ddb95979be3c",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_clear_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mountfd_of",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "243550667964",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_privdata_ptr_raw(file)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "mountfd_of",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "537a672885ab",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::raw_ref_mut(p as *mut MountFd)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "treepath_dentry",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "21c489fdca18",
+   "inv": "INV-FSCTX-1",
+   "section": "fs context / mount fd (INV-FSCTX-1)",
+   "call": "crate::fs::r#unsafe::file_dentry_arc(file)"
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl<T> Send for AssertingSyncArc<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "4e018c14cf1b",
+   "inv": "GAP",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "GAP (INV-JSEAM-4 in the SAFETY note): the assertion is the JOURNAL use's to make; the type stays narrow-purposed and documented."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "unsafe impl<T> Sync for AssertingSyncArc<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "a2f9c23cf1d2",
+   "inv": "GAP",
+   "section": "Send/Sync proofs (per-type contracts)",
+   "inv_note": "GAP (INV-JSEAM-4 in the SAFETY note): same narrow-purposed assertion as the Send proof."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/fs/hotpath.rs",
+   "owner": "inode_permission",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a6bd58adaee4",
+   "inv": "INV-KTASK-1",
+   "section": "VFS walk claims (INV-VFS-WALK-1)",
+   "call": "crate::fs::r#unsafe::raw_ref(task).cred()"
+  }
+ ]
+}

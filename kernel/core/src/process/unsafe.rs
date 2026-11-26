@@ -33,6 +33,8 @@
 //! stay in the service files; only the pointer discipline lives here.
 
 use super::types::Task;
+use core::ptr::NonNull;
+use super::types::TaskBorrow;
 
 /// Borrow a live task immutably.
 ///
@@ -1171,3 +1173,106 @@ pub fn zeroed_siginfo() -> crate::signal::SigInfo {
     // integer-only C layout.
     unsafe { core::mem::zeroed() }
 }
+
+// ==========================================================================
+// pass 3 (seed-core §2c.5): process's collected unsafe — the inline
+// blocks of the subsystem's mechanism files, one contract each.
+// ==========================================================================
+
+// ------------ TaskBorrow/TaskRef deref edges (INV-TASKREF-1) ------------
+
+impl TaskBorrow {
+    /// Adopt an already-validated raw task handle (round 4): the ONE
+    /// audited edge for handles that predate this type (tree-ring
+    /// handles, walk-callback pointers). The caller proves the same
+    /// contract `lookup` documents: a short read/write in syscall
+    /// context on this CPU, no yield, no store.
+    /// (INV-TASKREF-1 hatch row: adopt-once under the caller's
+    /// liveness proof.)
+    ///
+    /// # Safety
+    /// `p` must point at a live task (the caller's borrow/pin/tree-lock
+    /// keeps the slot alive for the borrow's duration) and must not be
+    /// adopted twice into handles that outlive that proof.
+    /// INV-TASKREF-1: adopt-once under the caller's liveness proof — the # Safety section in the doc below is the contract.
+    pub unsafe fn from_raw(p: *mut Task) -> Option<Self> {
+        NonNull::new(p).map(TaskBorrow)
+    }
+}
+/// TaskBorrow's shared dereference (collected by pass 3): the one
+/// consolidated raw-pointer read behind the Deref impl.
+///
+/// # Contract (INV-TASKREF-1)
+/// Syscall-context short read (the TaskBorrow type doc): the reaper
+/// cannot run on this CPU while the borrower executes, so the task
+/// page cannot be freed under the returned reference for the
+/// duration of the read (INV-TASKREF-1).
+#[inline(always)]
+pub(crate) fn task_borrow_deref(nn: &core::ptr::NonNull<Task>) -> &Task {
+        unsafe { nn.as_ref() }
+}
+
+/// TaskBorrow's exclusive dereference (collected by pass 3).
+///
+/// # Contract (INV-TASKREF-1)
+/// Same liveness as the shared deref; mutation additionally relies on
+/// the caller's existing exclusion (this CPU owns the task, or the
+/// caller holds the lock that serializes the write) — INV-TASKREF-1's
+/// mutable half, the same argument the pre-conversion call sites made.
+#[inline(always)]
+pub(crate) fn task_borrow_deref_mut(nn: &mut core::ptr::NonNull<Task>) -> &mut Task {
+        unsafe { nn.as_mut() }
+}
+
+/// TaskRef's shared dereference (collected by pass 3).
+///
+/// # Contract (INV-TASKREF-1)
+/// The pin defers free_task_slot (task_put) until after this handle
+/// is dropped, so the task page stays alive and mapped for the whole
+/// lifetime of the returned reference (INV-TASKREF-1).
+#[inline(always)]
+pub(crate) fn task_ref_deref(nn: &core::ptr::NonNull<Task>) -> &Task {
+        unsafe { nn.as_ref() }
+}
+
+/// TaskRef's exclusive dereference (collected by pass 3).
+///
+/// # Contract (INV-TASKREF-1)
+/// Same liveness as the shared deref (the pin serializes freeing,
+/// not writing); mutation exclusion is the caller's —
+/// INV-TASKREF-1's mutable half.
+#[inline(always)]
+pub(crate) fn task_ref_deref_mut(nn: &mut core::ptr::NonNull<Task>) -> &mut Task {
+        unsafe { nn.as_mut() }
+}
+
+
+// ------------ pid-handle leaf reads (INV-PROC-BORROW-1) ------------
+
+/// One pgid read off the current task's page (collected by pass 3).
+///
+/// # Contract (INV-PROC-BORROW-1)
+/// `t` is the pointer sched::current() handed out: the currently
+/// running task on this CPU. The reaper (the task's parent) cannot run
+/// on this CPU while the reader executes, so the page cannot be freed
+/// under the read (INV-PROC-BORROW-1's current-task discipline).
+#[inline(always)]
+pub(crate) fn task_pgid_raw(t: *mut Task) -> u32 {
+unsafe { (*t).pgid() }
+}
+
+/// Turn a pid-hash lookup's raw pointer into the &'static mut handle
+/// find_task_by_pid returns (collected by pass 3).
+///
+/// # Contract (INV-PROC-BORROW-1)
+/// `ptr` came from pid_hash_lookup: a live Task pointer published by
+/// the hash insert. The returned &'static mut continues the lookup's
+/// liveness proof — the task stays alive (not reaped) for the
+/// caller's use, mutation excluded by the caller's existing
+/// ownership argument (this CPU runs the task, or the caller holds
+/// the serializing lock) — INV-PROC-BORROW-1's mutable half.
+#[inline(always)]
+pub(crate) fn task_from_pid_ptr(ptr: *mut Task) -> &'static mut Task {
+unsafe { &mut *ptr }
+}
+

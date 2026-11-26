@@ -29,6 +29,7 @@
 //! of the subsystem's code under the hot-path name, not a verified set of
 //! hot-path functions (§2c.3, user decision 2026-11-25).
 
+#![forbid(unsafe_code)]
 use super::types::{
     AddressSpace,
     AnonDevMap,
@@ -178,6 +179,15 @@ use crate::safety::slot::OnceSlot;
 use crate::sync::types::RwSpinlock;
 use crate::sync::types::{Spinlock, SpinlockGuard};
 use crate::timer::msecs_to_jiffies;
+use super::r#unsafe::{
+    bh_pinned, boxed_drop, boxed_mut, boxed_ref,
+    copy_into_page, copy_user_into_page, entry_ref, list_entry,
+    list_entry_mut, list_first, list_link_tail, list_next,
+    list_unlink, mem_file_content, mem_file_content_mut,
+    mem_file_take_owned, stat_dev_for_fs,
+};
+pub use super::r#unsafe::bread_wait;
+pub use super::r#unsafe::bh_data_mut;
 // ════════════════ fs root ═════════════════════════════
 // (was mod.rs: the module's own function. Its `pub mod` declarations and
 // its re-exports are gone — every path now names hotpath or types.)
@@ -417,86 +427,7 @@ fn next_file_id() -> u64 {
     ((cpu as u64) << 56) | (c & 0x00ff_ffff_ffff_ffff)
 }
 
-/// Conditional strong-count acquisition on a published File — the
-/// reference's `get_file_rcu` / `atomic_long_inc_not_zero` shape
-/// (oc-rc close-path rework; replaces the unconditional increment that
-/// forced every close(2) to wait out an RCU grace period before
-/// dropping the removed Arc).
-///
-/// Returns None when the strong count has reached zero — the fd was
-/// closed concurrently; callers treat it exactly like an empty slot
-/// (EBADF), which is the reference fget race outcome.
-///
-/// SAFETY: `p` must have been published by a writer from an owned Arc
-/// (install/dup/fork displacement-free publication), and the ArcInner
-/// allocation must be pinned across this call (a slot reference or a
-/// fdreap-parked Weak) — the CAS itself must never act on freed memory.
-/// (INV-FILE-ARC-1: the strong-word offset assumption this family
-/// rests on is PINNED AT BOOT by verify_arc_inner_layout below; the
-/// caller-pins + CAS-nonzero-or-clean-fail protocol is the audited
-/// edge — every row of this family rides it.)
-#[inline]
-unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
-    // std Arc layout on our 64-bit targets: ArcInner { strong:
-    // AtomicUsize, weak: AtomicUsize, value: T }, and into_raw/as_ptr
-    // point at `value` — the strong word sits two usize words back.
-    // The assumption is pinned at boot by verify_arc_inner_layout().
-    let strong = (p as *const core::sync::atomic::AtomicUsize).sub(2);
-    // SAFETY: caller pins the allocation (see doc); the atomic protocol
-    // below either wins a nonzero count or fails cleanly.
-    let mut cur = unsafe { (*strong).load(Ordering::Relaxed) };
-    loop {
-        if cur == 0 {
-            return None;
-        }
-        match unsafe {
-            (*strong).compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-        } {
-            Ok(_) => return Some(unsafe { Arc::from_raw(p) }),
-            Err(c) => cur = c,
-        }
-    }
-}
 
-/// Boot-time pin of the ArcInner strong-word offset assumption used by
-/// `file_arc_try_clone` (called from fs::fdreap::init). If a future
-/// toolchain moved the refcount word, every lock-free fd lookup would
-/// CAS the wrong memory — fail loudly at boot instead.
-pub(crate) fn verify_arc_inner_layout() {
-    // (INV-FILE-ARC-1: the boot-time pin of the ArcInner strong-word
-    // offset — the family's layout assumption, checked here once.)
-    crate::pr_info!(
-        "fs: File={}B (open/close hot path size gate)",
-        core::mem::size_of::<File>()
-    );
-    let probe = Arc::new(File::new(FileFlags::new(0)));
-    // SAFETY: read-only probe of the live Arc the function constructed.
-    let strong = unsafe {
-        (Arc::as_ptr(&probe) as *const core::sync::atomic::AtomicUsize).sub(2)
-    };
-    // SAFETY: probe is a live Arc; the word read is the refcount itself
-    // under verification.
-    assert_eq!(
-        unsafe { (*strong).load(Ordering::Relaxed) },
-        1,
-        "ArcInner strong-word offset assumption broken"
-    );
-    let clone = Arc::clone(&probe);
-    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 2);
-    drop(clone);
-    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 1);
-    // Weak interplay: a downgrade must keep the ArcInner alive at
-    // strong-count zero (the fdreap parking depends on it).
-    let weak = Arc::downgrade(&probe);
-    drop(probe);
-    assert!(weak.upgrade().is_none(), "strong count must be zero");
-    drop(weak);
-}
 
 
 impl FileOwner {
@@ -505,15 +436,6 @@ impl FileOwner {
     }
 }
 
-// SAFETY: File is only shared across threads when referenced through Arc,
-// and all mutable access goes through Spinlock or UnsafeCell fields that
-// are synchronized with IRQ-safe locking.
-// (INV-FILE-SEND-1: File's Sync/Send are carried per-field — cells are
-// write-once (INV-FILE-CELL-1), pos/cloexec/dirent_cache behind their
-// locks, flags/f_owner/f_signum atomics, io_lock a real mutex. No
-// field admits a data race through &File.)
-unsafe impl Sync for File {}
-unsafe impl Send for File {}
 
 // Compile-time checks for File structure alignment
 const _: () = assert!(core::mem::align_of::<File>() >= 16);
@@ -574,12 +496,12 @@ impl File {
         // File::drop unregisters. O_ACCMODE=3: O_WRONLY(1)/O_RDWR(2)
         // carry write access.
         self::lock_hooks_inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
-        unsafe { *self.inode.get() = Some(inode); }
+        crate::fs::r#unsafe::file_inode_install(self, inode);
     }
 
     /// Set dentry
     pub fn set_dentry(&self, dentry: Arc<Dentry>) {
-        unsafe { *self.dentry.get() = Some(dentry); }
+        crate::fs::r#unsafe::file_dentry_install(self, dentry);
     }
 
     /// Get the backing dentry of this open file description, if it has one.
@@ -590,19 +512,19 @@ impl File {
     /// a shared `&self` borrow is race-free.
     pub fn get_dentry(&self) -> Option<&Arc<Dentry>> {
         // SAFETY: no write to the cell after publication (see doc).
-        unsafe { &*self.dentry.get() }.as_ref()
+        crate::fs::r#unsafe::file_dentry(self)
     }
 
     /// Set file operations
     pub fn set_ops(&self, ops: &'static FileOps) {
-        unsafe { *self.ops.get() = Some(ops); }
+        crate::fs::r#unsafe::file_ops_install(self, ops);
     }
 
     /// Get file operations
     pub fn get_ops(&self) -> Option<&'static FileOps> {
         // SAFETY: write-once cell (see get_inode doc); no write after
         // the File is published to an fd table.
-        unsafe { *self.ops.get() }
+        crate::fs::r#unsafe::file_ops_ref(self)
     }
 
     /// Get the backing inode of this open file description, if it has one.
@@ -613,12 +535,12 @@ impl File {
     pub fn get_inode(&self) -> Option<&Arc<Inode>> {
         // SAFETY: no write to the cell after publication (see doc), so a
         // shared read through the shared &self borrow is race-free.
-        unsafe { &*self.inode.get() }.as_ref()
+        crate::fs::r#unsafe::file_inode_arc_ref(self)
     }
 
     /// Set private data
     pub fn set_private_data(&self, data: *mut u8) {
-        unsafe { *self.private_data.get() = Some(data); }
+        crate::fs::r#unsafe::file_privdata_install_raw(self, data);
     }
 
     /// Read-private-data twin of [`File::set_private_data`] (round-5):
@@ -632,7 +554,7 @@ impl File {
     pub fn private_data_ptr(&self) -> Option<*mut u8> {
         // SAFETY: a plain load of a pointer-sized word; the value is
         // handed out as an opaque copy, not dereferenced here.
-        unsafe { *self.private_data.get() }
+        crate::fs::r#unsafe::file_privdata_ptr_raw(self)
     }
 
     /// L4 name twin of [`Self::private_data_ptr`] (same slot-value
@@ -646,7 +568,7 @@ impl File {
     pub fn clear_private_data(&self) {
         // SAFETY: the store races no live handle (close is the last
         // user of this open file description).
-        unsafe { *self.private_data.get() = None };
+        crate::fs::r#unsafe::file_privdata_clear_raw(self);
     }
 
     /// Take the private-data slot value out (the close-path reclaim
@@ -655,7 +577,7 @@ impl File {
     pub fn take_private_data(&self) -> Option<*mut u8> {
         // SAFETY: INV-FS-FILEPRIV-1; callers run in the release path
         // where no shared reader can race the cell.
-        unsafe { (*self.private_data.get()).take() }
+        crate::fs::r#unsafe::file_privdata_take_raw(self)
     }
 
     /// Get close-on-exec flag
@@ -730,257 +652,25 @@ impl File {
         }
     }
 
-    /// Read file
-    pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
-        // f_mode enforcement: read on an O_WRONLY fd is EBADF (Linux)
-        if self.flags().is_writeonly() {
-            return -9;  // EBADF
-        }
-        // O_PATH descriptors permit no I/O at all (LTP open13).
-        if self.flags().bits() & super::types::FileFlags::O_PATH != 0 {
-            return -9; // EBADF
-        }
-        if let Some(ops) = *self.ops.get() {
-            if let Some(read_fn) = ops.read {
-                let slice = core::slice::from_raw_parts_mut(buf, count);
-                let result = read_fn(self, slice);
-                if result > 0 {
-                    // inotify IN_ACCESS (P0-4): one atomic load when no
-                    // watches exist.
-                    self::notify_file(self, self::ino_events::IN_ACCESS);
-                }
-                return result;
-            }
-        }
-        // Valid fd, readable mode, but the type carries no read op
-        // (epoll, binder, access_token, io_uring) — see
-        // missing_op_errno(FileOpKind::Read) for why EINVAL, not EBADF.
-        self.missing_op_errno(FileOpKind::Read)
-    }
 
-    /// Write file
-    pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
-        // f_mode enforcement: write on an O_RDONLY fd is EBADF (Linux)
-        if self.flags().is_readonly() {
-            return -9;  // EBADF
-        }
-        // O_PATH descriptors permit no I/O at all (LTP open13).
-        if self.flags().bits() & super::types::FileFlags::O_PATH != 0 {
-            return -9; // EBADF
-        }
-        if let Some(ops) = *self.ops.get() {
-            if let Some(write_fn) = ops.write {
-                let slice = core::slice::from_raw_parts(buf, count);
-                let result = write_fn(self, slice);
-                if result > 0 {
-                    // inotify IN_MODIFY (P0-4): sqlite/editors/build tools.
-                    self::notify_file(self, self::ino_events::IN_MODIFY);
-                }
-                return result;
-            }
-        }
-        // Valid fd, writable mode, but the type carries no write op —
-        // see missing_op_errno(FileOpKind::Write) (EINVAL, matching the
-        // reference kernel's vfs_write).
-        self.missing_op_errno(FileOpKind::Write)
-    }
 
-    /// Seek file position
-    pub unsafe fn lseek(&self, offset: isize, whence: i32) -> isize {
-        if let Some(ops) = *self.ops.get() {
-            if let Some(lseek_fn) = ops.lseek {
-                return lseek_fn(self, offset, whence);
-            }
-        }
-        // No seek op = unseekable object (pipe, socket, fifo) — see
-        // missing_op_errno(FileOpKind::LSeek) for the POSIX reasoning.
-        self.missing_op_errno(FileOpKind::LSeek)
-    }
 
-    /// Position-invariant read at an explicit offset (pread(2) backing).
-    ///
-    /// Prefers the op's native read_at entry (R71): those never touch the
-    /// shared file position at all. The fd-backed fallback below still
-    /// swings the position — it is inherently not atomic against a
-    /// concurrent plain read() on the same description, which is exactly
-    /// why ops that userspace preads or demand-fault-maps at scale
-    /// (ext4/tmpfs) must carry ops.read_at.
-    ///
-    /// Returns -ESPIPE for non-seekable objects (pipes/sockets — Linux
-    /// pread on them fails with ESPIPE).
-    pub unsafe fn read_at(&self, offset: u64, buf: *mut u8, count: usize) -> isize {
-        // Unseekable objects first (pipes/sockets/fifos: no lseek op, no
-        // inode): explicit-position reads fail ESPIPE BEFORE the f_mode
-        // check — Linux rw_verify_area's FMODE_STREAM rejection (LTP
-        // preadv202 expects ESPIPE on a pipe read end, and pread on an
-        // O_WRONLY pipe write end is also ESPIPE, not EBADF).
-        let inode_opt = &*self.inode.get();
-        if !self.positional_capable() {
-            // Two non-seekable classes must be told apart — the decision
-            // and its ABI reasoning live in missing_op_errno(ReadAt):
-            // stream types (pipes/sockets/fifos) get ESPIPE, op-less fd
-            // types (epoll/binder/access_token/io_uring) get EINVAL.
-            return self.missing_op_errno(FileOpKind::ReadAt);
-        }
-        // f_mode enforcement, same as read().
-        if self.flags().is_writeonly() {
-            return -9; // EBADF
-        }
-        if self.flags().bits() & super::types::FileFlags::O_PATH != 0 {
-            return -9; // EBADF
-        }
-        // Native positional op: no shared-position access at all.
-        if let Some(ops) = *self.ops.get() {
-            if let Some(read_at_fn) = ops.read_at {
-                let slice = core::slice::from_raw_parts_mut(buf, count);
-                let n = read_at_fn(self, offset, slice);
-                if n > 0 {
-                    self::notify_file(
-                        self,
-                        self::ino_events::IN_ACCESS,
-                    );
-                }
-                return n;
-            }
-        }
-
-        // Disk-backed files (ext4) serve reads through their file ops;
-        // inode.read_data only holds the in-memory FileBuffer of mem
-        // files and returns 0 for on-disk inodes — pread on any ext4
-        // file used to return 0 bytes (glibc's regcomp mmap'd locale
-        // tables fine but every pread-based reader saw zeros).
-        if let Some(ops) = *self.ops.get() {
-            // lseek presence marks the file seekable (pipes/sockets have
-            // none); pread on them must stay ESPIPE.
-            if ops.read.is_some() && ops.lseek.is_some() {
-                let saved = self.get_pos();
-                self.set_pos(offset);
-                let n = self.read(buf, count);
-                self.set_pos(saved);
-                return n;
-            }
-        }
-
-        let slice = core::slice::from_raw_parts_mut(buf, count);
-        // Only seekable (inode-backed) files support offset reads.
-        match inode_opt.as_ref() {
-            Some(inode) if inode.ops.is_some() => {
-                let n = inode.read_data(offset as usize, slice);
-                if n > 0 {
-                    // inotify IN_ACCESS on the pread(2) path (P0-4).
-                    self::notify_file(
-                        self,
-                        self::ino_events::IN_ACCESS,
-                    );
-                }
-                n as isize
-            }
-            _ => -29, // ESPIPE
-        }
-    }
 
     /// Can this file serve explicit-position (pread/pwrite) IO? Native
     /// read_at op, an lseek op (position-swing fallback), or an inode with
     /// data ops all qualify; pipes/sockets/fifos do not (ESPIPE).
-    fn positional_capable(&self) -> bool {
+    pub(crate) fn positional_capable(&self) -> bool {
         if let Some(ops) = self.get_ops() {
             if ops.read_at.is_some() || ops.lseek.is_some() {
                 return true;
             }
         }
-        if let Some(inode) = unsafe { &*self.inode.get() }.as_ref() {
+        if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(self) {
             return inode.ops.is_some();
         }
         false
     }
 
-    /// Position-invariant write at an explicit offset (pwrite(2) backing).
-    ///
-    /// POSIX leaves the offset/O_APPEND interaction unspecified; this ABI
-    /// resolves it the documented pwrite(2) way: on a descriptor opened
-    /// with O_APPEND the data is APPENDED regardless of the offset (LTP
-    /// pwrite04/pwrite04_64: the second pwrite at offset 0 must extend
-    /// the file from 2048 to 3072, not overwrite byte 0).
-    pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
-        // Unseekable first, before the f_mode check: pwrite on a pipe
-        // (even its O_RDONLY read end) fails ESPIPE, not EBADF — Linux
-        // rw_verify_area's FMODE_STREAM rejection (LTP pwritev202).
-        let inode_opt = &*self.inode.get();
-        if !self.positional_capable() {
-            return -29; // ESPIPE
-        }
-        // f_mode enforcement, same as write().
-        if self.flags().is_readonly() {
-            return -9; // EBADF
-        }
-        if self.flags().bits() & super::types::FileFlags::O_PATH != 0 {
-            return -9; // EBADF
-        }
-        // O_APPEND wins over the explicit offset: resolve the write
-        // position to the CURRENT end of file (the ext4 backend
-        // re-resolves u64::MAX under its own lock; the value here covers
-        // the set_pos/write/restore fallback and memfs paths).
-        let offset = if self.flags().bits() & super::types::FileFlags::O_APPEND != 0 {
-            match inode_opt.as_ref() {
-                Some(inode) => inode.size.load(core::sync::atomic::Ordering::Acquire) as u64,
-                None => offset,
-            }
-        } else {
-            offset
-        };
-
-        // Disk-backed files (ext4) must write through their file ops;
-        // inode.write_data targets the in-memory FileBuffer and would
-        // desynchronize disk-backed files (pwrite silently lost).
-        if let Some(ops) = *self.ops.get() {
-            // Native position-invariant write (session 25's ext4 lesson,
-            // now a generic capability): the set_pos/write/restore dance
-            // below raced concurrent plain write()/read() on the same
-            // open file description (the write twin of the R71 read_at
-            // race), and ext4's trailing whole-inode page-cache
-            // invalidate broke shared-mapping coherence.
-            if let Some(write_at) = ops.write_at {
-                let slice = core::slice::from_raw_parts(buf, count);
-                let n = write_at(self, offset, slice);
-                if n > 0 {
-                    // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
-                    // sqlite's journal/WAL writes all go through pwrite.
-                    self::notify_file(
-                        self,
-                        self::ino_events::IN_MODIFY,
-                    );
-                }
-                return n;
-            }
-            if ops.write.is_some() && ops.lseek.is_some() {
-                let saved = self.get_pos();
-                self.set_pos(offset);
-                let n = self.write(buf, count);
-                self.set_pos(saved);
-                return n;
-            }
-        }
-
-        let slice = core::slice::from_raw_parts(buf, count);
-        match inode_opt.as_ref() {
-            Some(inode) if inode.ops.is_some() => {
-                // Serialize concurrent explicit-offset writers like
-                // reg_file_write does (O_APPEND/pos race class, review 5.2).
-                let _write_guard = self.io_lock.guard();
-                let n = inode.write_data(offset as usize, slice);
-                if n > 0 {
-                    // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
-                    // sqlite's journal/WAL writes all go through pwrite.
-                    self::notify_file(
-                        self,
-                        self::ino_events::IN_MODIFY,
-                    );
-                }
-                n as isize
-            }
-            _ => -29, // ESPIPE
-        }
-    }
 
     // -------------------------------------------------------------------------
     // Slice-typed I/O entries (kernel capsule boundary)
@@ -990,50 +680,11 @@ impl File {
     // system, so `#![forbid(unsafe_code)]` syscall files can call them.
     // -------------------------------------------------------------------------
 
-    /// Slice-typed read(2) dispatch (see read()).
-    pub fn read_slice(&self, buf: &mut [u8]) -> isize {
-        // SAFETY: the mutable slice guarantees buf.len() writable bytes —
-        // exactly the (buf, count) contract read() requires.
-        unsafe { self.read(buf.as_mut_ptr(), buf.len()) }
-    }
 
-    /// Slice-typed write(2) dispatch (see write()).
-    pub fn write_slice(&self, buf: &[u8]) -> isize {
-        // SAFETY: the shared slice guarantees buf.len() readable bytes —
-        // exactly the (buf, count) contract write() requires.
-        unsafe { self.write(buf.as_ptr(), buf.len()) }
-    }
 
-    /// Slice-typed pread(2) dispatch (see read_at()).
-    pub fn read_at_slice(&self, offset: u64, buf: &mut [u8]) -> isize {
-        // SAFETY: the mutable slice guarantees buf.len() writable bytes.
-        unsafe { self.read_at(offset, buf.as_mut_ptr(), buf.len()) }
-    }
 
-    /// Slice-typed pwrite(2) dispatch (see write_at()).
-    pub fn write_at_slice(&self, offset: u64, buf: &[u8]) -> isize {
-        // SAFETY: the shared slice guarantees buf.len() readable bytes.
-        unsafe { self.write_at(offset, buf.as_ptr(), buf.len()) }
-    }
 
-    /// Safe lseek(2) dispatch for `#![forbid(unsafe_code)]` syscall
-    /// files (same rationale as the slice-typed I/O entries above):
-    /// the raw-pointer-free dispatch over the write-once ops cell.
-    pub fn lseek_op(&self, offset: isize, whence: i32) -> isize {
-        // SAFETY: the only unsafe inside lseek() is the write-once ops
-        // cell read (see get_ops); this entry adds no raw pointers.
-        unsafe { self.lseek(offset, whence) }
-    }
 
-    /// Close file
-    pub unsafe fn close(&mut self) -> i32 {
-        if let Some(ops) = *self.ops.get() {
-            if let Some(close_fn) = ops.close {
-                return close_fn(self);
-            }
-        }
-        0
-    }
 
     /// Get current position
     pub fn get_pos(&self) -> u64 {
@@ -1052,12 +703,12 @@ impl File {
     pub fn path(&self) -> alloc::string::String {
         // SAFETY: dentry is written once at open time and never mutated
         // afterwards; read-only access here.
-        let dentry_opt = unsafe { (*self.dentry.get()).clone() };
+        let dentry_opt = crate::fs::r#unsafe::file_dentry_arc(self);
         match dentry_opt {
             Some(dentry) => dentry.build_path(),
             None => {
                 // SAFETY: inode is written once at open; read-only access.
-                let inode_opt = unsafe { (*self.inode.get()).clone() };
+                let inode_opt = crate::fs::r#unsafe::file_inode_arc(self);
                 match inode_opt {
                     Some(inode) => alloc::format!("anon_inode:[{}]", inode.ino),
                     None => alloc::string::String::from("anon_inode"),
@@ -1106,7 +757,7 @@ impl Drop for File {
             // SAFETY: we own the File exclusively (refcount reached 0) and
             // close_fd already committed this close; ops.close was installed
             // at open time and never mutated afterwards.
-            unsafe { self.close(); }
+            crate::fs::r#unsafe::file_close(self);
         }
     }
 }
@@ -1167,7 +818,7 @@ impl FdTable {
                 // SAFETY: p was published by a writer (install/dup/fork)
                 // and the parent table holds its reference for as long
                 // as the entry lock we hold blocks removal.
-                unsafe { Arc::increment_strong_count(p) };
+                crate::fs::r#unsafe::arc_inc(p);
                 child.slots[i].0.store(p, core::sync::atomic::Ordering::Release);
             }
         }
@@ -1344,7 +995,7 @@ impl FdTable {
         // the slot stays alive (and the slot immutable) for the whole
         // syscall; reconstruction is only needed to touch the refcount,
         // which this path never does.
-        Some(unsafe { &*(p as *const File) })
+        Some(crate::fs::r#unsafe::raw_ref(p as *const File))
     }
 
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
@@ -1372,7 +1023,7 @@ impl FdTable {
         // concurrently — the reference fget race outcome (EBADF).
         let p = self.slots[fd].0.load(Ordering::Acquire);
         let out = if !p.is_null() {
-            unsafe { file_arc_try_clone(p) }
+            crate::fs::r#unsafe::file_arc_try_clone_claimed(p)
         } else {
             None
         };
@@ -1404,12 +1055,7 @@ impl FdTable {
                 if !p.is_null() {
                     // SAFETY: published by a writer; the table's reference
                     // is held by the slot for the duration of our lock.
-                    unsafe {
-                        Arc::increment_strong_count(p);
-                        let file = Arc::from_raw(p);
-                        f(fd, &file);
-                        drop(file);
-                    }
+                    crate::fs::r#unsafe::fdslot_visit_published(fd, p, &mut f);
                 }
             }
         }
@@ -1462,7 +1108,7 @@ impl FdTable {
                 entry.next_fd = fd;
             }
             entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
-            Some(unsafe { Arc::from_raw(p) })
+            Some(crate::fs::r#unsafe::arc_reclaim_owned(p))
         };
         if let Some(file) = removed {
             // Complete the close decisions and park the allocation for
@@ -1507,7 +1153,7 @@ impl FdTable {
                 entry.next_fd = fd;
             }
             entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
-            Some(unsafe { Arc::from_raw(p) })
+            Some(crate::fs::r#unsafe::arc_reclaim_owned(p))
         };
         match removed {
             Some(file) => {
@@ -1594,8 +1240,7 @@ impl FdTable {
             // SAFETY: src is published and the entry lock blocks removal,
             // so the table's reference keeps it alive through our own
             // clone (the dup'd descriptor's reference).
-            unsafe { Arc::increment_strong_count(src) };
-            let dup_arc = unsafe { Arc::from_raw(src) };
+            let dup_arc = crate::fs::r#unsafe::arc_clone_claimed(src);
             // SAFETY: the swap takes the previous occupant's reference out
             // atomically (single-word, no torn window for readers).
             let prev = self.slots[newfd].0.swap(Arc::into_raw(dup_arc) as *mut File, Ordering::Release);
@@ -1606,7 +1251,7 @@ impl FdTable {
             entry.open_bits[newfd / 64] |= 1u64 << (newfd % 64);
             entry.count = entry.count.saturating_sub(if prev.is_null() { 0 } else { 1 });
             entry.count += 1;
-            if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
+            if prev.is_null() { None } else { Some(crate::fs::r#unsafe::arc_reclaim_owned(prev)) }
         };
 
         // Run the displaced file's close decision in the retire reaper, outside
@@ -1687,7 +1332,7 @@ impl Drop for FdTable {
                 let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Relaxed);
                 if !p.is_null() {
                     entry.count = entry.count.saturating_sub(1);
-                    to_close.push(unsafe { Arc::from_raw(p) });
+                    to_close.push(crate::fs::r#unsafe::arc_reclaim_owned(p));
                 }
             }
         }
@@ -1723,7 +1368,7 @@ pub fn alloc_staging_buf(n: usize) -> alloc::vec::Vec<u8> {
     let mut v = alloc::vec::Vec::with_capacity(n);
     // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer
     // is filled by the caller before any read of its contents (see doc).
-    unsafe { v.set_len(n); }
+    crate::fs::r#unsafe::vec_set_len_uninit(&mut v, n);
     v
 }
 
@@ -1740,16 +1385,8 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
     // SAFETY: capacity covers start..start+len; copy_from_user fills all
     // of it or we return without exposing the bytes (set_len runs only
     // on the fully-copied path).
-    unsafe {
-        let copied_ok = crate::arch::uaccess::copy_from_user(
-            dst.as_mut_ptr().add(start),
-            src_user as *const u8,
-            len,
-        ) == 0;
-        if !copied_ok {
-            return false;
-        }
-        dst.set_len(start + len);
+    if !crate::fs::r#unsafe::gather_append_copy(dst, start, src_user, len) {
+        return false;
     }
     true
 }
@@ -1776,19 +1413,7 @@ impl FastFd {
 pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
     let cur = crate::sched::hotpath::current()?;
     // SAFETY: current() yields a live task pointer.
-    unsafe {
-        if !(*cur).fdtable_unshared() {
-            return (*cur).try_fdtable().and_then(|t| t.get_file(fd)).map(FastFd::Owned);
-        }
-        // The unshared table outlives the syscall (owned by this task);
-        // extend the borrow to 'static through the raw pointer.
-        let tbl: &'static FdTable = (*cur).try_fdtable()?;
-        tbl.get_file_borrow(fd).map(|f| {
-            // SAFETY: the slot's Arc is owned by the unshared table and
-            // cannot be retired for the duration of this syscall.
-            unsafe { core::mem::transmute::<&File, &'static File>(f) }
-        }).map(FastFd::Borrowed)
-    }
+    crate::fs::r#unsafe::fd_fast_lookup(cur, fd)
 }
 
 /// Safe-typed fd lookup for the kernel capsule boundary: identical
@@ -1799,7 +1424,7 @@ pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
 pub fn get_file_fd_safe(fd: usize) -> Option<Arc<File>> {
     // SAFETY: vacuous contract — get_file_fd's body calls only safe
     // functions (see doc).
-    unsafe { get_file_fd(fd) }
+    get_file_fd(fd)
 }
 
 /// (unsafe-slim r3) un-signed: parameters are safe (Arc<File>) and the
@@ -1845,16 +1470,13 @@ pub fn get_stdout() -> Option<Arc<File>> {
     get_file_fd(1)
 }
 
-pub unsafe fn get_stderr() -> Option<Arc<File>> {
-    get_file_fd(2)
-}
 
 // ============================================================================
 // Default operations for regular files
 // ============================================================================
 
 fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
-    if let Some(ref inode) = unsafe { &*file.inode.get() } {
+    if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(file) {
         // Serialize the whole get_pos → read_data → set_pos sequence with
         // writers and other readers sharing this open file description:
         // without the lock, two CPUs fork-inheriting the same fd could
@@ -1902,7 +1524,7 @@ pub fn reg_file_close_pub(file: &File) -> i32 {
 }
 
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
-    if let Some(ref inode) = unsafe { &*file.inode.get() } {
+    if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(file) {
         // Serialize the whole read-offset → write → update-pos sequence so
         // that two O_APPEND writers on SMP cannot interleave (their writes
         // would each position at the "old" end). Also protects plain
@@ -1973,7 +1595,7 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     let current_pos = file.get_pos() as i64;
 
     // Get file size
-    let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {
+    let file_size = if let Some(inode) = crate::fs::r#unsafe::file_inode_arc_ref(file) {
         inode.get_size() as i64
     } else {
         return -9  // EBADF
@@ -2110,65 +1732,18 @@ pub mod epoll_events {
 
 // ==================== audited list helpers (INV-SYSC-1 twins) ====================
 
-#[inline]
-fn list_first(head: *mut ListHead) -> *mut ListHead {
-    debug_assert!(!head.is_null());
-    // SAFETY: INV-SYSC-1 — plain load of the sentinel's next field.
-    unsafe { (*head).next }
-}
 
-#[inline]
-fn list_next(cur: *mut ListHead) -> *mut ListHead {
-    // SAFETY: INV-SYSC-1 — capture-before-body discipline.
-    unsafe { (*cur).next }
-}
 
-#[inline]
-fn list_link_tail(node: *mut ListHead, head: *mut ListHead) {
-    debug_assert!(!node.is_null() && !head.is_null());
-    // SAFETY: INV-SYSC-1 — node's list is initialized (fresh) and
-    // unlinked; head is the live sentinel held under the lock.
-    unsafe { (*node).add_tail(head) }
-}
 
-#[inline]
-fn list_unlink(node: *mut ListHead) {
-    // SAFETY: INV-SYSC-1 unlink arm — caller holds the list's lock; the
-    // node is currently linked and its neighbors are live.
-    unsafe { (*node).del() }
-}
 
-#[inline]
-fn boxed_mut<T>(p: *mut T) -> &'static mut T {
-    // SAFETY: INV-SYSC-2 — caller holds the ownership/pin proof.
-    unsafe { &mut *p }
-}
 
-#[inline]
-fn boxed_drop<T>(p: *mut T) {
-    // SAFETY: INV-SYSC-2 — the box is uniquely owned here (unlinked or
-    // never linked).
-    unsafe { drop(alloc::boxed::Box::from_raw(p)) }
-}
 
-#[inline]
-fn list_entry_mut<T>(cur: *mut ListHead) -> &'static mut T {
-    // SAFETY: INV-SYSC-1 — container_of to the node for a read-modify pass
-    // under the owning lock.
-    unsafe { &mut *(cur as *mut T) }
-}
 
 #[inline]
 pub fn list_entry_pub<T>(cur: *mut ListHead) -> &'static T {
     list_entry(cur)
 }
 
-#[inline]
-fn list_entry<T>(cur: *mut ListHead) -> &'static T {
-    // SAFETY: INV-SYSC-1 — container_of back to the node (list is the
-    // first field, so the cast is a no-op).
-    unsafe { &mut *(cur as *mut T) }
-}
 
 /// The wake-target surface: the notify path's four touches of the
 /// epoll instance, as trait methods so the registry stays generic and
@@ -2185,12 +1760,6 @@ pub trait EpollWakeClient: Sized {
     fn wake_waiters(&self);
 }
 
-#[inline]
-fn boxed_ref<T>(p: *mut T) -> &'static T {
-    // SAFETY: callers hold the pin/liveness proof (INV-SYSC-2's
-    /// registry-side arm).
-    unsafe { &mut *p }
-}
 
 // ==================== the epoll wake registry ====================
 
@@ -2616,11 +2185,6 @@ pub fn signalfd_unregister(wq: *const crate::process::types::WaitQueueHead) {
     registry.bindings.retain(|(_, q)| *q != wq);
 }
 
-// Send proofs for the raw-pointer registry types (moved from
-// syscall/unsafe.rs with the types; same contracts: access only under
-// the shard/registry locks).
-unsafe impl Send for EpollWakeShard {}
-unsafe impl Send for SignalfdWakeRegistry {}
 
 
 // ════════════════ fdreap ══════════════════════════════
@@ -2817,7 +2381,7 @@ pub fn fdreap_init() {
     // Pin the ArcInner layout assumption file_arc_try_clone makes
     // (fails loudly at boot if a toolchain change moves the refcount
     // word the lock-free fd lookup CASes).
-    self::verify_arc_inner_layout();
+    crate::fs::r#unsafe::verify_arc_inner_layout();
     let ok = crate::api::process::kthread_run(
         fdreapd_fn,
         core::ptr::null_mut(),
@@ -3289,44 +2853,11 @@ pub const FS_ID_SELINUXFS: u64 = 0x534C_4E58_0005;
 // few hundred bytes — bounded, and freeing would race lock-free readers.
 // ============================================================================
 
-static ANON_DEV_NEXT: AtomicU32 = AtomicU32::new(1);
-static ANON_DEV_MAP: core::sync::atomic::AtomicPtr<AnonDevMap> =
+pub(crate) static ANON_DEV_NEXT: AtomicU32 = AtomicU32::new(1);
+pub(crate) static ANON_DEV_MAP: core::sync::atomic::AtomicPtr<AnonDevMap> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-static ANON_DEV_WRITE: Spinlock<()> = Spinlock::new(());
+pub(crate) static ANON_DEV_WRITE: Spinlock<()> = Spinlock::new(());
 
-/// The stat device (Linux s_dev) of a filesystem instance: kernel dev_t
-/// shape (DevNo, typically major 0 = UNNAMED_MAJOR, minor from the
-/// global counter). Deterministic per fs_id for the whole boot.
-pub fn stat_dev_for_fs(fs_id: u64) -> super::types::DevNo {
-    // Fast path: immutable published snapshot.
-    let p = ANON_DEV_MAP.load(Ordering::Acquire);
-    if !p.is_null() {
-        // SAFETY: snapshots are immutable once published; the pointer is
-        // only ever replaced (never freed), so this reference stays valid.
-        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
-            return d;
-        }
-    }
-    let _guard = ANON_DEV_WRITE.lock();
-    // Re-check under the write lock (another CPU may have just published).
-    let p = ANON_DEV_MAP.load(Ordering::Acquire);
-    if !p.is_null() {
-        // SAFETY: see above.
-        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
-            return d;
-        }
-    }
-    let dev = super::types::DevNo::new(0, ANON_DEV_NEXT.fetch_add(1, Ordering::Relaxed));
-    let mut next = alloc::collections::BTreeMap::new();
-    if !p.is_null() {
-        // SAFETY: see above; clone under the write lock.
-        next.clone_from(unsafe { &(*p).0 });
-    }
-    next.insert(fs_id, dev);
-    let fresh = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(AnonDevMap(next)));
-    ANON_DEV_MAP.store(fresh, Ordering::Release);
-    dev
-}
 
 /// stat(2) st_dev of a filesystem instance: the USERSPACE dev_t encoding
 /// (new_encode_dev layout — what struct stat carries and glibc
@@ -3336,8 +2867,6 @@ pub fn stat_dev_user(fs_id: u64) -> u64 {
     stat_dev_for_fs(fs_id).to_user_dev()
 }
 
-unsafe impl Send for Inode {}
-unsafe impl Sync for Inode {}
 
 impl Drop for Inode {
     fn drop(&mut self) {
@@ -3389,7 +2918,7 @@ impl Inode {
         // SAFETY: self is a live shared Inode; the store is aligned and
         // u32-sized (see comment) — concurrent readers observe either the
         // old or the new full word.
-        unsafe { ptr.write_volatile(mode); }
+        crate::fs::r#unsafe::inode_mode_volatile_store(ptr, mode);
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     }
 
@@ -3787,8 +3316,6 @@ impl Clone for InodeHashBucket {
     }
 }
 
-unsafe impl Send for InodeCache {}
-unsafe impl Sync for InodeCache {}
 
 /// Global Inode cache
 static ICACHE: Spinlock<Option<InodeCache>> = Spinlock::new(None);
@@ -4132,8 +3659,6 @@ impl VfsMountInternal {
     }
 }
 
-unsafe impl Send for VfsMountInternal {}
-unsafe impl Sync for VfsMountInternal {}
 
 // ============================================================================
 // Reader banks + deferred retirement (gap-fs lane)
@@ -4324,31 +3849,7 @@ pub fn dentry_drain_if_quiescent(parked: bool) {
     }
 }
 
-/// Increment a dentry's strong count for a pointer loaded under a
-/// reader claim (the claim blocks the drain that would otherwise free
-/// it) and return an owned Arc.
-///
-/// # Safety
-/// `p` must have been loaded from a dentry child memo slot / inode
-/// pointer mirror while a WalkClaim is held by the caller, and `p` must
-/// be non-null.
-/// (INV-DENTRY-ADOPT-1: the claim-then-adopt protocol — the WalkClaim
-/// blocks the deferred-retirement drain that would otherwise free the
-/// target; increment_strong_count + from_raw under that claim is the
-/// audited adopt edge. Both adopt fns and every call site ride it.)
-pub unsafe fn dentry_arc_from_raw(p: *const Dentry) -> Arc<Dentry> {
-    Arc::increment_strong_count(p);
-    Arc::from_raw(p)
-}
 
-/// Same as [`dentry_arc_from_raw`] for inodes (the inode pointer mirror).
-///
-/// # Safety
-/// See [`dentry_arc_from_raw`]; `p` non-null, loaded under a claim.
-pub unsafe fn inode_arc_from_raw(p: *const Inode) -> Arc<Inode> {
-    Arc::increment_strong_count(p);
-    Arc::from_raw(p)
-}
 
 /// FNV-1a over the component bytes — the memo slot key.
 #[inline]
@@ -4385,11 +3886,6 @@ const CHILD_MEMO_BIG_MIN: usize = 12;
 const CHILD_MEMO_BIG_MIN_SLOTS: usize = 128;
 const CHILD_MEMO_BIG_MAX_SLOTS: usize = 2048;
 
-// SAFETY: the table's slots are shared-memory seqlock cells exactly like
-// the inline `memo` array inside Sync Dentry; cross-thread access goes
-// through the seqlock/children-lock protocol.
-unsafe impl Send for BigMemoTable {}
-unsafe impl Sync for BigMemoTable {}
 
 impl ChildMemoSlot {
     const fn empty() -> Self {
@@ -4426,7 +3922,7 @@ fn memo_slot_read(
     // validation for the small slots, children-lock Release publication
     // + immutable nslots for the big table, walk-claim blocking the
     // drain; every memo/table row rides this.)
-    let d = unsafe { &*slot.data.get() };
+    let d = crate::fs::r#unsafe::raw_ref(slot.data.get());
     let hit = d.ver == ver
         && d.hash == h
         && !d.child.is_null()
@@ -4440,12 +3936,6 @@ fn memo_slot_read(
     }
 }
 
-// (INV-DENTRY-SEND-1: Dentry/VfsMountInternal/BigMemoTable Sync/Send
-// are carried per-field — children/memo under their locks and seqlock,
-// the retirement banks under the drain lock; no field races through
-// a shared reference.)
-unsafe impl Send for Dentry {}
-unsafe impl Sync for Dentry {}
 
 impl Dentry {
     /// Create new dentry
@@ -4607,7 +4097,7 @@ impl Dentry {
         } else {
             // SAFETY: p is non-null and kept alive by the inode slot or
             // its pending retire; our claim blocks the drain.
-            Some(unsafe { inode_arc_from_raw(p) })
+            Some(crate::fs::r#unsafe::inode_arc_adopt(p))
         };
         drop(claim);
         out
@@ -4800,7 +4290,7 @@ impl Dentry {
             // drain that would free it. `nslots` is immutable after
             // construction, so the base pointer alone yields a
             // consistent (slots, len) pair even across a concurrent grow.
-            let table: &BigMemoTable = unsafe { &*big };
+            let table: &BigMemoTable = crate::fs::r#unsafe::raw_ref(big);
             let n = table.nslots;
             let slot = &table.slots[(h as usize) & (n - 1)];
             if let Some(p) = memo_slot_read(slot, ver, h, bytes) {
@@ -4827,7 +4317,7 @@ impl Dentry {
         let out = match self.lookup_child_walk(&claim, name) {
             Some(p) => {
                 // SAFETY: loaded under the claim; see the protocol.
-                Some(unsafe { dentry_arc_from_raw(p) })
+                Some(crate::fs::r#unsafe::dentry_arc_adopt(p))
             }
             None => None,
         };
@@ -4851,7 +4341,7 @@ impl Dentry {
         // CPU refilled between our miss and taking the lock).
         {
             // SAFETY: children lock held — all refills serialize here.
-            let cur = unsafe { &*slot.data.get() };
+            let cur = crate::fs::r#unsafe::raw_ref(slot.data.get());
             if cur.ver == ver && cur.hash == h && !cur.child.is_null() {
                 return;
             }
@@ -4861,7 +4351,7 @@ impl Dentry {
         // SAFETY: children lock held (serializes writers); racing
         // readers are guarded by the seqlock.
         {
-            let d = unsafe { &mut *slot.data.get() };
+            let d = crate::fs::r#unsafe::raw_ref_mut(slot.data.get());
             d.ver = ver;
             d.hash = h;
             d.name_len = name.len() as u8;
@@ -4878,13 +4368,13 @@ impl Dentry {
             // SAFETY: published table (children lock held here
             // serializes this writer against every other refill);
             // `nslots` immutable after construction.
-            let table: &BigMemoTable = unsafe { &*big };
+            let table: &BigMemoTable = crate::fs::r#unsafe::raw_ref(big);
             let n = table.nslots;
             let bslot = &table.slots[(h as usize) & (n - 1)];
             // Same already-filled short-circuit as the inline slot.
             {
                 // SAFETY: children lock held — all refills serialize.
-                let cur = unsafe { &*bslot.data.get() };
+                let cur = crate::fs::r#unsafe::raw_ref(bslot.data.get());
                 if cur.ver == ver && cur.hash == h && !cur.child.is_null() {
                     return;
                 }
@@ -4893,7 +4383,7 @@ impl Dentry {
             bslot.seq.store(s | 1, Ordering::Release); // odd — enter write
             // SAFETY: children lock held; seqlock guards racing readers.
             {
-                let d = unsafe { &mut *bslot.data.get() };
+                let d = crate::fs::r#unsafe::raw_ref_mut(bslot.data.get());
                 d.ver = ver;
                 d.hash = h;
                 d.name_len = name.len() as u8;
@@ -4932,7 +4422,7 @@ impl Dentry {
             // SAFETY: published table pointer (children lock held here,
             // and the pointer only changes under this lock); nslots is
             // immutable after construction.
-            unsafe { (*cur).nslots }
+            crate::fs::r#unsafe::raw_ref(cur).nslots
         };
         if want <= cur_slots {
             return;
@@ -4947,8 +4437,8 @@ impl Dentry {
         // SAFETY: children lock held — this cell's only writers are
         // here and the final Dentry drop (post-quiescence); lock-free
         // readers never touch the ownership cell.
-        let old = unsafe { (*self.big_memo.get()).replace(table) };
-        let base = match unsafe { &*self.big_memo.get() } {
+        let old = crate::fs::r#unsafe::big_memo_replace(&self.big_memo, table);
+        let base = match crate::fs::r#unsafe::raw_ref(self.big_memo.get()) {
             Some(b) => &**b as *const BigMemoTable as *mut BigMemoTable,
             None => return,
         };
@@ -5257,8 +4747,6 @@ impl Clone for DentryHashBucket {
     }
 }
 
-unsafe impl Send for DentryCache {}
-unsafe impl Sync for DentryCache {}
 
 /// Global Dentry cache
 static DCACHE: Spinlock<Option<DentryCache>> = Spinlock::new(None);
@@ -5809,21 +5297,7 @@ impl ElfLoader {
         // the caller's address-space setup mapped for this PT_LOAD (the
         // exec path maps before loading); the file span was bounds-checked
         // above.
-        unsafe {
-            // Copy segment data to memory
-            if filesz > 0 {
-                let src = data.as_ptr().add(offset);
-                let dst = vaddr as *mut u8;
-                core::ptr::copy_nonoverlapping(src, dst, filesz);
-            }
-
-            // Zero BSS segment (p_memsz > p_filesz portion)
-            if memsz > filesz {
-                let bss_start = vaddr.checked_add(filesz as u64).ok_or(ElfError::InvalidSegment)?;
-                let bss_size = memsz - filesz;
-                core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
-            }
-        }
+        crate::fs::r#unsafe::elf_load_copy_segment(vaddr, data, offset, filesz, memsz)?;
 
         Ok(())
     }
@@ -5884,10 +5358,7 @@ impl Page {
     /// Create new page
     pub fn new() -> Self {
         let mut data = Vec::with_capacity(PAGE_SIZE);
-        unsafe {
-            core::ptr::write_bytes(data.as_mut_ptr(), 0, PAGE_SIZE);
-            data.set_len(PAGE_SIZE);
-        }
+        crate::fs::r#unsafe::vec_zero_set_len(&mut data, PAGE_SIZE);
         Self {
             data,
             flags: AtomicUsize::new(0),
@@ -5898,9 +5369,7 @@ impl Page {
     /// Create page from data
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut data = Vec::with_capacity(PAGE_SIZE);
-        unsafe {
-            data.set_len(PAGE_SIZE);
-        }
+        crate::fs::r#unsafe::vec_set_len_uninit(&mut data, PAGE_SIZE);
         let copy_len = core::cmp::min(bytes.len(), PAGE_SIZE);
         data[..copy_len].copy_from_slice(&bytes[..copy_len]);
 
@@ -6134,10 +5603,7 @@ impl FileChunk {
         // heap chunk. May itself fail on an exhausted heap — the caller
         // treats None as ENOMEM.
         let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);
-        unsafe {
-            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);
-            c.set_len(FILE_BUFFER_CHUNK);
-        }
+        crate::fs::r#unsafe::vec_zero_set_len(&mut c, FILE_BUFFER_CHUNK);
         Some(FileChunk::Heap(c))
     }
 
@@ -6147,7 +5613,7 @@ impl FileChunk {
     /// a deref; callers must not hold two live mutable slices into the
     /// same chunk, the FileBuffer lock serializes all access in
     /// practice).
-    fn base_ptr(&mut self) -> *mut u8 {
+    pub(crate) fn base_ptr(&mut self) -> *mut u8 {
         match self {
             FileChunk::Page(phys) => {
                 crate::arch::mm::phys_to_virt(
@@ -6173,10 +5639,7 @@ impl FileBuffer {
     /// stack: with_capacity mmaps from the heap directly.
     fn new_chunk() -> Vec<u8> {
         let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);
-        unsafe {
-            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);
-            c.set_len(FILE_BUFFER_CHUNK);
-        }
+        crate::fs::r#unsafe::vec_zero_set_len(&mut c, FILE_BUFFER_CHUNK);
         c
     }
 
@@ -6210,11 +5673,7 @@ impl FileBuffer {
             let n = core::cmp::min(FILE_BUFFER_CHUNK - co, to_read - done);
             // SAFETY: const cast of the chunk reference — read-only use;
             // all FileBuffer access is serialized by the inode data lock.
-            let src: &[u8] = unsafe {
-                let fc = &self.chunks[ci] as *const FileChunk as *mut FileChunk;
-                let base = (*fc).base_ptr();
-                core::slice::from_raw_parts(base.add(co), n)
-            };
+            let src: &[u8] = crate::fs::r#unsafe::chunk_read_slice(&self.chunks[ci], co, n);
             buf[done..done + n].copy_from_slice(src);
             done += n;
         }
@@ -6246,10 +5705,7 @@ impl FileBuffer {
             let co = pos % FILE_BUFFER_CHUNK;
             let n = core::cmp::min(FILE_BUFFER_CHUNK - co, writable - done);
             // SAFETY: &mut access; serialized by the inode data lock.
-            let dst: &mut [u8] = unsafe {
-                let base = self.chunks[ci].base_ptr();
-                core::slice::from_raw_parts_mut(base.add(co), n)
-            };
+            let dst: &mut [u8] = crate::fs::r#unsafe::chunk_write_slice(&mut self.chunks[ci], co, n);
             dst.copy_from_slice(&buf[done..done + n]);
             done += n;
         }
@@ -6285,13 +5741,7 @@ impl FileBuffer {
                     // &mut access to the chunk we own; the write stays
                     // inside the FILE_BUFFER_CHUNK-sized chunk.
                     // SAFETY: owned chunk, bounded tail zero.
-                    unsafe {
-                        core::ptr::write_bytes(
-                            c.base_ptr().add(tail),
-                            0,
-                            FILE_BUFFER_CHUNK - tail,
-                        );
-                    }
+                    crate::fs::r#unsafe::chunk_zero_tail(c, tail);
                 }
             }
         }
@@ -6376,12 +5826,6 @@ impl BufferState {
 // Buffer Head
 // ============================================================================
 
-// SAFETY: BufferHead's mutable state (b_data) is protected by BufferState spinlock;
-// other fields are atomic or only accessed under lock.
-unsafe impl Send for BufferHead {}
-// SAFETY: all shared mutable state is protected by the BufferState spinlock;
-// b_data is only mutated under lock or from a single thread.
-unsafe impl Sync for BufferHead {}
 
 impl BufferHead {
     /// Create new buffer head
@@ -6410,7 +5854,7 @@ impl BufferHead {
         // purposes; no read of b_data happens before the DMA completes and
         // BH_Uptodate is set (documented contract above). The capacity is
         // exactly `size`, so set_len stays in bounds.
-        unsafe { b_data.set_len(size as usize); }
+        crate::fs::r#unsafe::vec_set_len_uninit(&mut b_data, size as usize);
         Self {
             b_device: None,
             b_blocknr: blocknr,
@@ -6547,7 +5991,7 @@ impl CacheEntry {
             None
         } else {
             // SAFETY: INV-BIO-BH; Box-owned, non-null (checked).
-            Some(unsafe { &*self.bh })
+            Some(crate::fs::r#unsafe::raw_ref(self.bh))
         }
     }
 
@@ -6564,32 +6008,18 @@ impl CacheEntry {
         } else {
             // SAFETY: INV-BIO-BH + bucket lock held; single live &mut
             // window under the same lock the pre-conversion writes had.
-            Some(unsafe { &mut *self.bh })
+            Some(crate::fs::r#unsafe::raw_ref_mut(self.bh))
         }
     }
 }
 
-/// Borrow a hash-linked (or LRU-linked) cache entry.
-///
-/// INV-BIO-ENTRY: `p` came from a bucket chain or the LRU list and the
-/// corresponding lock (bucket / lru) is held — under that lock the entry
-/// cannot be unlinked and freed, so the borrow is live for the walk.
-/// The round-1 TaskRef shape applied to the buffer cache.
-#[inline]
-fn entry_ref(p: *mut CacheEntry) -> &'static CacheEntry {
-    // SAFETY: INV-BIO-ENTRY; entries are Box::into_raw allocations that
-    // live while linked under their locks.
-    unsafe { &*p }
-}
 
 impl Drop for CacheEntry {
     fn drop(&mut self) {
         if !self.bh.is_null() {
             // SAFETY: self.bh was created by Box::into_raw in CacheEntry::new;
             // Drop is called once and bh is non-null (checked above), so this reclaims the Box.
-            unsafe {
-                let _ = Box::from_raw(self.bh);
-            }
+            crate::fs::r#unsafe::boxed_drop(self.bh);
         }
     }
 }
@@ -6598,13 +6028,6 @@ impl Drop for CacheEntry {
 // Block Cache with Per-Bucket Locking and LRU
 // ============================================================================
 
-// SAFETY: BlockCache is only accessed via &self methods that use internal locking
-// (per-bucket Spinlock and LRU Spinlock) and atomic count; raw pointers are
-// confined to cache internals and never exposed without locks.
-unsafe impl Send for BlockCache {}
-// SAFETY: all shared mutable state (hash buckets, LRU list) is protected by
-// Spinlocks; raw pointer access is always under the appropriate bucket lock.
-unsafe impl Sync for BlockCache {}
 
 /// Leg-52 debug counter: sync_all/sync_all_excluding walked a LINKED
 /// cache entry whose bh was NULL (the R11-1 crash family's read side).
@@ -6669,97 +6092,8 @@ impl BlockCache {
         (hash as usize) & (self.hash_size - 1)
     }
 
-    /// Move entry to LRU head. Caller must hold the lru lock
-    /// (INV-BIO-ENTRY; the unsafe raw-deref window is confined to here).
-    fn move_to_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
-        // SAFETY: INV-BIO-ENTRY — lru lock held; entry and every neighbor
-        // it names in prev/next are linked under the same lock, so the
-        // whole relink is one raw-deref window.
-        unsafe {
-            let entry = &mut *entry_ptr;
 
-            // R7-C1: an entry unlinked by evict_one Phase 1 (both links
-            // None) but still visible in the hash chain can race here via
-            // get(). Unlinking it again would drop lru.tail (lru_next None
-            // -> tail = lru_prev = None) and leave the real tail orphaned
-            // — instead treat it as a fresh insert (same as push_lru_head).
-            if entry.lru_prev.is_none() && entry.lru_next.is_none() && lru.head != Some(entry_ptr) {
-                Self::push_lru_head(lru, entry_ptr);
-                return;
-            }
-            if lru.head == Some(entry_ptr) {
-                return; // already at head
-            }
 
-            // Unlink from current position
-            if let Some(prev) = entry.lru_prev {
-                (*prev).lru_next = entry.lru_next;
-            }
-            if let Some(next) = entry.lru_next {
-                (*next).lru_prev = entry.lru_prev;
-            } else {
-                lru.tail = entry.lru_prev;
-            }
-
-            // Insert at head
-            entry.lru_prev = None;
-            entry.lru_next = lru.head;
-            if let Some(head) = lru.head {
-                (*head).lru_prev = Some(entry_ptr);
-            }
-            lru.head = Some(entry_ptr);
-            if lru.tail.is_none() {
-                lru.tail = Some(entry_ptr);
-            }
-        }
-    }
-
-    /// Push an entry that is currently UNLINKED onto the LRU head.
-    /// Caller must hold the lru lock (INV-BIO-ENTRY).
-    fn push_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
-        // R7-C1: idempotent — evict_one Phase 2 re-inserts after a pin
-        // recheck; a concurrent get() may have re-linked the entry at head
-        // already. Pushing again would self-loop (entry.lru_next = head =
-        // entry itself).
-        if lru.head == Some(entry_ptr) {
-            return;
-        }
-        // SAFETY: INV-BIO-ENTRY — lru lock held; head is a linked entry.
-        unsafe {
-            let entry = &mut *entry_ptr;
-            entry.lru_prev = None;
-            entry.lru_next = lru.head;
-            if let Some(head) = lru.head {
-                (*head).lru_prev = Some(entry_ptr);
-            }
-            lru.head = Some(entry_ptr);
-            if lru.tail.is_none() {
-                lru.tail = Some(entry_ptr);
-            }
-        }
-    }
-
-    /// Unlink entry from LRU list. Caller must hold the lru lock
-    /// (INV-BIO-ENTRY; the unsafe raw-deref window is confined to here).
-    fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
-        // SAFETY: INV-BIO-ENTRY — lru lock held; prev/next are linked
-        // entries under the same lock.
-        unsafe {
-            let entry = &*entry_ptr;
-            if let Some(prev) = entry.lru_prev {
-                (*prev).lru_next = entry.lru_next;
-            } else {
-                lru.head = entry.lru_next;
-            }
-            if let Some(next) = entry.lru_next {
-                (*next).lru_prev = entry.lru_prev;
-            } else {
-                lru.tail = entry.lru_prev;
-            }
-            (*entry_ptr).lru_prev = None;
-            (*entry_ptr).lru_next = None;
-        }
-    }
 
     /// Evict one entry from the LRU tail.
     ///
@@ -6825,12 +6159,11 @@ impl BlockCache {
                 if cp == victim {
                     // SAFETY: bucket lock held; cp/prev chain-linked
                     // (INV-BIO-ENTRY) — the unhash relink writes.
-                    unsafe {
-                        if let Some(pp) = prev {
-                            (*pp).hash_next = (*cp).hash_next;
-                        } else {
-                            bucket.head = (*cp).hash_next;
-                        }
+                    if let Some(pp) = prev {
+                        crate::fs::r#unsafe::raw_ref_mut(pp).hash_next =
+                            crate::fs::r#unsafe::raw_ref(cp).hash_next;
+                    } else {
+                        bucket.head = crate::fs::r#unsafe::raw_ref(cp).hash_next;
                     }
                     present = true;
                     break;
@@ -6850,14 +6183,12 @@ impl BlockCache {
                 // Pinned between Phase 1 and Phase 2 — but we already
                 // unlinked it! Re-link at the head and abort.
                 // SAFETY: bucket lock held relink write (INV-BIO-ENTRY).
-                unsafe {
-                    (*victim).hash_next = bucket.head;
-                }
+                crate::fs::r#unsafe::raw_ref_mut(victim).hash_next = bucket.head;
                 bucket.head = Some(victim);
                 return false;
             }
             // SAFETY: bucket lock held; victim present in chain.
-            unsafe { (*victim).evicting = true; }
+            crate::fs::r#unsafe::raw_ref_mut(victim).evicting = true;
         }
         // bucket lock released; entry is unpinnable and unhashed
 
@@ -6914,7 +6245,7 @@ impl BlockCache {
             }
             // SAFETY: victim is unhashed + unlinked + unpinnable; the
             // Box::into_raw from insertion is reclaimed exactly once.
-            let _ = unsafe { Box::from_raw(victim) };
+            let _ = crate::fs::r#unsafe::boxed_drop(victim);
         }
         self.count.fetch_sub(1, Ordering::Release);
         true
@@ -6985,13 +6316,12 @@ impl BlockCache {
                 // after this, no new pins can arrive.
                 // SAFETY: bucket lock held; unhash relink write
                 // (INV-BIO-ENTRY).
-                unsafe {
-                    (*cp).evicting = true;
-                    if let Some(pp) = prev {
-                        (*pp).hash_next = (*cp).hash_next;
-                    } else {
-                        bucket.head = (*cp).hash_next;
-                    }
+                crate::fs::r#unsafe::raw_ref_mut(cp).evicting = true;
+                if let Some(pp) = prev {
+                    crate::fs::r#unsafe::raw_ref_mut(pp).hash_next =
+                        crate::fs::r#unsafe::raw_ref(cp).hash_next;
+                } else {
+                    bucket.head = crate::fs::r#unsafe::raw_ref(cp).hash_next;
                 }
             }
             victim = cp;
@@ -7003,7 +6333,7 @@ impl BlockCache {
         }
         crate::debug::hotpath::note_drop_block();
         // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
-        unsafe { let _ = Box::from_raw(victim); }
+        crate::fs::r#unsafe::boxed_drop(victim);
         self.count.fetch_sub(1, Ordering::Release);
     }
 
@@ -7129,11 +6459,11 @@ impl BlockCache {
                         if prev.is_some() {
                             // SAFETY: prev/entry are chain-linked under the
                             // bucket lock (INV-BIO-ENTRY); relinking writes.
-                            unsafe {
-                                let prev_entry = &mut *prev.unwrap();
-                                prev_entry.hash_next = entry.hash_next;
-                                (*entry_ptr).hash_next = bucket.head;
-                            }
+                            let prev_entry =
+                                crate::fs::r#unsafe::raw_ref_mut(prev.unwrap());
+                            prev_entry.hash_next = entry.hash_next;
+                            crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next =
+                                bucket.head;
                             bucket.head = Some(entry_ptr);
                         }
                         // Move to LRU head (bucket lock held — enforces ordering)
@@ -7217,18 +6547,14 @@ impl BlockCache {
                         Self::move_to_lru_head(&mut lru, cp);
                         // SAFETY: entry_ptr was created by Box::into_raw
                         // above; never published, dropped on the dup path.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::r#unsafe::boxed_drop(entry_ptr);
                         return Some(ce.bh);
                     }
                     current = ce.hash_next;
                 }
 
                 // Insert at hash chain head
-                // SAFETY: entry_ptr is the freshly Box::into_raw'd entry;
-                // bucket lock held (INV-BIO-ENTRY relink write).
-                unsafe {
-                    (*entry_ptr).hash_next = bucket.head;
-                }
+                crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
 
                 // Insert at LRU head (bucket lock held — enforces ordering)
@@ -7238,7 +6564,7 @@ impl BlockCache {
 
             self.count.fetch_add(1, Ordering::Release);
             // SAFETY: entry_ptr linked above under the bucket lock.
-            Some(unsafe { (*entry_ptr).bh })
+            Some(crate::fs::r#unsafe::raw_ref(entry_ptr).bh)
         }
     }
 
@@ -7365,16 +6691,14 @@ impl BlockCache {
                         }
                         ce.bh().unwrap().get();
                         // SAFETY: our never-published entry, dropped.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::r#unsafe::boxed_drop(entry_ptr);
                         return Some(ce.bh);
                     }
                     current = ce.hash_next;
                 }
                 // SAFETY: fresh Box::into_raw entry; bucket lock held
                 // (INV-BIO-ENTRY relink write).
-                unsafe {
-                    (*entry_ptr).hash_next = bucket.head;
-                }
+                crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
                 let mut lru = self.lru_lock_under_bucket(&bucket);
                 Self::move_to_lru_head(&mut lru, entry_ptr);
@@ -7382,18 +6706,10 @@ impl BlockCache {
 
             self.count.fetch_add(1, Ordering::Release);
             // SAFETY: entry_ptr linked above under the bucket lock.
-            Some(unsafe { (*entry_ptr).bh })
+            Some(crate::fs::r#unsafe::raw_ref(entry_ptr).bh)
         }
     }
 
-    /// Release buffer (decrement refcount)
-    pub fn put(&self, bh: *const BufferHead) {
-        // SAFETY: bh is a raw pointer returned by get()/bread(); it points to a
-        // valid BufferHead owned by a CacheEntry in the cache.
-        unsafe {
-            (*bh).put();
-        }
-    }
 
     /// Sync all dirty buffers.
     ///
@@ -7515,9 +6831,9 @@ impl BlockCache {
             while let Some(entry_ptr) = current {
                 // SAFETY: bucket lock held and the chain is being drained;
                 // Box::from_raw reclaims the CacheEntry and its BufferHead.
-                let next = unsafe {
-                    let next = (*entry_ptr).hash_next;
-                    let _ = Box::from_raw(entry_ptr);
+                let next = {
+                    let next = crate::fs::r#unsafe::raw_ref(entry_ptr).hash_next;
+                    crate::fs::r#unsafe::boxed_drop(entry_ptr);
                     next
                 };
                 current = next;
@@ -7567,12 +6883,10 @@ impl BlockCache {
                         // SAFETY: bucket lock held; the unhash relink
                         // write plus the guarded free (entry marked
                         // evicting first, so get() skips it).
-                        unsafe {
-                            (*entry_ptr).evicting = true;
-                            match prev {
-                                Some(pp) => (*pp).hash_next = next,
-                                None => bucket.head = next,
-                            }
+                        crate::fs::r#unsafe::raw_ref_mut(entry_ptr).evicting = true;
+                        match prev {
+                            Some(pp) => crate::fs::r#unsafe::raw_ref_mut(pp).hash_next = next,
+                            None => bucket.head = next,
                         }
                         let mut lru = self.lru.lock_irqsave();
                         Self::remove_from_lru(&mut lru, entry_ptr);
@@ -7582,7 +6896,7 @@ impl BlockCache {
                         // skips evicting entries).
                         // SAFETY: unhashed + evicting-marked + LRU-
                         // unlinked; the Box::into_raw reclaim.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::r#unsafe::boxed_drop(entry_ptr);
                         self.count.fetch_sub(1, Ordering::Release);
                     } else {
                         // Pinned: keep the buffer for its holder, but
@@ -7661,31 +6975,12 @@ pub fn get_block_cache() -> &'static BlockCache {
 // family the sibling lane is landing.)
 // ============================================================================
 
-/// THE pinned-handle edge: adopt a bread-family buffer handle as a
-/// shared view. INV-BIO-PIN: `bh` came from bread/bread_async/getblk
-/// (non-null, the caller's refcount pin holds it until brelse) and the
-/// borrow lives only as long as the caller's handle borrow.
-#[inline]
-fn bh_pinned<'a>(bh: &'a *mut BufferHead) -> &'a BufferHead {
-    // SAFETY: INV-BIO-PIN — pinned by the caller's refcount; non-null
-    // by the bread family's construction.
-    unsafe { &**bh }
-}
 
 /// Shared view of a pinned buffer's data block.
 pub fn bh_data<'a>(bh: &'a *mut BufferHead) -> &'a [u8] {
     &bh_pinned(bh).b_data
 }
 
-/// Exclusive view of a pinned buffer's data block (read-modify-write).
-pub fn bh_data_mut<'a>(bh: &'a *mut BufferHead) -> &'a mut [u8] {
-    // SAFETY: INV-BIO-PIN — the caller's pin holds the buffer; every
-    // call site's `bh` local is a uniquely-held *mut (the metadata
-    // read-modify-write discipline), so the &mut window aliases no live
-    // shared borrow. (Kept as the one documented mut edge rather than
-    // rippling &mut through dozens of ext4 call sites this round.)
-    unsafe { &mut (**bh).b_data }
-}
 
 /// Block number of a pinned buffer (metadata loops).
 pub fn bh_blocknr(bh: &*mut BufferHead) -> u64 {
@@ -7789,14 +7084,14 @@ pub fn invalidate_device(device: &crate::drivers::types::GenDisk) {
 /// churn starved the timer softirq into ALLOCTHROW panics on other
 /// CPUs). Bound the wait: after WAIT_DEADLINE_JIFFIES, give up and
 /// report -EIO so the syscall unwinds and the task stays killable.
-fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
+pub(crate) fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
     const WAIT_DEADLINE_JIFFIES: u64 = crate::timer::msecs_to_jiffies(10_000);
     let mut slept = 0u32;
     let deadline = crate::timer::get_jiffies().saturating_add(WAIT_DEADLINE_JIFFIES);
     loop {
         // SAFETY: INV-BIO-PIN — the owner's reference pins the buffer
         // across this wait (the module doc above).
-        let bh_ref: &BufferHead = unsafe { &*bh };
+        let bh_ref: &BufferHead = crate::fs::r#unsafe::raw_ref(bh);
         let state = bh_ref.get_state();
         if !state.test(BufferState::BH_Req) {
             return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
@@ -7882,11 +7177,7 @@ pub fn bread_async(
                         // I/O, then complete.
                         // SAFETY: entry.bh passed the len guard above
                         // (non-null, block-sized); pinned before unlock.
-                        let (bh, status) = unsafe {
-                            let bh = entry.bh;
-                            (*bh).get();
-                            (bh, wait_buffer_io_done(bh))
-                        };
+                        let (bh, status) = crate::fs::r#unsafe::bread_pin_settle(entry.bh);
                         drop(bucket);
                         completion.complete(status);
                         return Some(bh);
@@ -7905,11 +7196,11 @@ pub fn bread_async(
                     if prev.is_some() {
                         // SAFETY: bucket lock held; chain relink write
                         // (INV-BIO-ENTRY).
-                        unsafe {
-                            let prev_entry = &mut *prev.unwrap();
-                            prev_entry.hash_next = entry.hash_next;
-                            (*entry_ptr).hash_next = bucket.head;
-                        }
+                        let prev_entry =
+                            crate::fs::r#unsafe::raw_ref_mut(prev.unwrap());
+                        prev_entry.hash_next = entry.hash_next;
+                        crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next =
+                            bucket.head;
                         bucket.head = Some(entry_ptr);
                     }
                     let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
@@ -7928,15 +7219,7 @@ pub fn bread_async(
                     // rux:exthunt (retired debug=exthunt): block-cache hit truth (buffer pointer +
                     // first bytes) — see exthunt_rxbit/exthunt_rxbhit.
                     // SAFETY: hit_bh passed the b_data length guard above.
-                    unsafe {
-                        let d = &(*hit_bh).b_data;
-                        crate::api::ext4::exthunt_rxbhit(
-                            blocknr,
-                            d.as_ptr(),
-                            d[0],
-                            d[1],
-                        );
-                    }
+                    crate::fs::r#unsafe::exthunt_rxbhit_probe(hit_bh, blocknr);
                     completion.complete(0);
                     return Some(hit_bh);
                 }
@@ -8035,7 +7318,7 @@ pub fn bread_async(
                 } else {
                     // SAFETY: entry_ptr was created by Box::into_raw above;
                     // our I/O has finished and the entry was never published.
-                    let _ = unsafe { Box::from_raw(entry_ptr) };
+                    let _ = crate::fs::r#unsafe::boxed_drop(entry_ptr);
                 }
                 // SAFETY: existing_bh was pinned in the dup walk above.
                 let settle = wait_buffer_io_done(existing_bh);
@@ -8057,9 +7340,7 @@ pub fn bread_async(
                 let mut bucket = cache.buckets[index].lock_irqsave();
                 // SAFETY: fresh Box::into_raw entry; bucket lock held
                 // (INV-BIO-ENTRY relink write).
-                unsafe {
-                    (*entry_ptr).hash_next = bucket.head;
-                }
+                crate::fs::r#unsafe::raw_ref_mut(entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
 
                 let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
@@ -8068,61 +7349,11 @@ pub fn bread_async(
 
             cache.count.fetch_add(1, Ordering::Release);
             // SAFETY: entry_ptr linked above under the bucket lock.
-            Some(unsafe { (*entry_ptr).bh })
+            Some(crate::fs::r#unsafe::raw_ref(entry_ptr).bh)
         }
     }
 }
 
-/// Wait for an async buffer read to complete.
-///
-/// Blocks until the IoCompletion signals done, then marks the buffer
-/// as up-to-date and clears the in-flight flag.
-///
-/// R20-FS8: returns the I/O status (0 = success, negative errno on failure)
-/// so callers can refuse to consume/cache data from a failed read. The
-/// buffer stays in the cache marked !Uptodate on error.
-///
-/// On [`crate::fs::hotpath::WAIT_TIMED_OUT`] the device may STILL be
-/// writing the request's DMA target: wait() itself has already abandoned the
-/// device-side pending entry (so its late completion can never fire into the
-/// waiter's memory after this returns — the freed-kernel-stack completion
-/// corruption family), and callers must NOT free the DMA target (multi-block
-/// buffers are leaked by drain_batch; single-block buffers keep their pin).
-pub fn bread_wait(bh: *mut BufferHead, completion: &super::types::IoCompletion) -> i32 {
-    // SAFETY: bh is a raw pointer returned by bread_async(); it points to a
-    // valid BufferHead owned by a CacheEntry in the cache.
-    unsafe {
-        let status = completion.wait();
-        if status == 0 {
-            // Zero-serve guard (the no-journal ext4 root-lookup family): a
-            // device completion walker delivers with a token proving WHICH
-            // buffer's chain completed. A token mismatch means the delivery
-            // was misattributed — the waiter's own DMA may not have landed,
-            // and b_data is still the new_uninit heap contents (all zeros on
-            // a fresh page). Publishing that as BH_Uptodate caches silent
-            // zeros for the block (every later lookup of the root directory
-            // failed after "init: /test/pbench not found"). Refuse instead:
-            // report EIO, leave the buffer !Uptodate (the failed-async
-            // residue discipline re-reads it on the next miss) and make the
-            // misattribution loud. Token 0 = internal signal (cache hit,
-            // in-flight branch, dup-path re-settle) — always accept.
-            let token = completion.delivered_token();
-            if token != 0 && token != (*bh).b_data.as_ptr() as usize {
-                crate::pr_err!(
-                    "bio: misattributed completion for block {} (token {:x} != buffer {:x}) — refusing to publish, reporting EIO",
-                    (*bh).b_blocknr,
-                    token,
-                    (*bh).b_data.as_ptr() as usize
-                );
-                (*bh).clear_state_bit(BufferState::BH_Req);
-                return -5;
-            }
-            (*bh).set_state_bit(BufferState::BH_Uptodate);
-        }
-        (*bh).clear_state_bit(BufferState::BH_Req);
-        status
-    }
-}
 
 /// Release a buffer
 pub fn brelse(bh: *const BufferHead) {
@@ -8322,7 +7553,7 @@ pub fn bfree_multi(bh: *mut BufferHead) {
         return;
     }
     // SAFETY: caller contract above; Box::into_raw in bread_async_multi.
-    unsafe { drop(Box::from_raw(bh)) };
+    crate::fs::r#unsafe::boxed_drop(bh);
 }
 
 // ============================================================================
@@ -8386,13 +7617,7 @@ impl WriteSource {
                 // SAFETY: the Borrowed variant's contract — `ptr..ptr+len`
                 // names the caller's live, unmodified DMA source for the
                 // submission window (the write-batch discipline).
-                unsafe {
-                    if *len == 0 {
-                        &[]
-                    } else {
-                        core::slice::from_raw_parts(*ptr, *len)
-                    }
-                }
+                crate::fs::r#unsafe::borrowed_dma_slice(*ptr, len)
             }
         }
     }
@@ -8953,7 +8178,7 @@ pub fn sync_dirty_blocks_batched(
                 bh_pinned(&bh).set_state_bit(BufferState::BH_Dirty);
             }
             // SAFETY: same pin.
-            if !unsafe { (*bh).is_dirty() } {
+            if !crate::fs::r#unsafe::raw_ref(bh).is_dirty() {
                 get_block_cache().put(bh);
                 continue;
             }
@@ -9022,7 +8247,7 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     // bh is a raw pointer returned by bread() (INV-BIO-PIN).
     {
         // SAFETY: pinned by the caller's refcount; read-only.
-        let bh_ref: &BufferHead = unsafe { &*bh };
+        let bh_ref: &BufferHead = crate::fs::r#unsafe::raw_ref(bh);
         if let Some(dev) = bh_ref.b_device {
             let (mj, mi) = dev_key(dev);
             if publication_constrained(mj, mi, bh_ref.b_blocknr) {
@@ -9032,10 +8257,7 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     }
     // SAFETY: bh is a raw pointer returned by bread(); it points to a valid
     // BufferHead owned by a CacheEntry in the cache.
-    unsafe {
-        let bh_ref = &*bh;
-        bh_ref.sync()
-    }
+    crate::fs::r#unsafe::raw_ref(bh).sync()
 }
 
 /// Sync all dirty buffers
@@ -9364,7 +8586,7 @@ fn publication_capture_note_dirty(
     // jbd2 Handle whose FIRST field (repr(C)) is the capture header;
     // the handle lives on the owner task's stack for the whole syscall
     // (see namei::set_current_handle).
-    let hc: &JournalCaptureState = unsafe { &*(hptr as *const JournalCaptureState) };
+    let hc: &JournalCaptureState = crate::fs::r#unsafe::raw_ref(hptr as *const JournalCaptureState);
     let (mode, capture_id, capture_dev) =
         (hc.mode.get(), hc.post_id.get(), hc.dev_key.get());
     if capture_dev != dev_key(dev) {
@@ -9844,7 +9066,7 @@ fn sync_block_ordered(dev: (u32, u32), blocknr: u64) -> Result<(), i32> {
             // SAFETY: peek_buffer bumped the refcount; the bh stays valid
             // until the matching put below. sync() skips clean buffers,
             // so already-persisted blocks cost nothing.
-            let r = unsafe { (*bh).sync() };
+            let r = crate::fs::r#unsafe::raw_ref(bh).sync();
             get_block_cache().put(bh);
             r
         }
@@ -9893,10 +9115,10 @@ pub fn with_block_mut<T>(
     let bh = bread(device, blocknr).ok_or(crate::errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: INV-BIO-PIN — bread pinned the buffer; the &mut window
     // rides this function's exclusive scope (no other holder).
-    let data: &mut [u8] = unsafe { &mut (*bh).b_data };
+    let data: &mut [u8] = &mut crate::fs::r#unsafe::raw_ref_mut(bh).b_data;
     let out = f(data, bh);
     // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
-    unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
+    crate::fs::r#unsafe::raw_ref(bh).set_state_bit(BufferState::BH_Dirty);
     // The journal tag (rung-5 seam row): the crate resolves the handle
     // and tags the buffer; one indirect call per journaled metadata
     // write, replacing the two direct calls.
@@ -9921,10 +9143,10 @@ pub fn with_block_deferred_mut<T>(
 ) -> Result<T, i32> {
     let bh = bread(device, blocknr).ok_or(crate::errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: INV-BIO-PIN — the &mut window rides this exclusive scope.
-    let data: &mut [u8] = unsafe { &mut (*bh).b_data };
+    let data: &mut [u8] = &mut crate::fs::r#unsafe::raw_ref_mut(bh).b_data;
     let out = f(data, bh);
     // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
-    unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
+    crate::fs::r#unsafe::raw_ref(bh).set_state_bit(BufferState::BH_Dirty);
     // The journal tag (rung-5 seam row; deferred-write twin).
     let handle = self::current_handle_raw();
     if !handle.is_null() {
@@ -9945,7 +9167,7 @@ pub fn with_block<T>(
     let bh = bread(device, blocknr)?;
     // SAFETY: INV-BIO-PIN — bread pinned the buffer; the &mut window
     // rides this function's exclusive scope.
-    let data: &[u8] = unsafe { &(*bh).b_data };
+    let data: &[u8] = &crate::fs::r#unsafe::raw_ref(bh).b_data;
     let out = f(data);
     brelse(bh);
     Some(out)
@@ -10130,12 +9352,7 @@ pub fn get_vfs_root() -> Option<Arc<Dentry>> {
         // alive for the whole read. Building a temporary Arc from it and
         // forgetting the temporary leaves the leaked count untouched; the
         // clone handed out owns its own balanced increment.
-        unsafe {
-            let tmp = Arc::from_raw(p as *const Dentry);
-            let out = Arc::clone(&tmp);
-            core::mem::forget(tmp);
-            return Some(out);
-        }
+        return crate::fs::r#unsafe::dentry_root_peek_clone(p);
     }
     VFS_STATE.lock().root_dentry.clone()
 }
@@ -10646,7 +9863,7 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
         if busy.load(Ordering::Relaxed) {
             return;
         }
-        let task = unsafe { &*t };
+        let task = crate::fs::r#unsafe::raw_ref(t);
         // Open descriptors: any file whose dentry sits in the subtree.
         if let Some(fdtable) = task.try_fdtable() {
             fdtable.for_each_file(|_fd, file| {
@@ -12789,7 +12006,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // the retirement drain, or is refreshed from a live owned Arc;
         // the *_arc_from_raw adopts ride INV-DENTRY-ADOPT-1. All walk
         // rows in this file ride this contract.)
-        let cur_d: &Dentry = unsafe { &*current_raw };
+        let cur_d: &Dentry = crate::fs::r#unsafe::raw_ref(current_raw);
 
         // ENOTDIR (Linux link_path_walk): `current` must be a directory to
         // walk INTO the next component — a regular file / FIFO / device in
@@ -12807,7 +12024,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
         if !cur_inode_raw.is_null() {
             // SAFETY: carried under the claim (see above).
-            let cur_inode = unsafe { &*cur_inode_raw };
+            let cur_inode = crate::fs::r#unsafe::raw_ref(cur_inode_raw);
             if !cur_inode.mode.is_directory() {
                 return Err(errno::Errno::NotADirectory.as_neg_i32());
             }
@@ -12880,19 +12097,19 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // as 87c51458; negstorm 8w+16w rc=0, 568,699 stale hits clean.)
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
-            if (unsafe { &*p }).is_negative() && crate::debug::hotpath::negmemo_on() {
+            if (crate::fs::r#unsafe::raw_ref(p)).is_negative() && crate::debug::hotpath::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
                 let parent_gen = if !cur_inode_raw.is_null() {
                     // SAFETY: carried under the claim (see above).
-                    unsafe { &*cur_inode_raw }.dir_mut_gen_load()
+                    crate::fs::r#unsafe::raw_ref(cur_inode_raw).dir_mut_gen_load()
                 } else {
                     match cur_d.get_inode_fast() {
                         Some(i) => i.dir_mut_gen_load(),
                         None => 0,
                     }
                 };
-                if (unsafe { &*p }).neg_gen_load() != parent_gen {
+                if (crate::fs::r#unsafe::raw_ref(p)).neg_gen_load() != parent_gen {
                     // STALE memo: the parent mutated since the memo was
                     // inserted (through this dentry OR any bind alias).
                     // Detach and re-resolve from the filesystem — the
@@ -12925,7 +12142,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // Non-procfs walks pay exactly one fs_id compare here.
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
-            let child = unsafe { &*p };
+            let child = crate::fs::r#unsafe::raw_ref(p);
             if !child.is_negative() {
                 // SAFETY: raw mirror read under the walk claim (same
                 // contract as inode_ptr_walk's callers below); the claim
@@ -12933,7 +12150,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 let ino_ptr = child.inode_ptr_walk(cl);
                 if !ino_ptr.is_null() {
                     // SAFETY: non-null and claim-protected (see above).
-                    let inode = unsafe { &*ino_ptr };
+                    let inode = crate::fs::r#unsafe::raw_ref(ino_ptr);
                     if inode.fs_id == self::FS_ID_PROCFS
                         && inode.private_data.is_none()
                         && inode.ino < 10000
@@ -12959,7 +12176,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     // SAFETY: current_raw is protected by the claim held
                     // by `claim` (still alive — dropped below, AFTER this
                     // strong-count increment).
-                    None => unsafe { self::dentry_arc_from_raw(current_raw) },
+                    None => crate::fs::r#unsafe::dentry_arc_adopt(current_raw),
                 });
                 drop(claim.take());
                 let pc_m = crate::debug::hotpath::pc_now();
@@ -13117,7 +12334,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_B_NS, pc_b);
         // SAFETY: child_raw came from lookup_child_walk under the claim
         // (memo slot or the child map — the claim pins its lifetime).
-        let c: &Dentry = unsafe { &*child_raw };
+        let c: &Dentry = crate::fs::r#unsafe::raw_ref(child_raw);
         // Negative dentry — file known not to exist
         if c.is_negative() {
             crate::debug::hotpath::note_neghit();
@@ -13178,7 +12395,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         if c.get_inode_gen() != gen_now {
             if !inode_raw.is_null() {
                 // SAFETY: read under the claim.
-                let cached = unsafe { &*inode_raw };
+                let cached = crate::fs::r#unsafe::raw_ref(inode_raw);
                 if let Some(fresh) = self::icache_lookup(cached.ino, cached.fs_id) {
                     if Arc::as_ptr(&fresh) as *const super::types::Inode != inode_raw {
                         c.set_inode(alloc::sync::Arc::clone(&fresh));
@@ -13207,7 +12424,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
         if hopped {
             // SAFETY: child_raw protected by the claim (see above).
-            let child_arc = unsafe { self::dentry_arc_from_raw(child_raw) };
+            let child_arc = crate::fs::r#unsafe::dentry_arc_adopt(child_raw);
             let landed = follow_mount(child_arc);
             current_raw = Arc::as_ptr(&landed);
             current = Some(landed);
@@ -13224,7 +12441,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 "{}{}={} ",
                 component,
                 if hopped { "*" } else { "" },
-                unsafe { &*current_raw }.get_name()
+                crate::fs::r#unsafe::raw_ref(current_raw).get_name()
             ));
         }
         // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
@@ -13234,18 +12451,18 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         let is_last = ci == components.len() - 1;
         let is_symlink = !hopped
             && !inode_raw.is_null()
-            && (unsafe { &*inode_raw }).mode.is_symlink();
+            && (crate::fs::r#unsafe::raw_ref(inode_raw)).mode.is_symlink();
         if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
             // Don't follow symlink on the final component
         } else if is_symlink {
             // SAFETY: inode_raw protected by the claim.
             let inode_arc =
-                unsafe { self::inode_arc_from_raw(inode_raw) };
+                crate::fs::r#unsafe::inode_arc_adopt(inode_raw);
             let d_arc = match current.take() {
                 Some(a) if Arc::as_ptr(&a) == current_raw => a,
                 // SAFETY: current_raw protected by the claim (still held —
                 // dropped below, after this increment).
-                _ => unsafe { self::dentry_arc_from_raw(current_raw) },
+                _ => crate::fs::r#unsafe::dentry_arc_adopt(current_raw),
             };
             cur_inode_raw = core::ptr::null();
             drop(claim.take());
@@ -13274,7 +12491,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     }
     let cl = claim.as_ref().unwrap();
     // SAFETY: protected by the claim (see the protocol).
-    let dentry_d: &Dentry = unsafe { &*current_raw };
+    let dentry_d: &Dentry = crate::fs::r#unsafe::raw_ref(current_raw);
 
     // Build VfsPath from final dentry — materialize BOTH owned Arcs
     // while the claim is held (the strong-count increments must not
@@ -13298,12 +12515,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
         // SAFETY: protected by the claim.
-        unsafe { self::inode_arc_from_raw(p) }
+        crate::fs::r#unsafe::inode_arc_adopt(p)
     };
     let dentry: Arc<Dentry> = match current.take() {
         Some(a) if Arc::as_ptr(&a) == current_raw => a,
         // SAFETY: protected by the claim.
-        _ => unsafe { self::dentry_arc_from_raw(current_raw) },
+        _ => crate::fs::r#unsafe::dentry_arc_adopt(current_raw),
     };
     drop(claim.take());
 
@@ -15322,9 +14539,7 @@ pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, 
     // close the descriptor and surface the error instead.
     if let Err(e) = vfs_unlink(&full) {
         // SAFETY: fd was just installed in the current task's table.
-        unsafe {
-            let _ = self::close_file_fd(fd);
-        }
+        let _ = self::close_file_fd(fd);
         return Err(e);
     }
     Ok(fd)
@@ -17002,31 +16217,8 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 // Memory File (for procfs shortcut)
 // ============================================================================
 
-/// INV-MEMFILE-1 (unsafe-slim r3): open_mem_file stores an OWNED
-/// Box<MemFileContent> in File::private_data (raw via Box::into_raw);
-/// these three accessors are the only code that touches it. Identity is
-/// guarded by ops == &MEM_FILE_OPS at every call site (the mem_file
-/// ops table is only installed by open_mem_file).
-fn mem_file_content(file: &File) -> Option<&MemFileContent> {
-    // SAFETY: INV-MEMFILE-1 — the pointer, when present, is a live
-    // Box<MemFileContent> owned by this File; shared read here.
-    let ptr = unsafe { *file.private_data.get() }?;
-    Some(unsafe { &*(ptr as *const MemFileContent) })
-}
 
-fn mem_file_content_mut(file: &File) -> Option<&mut MemFileContent> {
-    // SAFETY: INV-MEMFILE-1 — sole mutable reach; mem-file ops are the
-    // only private_data users for this File.
-    let ptr = unsafe { *file.private_data.get() }?;
-    Some(unsafe { &mut *(ptr as *mut MemFileContent) })
-}
 
-/// Take the owned Box back (close path — frees the content).
-fn mem_file_take_owned(file: &File) -> Option<alloc::boxed::Box<MemFileContent>> {
-    // SAFETY: INV-MEMFILE-1 — take() hands the unique ownership to us.
-    let ptr = unsafe { &mut *file.private_data.get() }.take()?;
-    Some(unsafe { alloc::boxed::Box::from_raw(ptr as *mut MemFileContent) })
-}
 
 /// Read operation for memory files
 fn mem_file_read(file: &File, buf: &mut [u8]) -> isize {
@@ -17685,7 +16877,7 @@ pub fn inode_permission(inode: &super::types::Inode, mask: u32) -> bool {
         Some(task) => {
             // SAFETY: `task` is the current task pointer from sched::hotpath::current();
             // its cred is immutable for the duration of this check.
-            let cred = unsafe { (*task).cred() };
+            let cred = crate::fs::r#unsafe::raw_ref(task).cred();
             generic_permission(
                 inode.mode.bits() as u16,
                 inode.uid.load(core::sync::atomic::Ordering::Relaxed),
@@ -17750,8 +16942,6 @@ impl SuperBlockFlags {
     }
 }
 
-unsafe impl Send for SuperBlock {}
-unsafe impl Sync for SuperBlock {}
 
 impl SuperBlock {
     /// Create new superblock
@@ -17852,8 +17042,6 @@ impl FileSystemType {
     }
 }
 
-unsafe impl Send for FsRegistry {}
-unsafe impl Sync for FsRegistry {}
 
 impl FsRegistry {
     pub const fn new() -> Self {
@@ -18090,8 +17278,6 @@ impl MntFlags {
     }
 }
 
-unsafe impl Send for VfsMount {}
-unsafe impl Sync for VfsMount {}
 
 impl VfsMount {
     pub fn new(mountpoint: Vec<u8>, root: Vec<u8>, flags: MntFlags, sb: Option<*mut u8>) -> Self {
@@ -19478,23 +18664,11 @@ pub fn copy_stat_to_user(buf: *mut u8, stat: &Stat) -> usize {
         let x = X86Stat::from(stat);
         // SAFETY: caller validated buf with access_ok over
         // user_stat_size() bytes; exception-table copy faults safely.
-        unsafe {
-            crate::arch::uaccess::copy_to_user(
-                buf,
-                &x as *const X86Stat as *const u8,
-                core::mem::size_of::<X86Stat>(),
-            )
-        }
+        crate::fs::r#unsafe::fs_copy_to_user(buf, &x as *const X86Stat as *const u8, size_of::<X86Stat>())
     }
     #[cfg(not(feature = "x86_64"))]
     // SAFETY: see above.
-    unsafe {
-        crate::arch::uaccess::copy_to_user(
-            buf,
-            stat as *const Stat as *const u8,
-            core::mem::size_of::<Stat>(),
-        )
-    }
+    crate::fs::r#unsafe::fs_copy_to_user(buf, stat as *const Stat as *const u8, size_of::<Stat>())
 }
 
 impl Statx {
@@ -19870,8 +19044,6 @@ impl Default for FsStruct {
     }
 }
 
-unsafe impl Send for FsStruct {}
-unsafe impl Sync for FsStruct {}
 
 
 // ════════════════ page_cache ══════════════════════════
@@ -20148,7 +19320,7 @@ pub fn pcache_dirty_histogram() -> alloc::string::String {
             continue;
         }
         // SAFETY: wlock excludes removal; entry alive.
-        let entry = unsafe { &*p };
+        let entry = crate::fs::r#unsafe::raw_ref(p);
         let g = entry.lock.lock();
         let mut dirty_n = 0usize;
         let mut total_n = 0usize;
@@ -20264,10 +19436,7 @@ impl InodePageCache {
 fn claim_entry_arc(p: *mut InodePageCache) -> Arc<InodePageCache> {
     // SAFETY: INV-PC-CLAIM — p was published by a writer from an owned
     // Arc and the caller's claim keeps it alive across the increment.
-    unsafe {
-        Arc::increment_strong_count(p);
-        Arc::from_raw(p)
-    }
+    crate::fs::r#unsafe::arc_clone_claimed(p)
 }
 
 /// Combine (fs_id, ino) into the single u64 map key. Distinct inputs map to
@@ -20281,7 +19450,7 @@ fn cache_key(fs_id: u64, ino: u64) -> u64 {
 
 /// Convert a physical address to a kernel-virtual pointer via the linear mapping.
 #[inline]
-fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
+pub(crate) fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
     phys_to_virt(PhysAddr::new(phys as u64)).0 as *mut u8
 }
 
@@ -20299,12 +19468,7 @@ impl FrameWindow {
     fn fill_from(&mut self, src: &[u8]) {
         let copy_len = core::cmp::min(src.len(), crate::mm::types::PAGE_SIZE);
         // SAFETY: INV-PC-WIN — owned frame, PAGE_SIZE window, bounded copy.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, copy_len);
-            if copy_len < crate::mm::types::PAGE_SIZE {
-                core::ptr::write_bytes(self.ptr.add(copy_len), 0, crate::mm::types::PAGE_SIZE - copy_len);
-            }
-        }
+        crate::fs::r#unsafe::frame_fill_from(self.ptr, src, copy_len);
     }
 
     /// Copy `copy_len` bytes from another frame, zero the tail
@@ -20313,15 +19477,7 @@ impl FrameWindow {
     fn copy_frame_from(&mut self, src_phys: usize, copy_len: usize) {
         // SAFETY: INV-PC-WIN — both frames live and owned/locked by the
         /// caller's call (the old INV-PC-PAGECOPY argument).
-        unsafe {
-            let src = phys_to_virt_ptr(src_phys) as *const u8;
-            if copy_len > 0 {
-                core::ptr::copy_nonoverlapping(src, self.ptr, copy_len);
-            }
-            if copy_len < crate::mm::types::PAGE_SIZE {
-                core::ptr::write_bytes(self.ptr.add(copy_len), 0, crate::mm::types::PAGE_SIZE - copy_len);
-            }
-        }
+        crate::fs::r#unsafe::frame_copy_from(self.ptr, src_phys, copy_len);
     }
 }
 
@@ -20346,33 +19502,7 @@ fn copy_page_page(dst_phys: usize, src_phys: usize, copy_len: usize) {
     FrameWindow::from_phys(dst_phys).copy_frame_from(src_phys, copy_len);
 }
 
-/// Copy `n` bytes at kernel `src` into the frame at `pfn`, offset `off`
-/// (the partial-span writeback shape). INV-PC-PAGECOPY: off+n <= PAGE_SIZE.
-#[inline]
-fn copy_into_page(pfn: u64, off: usize, src: *const u8, n: usize) {
-    // SAFETY: INV-PC-PAGECOPY — the span is inside one frame by
-    // construction at every caller (the cursor arithmetic asserts it).
-    unsafe {
-        let dst = phys_to_virt_ptr(pfn_to_phys(pfn as usize));
-        core::ptr::copy_nonoverlapping(src, dst.add(off), n);
-    }
-}
 
-/// Exception-table user->frame copy (the DIO insert path). Returns the
-/// uncopied tail on fault. INV-PC-PAGECOPY + the uaccess extable
-/// primitive's own contract (any user address is sound to pass).
-#[inline]
-fn copy_user_into_page(pfn: u64, off: usize, user_addr: usize, n: usize) -> usize {
-    // SAFETY: INV-PC-PAGECOPY — the frame is this call's private
-    // destination; the user source rides the exception-table primitive.
-    unsafe {
-        crate::arch::uaccess::copy_from_user(
-            phys_to_virt_ptr(pfn_to_phys(pfn as usize)).add(off),
-            user_addr as *const u8,
-            n,
-        )
-    }
-}
 
 impl PageCache {
     /// Create a new empty page cache.
@@ -20475,7 +19605,7 @@ impl PageCache {
             }
             // SAFETY: p is a published-or-parked live entry (see the
             // liveness contract of the callers); `key` is write-once.
-            if unsafe { (*p).key } == key {
+            if crate::fs::r#unsafe::raw_ref(p).key == key {
                 return p;
             }
         }
@@ -20499,7 +19629,7 @@ impl PageCache {
             }
             // SAFETY: wlock excludes removal, so the slot's reference is
             // stable and the entry is alive; `key` is write-once.
-            if unsafe { (*p).key } == key {
+            if crate::fs::r#unsafe::raw_ref(p).key == key {
                 return Some(i);
             }
         }
@@ -20557,9 +19687,9 @@ impl PageCache {
                 // SAFETY: ptr's reference count is transferred to the
                 // slot; we re-constitute a second owning Arc for the
                 // caller via an increment + from_raw pair.
-                unsafe { Arc::increment_strong_count(ptr) };
+                let cloned = crate::fs::r#unsafe::arc_clone_claimed(ptr);
                 self.slots[slot].0.store(ptr, Ordering::Release);
-                return Some(unsafe { Arc::from_raw(ptr) });
+                return Some(cloned);
             }
             if p as usize == PC_TOMBSTONE_BITS {
                 if first_tomb.is_none() {
@@ -20568,11 +19698,10 @@ impl PageCache {
                 continue;
             }
             // SAFETY: wlock excludes removal (stable slot reference).
-            if unsafe { (*p).key } == key {
+            if crate::fs::r#unsafe::raw_ref(p).key == key {
                 // SAFETY: the slot keeps its reference; ours is a new
                 // owning claim established while wlock blocks removal.
-                unsafe { Arc::increment_strong_count(p) };
-                return Some(unsafe { Arc::from_raw(p) });
+                return Some(crate::fs::r#unsafe::arc_clone_claimed(p));
             }
         }
         PC_TABLE_FULL.fetch_add(1, Ordering::Relaxed);
@@ -20601,7 +19730,7 @@ impl PageCache {
             // SAFETY: the slot's reference is handed over here (the slot
             // no longer owns it); the parking Vec keeps it until the
             // reader-quiescent drain.
-            unsafe { Arc::from_raw(Arc::as_ptr(claimed)) }
+            crate::fs::r#unsafe::arc_reclaim_owned(Arc::as_ptr(claimed))
         };
         drop(w);
         self.park_and_drain(parked);
@@ -21762,7 +20891,7 @@ impl PageCache {
                     if p.is_null() || p as usize == PC_TOMBSTONE_BITS {
                         continue;
                     }
-                    let entry = unsafe { &*p };
+                    let entry = crate::fs::r#unsafe::raw_ref(p);
                     let has_dirty = {
                         let g = entry.lock.lock();
                         g.iter()
@@ -23000,7 +22129,7 @@ impl PageCache {
             }
             // SAFETY: wlock excludes removal, so the slot's reference is
             // stable and the entry is alive.
-            let entry = unsafe { &*p };
+            let entry = crate::fs::r#unsafe::raw_ref(p);
             let g = entry.lock.lock();
             let mut first: Option<u64> = None;
             let mut last: u64 = 0;
@@ -23403,7 +22532,7 @@ impl PageCache {
                             // SAFETY: wlock excludes removal; the entry is
                             // alive and keyed (write-once `key` checked by
                             // table_find).
-                            let entry = unsafe { &*ptr };
+                            let entry = crate::fs::r#unsafe::raw_ref(ptr);
                             let mut g = entry.lock.lock();
                             let verdict = match g.get(&page_index) {
                                 Some(cached) => {
@@ -23458,7 +22587,7 @@ impl PageCache {
                                                     // SAFETY: the slot's
                                                     // reference is handed over
                                                     // here (see remove_entry).
-                                                    *slot = Some(unsafe { Arc::from_raw(ptr) });
+                                                    *slot = Some(crate::fs::r#unsafe::arc_reclaim_owned(ptr));
                                                 }
                                             }
                                             Victim::Evict
@@ -23533,7 +22662,7 @@ impl PageCache {
                 continue;
             }
             // SAFETY: wlock excludes removal; the entry is alive.
-            let entry = unsafe { &*ptr };
+            let entry = crate::fs::r#unsafe::raw_ref(ptr);
             let mut g = entry.lock.lock();
             // Same candidate rule as the LRU walk: skip pinned and dirty,
             // give Referenced pages their second chance (activated, scan
@@ -23566,7 +22695,7 @@ impl PageCache {
                         .store(PC_TOMBSTONE_BITS as *mut InodePageCache, Ordering::Release);
                     if let Some(slot) = parked.iter_mut().find(|p| p.is_none()) {
                         // SAFETY: the slot's reference is handed over here.
-                        *slot = Some(unsafe { Arc::from_raw(ptr) });
+                        *slot = Some(crate::fs::r#unsafe::arc_reclaim_owned(ptr));
                     }
                 }
                 drop(g);
@@ -23709,7 +22838,7 @@ pub fn page_cache_cap_pages() -> usize {
 /// itself, which stays coherent.
 pub fn shared_file_fault_page(file: &super::types::File, file_offset: u64) -> Option<u64> {
     // SAFETY: inode is written once at open time and read-only afterwards.
-    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    let inode = crate::fs::r#unsafe::file_inode(file)?;
     let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
     let cache = get_page_cache();
     let page_index = file_offset / crate::mm::types::PAGE_SIZE as u64;
@@ -23729,31 +22858,22 @@ pub fn shared_file_fault_page(file: &super::types::File, file_offset: u64) -> Op
         return None;
     }
     // SAFETY: bounce_phys is a freshly allocated page frame owned here.
-    let bounce = unsafe {
-        core::ptr::write_bytes(
-            phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8,
-            0,
-            crate::mm::types::PAGE_SIZE,
-        );
-        phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8
-    };
+    let bounce = crate::fs::r#unsafe::bounce_zero_frame(bounce_phys);
     // SAFETY: read_at validates its own file references; bounce is a full
     // page of writable kernel memory.
-    let got = unsafe { file.read_at(file_offset, bounce, crate::mm::types::PAGE_SIZE) };
+    let got = crate::fs::r#unsafe::file_read_at_raw(file, file_offset, bounce, crate::mm::types::PAGE_SIZE);
     if got < 0 {
         free_page(bounce_phys);
         return None;
     }
     // SAFETY: bounce holds PAGE_SIZE readable bytes (zero-filled tail).
-    unsafe {
-        cache.insert(
-            fs_id,
-            ino,
-            page_index,
-            0,
-            core::slice::from_raw_parts(bounce, crate::mm::types::PAGE_SIZE),
-        );
-    }
+    cache.insert(
+        fs_id,
+        ino,
+        page_index,
+        0,
+        crate::fs::r#unsafe::kernel_slice(bounce, crate::mm::types::PAGE_SIZE),
+    );
     free_page(bounce_phys);
     cache.get_phys(fs_id, ino, page_index)
 }
@@ -24733,13 +23853,13 @@ fn vtdev_poll(file: &super::types::File, events: u16) -> u16 {
 // SAFETY: private_data holds a leaked Box<DevNo> installed by devfs_open.
 fn vtdev_close(file: &super::types::File) -> i32 {
     // SAFETY: the Box was leaked for this File; close runs once.
-    let ptr = match unsafe { *file.private_data.get() } {
+    let ptr = match crate::fs::r#unsafe::file_privdata_ptr_raw(file) {
         Some(p) => p,
         None => return 0,
     };
-    let devno = unsafe { alloc::boxed::Box::from_raw(ptr as *mut super::types::DevNo) };
+    let devno = crate::fs::r#unsafe::box_take(ptr as *mut super::types::DevNo);
     vt_closed(&devno);
-    unsafe { *file.private_data.get() = None };
+    crate::fs::r#unsafe::file_privdata_clear_raw(file);
     0
 }
 
@@ -24768,12 +23888,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
     // The VT number this fd was opened against (devfs_open stashed the
     // DevNo; minor 0 = the tty0 master view, which addresses the ACTIVE
     // VT — exactly Linux's semantics for /dev/tty0).
-    let vt = unsafe {
-        match *(file.private_data.get()) {
-            Some(p) => (*(p as *const super::types::DevNo)).minor,
-            None => 1,
-        }
-    };
+    let vt = crate::fs::r#unsafe::vt_priv_minor(file);
     let _ = vt;
 
     use crate::errno::constants;
@@ -24801,7 +23916,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(4) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, found) } {
+            if !crate::fs::r#unsafe::fs_put_user_u32(arg as *mut i32, found) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -24820,7 +23935,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
                 buf[6..8].copy_from_slice(&m.frsig.to_le_bytes());
             }
             // SAFETY: arg validated with access_ok(8) above.
-            if unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), 8) } > 0 {
+            if crate::fs::r#unsafe::fs_copy_to_user(arg as *mut u8, buf.as_ptr(), 8) > 0 {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -24831,7 +23946,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
             }
             let mut buf = [0u8; 8];
             // SAFETY: arg validated with access_ok(8) above.
-            if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), arg as *const u8, 8) }
+            if crate::fs::r#unsafe::fs_copy_from_user(buf.as_mut_ptr(), arg as *const u8, 8)
                 > 0
             {
                 return Some(-(constants::EFAULT as i64));
@@ -24867,7 +23982,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
             buf[2..4].copy_from_slice(&0u16.to_le_bytes()); // v_signal
             buf[4..6].copy_from_slice(&mask.to_le_bytes());
             // SAFETY: arg validated with access_ok(6) above.
-            if unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), 6) } > 0 {
+            if crate::fs::r#unsafe::fs_copy_to_user(arg as *mut u8, buf.as_ptr(), 6) > 0 {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -24924,7 +24039,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(1) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u8, 0u8) } {
+            if !crate::fs::r#unsafe::fs_put_user_u8(arg as *mut u8, 0u8) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -24935,7 +24050,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(1) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u8, KB_101) } {
+            if !crate::fs::r#unsafe::fs_put_user_u8(arg as *mut u8, KB_101) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -24952,7 +24067,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(4) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, KD_MODE.load(Ordering::Acquire) as i32) } {
+            if !crate::fs::r#unsafe::fs_put_user_u32(arg as *mut i32, KD_MODE.load(Ordering::Acquire) as i32) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -24962,7 +24077,7 @@ pub fn vt_file_ioctl(file: &super::types::File, request: u32, arg: usize) -> Opt
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(4) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, KB_MODE.load(Ordering::Acquire) as i32) } {
+            if !crate::fs::r#unsafe::fs_put_user_u32(arg as *mut i32, KB_MODE.load(Ordering::Acquire) as i32) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -25038,22 +24153,17 @@ pub fn exit_notify_all_waiters() {
 /// when the pid is absent.
 fn pin_leader(pid: u32) -> Option<*mut Task> {
     // SAFETY: pid_hash_lookup_pinned returns a pinned, valid Task.
-    let t = unsafe { crate::process::hotpath::pid_hash_lookup_pinned(pid) };
+    let t = crate::fs::r#unsafe::pidfd_lookup_pinned(pid);
     if t.is_null() {
         return None;
     }
     // SAFETY: t is pinned for the duration of this function.
-    let leader = unsafe { (*t).group_leader_ptr() };
+    let leader = crate::fs::r#unsafe::raw_ref(t).group_leader_ptr();
     if (leader as *const Task) != (t as *const Task) && !leader.is_null() {
         // Pin the leader too; drop the intermediate pin.
         // SAFETY: group_leader_ptr() of a pinned task is in the same
         // thread ring (kept alive by the ring linkage discipline).
-        unsafe {
-            (*leader)
-                .task_refcnt
-                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-            Task::task_put(t);
-        }
+        crate::fs::r#unsafe::pidfd_leader_pin_swap(leader, t);
     }
     Some(leader)
 }
@@ -25072,7 +24182,7 @@ pub fn free_pidfd_data(data: *mut PidFdData) {
     }
     // SAFETY: the box was created by make_pidfd_data and is owned by the
     // caller (the file's private_data slot, single-owner).
-    let boxed = unsafe { alloc::boxed::Box::from_raw(data) };
+    let boxed = crate::fs::r#unsafe::box_take(data);
     Task::task_put(boxed.task);
 }
 
@@ -25090,12 +24200,12 @@ pub fn attach(file: &super::types::File, data: alloc::boxed::Box<PidFdData>) {
 pub fn data_of(file: &super::types::File) -> Option<&'static PidFdData> {
     // SAFETY: INV-FS-FILEPRIV-1 (write-once cell, install at attach);
     // the 'static lifetime claim per the Box::into_raw ownership above.
-    let p = unsafe { *file.private_data.get() }?;
+    let p = crate::fs::r#unsafe::file_privdata_ptr_raw(file)?;
     if p.is_null() {
         return None;
     }
     // SAFETY: same INV + ownership claim.
-    Some(unsafe { &*(p as *const PidFdData) })
+    Some(crate::fs::r#unsafe::raw_ref(p as *const PidFdData))
 }
 
 /// fdinfo helper (procfs): the pid a PIDFD_OPS file names, if `file`
@@ -25114,7 +24224,7 @@ pub fn fdinfo_pid_of(file: &super::types::File) -> Option<u32> {
     }
     // SAFETY: PIDFD_OPS files carry a PidFdData from attach(); the ops
     // check above proves the private_data slot is that box.
-    Some(unsafe { data_of(file)?.pid })
+    Some(data_of(file)?.pid)
 }
 
 /// Resolve a pidfd's process with pid-reuse protection.
@@ -25124,25 +24234,25 @@ pub fn fdinfo_pid_of(file: &super::types::File) -> Option<u32> {
 pub fn resolve_alive(data: &PidFdData) -> Option<&'static Task> {
     // SAFETY: lookup runs under RCU; equality with the pinned pointer
     // proves identity without dereferencing the result.
-    let now = unsafe { crate::process::hotpath::pid_hash_lookup(data.pid) };
+    let now = crate::fs::r#unsafe::pidfd_hash_lookup(data.pid);
     if now.is_null() || (now as *const Task) != (data.task as *const Task) {
         return None;
     }
     // SAFETY: equal to the pinned leader pointer, which stays valid
     // until the pidfd's close drops the pin.
-    Some(unsafe { &*(data.task as *const Task) })
+    Some(crate::fs::r#unsafe::raw_ref(data.task as *const Task))
 }
 
 /// Has the pidfd's thread group exited? (ZOMBIE/DEAD leader, or the
 /// leader left the pid hash — reaped.)
 pub fn target_exited(data: &PidFdData) -> bool {
     // SAFETY: the pinned leader's Task page is valid; state() is atomic.
-    let st = unsafe { (*data.task).state() };
+    let st = crate::fs::r#unsafe::raw_ref(data.task).state();
     if st.is_dead() || st.contains(crate::process::types::TaskState::ZOMBIE) {
         return true;
     }
     // Reaped and hash-removed: exited by definition.
-    unsafe { crate::process::hotpath::pid_hash_lookup(data.pid).is_null() }
+    crate::fs::r#unsafe::pidfd_hash_lookup(data.pid).is_null()
 }
 
 // ---------------------------------------------------------------------------
@@ -25152,7 +24262,7 @@ pub fn target_exited(data: &PidFdData) -> bool {
 fn pidfd_poll(_file: &super::types::File, _events: u16) -> u16 {
     // SAFETY: identity-checked dispatcher contract (poll only installed
     // on PIDFD_OPS files, whose private_data came from attach()).
-    match unsafe { data_of(_file) } {
+    match data_of(_file) {
         Some(d) if target_exited(d) => EPOLLIN_U16,
         _ => 0,
     }
@@ -25160,10 +24270,10 @@ fn pidfd_poll(_file: &super::types::File, _events: u16) -> u16 {
 
 fn pidfd_close(file: &super::types::File) -> i32 {
     // SAFETY: same contract as pidfd_poll.
-    if let Some(p) = unsafe { *file.private_data.get() } {
+    if let Some(p) = crate::fs::r#unsafe::file_privdata_ptr_raw(file) {
         free_pidfd_data(p as *mut PidFdData);
         // Null the slot so a racing second close cannot double-free.
-        unsafe { *file.private_data.get() = None };
+        crate::fs::r#unsafe::file_privdata_clear_raw(file);
     }
     0
 }
@@ -25535,9 +24645,9 @@ pub fn create_fs_root(
 fn fsctx_close(file: &super::types::File) -> i32 {
     // SAFETY: private_data holds a Box<FsContext> installed by sys_fsopen
     // (single owner, identity-checked via FSCTX_OPS).
-    if let Some(p) = unsafe { *file.private_data.get() } {
-        drop(unsafe { Box::from_raw(p as *mut FsConfigContext) });
-        unsafe { *file.private_data.get() = None };
+    if let Some(p) = crate::fs::r#unsafe::file_privdata_ptr_raw(file) {
+        drop(crate::fs::r#unsafe::box_take(p as *mut FsConfigContext));
+        crate::fs::r#unsafe::file_privdata_clear_raw(file);
     }
     0
 }
@@ -25554,8 +24664,8 @@ pub fn fsctx_of(file: &super::types::File) -> Option<&'static FsConfigContext> {
     }
     // SAFETY: identity-checked above — private_data came from
     // Box::into_raw(FsContext) in sys_fsopen and lives until close.
-    let p = (unsafe { *file.private_data.get() })?;
-    Some(unsafe { &*(p as *const FsConfigContext) })
+    let p = (crate::fs::r#unsafe::file_privdata_ptr_raw(file))?;
+    Some(crate::fs::r#unsafe::raw_ref(p as *const FsConfigContext))
 }
 
 /// Resolve a file's fs_context mutably (fsconfig/fsmount).
@@ -25567,8 +24677,8 @@ pub fn fsctx_of_mut(file: &super::types::File) -> Option<&'static mut FsConfigCo
     // SAFETY: same identity check; &mut is sound because syscall context
     // serializes per-fd operations (no concurrent fsconfig on one fd —
     // the reference holds fc->uapi_mutex).
-    let p = (unsafe { *file.private_data.get() })?;
-    Some(unsafe { &mut *(p as *mut FsConfigContext) })
+    let p = (crate::fs::r#unsafe::file_privdata_ptr_raw(file))?;
+    Some(crate::fs::r#unsafe::raw_ref_mut(p as *mut FsConfigContext))
 }
 
 /// mount fd close: free the MountFd bookkeeping. An ATTACHED mount is
@@ -25579,9 +24689,9 @@ pub fn fsctx_of_mut(file: &super::types::File) -> Option<&'static mut FsConfigCo
 fn mountfd_close(file: &super::types::File) -> i32 {
     // SAFETY: private_data holds a Box<MountFd> installed by
     // fsmount/open_tree (single owner, identity-checked via MOUNTFD_OPS).
-    if let Some(p) = unsafe { *file.private_data.get() } {
-        drop(unsafe { Box::from_raw(p as *mut MountFd) });
-        unsafe { *file.private_data.get() = None };
+    if let Some(p) = crate::fs::r#unsafe::file_privdata_ptr_raw(file) {
+        drop(crate::fs::r#unsafe::box_take(p as *mut MountFd));
+        crate::fs::r#unsafe::file_privdata_clear_raw(file);
     }
     0
 }
@@ -25597,8 +24707,8 @@ pub fn mountfd_of(file: &super::types::File) -> Option<&'static mut MountFd> {
         return None;
     }
     // SAFETY: identity-checked above; syscall context per-fd.
-    let p = (unsafe { *file.private_data.get() })?;
-    Some(unsafe { &mut *(p as *mut MountFd) })
+    let p = (crate::fs::r#unsafe::file_privdata_ptr_raw(file))?;
+    Some(crate::fs::r#unsafe::raw_ref_mut(p as *mut MountFd))
 }
 
 /// File operations for open_tree() WITHOUT OPEN_TREE_CLONE: an O_PATH
@@ -25614,7 +24724,7 @@ pub fn treepath_dentry(file: &super::types::File) -> Option<Arc<Dentry>> {
         return None;
     }
     // SAFETY: dentry written once at open_tree; read-only access.
-    unsafe { &*file.dentry.get() }.clone()
+    crate::fs::r#unsafe::file_dentry_arc(file).clone()
 }
 
 /// Build a fresh detached mount whose root shares `root_inode`
@@ -25645,9 +24755,7 @@ pub fn make_detached_mount(
         submount_src_base,
     });
     // SAFETY: single-owner handoff into the fd's private_data slot.
-    unsafe {
-        *file.private_data.get() = Some(Box::into_raw(boxed) as *mut u8);
-    }
+    crate::fs::r#unsafe::file_privdata_install_raw(&file, alloc::boxed::Box::into_raw(boxed) as *mut u8);
     file
 }
 
@@ -25898,12 +25006,6 @@ pub fn current_handle_raw() -> *mut () {
     }
 }
 
-// SAFETY: INV-JSEAM-4 above — the assertion is the JOURNAL use's to
-// make (the only user is Ext4FileSystem::journal; the type stays
-// narrow-purposed and documented).
-unsafe impl<T> Send for AssertingSyncArc<T> {}
-// SAFETY: INV-JSEAM-4 above.
-unsafe impl<T> Sync for AssertingSyncArc<T> {}
 
 impl<T> AssertingSyncArc<T> {
     pub const fn empty() -> Self {

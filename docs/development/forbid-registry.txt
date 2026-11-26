@@ -133,3 +133,4 @@ kernel/sched/src/stats.rs
 kernel/sched/src/stop_task.rs
 kernel/sched/src/wakewatch.rs
 kernel/sync/src/condvar.rs
+kernel/core/src/fs/hotpath.rs

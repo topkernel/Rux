@@ -1394,7 +1394,33 @@ def cmd_pair(args):
     if hard:
         print("unrecorded unpaired symbols: %d (add a reviewed row to "
               "docs/development/pass3-pair-exceptions.txt or fix the move)" % len(hard))
-    return 1 if hard or size_diff else 0
+    # same-name size drift: pass 3 is a REWRITE, not a move — a kept fn
+    # whose inline block became an edge call recompiles with a slightly
+    # different body (debug builds), same symbol name. Those have the
+    # same reviewed-recording channel as the renamed ones: a drifted
+    # symbol whose demangled name matches a recorded pattern is a
+    # RECORDED-SIZE-DRIFT; anything unrecorded fails.
+    drifted = [k for k in b if k in c and c[k][1] != b[k][1]]
+    drift_hard = []
+    if drifted:
+        dm = dict(zip(drifted, demangle(drifted, b, args.base)))
+        rec_drift, drift_hard = [], []
+        for k in drifted:
+            # same currency as the renamed-pairing keys: strip the crate
+            # disambiguator so recorded patterns read `rux::fs::...`
+            n = re.sub(r"rux\[[0-9a-f]+\]::", "rux::", dm.get(k) or k)
+            (rec_drift if any(p.search(n) for p in pats) else drift_hard).append(
+                (n, b[k][1], c[k][1]))
+        print("same-name size drifts: %d recorded, %d unrecorded"
+              % (len(rec_drift), len(drift_hard)))
+        for n, x, y in rec_drift[:args.show]:
+            print("RECORDED-SIZE-DRIFT %s\n     base %d -> current %d" % (n[:160], x, y))
+        for n, x, y in drift_hard[:args.show]:
+            print("SIZE-DRIFT %s\n     base %d -> current %d" % (n[:160], x, y))
+        if drift_hard:
+            print("unrecorded size-drift symbols: %d (add a reviewed row to "
+                  "docs/development/pass3-pair-exceptions.txt or fix the move)" % len(drift_hard))
+    return 1 if hard or drift_hard else 0
 
 
 def lines_of(text):

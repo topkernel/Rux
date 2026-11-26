@@ -1,0 +1,337 @@
+{
+ "sub": "net",
+ "target": "kernel/core/src/net",
+ "imports_rs": [],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/net/hotpath.rs",
+   "find": "use super::types::{EthProtocol, IpProtocol, PacketType, SkBuff};",
+   "replace": "use super::types::{EthProtocol, IpProtocol, SkBuff};",
+   "why": "PacketType left hotpath.rs with the moved SkBuff::alloc body"
+  },
+  {
+   "file": "kernel/core/src/net/hotpath.rs",
+   "find": "use crate::fs::types::File;\n",
+   "replace": "",
+   "why": "File left hotpath.rs with the moved file-to-Arc edge signatures"
+  },
+  {
+   "file": "kernel/core/src/net/hotpath.rs",
+   "find": "use core::sync::atomic::AtomicU64;",
+   "replace": "use core::sync::atomic::AtomicU64;\n\n// pass 3 (seed-core §2c.5): the audited unsafe operations moved to\n// net::r#unsafe; the historical net::hotpath:: paths of the pub ones\n// stay valid — the net service crate (its lib.rs root re-exports) and\n// the ext4 crate resolve file_arc / take_file_arc / hdr_view /\n// hdr_view_mut through here.\npub use super::r#unsafe::{file_arc, hdr_view, hdr_view_mut, take_file_arc};",
+   "why": "path stability for the moved pub fns' external callers (net crate lib.rs re-exports, net service files, ext4)"
+  },
+  {
+   "file": "kernel/core/src/net/unsafe.rs",
+   "find": "// pass 3 (seed-core §2c.5): net's collected unsafe — the inline",
+   "replace": "use super::types::{PacketType, SkBuff};\nuse crate::fs::types::File;\n// pass 3 (seed-core §2c.5): net's collected unsafe — the inline",
+   "why": "late edit (after the section insert): unsafe.rs had no use block, so the moved bodies' SkBuff/PacketType/File references import beside the collected sections"
+  }
+ ],
+ "moves": [
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "mod_file_arc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a6853241bd52",
+   "inv": "INV-NETARC-1",
+   "section": "socket-file Arc edges (INV-NETARC-1)",
+   "inv_note": "INV-NETARC-1: the caller's ops-identity check proves the Arc type; the increment balances the from_raw below, the File's close() is the only drop path."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "reclaim_file_arc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d76eb278ec4c",
+   "inv": "INV-NETARC-1",
+   "section": "socket-file Arc edges (INV-NETARC-1)",
+   "inv_note": "INV-NETARC-1: reconstructing consumes the slot's single reference; the emptied cell (clear_private_data before the from_raw) makes this exactly-once."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "mod_take_file_arc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "bc4ff69848d0",
+   "inv": "INV-NETARC-1",
+   "section": "socket-file Arc edges (INV-NETARC-1)",
+   "inv_note": "INV-NETARC-1: reconstructing the stored Arc consumes the slot's single reference; close is the last user of the file."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "file_arc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "6ff3c31a8ea6",
+   "inv": "INV-NETARC-1",
+   "section": "socket-file Arc edges (INV-NETARC-1)",
+   "inv_note": "INV-NETARC-1: the caller's ops-identity check proves the type; the clone-then-forget keeps the File's own reference alive (INV-FS-FILEPRIV pattern)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "take_file_arc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "703a0a4aff7d",
+   "inv": "INV-NETARC-1",
+   "section": "socket-file Arc edges (INV-NETARC-1)",
+   "inv_note": "INV-NETARC-1: same identity contract as file_arc; the take empties the cell (the close-path's exactly-once reclaim)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "unsafe impl Send for SkBuff",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "477dadbb8e7f",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff Send/Sync proofs (INV-SKB-1)",
+   "inv_note": "INV-SKB-1 Send: the head block is allocator-owned and single-owner by construction (alloc_skb hands out exclusive buffers); Send is the single-owner proof."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "unsafe impl Sync for SkBuff",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "8ac72914d975",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff Send/Sync proofs (INV-SKB-1)",
+   "inv_note": "INV-SKB-1 Sync: the same single-owner discipline — a live packet buffer is never shared between contexts; Sync is that proof."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "alloc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c51aa4e6d6d2",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: the head block is allocator-owned at alignment 16; the headroom/end offsets stay inside the allocation by construction (headroom + data + tailroom = alloc_size). Carries the ord-1/ord-2 offset adds of the same body."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "release",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2c7ba241e553",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "vis": "pub(crate)",
+   "inv_note": "INV-SKB-1: dealloc of the still-held head with the size recomputed from end - head; the corrupted-size guard routes to the error path instead of the allocator. Widened pub(crate): the Drop impl and free() in hotpath.rs call it across the module line."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "skb_put",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "efdd253da5fb",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: the tail advance is bounds-checked against end (checked_add + compare) before the add commits."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "skb_push",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ca1ff39daebe",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: the data retreat is bounds-checked against head (checked_sub + compare) before the sub commits."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "skb_pull",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "81c050f4e3dd",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: the data advance is len-checked, then tail-checked, before the add commits (head <= data <= tail <= end kept)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "skb_reserve",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "38cecb2ff28a",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: the tail advance is bounds-checked against end before the add commits."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "skb_put_data",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "177faefdaa25",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: skb_put reserved exactly len bytes at ptr; the copy writes only that span."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "data_slice",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1a6ffa529800",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: the slice is clamped to len, inside the exclusively-owned allocation."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "data_slice_at",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0c4cc659addc",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: off/n clamped to the buffer end; the offset add and the slice construction stay inside the exclusively-owned allocation. Carries the nested ord-1 offset add of the same block."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "hdr",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "30792356601a",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: T fits within len (checked, None otherwise); the view covers the start of the exclusively-owned data area."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "hdr_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8a1ad6f54dbc",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: T fits within len (checked); exclusive ownership, the caller serializes against readers (packet build paths are single-threaded per buffer)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "hdr_and_tail",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1633269a707b",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: T fits within len (checked); the header reference covers [0, hlen) and the tail slice [hlen, len) — disjoint ranges of the exclusively-owned buffer."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "push_hdr",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "55696175ce13",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INH-BUF-4: skb_push returned headroom of at least size_of::<T>() bytes inside this exclusively-owned buffer; the view covers exactly the pushed bytes."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "put_hdr",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2348574df33f",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INH-BUF-4: skb_put returned tail space of at least size_of::<T>() bytes inside this exclusively-owned buffer; the view covers exactly the appended bytes."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "push_bytes",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "350bfcf09952",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INH-BUF-4: skb_push returned headroom of src.len() bytes; the copy writes only that span."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "push_hdr_val",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7014a909c311",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INH-BUF-4: skb_push returned headroom of at least size_of::<T>() bytes; the copy writes exactly the header value."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "skb_copy_bits",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "27cd46e4a865",
+   "inv": "INV-SKB-1",
+   "section": "SkBuff lifecycle, pointer arithmetic and header views (INV-SKB-1)",
+   "impl_owner": "SkBuff",
+   "inv_note": "INV-SKB-1: offset and copy_len are bounds-checked against len; the copy reads inside the allocation and writes the caller's buf."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "hdr_view",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "26654c0fbee6",
+   "inv": "INV-SKB-1",
+   "section": "net-family header-view edges (INV-SKB-1)",
+   "inv_note": "INH-BUF-3: length checked (None otherwise); T is a plain repr(C) wire header; the borrow ties to data — the ONE audited parse edge shared by the protocol modules."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/net/hotpath.rs",
+   "owner": "hdr_view_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2717e8ebfa20",
+   "inv": "INV-SKB-1",
+   "section": "net-family header-view edges (INV-SKB-1)",
+   "inv_note": "INH-BUF-3: length checked (None otherwise); the exclusive borrow backs the write view (hdr_view's mutable twin)."
+  }
+ ]
+}

@@ -66,7 +66,6 @@ use super::types::{
     PCP_BATCH,
     PCP_HIGH,
     Page,
-    PageDescStats,
     PageFlag,
     PageFlags,
     PageHdr,
@@ -114,7 +113,7 @@ use super::types::{
 
 extern crate alloc;
 
-use core::alloc::{GlobalAlloc, Layout};
+use core::alloc::Layout;
 use core::cell::{Cell, UnsafeCell};
 use core::sync::atomic::{
     AtomicBool,
@@ -425,11 +424,6 @@ impl BlockMeta {
     }
 }
 
-// SAFETY: MetaArray is only accessed through BuddyAllocator, which holds a
-// Spinlock.  All get/get_mut calls happen under that lock, preventing
-// concurrent mutable access to the underlying array.
-unsafe impl Send for MetaArray {}
-unsafe impl Sync for MetaArray {}
 
 impl MetaArray {
     const fn new() -> Self {
@@ -438,25 +432,9 @@ impl MetaArray {
         }
     }
 
-    /// Get metadata reference
-    fn get(&self, idx: usize) -> &BlockMeta {
-        assert!(idx < BUDDY_MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, BUDDY_MAX_PAGES);
-        // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
-        unsafe { &(*self.data.get())[idx] }
-    }
 
-    /// Get mutable metadata reference
-    fn get_mut(&self, idx: usize) -> &mut BlockMeta {
-        assert!(idx < BUDDY_MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, BUDDY_MAX_PAGES);
-        // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
-        unsafe { &mut (*self.data.get())[idx] }
-    }
 }
 
-// SAFETY: BuddyAllocator uses internal Spinlock for all mutable operations
-// and atomics for read-only fields, making it safe to share across threads.
-unsafe impl Send for BuddyAllocator {}
-unsafe impl Sync for BuddyAllocator {}
 
 impl BuddyAllocator {
     /// R13-6: current heap virtual range (for allocation-validity checks).
@@ -464,38 +442,6 @@ impl BuddyAllocator {
         (self.heap_start.load(Ordering::Acquire), self.heap_end.load(Ordering::Acquire))
     }
 
-    /// oh-crash 98th (SPINLOCK-STUCK holder hunt): map an arbitrary
-    /// kernel-heap address to its containing DIRECT BUDDY allocation
-    /// (the >1KB kmalloc path — Task structs, large fs/ipc objects).
-    /// small_alloc::object_span names slab objects; this names the rest
-    /// of the heap. Returns `(block_base, order, meta_free)` on a live
-    /// allocated page, None outside the window / on a FREE block (a lock
-    /// address inside a free block is itself strong evidence — the
-    /// owning object was freed with the lock still referenced).
-    /// Read-only over BlockMeta WITHOUT the buddy lock: fields are
-    /// plain u8/u32 loads, worst case a torn value — acceptable for a
-    /// forensic print (same rationale as small_alloc::object_span).
-    pub fn buddy_block_span(&self, addr: usize) -> Option<(usize, u32, u8)> {
-        let heap_start = self.heap_start.load(Ordering::Acquire);
-        let heap_end = self.heap_end.load(Ordering::Acquire);
-        if heap_start == 0 || addr < heap_start || addr >= heap_end {
-            return None;
-        }
-        let idx = (addr - heap_start) / PAGE_SIZE;
-        if idx >= BUDDY_MAX_PAGES {
-            return None;
-        }
-        // SAFETY: read-only diagnostic access to the metadata array;
-        // idx is bounds-checked above. Concurrent mutation may tear a
-        // field but cannot make the read unsound (plain integer loads).
-        let m = unsafe { (*self.meta.data.get())[idx] };
-        if m.free != 0 {
-            return None; // free block: no containing allocation
-        }
-        let order = (m.order as u32).min(BUDDY_MAX_ORDER as u32);
-        let block = idx & !((1usize << order) - 1);
-        Some((heap_start + block * PAGE_SIZE, order, m.free))
-    }
 
     pub const fn new() -> Self {
         Self {
@@ -619,38 +565,6 @@ impl BuddyAllocator {
         }
     }
 
-    /// Fill the INTERIOR pages' `order` bytes for a block (leader is
-    /// written by the caller). Tight raw-pointer byte loop, no per-page
-    /// bounds call — this replaces the per-page `get_mut` interior marking
-    /// that made order-scale add/remove the ww-v2 wedge grind. The order
-    /// bytes keep the R9-14 ORDER_MISMATCH arm and report fidelity for
-    /// aliased interior frees; the load-bearing free bit is the bitmap.
-    fn fill_interior_order(&self, page_idx: usize, order: usize) {
-        if order == 0 {
-            return;
-        }
-        let last = page_idx + (1usize << order); // exclusive
-        assert!(
-            last <= BUDDY_MAX_PAGES,
-            "buddy fill_interior_order out of range ({}+2^{} > MAX_PAGES={})",
-            page_idx,
-            order,
-            BUDDY_MAX_PAGES
-        );
-        // SAFETY: indices bounds-checked above; callers hold the allocator
-        // lock (or are the single-threaded init_sized seeder); only the
-        // `order` byte of each BlockMeta is written.
-        unsafe {
-            let base = self.meta.data.get() as *mut BlockMeta;
-            let mut p = base.add(page_idx + 1);
-            let end = base.add(last);
-            let o = order as u8;
-            while p < end {
-                (*p).order = o;
-                p = p.add(1);
-            }
-        }
-    }
 
     /// Initialize block metadata
     fn init_block(&self, page_idx: usize, order: usize, free: bool) {
@@ -762,7 +676,7 @@ impl BuddyAllocator {
     /// requested layout: `alloc` rejects oversized requests with null
     /// (the GlobalAlloc failure contract) so the damage stays a loud,
     /// scoped ENOMEM kill instead of silent corruption.
-    fn size_to_order(&self, size: usize) -> usize {
+    pub(super) fn size_to_order(&self, size: usize) -> usize {
         if size <= PAGE_SIZE {
             return 0;
         }
@@ -798,7 +712,7 @@ impl BuddyAllocator {
     }
 
     /// Allocate memory
-    fn alloc_blocks(&self, order: usize) -> *mut u8 {
+    pub(super) fn alloc_blocks(&self, order: usize) -> *mut u8 {
         // Search starting from specified order
         for mut current_order in order..=BUDDY_MAX_ORDER {
             let list_head = self.free_lists[current_order].load(Ordering::Acquire);
@@ -970,215 +884,8 @@ impl BuddyAllocator {
     }
 }
 
-unsafe impl GlobalAlloc for BuddyAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // DEBUG memwatch: own s0, captured unconditionally at the top of the
-        // body. s0 is callee-saved so the value stays valid for the whole
-        // body even across helper calls; the actual frame walk runs just
-        // before the note call (see below). -O0 riscv64 frames keep
-        // s0 = frame TOP: [s0-8] = own saved ra, [s0-0x10] = caller's s0,
-        // so walking from s0 yields [ra-into-__rust_alloc, callers...].
-        let mw_s0: u64 = crate::debug::hotpath::current_frame_pointer();
 
-        // Opportunistic reclamation of time-deferred frees (see
-        // mm/deferred_free.rs): one relaxed load on the fast path; the
-        // same allocation churn that fills the pool drains it.
-        super::hotpath::drain_if_due();
 
-        // Check magic number and initialization state
-        if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
-            || self.initialized.load(Ordering::Acquire) == 0
-            || self.heap_start.load(Ordering::Acquire) == 0 {
-            return core::ptr::null_mut();
-        }
-
-        let size = layout.size();
-        let align = layout.align();
-
-        let order = self.size_to_order(size.max(align));
-
-        // R75: requests larger than the biggest buddy block must FAIL, not
-        // come back as an undersized BUDDY_MAX_ORDER block (see size_to_order).
-        if order > BUDDY_MAX_ORDER {
-            if size > 4 * 1024 * 1024 {
-                crate::pr_err!(
-                    "bigalloc: REJECTED size={:#x} (> max block {:#x})",
-                    size,
-                    PAGE_SIZE << BUDDY_MAX_ORDER
-                );
-            }
-            return core::ptr::null_mut();
-        }
-
-        // Small-object packing layer (alloc-crash r12-16): layouts that
-        // fit a <=1 KiB class are served from packed slab pages — one
-        // buddy page holds dozens of objects instead of one. Falls
-        // through to the plain buddy path if the layer cannot serve
-        // (uninitialized heap, out of pages).
-        if size <= super::hotpath::SMALL_MAX
-            && align <= super::hotpath::SMALL_MAX
-        {
-            let p = super::hotpath::alloc(size, align);
-            if !p.is_null() {
-                trace_kmalloc_at(
-                    mw_s0,
-                    p as u64,
-                    size,
-                    super::hotpath::effective_size(size, align),
-                );
-                return p;
-            }
-        }
-
-        let _guard = self.lock.lock_irqsave();
-        // rux:allocwatch (retired debug=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
-        // The GlobalAlloc main path — RawVec finish_grow lands here for
-        // sizes above the small_alloc classes.
-        let _aw = crate::debug::hotpath::guard(
-            crate::debug::hotpath::SITE_BUDDY,
-            0,
-        );
-        let ptr = self.alloc_blocks(order);
-        if ptr.is_null() && size > 4 * 1024 * 1024 {
-            crate::pr_err!("bigalloc: FAILED size={:#x}", size);
-        }
-        drop(_guard);
-        // kmem:kmalloc — the buddy-served tail of the same event: one
-        // record per allocation through the GlobalAlloc chokepoint, with
-        // bytes_alloc the true serving size (the buddy block).
-        if !ptr.is_null() {
-            trace_kmalloc_at(mw_s0, ptr as u64, size, PAGE_SIZE << order);
-        }
-        if !ptr.is_null() && crate::debug::hotpath::memwatch_armed() {
-            let mut mw_frames: [u64; crate::debug::types::SITE_FRAMES] =
-                [0; crate::debug::types::SITE_FRAMES];
-            // f[0] = own saved ra (== the ra at entry, before any helper
-            // could clobber the register), f[1..] = the s0 chain above.
-            // s0 is callee-saved, so the walk stays valid even here, after
-            // alloc_blocks().
-            unsafe {
-                crate::debug::hotpath::walk_fp_chain(mw_s0, &mut mw_frames);
-            }
-            crate::debug::hotpath::note_alloc(
-                ptr,
-                self.heap_start.load(Ordering::Relaxed),
-                size,
-                &mw_frames,
-            );
-        }
-        ptr
-    }
-
-    // DEBUG memwatch leak hunt: explicit realloc (instead of the default
-    // trait method) so the frame-pointer chain can be walked past the whole
-    // raw_vec/alloc growth machinery into the allocating kernel code. This
-    // is how the GNOME-oom leak was run to ground (the "129..256-byte
-    // buffer reallocated ~4.6x/s" signature was BTreeMap node growth in
-    // timer add_timer_wakeup). At -O0 the chain is: this method <-
-    // __rust_realloc <- realloc_nonnull <- grow_impl <- Allocator::grow <-
-    // finish_grow <- grow_amortized <- do_reserve <- reserve <-
-    // append_elements <- THE KERNEL CODE, so 12 frames are captured.
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // DEBUG memwatch leak hunt (see the method-level comment below for the
-        // chain shape). The walk is gated: disabled = zero added work on the
-        // realloc hot path; enabled = 12-frame pointer chase per realloc.
-        let mut mw_frames: [u64; crate::debug::types::SITE_FRAMES] =
-            [0; crate::debug::types::SITE_FRAMES];
-        if crate::debug::hotpath::memwatch_armed() {
-            let mut fp: u64 = crate::debug::hotpath::current_frame_pointer();
-            // f[0] = return address out of this method (into __rust_realloc);
-            // f[1..] ascend the caller chain through the growth machinery.
-            unsafe {
-                crate::debug::hotpath::walk_fp_chain(fp, &mut mw_frames);
-            }
-            crate::debug::hotpath::note_realloc(new_size, &mw_frames);
-        }
-
-        // Default GlobalAlloc::realloc behavior.
-        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
-            Ok(l) => l,
-            Err(_) => return core::ptr::null_mut(),
-        };
-        let new_ptr = self.alloc(new_layout);
-        if new_ptr.is_null() {
-            return core::ptr::null_mut();
-        }
-        let copy_len = layout.size().min(new_size);
-        core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_len);
-        self.dealloc(ptr, layout);
-        new_ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if self.initialized.load(Ordering::Acquire) == 0 {
-            return;
-        }
-        // kmem:kfree — one event per free, at entry, before the
-        // deferred-free interception decides where the block goes (the
-        // reference fires kfree at kfree() entry, whatever the backend
-        // does with it afterwards). armed() first: the disabled path on
-        // this, the kernel's hottest function pair, is one branch.
-        trace_kfree_at(ptr as u64);
-
-        // Teardown-race guard (mm/deferred_free.rs): frees of the
-        // registered size class (the MmStruct ArcInner block) are held
-        // back briefly so unaccounted &MmStruct borrowers (procfs
-        // generators) preempted mid-syscall resume against coherent
-        // post-teardown memory instead of heap-reused garbage (the
-        // #GP-in-btree-navigate family). NOTE: this impl is the live
-        // #[global_allocator] (GLOBAL_ALLOCATOR: BuddyAllocator) — the
-        // interception must live HERE, not in CombinedAllocator.
-        if super::hotpath::try_defer(ptr, &layout) {
-            return;
-        }
-
-        self.dealloc_untracked(ptr, layout);
-    }
-}
-
-/// kmem:kmalloc record from the GlobalAlloc boundary. `s0` is the
-/// caller's own frame pointer captured at entry (callee-saved — the
-/// same discipline memwatch uses); the call_site is the first frame
-/// above the __rust_alloc plumbing. Disarmed = two relaxed loads and a
-/// branch, the tracepoint contract.
-#[inline]
-fn trace_kmalloc_at(s0: u64, ptr: u64, bytes_req: usize, bytes_alloc: usize) {
-    if !crate::trace::EVENT_KMALLOC.armed() {
-        return;
-    }
-    let mut frames = [0u64; 8];
-    // SAFETY: s0 is GlobalAlloc::alloc's own fp (captured at entry,
-    // callee-saved); the walk reads only kernel frames.
-    unsafe {
-        crate::debug::hotpath::walk_fp_chain(s0, &mut frames);
-    }
-    crate::trace::trace_kmalloc(
-        crate::trace::alloc_call_site(&frames),
-        ptr,
-        bytes_req as u64,
-        bytes_alloc as u64,
-        0xcc0, // GFP_KERNEL — Rux's allocator takes no gfp mask
-        -1,    // NUMA_NO_NODE
-        false, // __GFP_ACCOUNT not set
-    );
-}
-
-/// kmem:kfree record from the GlobalAlloc boundary, same origin
-/// discipline as the alloc twin.
-#[inline]
-fn trace_kfree_at(ptr: u64) {
-    if !crate::trace::EVENT_KFREE.armed() {
-        return;
-    }
-    let s0 = crate::debug::hotpath::current_frame_pointer();
-    let mut frames = [0u64; 8];
-    // SAFETY: s0 is current_frame_pointer() read in THIS frame, the
-    // dealloc twin of the alloc capture.
-    unsafe {
-        crate::debug::hotpath::walk_fp_chain(s0, &mut frames);
-    }
-    crate::trace::trace_kfree(crate::trace::alloc_call_site(&frames), ptr);
-}
 
 /// Free through the live global allocator, bypassing the deferred-free
 /// interception (drainer entry point, mm/deferred_free.rs).
@@ -1238,7 +945,7 @@ impl BuddyAllocator {
     /// The real buddy free path, unintercepted — the deferred-free
     /// drainer (mm/deferred_free.rs) calls this so a held-back entry can
     /// never be re-deferred.
-    fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
+    pub(super) fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
         // Small-object packing layer FIRST (alloc-crash r12-16): slab-page
         // objects free through their page's freelist, never the buddy —
         // and this must run before the R69 task-page probe, whose
@@ -1344,6 +1051,16 @@ pub fn audit_lock_held() -> bool {
 
 /// Compatibility alias
 pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;
+
+// pass 3 (seed-core §2c.5): the audited unsafe operations moved to
+// mm::r#unsafe; the historical `mm::hotpath::` paths of the pub ones stay
+// valid for their callers (lib.rs boot init, the debug/periodic scans,
+// timer.rs and the drivers' TSC resync, the arch mmu_init node walks).
+pub use super::r#unsafe::{
+    copy_page_contents, dealloc_direct, first_online_node_mut, get_page,
+    get_page_mut, init_mem_map, mark_non_ram_pages, page_desc_stats,
+    vdso_data_tick, vdso_init,
+};
 
 /// The actual #[global_allocator]: small (<=4KB, <=8-aligned) allocations
 /// pack into slab pages (16-byte header + 8-multiple object grids); larger
@@ -1487,11 +1204,8 @@ pub const EMPTY_FINDING: MetaFinding = MetaFinding {
 /// claim, so the scratch is never shared by two concurrent audits.
 static META_AUDIT_BUSY: AtomicU64 = AtomicU64::new(0);
 
-// SAFETY: see `AuditScratch` doc — all access is claim-serialized.
-unsafe impl Send for AuditScratch {}
-unsafe impl Sync for AuditScratch {}
 
-static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {
+pub(super) static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {
     data: UnsafeCell::new([0; FREE_BITMAP_WORDS]),
 };
 
@@ -1518,7 +1232,7 @@ fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
     let mut total = 0usize;
     // SAFETY: caller holds the META_AUDIT_BUSY claim (single audit at a
     // time across CPUs); the borrow lives only inside this function.
-    let scratch = unsafe { &mut (*META_AUDIT_SCRATCH.data.get()) };
+    let scratch = crate::mm::r#unsafe::meta_audit_scratch();
     for w in scratch.iter_mut() {
         *w = 0;
     }
@@ -1811,85 +1525,7 @@ pub fn buddy_meta_selftest() -> bool {
     saw_kind && clean
 }
 
-/// The real (unintercepted) free path: slab-region or buddy-heap by
-/// pointer range. `CombinedAllocator::dealloc` routes here after the
-/// deferred-free check declines; the deferred-free drainer calls this
-/// directly so re-deferring is impossible.
-pub unsafe fn dealloc_direct(ptr: *mut u8, layout: Layout) {
-    if ptr.is_null() {
-        return;
-    }
 
-    let ptr_addr = ptr as usize;
-    let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
-    let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
-
-    // Slab-region membership uses the TRUE bounds registered by
-    // init_slab() (review 4.8) — the old `heap_end + hardcoded 4MB`
-    // duplicated the layout and silently diverged whenever the slab
-    // region moved or resized.
-    let in_slab = super::hotpath::slab_region()
-        .map(|(s, e)| ptr_addr >= s && ptr_addr < e)
-        .unwrap_or(false);
-
-    if in_slab {
-        // In Slab area, use kfree
-        super::hotpath::kfree(ptr);
-    } else if ptr_addr >= heap_start && ptr_addr < heap_end {
-        // In Buddy heap area
-        HEAP_ALLOCATOR.dealloc(ptr, layout);
-    }
-    // Pointers in other regions are ignored
-}
-
-unsafe impl GlobalAlloc for CombinedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-
-        // Opportunistic reclamation of time-deferred frees (see
-        // mm/deferred_free.rs): one relaxed load on the fast path; the
-        // same allocation churn that fills the pool drains it.
-        super::hotpath::drain_if_due();
-
-        // Small objects (<= 4096 bytes) try Slab allocator. The align <= 8
-        // guard is load-bearing: slab objects are at least 8-aligned (16-byte
-        // header + 8-multiple object sizes) but NOT 16-aligned in general, so
-        // higher alignments must fall through to the buddy, which hands out
-        // naturally aligned power-of-two blocks. Routing an align-16 layout
-        // through the slab would hand back a misaligned pointer.
-        // Without the slab, EVERY small Rust allocation (Box/Arc/String/Vec)
-        // pinned a whole 4KB buddy page — a 30K-object workload exhausted the
-        // 128MB heap (LTP inode02 ALLOCTHROW storm).
-        if size <= 4096 && layout.align() <= 8 && super::hotpath::is_slab_initialized() {
-            let ptr = super::hotpath::kmalloc(size);
-            if !ptr.is_null() {
-                return ptr;
-            }
-            // Slab allocation failed, fall back to Buddy
-        }
-
-        // Large objects or Slab failure uses Buddy allocator
-        HEAP_ALLOCATOR.alloc(layout)
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ptr.is_null() {
-            return;
-        }
-
-        // Teardown-race guard (mm/deferred_free.rs): frees of the
-        // registered size class (MmStruct) are held back briefly so
-        // unaccounted &MmStruct borrowers (procfs generators) that were
-        // preempted mid-syscall resume against coherent post-teardown
-        // memory instead of heap-reused garbage (the #GP-in-btree
-        // family).
-        if super::hotpath::try_defer(ptr, &layout) {
-            return;
-        }
-
-        dealloc_direct(ptr, layout);
-    }
-}
 
 
 // ════════════════ allocator ═══════════════════════════
@@ -3237,24 +2873,6 @@ impl Page {
 
 // ========== Page content operations ==========
 
-/// Copy contents of one physical page to another.
-///
-/// Both `src_pfn` and `dst_pfn` must be valid page frame numbers.
-/// The pages must not overlap.
-///
-/// # Safety
-/// - src_pfn and dst_pfn must be valid
-/// - The source page must contain valid data
-/// - The caller must ensure no concurrent writes to either page
-pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
-    use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
-    // pfn_to_phys yields a physical address; it must go through the linear
-    // mapping (phys_to_virt) before dereference — the raw PA has no mapping
-    // once the MMU is on.
-    let src = phys_to_virt(PhysAddr(super::hotpath::pfn_to_phys(src_pfn) as u64)).0 as usize as *const u8;
-    let dst = phys_to_virt(PhysAddr(super::hotpath::pfn_to_phys(dst_pfn) as u64)).0 as usize as *mut u8;
-    core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE);
-}
 
 // ========== Global page array (mem_map) ==========
 
@@ -3371,122 +2989,10 @@ pub fn present_pages() -> usize {
     }
 }
 
-/// Mark every PFN in the descriptor span that is NOT covered by a usable
-/// RAM region as Reserved (fake-OOM family, the phantom-drift mechanism):
-/// descriptors are indexed linearly over the whole PFN span, so the
-/// descriptors backing MMIO holes / firmware gaps would otherwise sit at
-/// power-on zero — refcount 0, no flags — and the MEMLEDGER census would
-/// count them as free pages (b126: 524,804 phantom "free" pages inside
-/// the 3G..4G hole alone), while the free-path tripwires would not stop
-/// a forged free of them.
-///
-/// A page is RAM only if FULLY contained in one region (partial edge
-/// pages of unaligned regions count as non-RAM, like Linux marking
-/// partial e820 pages reserved).
-pub fn mark_non_ram_pages(regions: &[crate::cmdline::MemoryRegion]) {
-    use super::types::PAGE_SIZE;
-    let start_pfn = MIN_PFN;
-    let end_pfn = MIN_PFN + nr_descs();
-
-    // Regions sorted by base (e820/FDT maps come sorted; sort again —
-    // n <= 64, insertion sort is fine).
-    let mut sorted: alloc::vec::Vec<(usize, usize)> =
-        regions.iter().map(|r| (r.base, r.base + r.size)).collect();
-    sorted.sort_unstable();
-
-    let is_ram = |pfn: usize| -> bool {
-        let pa = pfn * PAGE_SIZE;
-        let pe = pa + PAGE_SIZE;
-        sorted
-            .iter()
-            .any(|&(b, e)| pa >= b && pe <= e)
-    };
-
-    let mut marked = 0usize;
-    for pfn in start_pfn..end_pfn {
-        if is_ram(pfn) {
-            continue;
-        }
-        let page = pfn_to_page(pfn);
-        if !page.is_null() {
-            // SAFETY: boot-time single-threaded init; descriptor in span.
-            unsafe {
-                (*page).init_reserved();
-            }
-            marked += 1;
-        }
-    }
-    if marked > 0 {
-        crate::println!(
-            "page_desc: marked {} non-RAM hole pages Reserved ({} MB)",
-            marked,
-            marked * PAGE_SIZE / (1024 * 1024)
-        );
-    }
-}
 
 /// Whether page array is initialized
-static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
+pub(super) static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
 
-/// Initialize page array
-///
-/// Initialize page descriptors within specified range.
-/// Pages backing memblock-RESERVED regions (kernel image, dtb, early
-/// allocations, vmemmap storage) are marked Reserved so they can never be
-/// mistaken for free memory (review 4.4: descriptors left at power-on
-/// zero look like free/unmapped pages).
-///
-/// # Arguments
-/// - `start_pfn`: Available memory start PFN
-/// - `nr_pages`: Number of available pages
-pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
-    // Prevent duplicate initialization
-    if MEM_MAP_INIT.swap(1, Ordering::AcqRel) != 0 {
-        return;
-    }
-
-    // Use vmemmap to access page descriptors
-    // Only iterate over the pages that are actually mapped in vmemmap
-    let init_count = if nr_pages > MAX_PAGES { MAX_PAGES } else { nr_pages };
-
-    // Initialize available pages as free.
-    // (The first loop that marked all pages reserved has been removed because
-    // init_free() fully resets every field, making the prior reserved pass
-    // wasted work.)
-    for i in 0..init_count {
-        let pfn = start_pfn + i;
-        let page = pfn_to_page(pfn);
-        if !page.is_null() {
-            unsafe {
-                (*page).init_free();
-            }
-        }
-    }
-
-    // Re-mark reserved ranges (review 4.4): iterate memblock's reserved
-    // list and set Reserved + refcount 1 on every covered page inside the
-    // initialized span, mirroring Linux's memblock_reserve → reserve pages
-    // marking during free_area_init.  Runs once during boot (single CPU).
-    let span_start = start_pfn * PAGE_SIZE;
-    let span_end = (start_pfn + init_count) * PAGE_SIZE;
-    super::hotpath::memblock().reserved().iter().for_each(|region| {
-        let res_start = region.base.max(span_start) & !(PAGE_SIZE - 1);
-        let res_end = (region.base + region.size).min(span_end);
-        if res_end <= res_start {
-            return;
-        }
-        let mut addr = res_start;
-        while addr < res_end {
-            let page = pfn_to_page(addr / PAGE_SIZE);
-            if !page.is_null() {
-                unsafe {
-                    (*page).init_reserved();
-                }
-            }
-            addr += PAGE_SIZE;
-        }
-    });
-}
 
 // ========== PFN <-> Page conversion (vmemmap-style) ==========
 
@@ -3596,86 +3102,8 @@ pub fn page_size() -> usize {
     core::mem::size_of::<Page>()
 }
 
-/// Get page descriptor statistics
-pub fn page_desc_stats() -> PageDescStats {
-    // F12: iterate only the pages the RUNNING machine actually has.
-    // MAX_PAGES is the compile-time 2 GB worst case; on a 1 GB QEMU the
-    // vmemmap pages past the real RAM are unmapped, and the debug periodic
-    // dump walked straight into them (KERNPANIC pfault from
-    // Page::refcount — the diagnostic killed the box it was diagnosing).
-    // Runtime descriptor count (discovered memory map; config fallback
-    // before init). F12: never scan past the descriptors vmemmap actually
-    // mapped — the min() below is the dereference-safety bound.
-    let live_pages = nr_descs();
-    let mut stats = PageDescStats {
-        total_pages: live_pages,
-        ..Default::default()
-    };
 
-    let base_pfn = MIN_PFN;
-    // Clamp to the descriptors actually mapped by init_vmemmap: MAX_PAGES
-    // is the compile-time PHYS_MEMORY_SIZE (2 GiB) while the machine may
-    // boot with less RAM — descriptors past the mapped range are unmapped
-    // vmemmap, and dereferencing them panics the periodic DEBUG dump
-    // (observed: KERNPANIC in page_desc_stats 8s into a -m 1G boot with
-    // rux:periodic (retired debug=periodic),taskdump). The vmemmap-mapped count is the direct
-    // dereference-safety bound; F12's phys_memory_size estimate is kept
-    // for total_pages above.
-    let live_pages = live_pages.min(super::hotpath::vmemmap_stats().nr_pages);
-    for i in 0..live_pages {
-        let page = pfn_to_page(base_pfn + i);
-        if page.is_null() {
-            continue;
-        }
-        unsafe {
-            if (*page).refcount() == 0 {
-                stats.free_pages += 1;
-            } else {
-                stats.used_pages += 1;
-            }
 
-            if (*page).is_reserved() {
-                stats.reserved_pages += 1;
-            }
-
-            if (*page).is_mapped() {
-                stats.mapped_pages += 1;
-            }
-
-            if (*page).is_dirty() {
-                stats.dirty_pages += 1;
-            }
-
-            if (*page).is_cow() {
-                stats.cow_pages += 1;
-            }
-
-            if (*page).is_anonymous() {
-                stats.anonymous_pages += 1;
-            }
-        }
-    }
-
-    stats
-}
-
-/// Get Page reference for a physical frame
-///
-/// # Safety
-/// Caller must ensure pfn is in valid range
-#[inline]
-pub unsafe fn get_page(pfn: PhysFrameNr) -> &'static Page {
-    &*pfn_to_page(pfn)
-}
-
-/// Get mutable Page reference for a physical frame
-///
-/// # Safety
-/// Caller must ensure pfn is in valid range and there are no other references
-#[inline]
-pub unsafe fn get_page_mut(pfn: PhysFrameNr) -> &'static mut Page {
-    &mut *pfn_to_page_mut(pfn)
-}
 
 /// Safe shared view of a frame's page descriptor (unsafe-slim round 2).
 ///
@@ -3696,7 +3124,7 @@ pub fn page_desc(pfn: PhysFrameNr) -> Option<&'static Page> {
     // SAFETY: INV-FRAME-1 — vmemmap descriptors exist for the whole
     // machine lifetime; non-null check above mirrors pfn_to_page's
     // range validation.
-    Some(unsafe { &*p })
+    Some(crate::mm::r#unsafe::page_desc_ref(p))
 }
 
 
@@ -8752,7 +8180,7 @@ pub fn node_data(node_id: usize) -> Option<&'static PglistData> {
     }
     // SAFETY: node_id is bounds-checked above; NODE_DATA is initialized by
     // init_node_data() before any call here.
-    unsafe { NODE_DATA[node_id].as_ref() }
+    crate::mm::r#unsafe::node_data_ref(node_id)
 }
 
 /// Get mutable node by ID
@@ -8765,7 +8193,7 @@ pub fn node_data_mut(node_id: usize) -> Option<&'static mut PglistData> {
     }
     // SAFETY: node_id is bounds-checked above; caller must ensure exclusive
     // access (called only during init or with appropriate locking).
-    unsafe { NODE_DATA[node_id].as_mut() }
+    crate::mm::r#unsafe::node_data_ref_mut(node_id)
 }
 
 /// Get first (and only, on UMA) node
@@ -8773,17 +8201,6 @@ pub fn first_online_node() -> Option<&'static PglistData> {
     node_data(0)
 }
 
-/// Get first mutable node.
-///
-/// # Safety
-/// Caller must ensure exclusive access to the node.  On a single-node UMA
-/// system this means no other thread may hold a mutable or shared reference
-/// to the same `PglistData` simultaneously.  Typically this is safe only
-/// during early boot or when the caller holds a lock that prevents
-/// concurrent page allocation / reclaim on the same node.
-pub unsafe fn first_online_node_mut() -> Option<&'static mut PglistData> {
-    node_data_mut(0)
-}
 
 /// Get node count
 pub fn num_online_nodes() -> usize {
@@ -12622,48 +12039,9 @@ pub fn vdso_ehdr() -> u64 {
 // Data page
 // ============================================================================
 
-static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);
+pub(super) static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);
 
-/// The seqlock word IS data-page offset 0 (odd = write in progress).
-///
-/// It must be accessed THROUGH the page pointer, never through a
-/// separate static: the user-side vDSO code reads page[0] and retries
-/// while it is odd or changed across the read. The original separate
-/// VDSO_SEQ static never aliased the page, so page[0] stayed 0 forever,
-/// no reader ever retried, and a reader descheduled between its
-/// base_tsc and base_mono_ns loads paired a stale tsc with a fresh mono
-/// — a vDSO clock AHEAD of the syscall clock by the whole preemption
-/// gap (LTP clock_gettime04: "Time travelled backwards (-454618735 ns)"
-/// on every clock, only on loads noisy enough to deschedule the reader
-/// for hundreds of ms).
-// SAFETY: only written from the timer-tick refresh paths below.
-unsafe fn vdso_seq() -> &'static AtomicU32 {
-    unsafe { &*(VDSO_DATA_PAGE.0.as_ptr() as *const AtomicU32) }
-}
 
-/// Refresh the data page snapshot (timer tick / clock-set paths).
-///
-/// Seqlock protocol: seq |= 1 (begin) → write fields → seq += 1 (end,
-/// even). Readers retry while seq is odd or changed across the read.
-#[cfg(not(feature = "x86_64"))]
-pub fn vdso_data_tick() {
-    let cycles = crate::timer::read_time();
-    // 10 MHz source: 100 ns per cycle, exact.
-    let mono_ns = cycles.saturating_mul(100);
-    let epoch_ns = crate::timer::wall_epoch_offset_ns();
-    // SAFETY: the page is only written here under the seqlock; user
-    // readers validate via the seq word before trusting the fields.
-    unsafe {
-        let seq = vdso_seq();
-        seq.fetch_or(1, Ordering::Release);
-        let base = VDSO_DATA_PAGE.0.as_mut_ptr();
-        core::ptr::write_volatile(base.add(8) as *mut u64, cycles);
-        core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
-        core::ptr::write_volatile(base.add(24) as *mut u64, epoch_ns);
-        // tz fields (32/36) stay zero.
-        seq.fetch_add(1, Ordering::Release);
-    }
-}
 
 /// x86_64 unified-track timekeeping (vDSO re-arm, 2026-11-15).
 ///
@@ -12725,7 +12103,14 @@ pub fn vdso_data_tick() {
 pub mod x86_track {
     use core::sync::atomic::Ordering;
 
-    use super::vdso_seq;
+    // pass 3: the vDSO/TSC edges moved to mm::r#unsafe; the module
+    // re-exports their names so the historical `x86_track::` paths of the
+    // drivers' callers (and the moved vdso_data_tick body) stay valid.
+    pub(crate) use crate::mm::r#unsafe::{
+        publish_tsc_anchor, rd, read_tsc_ordered, seq_end, seq_try_begin,
+        tsc_anchor_peek, tsc_anchor_step_back, tsc_anchor_step_forward,
+        tsc_track_now_nominal, wr,
+    };
 
     // ---- lane instrumentation (vdso-clock): fallback/skip counters ----
     pub static TRACK_READ_NONE: core::sync::atomic::AtomicU64 =
@@ -12735,7 +12120,7 @@ pub mod x86_track {
     pub static TICK_SKIP: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
     #[inline]
-    fn bump(c: &core::sync::atomic::AtomicU64, _tag: &str) {
+    pub(crate) fn bump(c: &core::sync::atomic::AtomicU64, _tag: &str) {
         // Counters only, no console prints: the hunt prints fired every
         // 100 events and flooded the serial on SMP8 boots (ub2404:
         // 22k+ track-none events = 220+ lines/boot interleaved with
@@ -12753,45 +12138,7 @@ pub mod x86_track {
     // coherence is the seq word's job)
     // ------------------------------------------------------------------
 
-    #[inline]
-    pub(super) unsafe fn rd(off: usize) -> u64 {
-        unsafe {
-            core::ptr::read_volatile(
-                super::VDSO_DATA_PAGE.0.as_ptr().add(off) as *const u64,
-            )
-        }
-    }
-    #[inline]
-    pub(super) unsafe fn wr(off: usize, v: u64) {
-        unsafe {
-            core::ptr::write_volatile(
-                super::VDSO_DATA_PAGE.0.as_mut_ptr().add(off) as *mut u64,
-                v,
-            )
-        }
-    }
 
-    /// lfence;rdtsc — the ORDERED counter read. A bare rdtsc can be
-    /// hoisted across the field loads by the CPU; the seq protocol
-    /// requires the TSC stamp to sit inside the seq1..seq2 window (the
-    /// emitted vDSO code uses the identical pair).
-    #[inline]
-    pub fn read_tsc_ordered() -> u64 {
-        let lo: u32;
-        let hi: u32;
-        // SAFETY: pure counter read; lfence orders it against the
-        // surrounding seq-word loads.
-        unsafe {
-            core::arch::asm!(
-                "lfence",
-                "rdtsc",
-                out("eax") lo,
-                out("edx") hi,
-                options(nomem, nostack)
-            );
-        }
-        (lo as u64) | ((hi as u64) << 32)
-    }
 
     /// (delta_tsc * mult) >> 32 — full-precision nominal mapping,
     /// MULTIPLY FIRST, SHIFT SECOND.
@@ -12814,212 +12161,17 @@ pub mod x86_track {
     // writer side (all under cmpxchg even→odd; losers skip)
     // ------------------------------------------------------------------
 
-    /// Take the page for writing. Returns false when another writer
-    /// holds it (seq odd) — the caller skips this round.
-    #[inline]
-    pub(super) unsafe fn seq_try_begin() -> bool {
-        unsafe {
-            let seq = vdso_seq();
-            let cur = seq.load(Ordering::Relaxed);
-            if cur & 1 != 0 {
-                return false;
-            }
-            seq.compare_exchange(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-        }
-    }
-    #[inline]
-    pub(super) unsafe fn seq_end() {
-        unsafe { vdso_seq().fetch_add(1, Ordering::Release); }
-    }
 
-    /// Publish the initial anchor (promote_tsc_timekeeper; boot-time
-    /// single-threaded, but the seq protocol runs anyway for uniformity).
-    /// `base_mono_nom` must make the track continuous with the previous
-    /// clock (the caller computes the continuity value).
-    pub fn publish_tsc_anchor(mult: u64, cycle_last: u64, base_mono_nom: u64) {
-        unsafe {
-            if !seq_try_begin() {
-                // Cannot happen today (promote runs pre-SMP with IRQs
-                // off); if it ever races, the next tick refresh
-                // publishes — mult stays 0 and userspace falls back to
-                // the syscall until then.
-                return;
-            }
-            wr(40, mult);
-            wr(8, cycle_last);
-            wr(16, base_mono_nom);
-            wr(48, 1); // res_ns
-            seq_end();
-        }
-    }
 
-    /// Forward-only base step (1 Hz HPET resync). Returns false when
-    /// another writer held the page (retry next second).
-    pub fn tsc_anchor_step_forward(step_nominal: u64) -> bool {
-        if step_nominal == 0 {
-            return true;
-        }
-        unsafe {
-            if !seq_try_begin() {
-                return false;
-            }
-            let base = rd(16);
-            wr(16, base.wrapping_add(step_nominal));
-            seq_end();
-            true
-        }
-    }
 
-    /// The >25 s rebase pull-back (vCPU TSC-offset smash class). This
-    /// is the ONE base movement that can go backward; it prints loudly
-    /// at the caller and the TSC_LAST ratchet freezes the syscall track
-    /// through the pull (the vDSO track steps back — a broken-by-
-    /// definition state, documented, better than a 25 s-off clock).
-    pub fn tsc_anchor_step_back(lead_nominal: u64) -> bool {
-        unsafe {
-            if !seq_try_begin() {
-                return false;
-            }
-            let base = rd(16);
-            wr(16, base.wrapping_sub(lead_nominal));
-            seq_end();
-            true
-        }
-    }
 
     // ------------------------------------------------------------------
     // reader side
     // ------------------------------------------------------------------
 
-    /// Seq-validated anchor triple (no TSC read). None when not
-    /// promoted (mult == 0) or the writer wedged odd.
-    pub fn tsc_anchor_peek() -> Option<(u64, u64, u64)> {
-        unsafe {
-            for _ in 0..128 {
-                let s1 = vdso_seq().load(Ordering::Acquire);
-                if s1 & 1 != 0 {
-                    continue;
-                }
-                let cl = rd(8);
-                let base = rd(16);
-                let mult = rd(40);
-                let s2 = vdso_seq().load(Ordering::Acquire);
-                if s1 != s2 {
-                    continue;
-                }
-                if mult == 0 {
-                    bump(&PEEK_NONE, "peek-none-mult0");
-                    return None; // not promoted
-                }
-                return Some((cl, base, mult));
-            }
-            bump(&PEEK_NONE, "peek-none-retry");
-            None
-        }
-    }
 
-    /// The unified-track clock read (kernel side of the vDSO contract):
-    /// seq1 → fields → lfence;rdtsc → seq2, then the nominal sum.
-    /// IDENTICAL arithmetic to the emitted vDSO interpolation, so a
-    /// syscall read and a vDSO read at the same instant agree bit for
-    /// bit. None when not promoted / writer wedged (caller falls back;
-    /// the TSC_LAST ratchet keeps that fallback monotonic).
-    ///
-    /// WRAP GUARD (vdso-clock hunt, 2026-11-18): a TSC that reads
-    /// behind the published cycle_last (vCPU TSC-offset smash — the
-    /// class the poisoned release boots hit) makes `raw - cl` wrap to
-    /// ~2^64, and `(wrapped * mult) >> 32` manufactures ~2^32 SECONDS
-    /// of time (exactly 2^32 × mult ≈ 4.3e16 nominal ticks). The
-    /// emitted vDSO code already routes unsigned-above-bound deltas to
-    /// the syscall fallback; the kernel twin must refuse them too —
-    /// retry, then report unreadable (the caller's ratchet freeze is
-    /// the safe degradation; the resync/rebase paths repair the anchor).
-    pub fn tsc_track_now_nominal() -> Option<u64> {
-        unsafe {
-            for _ in 0..128 {
-                let s1 = vdso_seq().load(Ordering::Acquire);
-                if s1 & 1 != 0 {
-                    continue;
-                }
-                let cl = rd(8);
-                let base = rd(16);
-                let mult = rd(40);
-                if mult == 0 {
-                    return None; // not promoted
-                }
-                // The TSC stamp sits INSIDE the window: a refresh that
-                // lands between the field loads and this read bumps the
-                // seq word and the whole read retries — cycle_last can
-                // never be ahead of the stamped TSC (no wrapped delta).
-                let raw = read_tsc_ordered();
-                let s2 = vdso_seq().load(Ordering::Acquire);
-                if s1 != s2 {
-                    continue;
-                }
-                if raw < cl {
-                    // Wrapped-delta refusal (see the doc above).
-                    continue;
-                }
-                let delta = raw - cl;
-                return Some(base.wrapping_add(tsc_delta_nominal(delta, mult)));
-            }
-            bump(&TRACK_READ_NONE, "track-none");
-            None
-        }
-    }
 }
 
-/// x86_64 per-tick refresh: advance the anchor to NOW under the seq
-/// word, and republish the epoch and interpolation bound. Forward-only
-/// by construction (the measured TSC delta is non-negative); skipped
-/// entirely while the TSC timekeeper is not promoted (mult == 0 keeps
-/// userspace on the syscall fallback — the HPET/jiffies clock then
-/// serves every read).
-#[cfg(feature = "x86_64")]
-pub fn vdso_data_tick() {
-    unsafe {
-        if x86_track::tsc_anchor_peek().is_none() {
-            x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-peek");
-            return; // TSC timekeeper not promoted — keep the page as-is
-        }
-        if !x86_track::seq_try_begin() {
-            x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-writer");
-            return; // another CPU is mid-refresh; next tick catches up
-        }
-        let cl = x86_track::rd(8);
-        let base = x86_track::rd(16);
-        let mult = x86_track::rd(40);
-        // Ordered TSC stamp (vdso-clock discipline): the reader side
-        // uses lfence;rdtsc so the stamp sits inside its seq window;
-        // the writer stamps with the SAME ordered read so the anchor it
-        // publishes is coherent with every reader's comparison (a bare
-        // rdtsc can execute speculatively early relative to the field
-        // loads — harmless today because raw >= cl is re-checked, but
-        // the ordered read keeps the writer/reader pair symmetric).
-        let raw = x86_track::read_tsc_ordered();
-        // TSC must never read backward; if it ever does (vCPU TSC
-        // smash), keep the old anchor — the emitted bound check sends
-        // readers to the syscall and the resync report paths fire.
-        if raw >= cl {
-            let d = x86_track::tsc_delta_nominal(raw - cl, mult);
-            x86_track::wr(16, base.wrapping_add(d));
-            x86_track::wr(8, raw);
-        }
-        let epoch_ns = crate::timer::wall_epoch_offset_ns();
-        x86_track::wr(24, epoch_ns);
-        let hz = crate::drivers::hotpath::intc::apic::TSC_FREQ.load(Ordering::Acquire);
-        if hz >= 1_000_000 {
-            // Interpolation bound: 50 ms of raw TSC. Refreshes happen
-            // every tick (~10 ms); a healthy reader interpolates at most
-            // a few tens of ms past cycle_last. A larger (or wrapped)
-            // delta means the anchor is stale or the TSC jumped — the
-            // emitter then takes the syscall fallback.
-            x86_track::wr(52, hz / 20);
-        }
-        x86_track::seq_end();
-    }
-}
 
 /// Physical addresses of the two vDSO pages (data, code) for the exec
 /// mapping. `vdso_init()` must have run (code page built).
@@ -13068,7 +12220,7 @@ pub fn is_vdso_phys(phys: u64) -> bool {
 // Code page — mini RV64 assembler
 // ============================================================================
 
-static mut VDSO_CODE_PAGE: VdsoCodePage = VdsoCodePage([0; 4096]);
+pub(super) static mut VDSO_CODE_PAGE: VdsoCodePage = VdsoCodePage([0; 4096]);
 
 #[cfg(not(feature = "x86_64"))]
 mod rv {
@@ -13684,7 +12836,7 @@ fn elf_hash(name: &[u8]) -> u32 {
 
 /// Build the code page: ELF header + phdrs + dynamic + DT_HASH + dynsym
 /// + dynstr + the three functions.
-fn build_code_page() -> [u8; 4096] {
+pub(super) fn build_code_page() -> [u8; 4096] {
     let mut page = [0u8; 4096];
 
     // ---- function bodies (fixed offsets) ----
@@ -14009,18 +13161,6 @@ fn build_code_page() -> [u8; 4096] {
 // Init
 // ============================================================================
 
-/// Build the vDSO ELF code page and prime the data page. Called once
-/// during boot (single-threaded) before the first execve.
-pub fn vdso_init() {
-    // SAFETY: boot-time single-threaded init; the code page is only read
-    // afterwards (user mappings are R+X), and the data page writes are
-    // seqlock-guarded.
-    unsafe {
-        VDSO_CODE_PAGE.0 = build_code_page();
-    }
-    // Prime the snapshot so pre-first-tick readers see sane values.
-    vdso_data_tick();
-}
 
 
 // ════════════════ unwatch ═════════════════════════════

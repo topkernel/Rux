@@ -1,0 +1,2614 @@
+{
+ "sub": "drivers",
+ "target": "kernel/core/src/drivers",
+ "imports_rs": [
+  "use super::types::{",
+  "    AvailRing, BlockDeviceManager, Desc, FrameBuffer, GemObject, GenDisk,",
+  "    NetDevice, NotifyWidth, PendingIo, UsedRing, VirtIONetDevice,",
+  "    VirtIOBlkDevice, VirtIOBlkReqHeader, VirtIOBlkResp, VirtioGpuDevice,",
+  "    VirtioInputDevice, VirtioInputEvent, VirtQueue,",
+  "};",
+  "use super::hotpath::{IO_BUF_LAYOUT, MAX_PENDING_IO_PCI, PCI_BLK_PENDING};",
+  "use super::hotpath::{INPUT_BH_TASKLET, input_bh_run};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use super::hotpath::intc::apic::{",
+  "    APIC_BASE_ENABLE, APIC_BASE_X2APIC, KVM_HC_SEND_IPI, KVM_HC_VMMCALL,",
+  "    KVM_PV_IPI, MSR_IA32_APIC_BASE, X2APIC, X2APIC_ICR, X2APIC_ID, X2APIC_SVR,",
+  "};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use super::hotpath::timer::x86_64::{PIT_CH0_DATA, PIT_CH0_MODE3_BIN, PIT_MODE_CMD};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use crate::arch::cpu::{io_wait, outb, rdmsr, wrmsr};",
+  "#[cfg(feature = \"aarch64\")]",
+  "use super::hotpath::intc::gicv3::{find_my_rd_base, redist_configure_local};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use core::sync::atomic::Ordering;",
+  "#[cfg(any(feature = \"aarch64\", feature = \"riscv64\"))]",
+  "use core::arch::asm;"
+ ],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "fn find_my_rd_base() -> Option<usize> {",
+   "replace": "pub(crate) fn find_my_rd_base() -> Option<usize> {",
+   "why": "gicv3_cpu_interface_enable (unsafe.rs) walks the redistributors"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "fn redist_configure_local(rd: usize) {",
+   "replace": "pub(crate) fn redist_configure_local(rd: usize) {",
+   "why": "gicv3_cpu_interface_enable (unsafe.rs) configures the SGI/PPI bank"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const X2APIC_ID: u32 = 0x802;",
+   "replace": "pub(crate) const X2APIC_ID: u32 = 0x802;",
+   "why": "apic_read_id_raw (unsafe.rs) reads the id MSR"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const X2APIC_ICR: u32 = 0x830;",
+   "replace": "pub(crate) const X2APIC_ICR: u32 = 0x830;",
+   "why": "apic_x2apic_icr_write (unsafe.rs) targets the ICR MSR"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const X2APIC_SVR: u32 = 0x80F;",
+   "replace": "pub(crate) const X2APIC_SVR: u32 = 0x80F;",
+   "why": "apic_svr_read (unsafe.rs) probes the SVR"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "static X2APIC: AtomicBool = AtomicBool::new(false);",
+   "replace": "pub(crate) static X2APIC: AtomicBool = AtomicBool::new(false);",
+   "why": "apic_init_secondary_base (unsafe.rs) reads the BSP's mode choice"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const MSR_IA32_APIC_BASE: u32 = 0x1B;",
+   "replace": "pub(crate) const MSR_IA32_APIC_BASE: u32 = 0x1B;",
+   "why": "apic_base_enable_extd / apic_base_clear_extd / apic_init_secondary_base"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const APIC_BASE_ENABLE: u64 = 1 << 11;",
+   "replace": "pub(crate) const APIC_BASE_ENABLE: u64 = 1 << 11;",
+   "why": "apic_base_* and apic_init_secondary_base (unsafe.rs)"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const APIC_BASE_X2APIC: u64 = 1 << 10;",
+   "replace": "pub(crate) const APIC_BASE_X2APIC: u64 = 1 << 10;",
+   "why": "apic_base_* and apic_init_secondary_base (unsafe.rs)"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const KVM_HC_SEND_IPI: u64 = 10;",
+   "replace": "pub(crate) const KVM_HC_SEND_IPI: u64 = 10;",
+   "why": "kvm_pv_send_ipi (unsafe.rs) issues the hypercall"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "static KVM_PV_IPI: AtomicBool = AtomicBool::new(false);",
+   "replace": "pub(crate) static KVM_PV_IPI: AtomicBool = AtomicBool::new(false);",
+   "why": "kvm_pv_send_ipi (unsafe.rs) gates on the negotiation flag"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "static KVM_HC_VMMCALL: AtomicBool = AtomicBool::new(false);",
+   "replace": "pub(crate) static KVM_HC_VMMCALL: AtomicBool = AtomicBool::new(false);",
+   "why": "kvm_pv_send_ipi (unsafe.rs) picks vmmcall vs vmcall"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const PIT_CH0_DATA: u16 = 0x40;\nconst PIT_MODE_CMD: u16 = 0x43;",
+   "replace": "pub(crate) const PIT_CH0_DATA: u16 = 0x40;\npub(crate) const PIT_MODE_CMD: u16 = 0x43;",
+   "why": "pit_ch0_square_wave_init (unsafe.rs) programs the 8254"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const PIT_CH0_MODE3_BIN: u8 = 0x36;",
+   "replace": "pub(crate) const PIT_CH0_MODE3_BIN: u8 = 0x36;",
+   "why": "pit_ch0_square_wave_init (unsafe.rs) selects mode 3"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "static PCI_BLK_PENDING: [Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]>; MAX_PCI_BLK_DISKS] =",
+   "replace": "pub(crate) static PCI_BLK_PENDING: [Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]>; MAX_PCI_BLK_DISKS] =",
+   "why": "pci_pending_table_ref/mut (unsafe.rs) are the pending-table edges"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const MAX_PENDING_IO_PCI: usize = 64;",
+   "replace": "pub(crate) const MAX_PENDING_IO_PCI: usize = 64;",
+   "why": "the pending-table edge signatures name the slot count"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "const IO_BUF_LAYOUT: alloc::alloc::Layout = unsafe {\n    // SAFETY: 64 with align 16 is a valid layout (const-stable unwrap on\n    // an infallible constructor).\n    alloc::alloc::Layout::from_size_align_unchecked(64, 16)\n};",
+   "replace": "pub(crate) const IO_BUF_LAYOUT: alloc::alloc::Layout =\n    // 64/16 is valid: PROVEN at compile time here instead of\n    // asserted with from_size_align_unchecked (pass-3 drivers\n    // collection; the check is const-evaluated, zero runtime cost).\n    match alloc::alloc::Layout::from_size_align(64, 16) {\n        Ok(l) => l,\n        Err(_) => panic!(\"IO_BUF_LAYOUT: 64/16 is a valid layout\"),\n    };",
+   "why": "the <module> region is a const initializer \u2014 a const context cannot call an unsafe.rs wrapper fn, so the region is eliminated at the site with the const-checked constructor (same layout, compile-time proof)"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "static mut INPUT_BH_TASKLET: crate::interrupt::tasklet::TaskletStruct =",
+   "replace": "pub(crate) static mut INPUT_BH_TASKLET: crate::interrupt::tasklet::TaskletStruct =",
+   "why": "input_bh_tasklet_init (unsafe.rs) arms the tasklet"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {",
+   "replace": "pub(crate) fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {",
+   "why": "input_bh_tasklet_init (unsafe.rs) registers the handler"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "use core::ptr::{read_volatile, write_volatile};\n",
+   "replace": "",
+   "why": "the read_volatile/write_volatile users moved to unsafe.rs (resp_status_read kept the core::ptr:: full path)"
+  },
+  {
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "find": "use alloc::alloc::{Layout, alloc, alloc_zeroed, dealloc};",
+   "replace": "use alloc::alloc::Layout;",
+   "why": "the alloc/dealloc/alloc_zeroed users moved to unsafe.rs (Layout stays for the gpu ctrl path)"
+  },
+  {
+   "file": "kernel/core/src/drivers/types.rs",
+   "find": "pub(super) struct PendingIo {",
+   "replace": "pub(crate) struct PendingIo {",
+   "why": "pci_pending_table_ref/mut and PCI_BLK_PENDING (unsafe.rs edges) expose PendingIo in pub(crate) signatures"
+  }
+ ],
+ "moves": [
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "iar1_read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0d264deae088",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "gicv3_iar1_read",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "v = crate::drivers::r#unsafe::gicv3_iar1_read()",
+   "ret": "u64",
+   "attr": "#[cfg(feature = \"aarch64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read ICC_IAR1_EL1 (the GICv3 acknowledge register)."
+   ],
+   "contract": [
+    "The read is the acknowledge side effect itself: ICC_IAR1_EL1",
+    "returns the pending INTID and drops its priority; QEMU fixes",
+    "SRE=1 so the system-register form is always available."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { asm!(",
+     "replace": "let v: u64;\n    unsafe { asm!("
+    }
+   ],
+   "body_suffix": "\n        v"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "eoir1_write",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "70b1af9dbc02",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "gicv3_eoir1_write",
+   "params": "intid: u32",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::gicv3_eoir1_write(intid);",
+   "attr": "#[cfg(feature = \"aarch64\")]\n#[inline(always)]",
+   "doc": [
+    "Write ICC_EOIR1_EL1 (end of interrupt)."
+   ],
+   "contract": [
+    "The write deactivates the previously acknowledged INTID",
+    "(EOImode stays 0 = single-write EOI)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_sgi",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d164ed8443ef",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "gicv3_sgi1r_write",
+   "params": "sgi: u64",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::gicv3_sgi1r_write(sgi);",
+   "attr": "#[cfg(feature = \"aarch64\")]\n#[inline(always)]",
+   "doc": [
+    "Write ICC_SGI1R_EL1 (raise an SGI on the encoded targets)."
+   ],
+   "contract": [
+    "`sgi` carries the GICv3 SGI field layout the caller built",
+    "(INTID [27:24], TargetList [15:0]); the write raises the",
+    "SGI on the target cores."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "enable_cpu_interface",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d3757d84beb6",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "gicv3_cpu_interface_enable",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::gicv3_cpu_interface_enable();",
+   "attr": "#[cfg(feature = \"aarch64\")]\n#[inline(always)]",
+   "doc": [
+    "The GICv3 CPU-interface enable sequence (SRE, PMR, group-1)."
+   ],
+   "contract": [
+    "IRREDUCIBLE F-GIC-A1: ICC_* system-register programming",
+    "(reference kernel drivers/irqchip/irq-gic-v3.c gic_cpu_init);",
+    "register-file access with no safe shape. Runs per CPU from",
+    "the boot path; idempotent."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "read_time",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9238a8157018",
+   "inv": "F5",
+   "section": "timer: arch timer programming edges (F5)",
+   "name": "timer_riscv64_read_time",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::timer_riscv64_read_time()",
+   "ret": "u64",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Read the riscv64 time CSR (rdtime)."
+   ],
+   "contract": [
+    "rdtime is a read-only CSR available in S-mode; no other",
+    "side effect (INV:F5 timer floor)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "set_timecmp",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "b03ce47a9488",
+   "inv": "F5",
+   "section": "timer: arch timer programming edges (F5)",
+   "name": "timer_riscv64_sbi_set_timer",
+   "params": "value: u64",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::timer_riscv64_sbi_set_timer(value);",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Arm the riscv64 timer through the SBI TIMER extension."
+   ],
+   "contract": [
+    "sbi_rt::set_timer is an SBI ecall with no special",
+    "preconditions; `value` is an absolute deadline (u64).",
+    "Per-hart: applies to the calling hart."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "set_timer_stimecmp",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "03fed1689bef",
+   "inv": "F5",
+   "section": "timer: arch timer programming edges (F5)",
+   "name": "timer_riscv64_stimecmp_set",
+   "params": "deadline: u64",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::timer_riscv64_stimecmp_set(deadline);",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]\n#[allow(dead_code)]",
+   "doc": [
+    "Write the stimecmp CSR (sstc extension)."
+   ],
+   "contract": [
+    "A single CSR write of the absolute deadline; more direct",
+    "than SBI and avoids its round trip."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5204389c3b43",
+   "inv": "F5",
+   "section": "timer: arch timer programming edges (F5)",
+   "name": "pit_ch0_square_wave_init",
+   "params": "divisor: u16",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::pit_ch0_square_wave_init(divisor);",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Program PIT channel 0 for square-wave ticks (IRQ0 fallback)."
+   ],
+   "contract": [
+    "Ports 0x40/0x43 are the fixed 8254 channel-0 data and",
+    "mode/command registers; this is the standard programming",
+    "sequence. Called when the LAPIC tick could not arm."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "set_timer",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4ee893abfed8",
+   "inv": "F5",
+   "section": "timer: arch timer programming edges (F5)",
+   "name": "timer_aarch64_arm",
+   "params": "deadline: u64",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::timer_aarch64_arm(deadline);",
+   "attr": "#[cfg(feature = \"aarch64\")]\n#[inline(always)]",
+   "doc": [
+    "Arm the aarch64 EL1 virtual timer to an absolute deadline."
+   ],
+   "contract": [
+    "Writing cntv_cval_el0/cntv_ctl_el0 arms the per-cpu timer;",
+    "the only side effect is the future PPI."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "reg_read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dacb0f778567",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_reg_read_msr",
+   "params": "msr_x2apic: u32",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_reg_read_msr(msr_x2apic)",
+   "ret": "u32",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "x2APIC MSR read of one LAPIC register."
+   ],
+   "contract": [
+    "READY gates first use; the MSR index is one of the LAPIC",
+    "register constants."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "reg_read",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "0601cdb4a3fc",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_reg_read_mmio",
+   "params": "va: usize",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_reg_read_mmio(va)",
+   "ret": "u32",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "xAPIC MMIO read of one LAPIC register."
+   ],
+   "contract": [
+    "`va` is the kernel-half device-alias address of the LAPIC",
+    "window (Linux fixmap discipline: shared into every mm,",
+    "never a low identity VA), mapped at setup_device_mappings."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "reg_write",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dae8daf83943",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_reg_write_msr",
+   "params": "msr_x2apic: u32, value: u32",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_reg_write_msr(msr_x2apic, value)",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "x2APIC MSR write of one LAPIC register."
+   ],
+   "contract": [
+    "READY gates first use; the MSR index is one of the LAPIC",
+    "register constants."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "reg_write",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "9cc3f66cb891",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_reg_write_mmio",
+   "params": "va: usize, value: u32",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_reg_write_mmio(va, value)",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "xAPIC MMIO write of one LAPIC register."
+   ],
+   "contract": [
+    "`va` is the kernel-half device-alias address of the LAPIC",
+    "window (see apic_reg_read_mmio)."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "kvm_pv_send_ipi",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dd8943d69fd5",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "vis": "pub(crate)",
+   "name": "kvm_pv_send_ipi",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV:F5 (KVM pv-IPI hypercall, IRREDUCIBLE",
+   "callmap": [
+    {
+     "find": "            if on && kvm_pv_send_ipi(dest, vector) {",
+     "replace": "            if on && crate::drivers::r#unsafe::kvm_pv_send_ipi(dest, vector) {"
+    },
+    {
+     "find": "            if kvm_pv_send_ipi(dest, vector) {",
+     "replace": "            if crate::drivers::r#unsafe::kvm_pv_send_ipi(dest, vector) {"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_icr",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7a7046ef2923",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_x2apic_icr_write",
+   "params": "icr: u64",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_x2apic_icr_write(icr)",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Raw x2APIC ICR write."
+   ],
+   "contract": [
+    "In x2APIC the delivery-status bit is reserved/RAZ: the",
+    "write is posted and back-to-back MSR writes serialize",
+    "sufficiently (the caller falls back to the MMIO polling",
+    "shape on xAPIC)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "tick_arm_ra",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "54942913c252",
+   "inv": "F5",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "tick_arm_ra_read",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "        ra = crate::drivers::r#unsafe::tick_arm_ra_read();",
+   "ret": "u64",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Read this helper's caller's return address off the frame."
+   ],
+   "contract": [
+    "Pure register-relative read ([rbp+8], frame pointers forced",
+    "on), no memory side effects."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let ra: u64;\n        unsafe {"
+    }
+   ],
+   "body_suffix": "\n        ra"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "ensure_phys_mapped",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "deb9d0a6bc9a",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "map_firmware_range_linear",
+   "params": "page_offset: u64, start: usize, end: usize, flags: u64",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::map_firmware_range_linear(page_offset, start, end, flags);",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Map [start, end) of the physical range into the linear map."
+   ],
+   "contract": [
+    "Kernel-only linear-map VAs for firmware-table regions the",
+    "e820 walk skipped; the regions are reserved (never handed",
+    "to the page allocator). Re-mapping an already-mapped PTE",
+    "rewrites the same value (idempotent)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "this_lapic_id_raw",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a3efc92bf35d",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_read_id_raw",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_read_id_raw()",
+   "ret": "u32",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read the local APIC id without the READY guard."
+   ],
+   "contract": [
+    "x2APIC was enabled by the base MSR programming before this",
+    "runs (MADT parsing while the APIC is globally enabled but",
+    "the driver is not yet marked ready)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_x2apic_or_mmio",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "99d317430210",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_base_enable_extd",
+   "params": "has_x2: bool",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::apic_base_enable_extd(has_x2);",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Program IA32_APIC_BASE: global enable, EXTD per `has_x2`."
+   ],
+   "contract": [
+    "IA32_APIC_BASE programming of THIS cpu; the caller derived",
+    "`has_x2` from CPUID leaf 1 ECX bit 21 (the RT-2X probe",
+    "story lives on the hotpath fn)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_x2apic_or_mmio",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "f300f0c1ece8",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_svr_read",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::apic_svr_read()",
+   "ret": "u64",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read the x2APIC SVR (spurious-vector register)."
+   ],
+   "contract": [
+    "Gated on the EXTD write above; a functioning APIC reads",
+    "nonzero (reset 0xFF), an unbacked MSR range reads 0."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_x2apic_or_mmio",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "018ee9d7ff8c",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_base_clear_extd",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "            crate::drivers::r#unsafe::apic_base_clear_extd();",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Fall back to MMIO xAPIC: clear EXTD, keep global enable."
+   ],
+   "contract": [
+    "IA32_APIC_BASE programming of THIS cpu (the SVR probe",
+    "above found a dead MSR interface)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_secondary",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "f5b482f105d5",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "apic_init_secondary_base",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::apic_init_secondary_base();",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Enable the local APIC on an AP in the mode the BSP chose."
+   ],
+   "contract": [
+    "IA32_APIC_BASE programming of THIS cpu; X2APIC holds the",
+    "mode the BSP published before secondaries came up."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "read_reg",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "bf3a69abc5ae",
+   "inv": "INV-MMIO-1",
+   "section": "intc: interrupt-controller register edges (INV-MMIO-1 / F5)",
+   "name": "goldfish_rtc_reg_read",
+   "params": "va: u64, offset: u64",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::goldfish_rtc_reg_read(va, offset)",
+   "ret": "u32",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read one 32-bit goldfish-RTC device register."
+   ],
+   "contract": [
+    "The page at GOLDFISH_RTC_BASE is identity-mapped with",
+    "device flags by setup_device_mappings; only reachable",
+    "after that (INV-MMIO-1)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "private",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0935f7cfe86a",
+   "inv": "INV-BLKDEV-3",
+   "section": "blkdev: gendisk registry edges (INV-BLKDEV-1 / INV-BLKDEV-3)",
+   "name": "gen_disk_private_ref<'a, T>",
+   "params": "p: *mut u8",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gen_disk_private_ref(p)",
+   "ret": "&'a T",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Resolve the disk's private-data slot as a shared `&T`."
+   ],
+   "contract": [
+    "INV-BLKDEV-3: `private_data`, set at device init before",
+    "registration, points to a `T` that lives at least as long",
+    "as the registered disk (machine lifetime) and is not",
+    "mutated through this shared view while registered."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "get_disk",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "759e1fd11b83",
+   "inv": "INV-BLKDEV-1",
+   "section": "blkdev: gendisk registry edges (INV-BLKDEV-1 / INV-BLKDEV-3)",
+   "name": "gen_disk_ref<'a>",
+   "params": "p: &GenDisk",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gen_disk_ref(gd.as_ref())",
+   "ret": "&'a GenDisk",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Extend a boxed registered disk's shared view to 'static."
+   ],
+   "contract": [
+    "INV-BLKDEV-1: a registered disk is boxed ONCE into the",
+    "manager's Vec and never removed (no unregister path); a",
+    "Box's heap allocation is address-stable across Vec growth."
+   ],
+   "body_edits": [
+    {
+     "find": "gd.as_ref()",
+     "replace": "p"
+    }
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for GenDisk",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "1ea4aa6c5847",
+   "inv": "INV-BLKDEV-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-BLKDEV-1 (ledger row GAP): a registered GenDisk is boxed once into the manager's Vec and never removed \u2014 the Box outlives every shared view handed out of the registry."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for GenDisk",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "9fdd9167c27e",
+   "inv": "INV-BLKDEV-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-BLKDEV-1 (ledger row GAP): GenDisk state is manager-owned and its per-disk fields are only written at init before registration."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for BlockDeviceManager",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "7771f7d416a5",
+   "inv": "INV-BLKDEV-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-BLKDEV-1 (ledger row GAP): the manager's registry is Spinlock-guarded; no thread holds a &mut view outside the lock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for BlockDeviceManager",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "b0b40eddc9b6",
+   "inv": "INV-BLKDEV-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-BLKDEV-1 (ledger row GAP): every field access goes through the manager's Spinlock; shared &self views are read-only."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "io_buf_alloc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "650f5aa80af7",
+   "inv": "INV-BLKDEV-2",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "io_buf_park_pop_head",
+   "params": "p: *mut u8",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::io_buf_park_pop_head(p)",
+   "ret": "usize",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read a parked io_buf's intrusive next pointer (first 8 bytes)."
+   ],
+   "contract": [
+    "INV-BLKDEV-2: parked buffers were allocated with",
+    "IO_BUF_LAYOUT; the first 8 bytes hold the intrusive next",
+    "pointer (the consumer re-initializes the header before",
+    "use)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "io_buf_alloc",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "2235a5beff16",
+   "inv": "INV-BLKDEV-2",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "io_buf_heap_alloc",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::io_buf_heap_alloc()",
+   "ret": "*mut u8",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Heap allocation of one 64-byte io_buf (pool underflow path)."
+   ],
+   "contract": [
+    "INV-BLKDEV-2: IO_BUF_LAYOUT is a non-zero-size valid",
+    "layout (proven at compile time by the const)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "io_buf_free",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "eaf0dfb06162",
+   "inv": "INV-BLKDEV-2",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "io_buf_park_store_head",
+   "params": "p: *mut u8, head: usize",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::io_buf_park_store_head(p, pl.head)",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Park the intrusive next pointer in a pooled io_buf's head."
+   ],
+   "contract": [
+    "INV-BLKDEV-2: `p` is a live 64-byte, 16-aligned block;",
+    "parking the next pointer in its first 8 bytes is safe",
+    "because every consumer re-initializes the header before",
+    "use."
+   ],
+   "body_edits": [
+    {
+     "find": "pl.head",
+     "replace": "head"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "io_buf_free",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "9450bde4a4a3",
+   "inv": "INV-BLKDEV-2",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "io_buf_heap_dealloc",
+   "params": "p: *mut u8",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::io_buf_heap_dealloc(p)",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Heap deallocation of one pooled-layout io_buf (pool overflow)."
+   ],
+   "contract": [
+    "INV-BLKDEV-2: `p` was allocated with IO_BUF_LAYOUT (64/16)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "io_buf_init",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d39cf5f26067",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "io_buf_split_init",
+   "params": "io_buf: *mut u8, type_: u32, sector: u64",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::io_buf_split_init(io_buf, type_, sector)",
+   "ret": "(*mut VirtIOBlkReqHeader, *mut VirtIOBlkResp)",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Split one pooled 64-byte io_buf into its typed halves and",
+    "initialize them (the R17-C combined block)."
+   ],
+   "contract": [
+    "INV-SAFECALL-1: `io_buf` is non-null (callers check), 64",
+    "bytes, 16-aligned; +48 leaves 16 bytes for the response \u2014",
+    "both in bounds. THE one audited carve edge for the pool",
+    "shape (ledger row GAP; the contract is the doc above)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "io_buf_release",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "aa4b9b75cd90",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "io_buf_nonpool_dealloc",
+   "params": "ptr: *mut u8, layout: alloc::alloc::Layout",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::io_buf_nonpool_dealloc(ptr, layout);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Heap deallocation of a NON-pool-shaped pending entry block."
+   ],
+   "contract": [
+    "INV-SAFECALL-1: dealloc with the exact layout the",
+    "submitter allocated with (non-pool shape; the caller",
+    "already routed pool-shaped blocks to io_buf_free)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "begin_delivery",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dd08017f8611",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "completion_begin_delivery",
+   "params": "completion: *mut crate::fs::types::IoCompletion",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::completion_begin_delivery(completion);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Mark a pending's completion as under delivery."
+   ],
+   "contract": [
+    "INV-SAFECALL-1: the count protocol keeps the IoCompletion",
+    "(and its waiter's stack) alive; callers hold the",
+    "pending-table lock that serializes the handshake."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "deliver_completion",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "bad1f04fadf3",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "completion_deliver",
+   "params": "completion: *mut crate::fs::types::IoCompletion, status: i32, token: usize",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::completion_deliver(completion, status, token);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Complete a pending's completion through the raw pointer."
+   ],
+   "contract": [
+    "INV-SAFECALL-1: see the doc \u2014 count protocol + retire",
+    "order (complete_with_token, then end_delivery)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "abandon_pending_completion",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "6f83859efe39",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "completion_wait_deliveries",
+   "params": "comp: *mut crate::fs::types::IoCompletion",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::completion_wait_deliveries(comp)",
+   "ret": "bool",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Wait out any walker delivery of THIS completion still in flight."
+   ],
+   "contract": [
+    "INV-SAFECALL-1: the entry was taken from a table before the",
+    "scan, so the tombstone pass could not retire it; the",
+    "delivering count gates a late complete() into a recycled",
+    "waiter stack (the ftest01 wandering-corruption fix)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_blk_acquire_site",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "28338b3ddac3",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "pciblk_site_ra_riscv64",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    {\n        ra = crate::drivers::r#unsafe::pciblk_site_ra_riscv64();\n    }",
+   "ret": "usize",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Capture the caller's return address (virtio acquire site)."
+   ],
+   "contract": [
+    "Pure register read (`mv ra`), no memory access or side",
+    "effects (holder forensics, same technique as spinlock.rs)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let ra: usize;\n    unsafe {"
+    }
+   ],
+   "body_suffix": "\n    ra"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_blk_acquire_site",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "6542bc03aa6b",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "pciblk_site_ra_x86_64",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    {\n        ra = crate::drivers::r#unsafe::pciblk_site_ra_x86_64();\n    }",
+   "ret": "usize",
+   "attr": "#[cfg(feature = \"x86_64\")]\n#[inline(always)]",
+   "doc": [
+    "Capture the caller's return address (virtio acquire site)."
+   ],
+   "contract": [
+    "Frame pointers are forced on, so [rbp+8] is this inlined",
+    "helper's caller's return address."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let ra: usize;\n    unsafe {"
+    }
+   ],
+   "body_suffix": "\n    ra"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "wedge_put",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5ac796daaa4e",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "wedge_console_put",
+   "params": "b: u8",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::wedge_console_put(b)",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Lock-free console byte for holder forensics."
+   ],
+   "contract": [
+    "INV-SAFECALL-1: putchar_no_lock is a byte-wise polling",
+    "UART write usable from any context, including with",
+    "interrupts disabled (the holder may be wedged holding",
+    "printk's lock)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_pending_slot_reservable_len",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "678cc925a2e3",
+   "inv": "F7",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "pci_pending_table_ref",
+   "params": "disk: usize",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::pci_pending_table_ref(disk)",
+   "ret": "&'static [Option<PendingIo>; MAX_PENDING_IO_PCI]",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Shared view of a disk's pending-table slots."
+   ],
+   "contract": [
+    "F7 (SUBMIT-2X): the caller holds that disk's BLK lock,",
+    "which serializes every pending-table access \u2014 the table's",
+    "own lock is deliberately not taken inside the window."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_publish_sync_chain",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "dbca3bd100f4",
+   "inv": "F7",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "pci_pending_table_mut",
+   "params": "disk: usize",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::pci_pending_table_mut(disk)",
+   "ret": "&'static mut [Option<PendingIo>; MAX_PENDING_IO_PCI]",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Exclusive view of a disk's pending-table slots."
+   ],
+   "contract": [
+    "F7 (SUBMIT-2X): the caller holds that disk's BLK lock",
+    "(submit publish, walker collect, sync tombstones and",
+    "abandon all run under it) \u2014 direct access, no second",
+    "lock acquisition inside the window."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_flag_sync_tombstone_timed_out",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "de329f41e7ce",
+   "inv": "F7",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "call": "crate::drivers::r#unsafe::pci_pending_table_mut(disk)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "abandon_pending_completion",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8c03bc3e26e0",
+   "inv": "F7",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "call": "crate::drivers::r#unsafe::pci_pending_table_mut(disk)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_submit_data_async_sg",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "f190918f6ded",
+   "inv": "F7",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "call": "crate::drivers::r#unsafe::pci_pending_table_mut(slot)",
+   "doc": [
+    "Exclusive view of the disk's pending table at publish time."
+   ],
+   "contract": [
+    "F7 discipline (ledger row GAP): the BLK lock is held (the",
+    "_guard above); the store itself needs no second table",
+    "lock."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_process_async_completions_slot",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "94b938abb36d",
+   "inv": "F7",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "call": "crate::drivers::r#unsafe::pci_pending_table_mut(slot)",
+   "doc": [
+    "Exclusive view of the disk's pending table in the walker."
+   ],
+   "contract": [
+    "F7 discipline (ledger row GAP): the BLK lock held by this",
+    "walker pass serializes all pending-table access (submit",
+    "publish takes the same lock) \u2014 direct access, no second",
+    "table-lock acquisition per completed chain."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "pci_process_async_completions_slot",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "8510e9c8cfec",
+   "inv": "INV-SAFECALL-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "name": "pending_begin_delivery_walk",
+   "params": "completion: *mut crate::fs::types::IoCompletion",
+   "vis": "pub(crate)",
+   "call": "                            crate::drivers::r#unsafe::pending_begin_delivery_walk(p.completion);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Walker-side begin_delivery through a fired entry's raw pointer."
+   ],
+   "contract": [
+    "INV-SAFECALL-1 (ledger row GAP): the ABANDON-vs-DELIVERY",
+    "protocol \u2014 mark the waiter's completion as under delivery",
+    "BEFORE the table lock drops, so abandon_pending_completion",
+    "can never fire into a waiter's kernel stack after its",
+    "wait() returned."
+   ],
+   "body_edits": [
+    {
+     "find": "(*p.completion)",
+     "replace": "(*completion)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "get_pci_gen_disk_at",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a04b416e7827",
+   "inv": "INV-BLKDEV-1",
+   "section": "virtio-blk: io_buf pool, pending table and completion edges (INV-BLKDEV-2 / INV-SAFECALL-1 / F7)",
+   "call": "crate::drivers::r#unsafe::gen_disk_ref(ptr)",
+   "doc": [
+    "Extend a registered PCI disk's shared view to 'static."
+   ],
+   "contract": [
+    "INV-BLKDEV-1 (ledger row GAP): same boxed-once registry",
+    "proof as get_disk \u2014 the Box outlives the lock and the",
+    "machine; the allocation is address-stable."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for VirtIOBlkDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "e041964ba8b7",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks serialize all mutable access to shared fields."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for VirtIOBlkDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "d6c11e9b1f33",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: all shared state is protected by Spinlocks (irqsafe where needed), so shared &self views see a consistent state."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for PendingIo",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "bfcfbc814067",
+   "inv": "F7",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "F7 family (ledger row GAP): PendingIo lives in a Spinlock- protected table and is only touched from IRQ/softirq context; its raw pointers are not shared across threads."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "used_ring_idx",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c80a5894ae57",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "vring_used_idx",
+   "params": "used_ring: *const UsedRing",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::vring_used_idx(used_ring)",
+   "ret": "u16",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Read the used-ring idx field (offset 2, u16)."
+   ],
+   "contract": [
+    "INV-DMA-3: a live vring's used ring (the null check is the",
+    "caller's); the u16 at +2 is the device-written idx."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "used_ring_elem_id",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d18a88ddce80",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "vring_used_elem_id",
+   "params": "used_ring: *const UsedRing, slot: usize",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::vring_used_elem_id(used_ring, slot)",
+   "ret": "u32",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Read one used-ring entry's id field."
+   ],
+   "contract": [
+    "INV-DMA-3: live used ring; the entry at +4+slot*8 is",
+    "within the ring (queue_size checked by the caller)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "resp_status_byte",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ccf2bad68487",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "resp_status_read",
+   "params": "resp_status: *const u8",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::resp_status_read(resp_status)",
+   "ret": "u8",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read the device-written response byte of a live request."
+   ],
+   "contract": [
+    "INV-DMA-3: caller-owned response byte of a live request;",
+    "volatile read (the device may write it any time up to the",
+    "completion)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "notify",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "3b13ceccf713",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "virtio_notify_sie_save",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "        {\n            sie_backup = crate::drivers::r#unsafe::virtio_notify_sie_save();\n        }",
+   "ret": "u64",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Read `sie` and clear SEIE (bit 9) around the notify store."
+   ],
+   "contract": [
+    "INV-DMA-3 (F-VIO-NOTIFY family): register-based CSR",
+    "read/modify around the MMIO kick so the device IRQ cannot",
+    "nest into the notify window on riscv64."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe {",
+     "replace": "let sie_backup: u64;\n        unsafe {"
+    }
+   ],
+   "body_suffix": "\n        sie_backup"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "notify",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "21284905d5c3",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "virtio_notify_fence_wo",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "        {\n            crate::drivers::r#unsafe::virtio_notify_fence_wo();\n        }",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Store fence (w, o) before the notify MMIO write."
+   ],
+   "contract": [
+    "Orders the descriptor/avail writes before the device",
+    "kick on riscv64."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "notify",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "5c741aaee2cb",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "virtio_notify_mmio",
+   "params": "notify_width: NotifyWidth, queue_notify: u64, queue_index: u16",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::virtio_notify_mmio(self.notify_width, self.queue_notify, self.queue_index);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "The queue-notify MMIO store (the device kick itself)."
+   ],
+   "contract": [
+    "INV-DMA-3 (IRREDUCIBLE F-VIO-NOTIFY): `queue_notify` is a",
+    "valid MMIO address for the VirtIO notify register; the",
+    "width matches the capability negotiation (16-byte PCI",
+    "notify / 32-byte virtio-mmio \u2014 QEMU drops access != 4B)."
+   ],
+   "body_edits": [
+    {
+     "find": "self.notify_width",
+     "replace": "notify_width"
+    },
+    {
+     "find": "self.queue_notify as *mut u16",
+     "replace": "queue_notify as *mut u16"
+    },
+    {
+     "find": "self.queue_notify as *mut u32",
+     "replace": "queue_notify as *mut u32"
+    },
+    {
+     "find": "self.queue_index)",
+     "replace": "queue_index)"
+    },
+    {
+     "find": "self.queue_index as u32",
+     "replace": "queue_index as u32"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "notify",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "1aa46122d722",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "virtio_notify_fence_iorw",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "        {\n            crate::drivers::r#unsafe::virtio_notify_fence_iorw();\n        }",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Full fence (iorw, iorw) after the notify MMIO write."
+   ],
+   "contract": [
+    "Orders the kick against everything around it on riscv64."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "notify",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "1b914b49d8c2",
+   "inv": "INV-DMA-3",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "virtio_notify_sie_restore",
+   "params": "sie_backup: u64",
+   "vis": "pub(crate)",
+   "call": "        {\n            crate::drivers::r#unsafe::virtio_notify_sie_restore(sie_backup);\n        }",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "Restore the `sie` CSR saved around the notify window."
+   ],
+   "contract": [
+    "Writing the sie CSR to restore the previous interrupt-",
+    "enable state is valid on S-mode; `sie_backup` is the value",
+    "virtio_notify_sie_save returned."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "desc_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1fddde9075bc",
+   "inv": "INV-DMA-2",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "vq_desc_mut<'a>",
+   "params": "base: *mut Desc, idx: u16",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::vq_desc_mut(base, idx)",
+   "ret": "&'a mut Desc",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Mutable view of one descriptor-table slot."
+   ],
+   "contract": [
+    "INV-DMA-2: the idx bounds check is the caller's (the",
+    "slot's range is disjoint from every other slot); the",
+    "caller's device lock provides the exclusion."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "avail_header_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e3b234e3ae86",
+   "inv": "INV-DMA-2",
+   "section": "virtio::queue: vring access and notify edges (INV-DMA-2 / INV-DMA-3)",
+   "name": "vq_avail_mut<'a>",
+   "params": "base: *mut AvailRing",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::vq_avail_mut(base)",
+   "ret": "&'a mut AvailRing",
+   "attr": "#[inline(always)]\n#[allow(dead_code)]",
+   "inline": true,
+   "doc": [
+    "Mutable view of the available-ring header."
+   ],
+   "contract": [
+    "INV-DMA-2: disjoint slot, the avail header is driver-",
+    "written; the caller's device lock serializes."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for VirtQueue",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "61e0d0f1da1e",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: a VirtQueue is owned by one device instance; every shared view sits behind the device's own lock discipline."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for VirtQueue",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "51d2292110dc",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: the queue's ring memory is only written by the driver under the device lock or by the device through DMA (INV-DMA-2/3)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for NetDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "cc1bcda7b327",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: the net::space section banner above this impl stayed in hotpath.rs; the type has no cross-thread &mut sharing."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for NetDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "04f303eeaf7a",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Round-5: NetDevice's cross-thread state (stats, flags) is mutated under the NetRx softirq / syscall discipline each op documents; the priv_ raw slot is driver-owned and set before registration."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for VirtIONetDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "3e9ed68c4d38",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: all shared state is protected by Spinlocks (irqsave where needed); the device is confined to the net driver."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "poll",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "79cfd464ed11",
+   "inv": "INV-KPTR-3",
+   "section": "virtio-net: RX buffer edges (INV-KPTR-3)",
+   "name": "rx_hdr_slice<'a>",
+   "params": "buf_virt: u64, total_len: usize",
+   "vis": "pub(crate)",
+   "call": "        let hdr_and_data = crate::drivers::r#unsafe::rx_hdr_slice(buf_virt, total_len);",
+   "ret": "&'a [u8]",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Byte view of the device-completed RX buffer."
+   ],
+   "contract": [
+    "INV-KPTR-3: `buf_virt` is the linear-mapping address of a",
+    "device-completed RX buffer owned by this device (taken",
+    "from its own descriptor table); `total_len` is the",
+    "device-reported length, checked > header size by the",
+    "caller."
+   ],
+   "body_edits": [
+    {
+     "find": "let hdr_and_data = unsafe {",
+     "replace": "unsafe {"
+    },
+    {
+     "find": "        };",
+     "replace": "        }"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "dealloc_rx_buffer",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "51b0049bb920",
+   "inv": "INV-KPTR-3",
+   "section": "virtio-net: RX buffer edges (INV-KPTR-3)",
+   "name": "rx_buffer_dealloc",
+   "params": "addr: u64, buf_size: usize",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::rx_buffer_dealloc(addr, buf_size);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Free an RX buffer with its exact allocation layout."
+   ],
+   "contract": [
+    "INV-KPTR-3: the buffer was allocated with the identical",
+    "layout in refill_rx_buffers (64-aligned, buf_size bytes)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "refill_rx_buffers",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "bcb4845079c0",
+   "inv": "INV-KPTR-3",
+   "section": "virtio-net: RX buffer edges (INV-KPTR-3)",
+   "name": "rx_buffer_alloc",
+   "params": "layout: alloc::alloc::Layout",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::rx_buffer_alloc(layout)",
+   "ret": "*mut u8",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Allocate one RX buffer (null-checked by the caller)."
+   ],
+   "contract": [
+    "INV-KPTR-3: the layout is validated (from_size_align Ok)",
+    "by the caller before this allocation; the null check",
+    "follows immediately."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "refill_rx_buffers",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "cbec77b5dfca",
+   "inv": "INV-KPTR-3",
+   "section": "virtio-net: RX buffer edges (INV-KPTR-3)",
+   "call": "crate::drivers::r#unsafe::layout_dealloc(buf_ptr, layout);"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "flush_framebuffer",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "6ae02563cb55",
+   "inv": "INV-SLOT-1",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_flush",
+   "params": "device: *const VirtioGpuDevice",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::gpu_flush(device);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Flush the GPU device through its raw static-slot pointer."
+   ],
+   "contract": [
+    "INV-SLOT-1: GPU_DEVICE is a static set once by",
+    "set_gpu_device() during probe and never cleared; the",
+    "pointer stays valid for the machine's lifetime."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "with_gpu_device",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8302007790cc",
+   "inv": "INV-SLOT-1",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_device_ref<'a>",
+   "params": "device: *const VirtioGpuDevice",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gpu_device_ref(device)",
+   "ret": "&'a VirtioGpuDevice",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Shared view of the registered GPU device."
+   ],
+   "contract": [
+    "INV-SLOT-1: GPU_DEVICE is set once during boot and never",
+    "cleared; the reference cannot outlive the machine."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for FrameBuffer",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "d819eac3197e",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: a FrameBuffer owns its fb_ptr allocation outright (allocated in init_framebuffer, freed in Drop)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for FrameBuffer",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "eeb772436dda",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: FrameBuffer is only reached through the GPU_DEVICE slot's lock; no concurrent &mut view exists."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for VirtioGpuDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "c918f731f33f",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: the device's shared state sits behind Spinlocks; the raw ctrl-queue pointers are only touched under cmd_lock."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for VirtioGpuDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "e74a05112970",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: all command-path state is lock-serialized; shared &self views see a consistent device."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_framebuffer",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "572f2dcf2e70",
+   "inv": "INV-MMIO-1",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "dma_zeroed_alloc",
+   "params": "layout: alloc::alloc::Layout",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::dma_zeroed_alloc(layout)",
+   "ret": "*mut u8",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Zeroed allocation of a DMA buffer (null-checked by caller)."
+   ],
+   "contract": [
+    "INV-MMIO-1 family: the layout has non-zero size (fb_size =",
+    "stride*height with width/height checked != 0); the null",
+    "check follows. Shared RX/event/dumb-buffer edge."
+   ],
+   "body_edits": [
+    {
+     "find": "alloc_zeroed(layout)",
+     "replace": "alloc::alloc::alloc_zeroed(layout)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "create_dumb",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2600a08b3a1a",
+   "inv": "F9",
+   "section": "drm: GEM-object edges (F9)",
+   "call": "crate::drivers::r#unsafe::dma_zeroed_alloc(layout)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_virtio",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "7a8acc9a59b5",
+   "inv": "GAP",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "call": "crate::drivers::r#unsafe::dma_zeroed_alloc(buffer_layout)",
+   "doc": [
+    "Zeroed allocation of the input device's event DMA buffer."
+   ],
+   "contract": [
+    "Ledger GAP: the layout is the checked queue_size-sized",
+    "event-buffer shape; the null check follows immediately."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_command",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ce904819159f",
+   "inv": "GAP",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_ctrl_alloc",
+   "params": "layout: alloc::alloc::Layout",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gpu_ctrl_alloc(io_layout)",
+   "ret": "*mut u8",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Allocate the control-queue command/response buffer."
+   ],
+   "contract": [
+    "Ledger GAP: the layout is non-zero-sized (both parts are",
+    ">= 24 bytes); the null check follows immediately."
+   ],
+   "body_edits": [
+    {
+     "find": "alloc(io_layout)",
+     "replace": "alloc::alloc::alloc(layout)"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_command",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "310cfbf9bfea",
+   "inv": "GAP",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_ctrl_resp_half",
+   "params": "io_buf: *mut u8, cmd_size: usize",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gpu_ctrl_resp_half(io_buf, cmd_size)",
+   "ret": "*mut u8",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Response half of the control-queue io buffer."
+   ],
+   "contract": [
+    "Ledger GAP: io_buf is cmd_size + resp_size bytes, so",
+    "+cmd_size is within the allocation."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_command",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "56449180eb49",
+   "inv": "GAP",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_ctrl_cmd_copy<CMD>",
+   "params": "cmd: &CMD, cmd_size: usize, io_buf: *mut u8",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::gpu_ctrl_cmd_copy(cmd, cmd_size, io_buf);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Copy the command into the control-queue buffer."
+   ],
+   "contract": [
+    "Ledger GAP: `cmd` references at least cmd_size initialized",
+    "bytes; io_buf has room for them (layout above)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_command",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "30c3b14ff307",
+   "inv": "GAP",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_ctrl_fence_riscv64",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "            {\n                crate::drivers::r#unsafe::gpu_ctrl_fence_riscv64();\n            }",
+   "attr": "#[cfg(feature = \"riscv64\")]\n#[inline(always)]",
+   "doc": [
+    "riscv64 fence before reading back the used ring."
+   ],
+   "contract": [
+    "Ledger GAP: bare cache/memory fence instruction, no",
+    "operands \u2014 orders the avail publish against the poll."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_command",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "a39bf7deebf6",
+   "inv": "GAP",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "gpu_ctrl_resp_copy<RESP>",
+   "params": "resp_ptr: *mut u8, resp: &mut RESP, resp_size: usize",
+   "vis": "pub(crate)",
+   "call": "                crate::drivers::r#unsafe::gpu_ctrl_resp_copy(resp_ptr, resp, resp_size);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Copy the device-written response back to the caller."
+   ],
+   "contract": [
+    "Ledger GAP: the device wrote resp_size bytes at resp_ptr",
+    "(the completion fired \u2014 the used-ring read above passed)."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "send_command",
+   "kind": "block",
+   "ordinal": 5,
+   "base_id": "356be0afba49",
+   "inv": "GAP",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "call": "crate::drivers::r#unsafe::layout_dealloc(io_buf, io_layout)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "df04d83306b5",
+   "inv": "INV-DMA-3",
+   "section": "gpu: framebuffer and control-queue edges (INV-SLOT-1 / INV-MMIO-1)",
+   "name": "layout_dealloc",
+   "params": "p: *mut u8, layout: alloc::alloc::Layout",
+   "vis": "pub(crate)",
+   "call": "                crate::drivers::r#unsafe::layout_dealloc(self.fb_ptr, layout);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Deallocation with the exact allocation layout."
+   ],
+   "contract": [
+    "INV-DMA-3: `p` was allocated with exactly `layout` (the",
+    "framebuffer in init_framebuffer; the shared edge for the",
+    "input event buffer, the GEM backing store and the RX",
+    "rollback path)."
+   ],
+   "body_edits": [
+    {
+     "find": "dealloc(self.fb_ptr, layout);",
+     "replace": "alloc::alloc::dealloc(p, layout);"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "init_virtio_input",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c4cee12cf526",
+   "inv": "GAP",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "name": "input_bh_tasklet_init",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::input_bh_tasklet_init();",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Arm the input bottom-half tasklet with its handler."
+   ],
+   "contract": [
+    "Ledger GAP: touched from the probe (single-threaded init",
+    "context) and from tasklet_schedule in hard-IRQ context,",
+    "which is the API's designed use; a static tasklet struct",
+    "lives forever."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "read_event",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2310b81041e4",
+   "inv": "GAP",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "name": "input_event_read",
+   "params": "event_buffer: *mut VirtioInputEvent, desc_idx: usize",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::input_event_read(self.event_buffer, desc_idx)",
+   "ret": "VirtioInputEvent",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read one device-written input event from the DMA buffer."
+   ],
+   "contract": [
+    "Ledger GAP: the event buffer is a live registered DMA",
+    "buffer; desc_idx is the used-ring id, in-bounds for the",
+    "queue_size-sized allocation."
+   ],
+   "body_edits": [
+    {
+     "find": "self.event_buffer",
+     "replace": "event_buffer"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "fec3bb02d6e9",
+   "inv": "GAP",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "name": "input_buffer_dealloc",
+   "params": "p: *mut u8, layout: alloc::alloc::Layout",
+   "vis": "pub(crate)",
+   "call": "                crate::drivers::r#unsafe::input_buffer_dealloc(self.event_buffer as *mut u8, layout);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Free the input device's event DMA buffer."
+   ],
+   "contract": [
+    "Ledger GAP: the buffer was allocated with exactly",
+    "`layout` in init_virtio (alloc_zeroed); the device is",
+    "quiesced before the Drop runs."
+   ],
+   "body_edits": [
+    {
+     "find": "dealloc(self.event_buffer as *mut u8, layout);",
+     "replace": "alloc::alloc::dealloc(p, layout);"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "evdev_poll_wait",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5257632ec97b",
+   "inv": "INV-KTASK-1",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "call": "crate::drivers::r#unsafe::park_task_pid(task)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "evdev_poll_unwait",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "cf31fc50cd47",
+   "inv": "INV-KTASK-1",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "name": "park_task_pid",
+   "params": "task: *mut crate::process::types::Task",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::park_task_pid(task)",
+   "ret": "crate::process::types::Pid",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read a parked waiter's pid through the raw task pointer."
+   ],
+   "contract": [
+    "INV-KTASK-1: `task` is the current task parking here (the",
+    "dispatcher identity-checked the File against EVDEV_OPS);",
+    "the task is alive for the whole wait/unwait handshake."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for VirtioInputDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "44c1bd6d6f2d",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: the device's shared state sits behind Spinlocks."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for VirtioInputDevice",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "7dde1d6fc2c0",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: all event-buffer access is confined to the device's own queue/reader discipline."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "device_of_file",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "caee36ab741d",
+   "inv": "INV-SREF-1",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "name": "devno_of_private",
+   "params": "p: *const u8",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::devno_of_private(p)",
+   "ret": "DevNo",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Read the DevNo a chardev file's private slot stores."
+   ],
+   "contract": [
+    "INV-SREF-1: devfs_open stored a Box<DevNo> (file-lifetime);",
+    "the slot is valid while the file is open. The one read",
+    "edge shared by evdev and loop files."
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "node_of_file",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "96e7302141fa",
+   "inv": "INV-SREF-1",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "call": "crate::drivers::r#unsafe::devno_of_private(p)"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "evdev_file_close",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c7f6b83cf6ae",
+   "inv": "INV-CHARDEV-PRIV-1",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "call": "crate::drivers::r#unsafe::devno_of_private(ptr)"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "evdev_file_close",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "ce8c3455bcb2",
+   "inv": "INV-CHARDEV-PRIV-1",
+   "section": "input: virtio-input and evdev edges (INV-SREF-1 / INV-CHARDEV-PRIV-1 / INV-KTASK-1)",
+   "name": "devno_box_take",
+   "params": "p: *mut DevNo",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::devno_box_take(ptr as *mut DevNo)",
+   "ret": "alloc::boxed::Box<DevNo>",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Reclaim the file's private Box<DevNo> at close."
+   ],
+   "contract": [
+    "INV-CHARDEV-PRIV-1: the Box<DevNo> devfs_open stored has",
+    "its sole owning reference in the slot; close retires it."
+   ],
+   "body_edits": [
+    {
+     "find": "Box::from_raw(ptr as *mut DevNo)",
+     "replace": "Box::from_raw(p as *mut DevNo)"
+    }
+   ]
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "loop_devno_of",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0221856f9d31",
+   "inv": "INV-BLKDEV-2",
+   "section": "loop: loop-device file edges (INV-BLKDEV-2 / INV-CHARDEV-PRIV-1)",
+   "call": "crate::drivers::r#unsafe::devno_of_private(pd.cast_const())"
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "loop_file_ioctl",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "fc2c304d4039",
+   "inv": "INV-CHARDEV-PRIV-1",
+   "section": "loop: loop-device file edges (INV-BLKDEV-2 / INV-CHARDEV-PRIV-1)",
+   "call": "crate::drivers::r#unsafe::devno_of_private(pd.cast_const())"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "loop_file_read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "f2508dba7c2a",
+   "inv": "INV-BLKDEV-2",
+   "section": "loop: loop-device file edges (INV-BLKDEV-2 / INV-CHARDEV-PRIV-1)",
+   "name": "loop_bh_read_into",
+   "params": "bh: *mut BufferHead, buf: &mut [u8], done: usize, want: usize, in_off: usize",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::loop_bh_read_into(bh, buf, done, want, in_off);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Copy one block range out of a bread()'d buffer head and",
+    "release it."
+   ],
+   "contract": [
+    "INV-BLKDEV-2: bh came from bread (the caller holds the",
+    "read reference until the brelse inside this edge); b_data",
+    "is block_size bytes so [in_off, in_off+want) is in bounds."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "loop_file_write",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ffb2b025fcbd",
+   "inv": "INV-BLKDEV-2",
+   "section": "loop: loop-device file edges (INV-BLKDEV-2 / INV-CHARDEV-PRIV-1)",
+   "name": "loop_bh_write_from",
+   "params": "bh: *mut BufferHead, buf: &[u8], done: usize, want: usize, in_off: usize",
+   "vis": "pub(crate)",
+   "call": "        if !crate::drivers::r#unsafe::loop_bh_write_from(bh, buf, done, want, in_off) {\n            break;\n        }",
+   "ret": "bool",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Copy one block range into a bread()'d buffer head, mark it",
+    "dirty, sync and release. False = the sync failed."
+   ],
+   "contract": [
+    "INV-BLKDEV-2: bh came from bread; b_data is block_size",
+    "bytes so [in_off, in_off+want) is in bounds. False means",
+    "sync_dirty_buffer failed: the caller stops the copy loop",
+    "(the original inline `break`)."
+   ],
+   "body_edits": [
+    {
+     "find": "break;",
+     "replace": "return false;"
+    }
+   ],
+   "body_suffix": "\n        true"
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "715923b8566e",
+   "inv": "GAP",
+   "section": "ashmem: pool-page edges (INV-FS-FILEPRIV-1)",
+   "name": "page_put_is_last",
+   "params": "page: *mut crate::mm::types::Page",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::page_put_is_last(page)",
+   "ret": "bool",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Put one ashmem pool page; report whether this was the last ref."
+   ],
+   "contract": [
+    "Ledger GAP: the descriptor exists for this in-RAM page",
+    "(the area's page list owns it); true means the put dropped",
+    "the last reference and the caller frees the underlying",
+    "pages."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "ashmem_file_read",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "f352fdfaa2c7",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "ashmem: pool-page edges (INV-FS-FILEPRIV-1)",
+   "name": "ashmem_read_copy_chunk",
+   "params": "src: *const u8, in_pg: usize, buf_ptr: *mut u8, done: usize, chunk: usize",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::ashmem_read_copy_chunk(src, in_pg, buf.as_mut_ptr(), done, chunk);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Copy one chunk out of a pool page's linear map."
+   ],
+   "contract": [
+    "INV-FS-FILEPRIV-1: src is the kernel linear map of a live",
+    "pool page; [in_pg, in_pg+chunk) and [0, chunk) are within",
+    "the page and the caller's buffer (chunk = min of both)."
+   ],
+   "body_edits": [
+    {
+     "find": "buf.as_mut_ptr().add(done)",
+     "replace": "buf_ptr.add(done)"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "ashmem_mmap",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a226cdd9bf47",
+   "inv": "INV-FS-FILEPRIV-1",
+   "section": "ashmem: pool-page edges (INV-FS-FILEPRIV-1)",
+   "name": "ashmem_flush_tlb_all",
+   "params": "",
+   "vis": "pub(crate)",
+   "call": "    crate::drivers::r#unsafe::ashmem_flush_tlb_all();",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Flush all TLBs after ashmem re-mapped pool pages."
+   ],
+   "contract": [
+    "INV-FS-FILEPRIV-1: the pool pages' mappings changed under",
+    "existing VMAs; a full flush is the conservative correct",
+    "shape for this driver."
+   ]
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Send for GemObject",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "410caff7796d",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "The object's mutable state is a single AtomicU32; kva/phys are stable for the object's lifetime (ledger GAP)."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "unsafe impl Sync for GemObject",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "3431f9aca1a0",
+   "inv": "GAP",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "Ledger GAP: shared views only read the stable kva/phys/size and the AtomicU32 resource id."
+  },
+  {
+   "op": "inline-call",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "079949e138b0",
+   "inv": "GAP",
+   "section": "drm: GEM-object edges (F9)",
+   "call": "crate::drivers::r#unsafe::layout_dealloc(self.kva, self.layout)",
+   "doc": [
+    "Free a GEM object's backing store at Drop."
+   ],
+   "contract": [
+    "Ledger GAP: kva was allocated with exactly this layout in",
+    "create_dumb; the virtio resource (if any) was unref'd",
+    "above, so the device no longer references the pages."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "prime_close",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "8709748e9913",
+   "inv": "F9",
+   "section": "drm: GEM-object edges (F9)",
+   "name": "gem_arc_box_take",
+   "params": "p: *mut Arc<GemObject>",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gem_arc_box_take(ptr as *mut Arc<GemObject>)",
+   "ret": "alloc::boxed::Box<Arc<GemObject>>",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Reclaim the dma-buf file's Box<Arc<GemObject>> at close."
+   ],
+   "contract": [
+    "F9: the Box<Arc<GemObject>> the export stored is the sole",
+    "owning reference; close retires it (the Arc may keep the",
+    "object alive for other holders)."
+   ],
+   "body_edits": [
+    {
+     "find": "Box::from_raw(ptr as *mut Arc<GemObject>)",
+     "replace": "Box::from_raw(p as *mut Arc<GemObject>)"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "prime_file_gem",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "991829f4fc72",
+   "inv": "F9",
+   "section": "drm: GEM-object edges (F9)",
+   "name": "gem_arc_clone",
+   "params": "p: *const Arc<GemObject>",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::gem_arc_clone(ptr as *const Arc<GemObject>)",
+   "ret": "Arc<GemObject>",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Clone the Arc behind a dma-buf file's private slot."
+   ],
+   "contract": [
+    "F9: the slot holds Box<Arc<GemObject>> for the file's",
+    "lifetime; the clone hands out a new owning reference."
+   ],
+   "body_edits": [
+    {
+     "find": "ptr as *const Arc<GemObject>",
+     "replace": "p as *const Arc<GemObject>"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "u32_slice_as_bytes",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5ae9f499f7e4",
+   "inv": "F9",
+   "section": "drm: GEM-object edges (F9)",
+   "name": "u32_slice_as_u8<'a>",
+   "params": "v: &[u32]",
+   "vis": "pub(crate)",
+   "call": "crate::drivers::r#unsafe::u32_slice_as_u8(v)",
+   "ret": "&'a [u8]",
+   "attr": "#[inline(always)]",
+   "inline": true,
+   "doc": [
+    "Byte view of a u32 slice (GEM dump formatting)."
+   ],
+   "contract": [
+    "F9: [u32] and its byte image have identical size and",
+    "alignment; the bytes alias the same allocation."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "prime_fd_to_handle",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "554b0f02c655",
+   "inv": "F9",
+   "section": "drm: GEM-object edges (F9)",
+   "name": "drm_scan_screen",
+   "params": "gem: &GemObject, nz: &mut usize, clear: &mut usize, samples: &mut [u32; 3]",
+   "vis": "pub(crate)",
+   "call": "            crate::drivers::r#unsafe::drm_scan_screen(&gem, &mut nz, &mut clear, &mut samples);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Diagnostic volatile scan of an imported GEM buffer."
+   ],
+   "contract": [
+    "F9: `gem` is a live imported object (its pages are pinned",
+    "for the machine's lifetime); the reads are volatile and",
+    "the results land in the caller's counters/samples."
+   ],
+   "body_edits": [
+    {
+     "find": "nz += 1;",
+     "replace": "*nz += 1;"
+    },
+    {
+     "find": "clear += 1;",
+     "replace": "*clear += 1;"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/drivers/hotpath.rs",
+   "owner": "present_fb",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "26dd132566cd",
+   "inv": "GAP",
+   "section": "drm: GEM-object edges (F9)",
+   "name": "drm_scan_present",
+   "params": "gem: &GemObject, nz: &mut usize, paint: &mut usize, samples: &mut [u32; 4], pitch: u32, width: u32, height: u32",
+   "vis": "pub(crate)",
+   "call": "        crate::drivers::r#unsafe::drm_scan_present(&gem, &mut nz, &mut paint, &mut samples, pitch, width, height);",
+   "attr": "#[inline(always)]",
+   "doc": [
+    "Diagnostic volatile scan of a presented framebuffer."
+   ],
+   "contract": [
+    "Ledger GAP: `gem` is the live backing object of the",
+    "presented fb; the reads are volatile diagnostics that",
+    "feed the caller's counters/samples."
+   ],
+   "body_edits": [
+    {
+     "find": "nz += 1;",
+     "replace": "*nz += 1;"
+    },
+    {
+     "find": "paint += 1;",
+     "replace": "*paint += 1;"
+    }
+   ]
+  }
+ ]
+}

@@ -21,10 +21,10 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 #   sizes [] on every arch).
 #
 # --- the pass-3 sched collection (p23-p3sched lane, 2026-11-26) ---
-^rux::sched::alloc_task_slot$
-^rux::sched::free_task_slot$
-^rux::sched::init$
-^rux::sched::scheduler_tick$
+^rux::sched::(hotpath::)?alloc_task_slot$
+^rux::sched::(hotpath::)?free_task_slot$
+^rux::sched::(hotpath::)?init$
+^rux::sched::(hotpath::)?scheduler_tick$
 #   the four sched functions whose inline unsafe block became an
 #   always-inlined unsafe.rs contract fn (task_slot_alloc / task_slot_init /
 #   task_drop_in_place / task_slot_poison_and_free / init_idle_cpu /
@@ -39,3 +39,703 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 #           init 668->704, scheduler_tick 15940->15780
 #   every other sched symbol pairs 1:1 at equal size on all three arches
 #   (after module-path, moved-nested-fn and closure normalization).
+
+# --- debug9 nine-subsystem gate + p3sched gate (2026-11-26) ---
+# <Console as fmt::Write>::write_str: zero live callers outside the panic
+# path's dead branch; LTO pop-in/out (present at base 462B, absent after).
+^<rux::print::Console as core\[[0-9a-f]*\]::fmt::Write>::write_str$
+# IrqDomain::new: callers remain (interrupt/domain.rs:87); the body is fully
+# inlined at all of them in the current build — LTO inline jitter.
+^<rux::interrupt::domain::IrqDomain>::new$
+# syscall::FdSet trivial bit-op methods (new/set/clear/is_set/zero): every
+# call site inlines them; base carried out-of-line copies. Same jitter.
+^<rux::syscall::FdSet>::(new|set|clear|is_set|zero)$
+# syscall::seam_register_default: single caller, fully inlined. Same jitter.
+^rux::syscall::seam_register_default$
+# interrupt/domain functions: callers remain (5/3/7/5 external references,
+# x86_64 gate 2026-11-26); fully inlined at all of them in this build.
+#
+# --- the pass-3 drivers collection (p23-p3drivers lane, 2026-11-26) ---
+^<rux::drivers::(hotpath::)?AshmemPages as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?AshmemPages as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?AshmemPages as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?BlockDeviceManager>::get_disk$
+^<rux::drivers::(hotpath::)?GemObject as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?GemObject as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?GemObject as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?GenDisk>::private::<rux::drivers::(hotpath::)?VirtIOBlkDevice>::\{closure#0\}$
+^<rux::drivers::(hotpath::)?VirtIONetDevice>::dealloc_rx_buffer$
+^<rux::drivers::(hotpath::)?VirtIONetDevice>::poll$
+^<rux::drivers::(hotpath::)?VirtIONetDevice>::refill_rx_buffers$
+^<rux::drivers::(hotpath::)?VirtQueue>::desc_mut$
+^<rux::drivers::(hotpath::)?VirtQueue>::notify$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::init_framebuffer$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<<rux::drivers::(hotpath::)?VirtioGpuDevice>::unref_resource::CmdResourceUnref, rux::drivers::(hotpath::)?RespNoData>$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<rux::drivers::(hotpath::)?CmdResourceAttachBacking, rux::drivers::(hotpath::)?RespNoData>$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<rux::drivers::(hotpath::)?CmdResourceCreate2d, rux::drivers::(hotpath::)?RespNoData>$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<rux::drivers::(hotpath::)?CmdResourceFlush, rux::drivers::(hotpath::)?RespNoData>$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<rux::drivers::(hotpath::)?CmdSetScanout, rux::drivers::(hotpath::)?RespNoData>$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<rux::drivers::(hotpath::)?CmdTransferToHost2d, rux::drivers::(hotpath::)?RespNoData>$
+^<rux::drivers::(hotpath::)?VirtioGpuDevice>::send_command::<rux::drivers::(hotpath::)?GpuCtrlHeader, rux::drivers::(hotpath::)?RespDisplayInfo>$
+^<rux::drivers::(hotpath::)?VirtioInputDevice as core\[93ee42ca37157773\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?VirtioInputDevice as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?VirtioInputDevice as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::drop$
+^<rux::drivers::(hotpath::)?VirtioInputDevice>::init_virtio$
+^<rux::drivers::(hotpath::)?VirtioInputDevice>::read_event$
+^rux::drivers::(hotpath::)?apic::kvm_pv_send_ipi$
+^rux::drivers::(hotpath::)?apic::kvm_pv_send_ipi::hc$
+^rux::drivers::(hotpath::)?kvm_pv_send_ipi$
+^rux::drivers::(hotpath::)?kvm_pv_send_ipi::hc$
+^rux::drivers::(hotpath::)?with_gpu_device::<bool, <rux::drivers::(hotpath::)?GemObject as core\[93ee42ca37157773\]::ops::drop::Drop>::\{closure\}>$
+^rux::drivers::(hotpath::)?with_gpu_device::<bool, <rux::drivers::(hotpath::)?GemObject as core\[c9230c9cd16dbdec\]::ops::drop::Drop>::\{closure\}>$
+^rux::drivers::(hotpath::)?with_gpu_device::<bool, <rux::drivers::(hotpath::)?GemObject as core\[f485ab2f9f61e21a\]::ops::drop::Drop>::\{closure\}>$
+^rux::drivers::(hotpath::)?with_gpu_device::<bool, rux::drivers::(hotpath::)?\{closure\}>$
+#   the drivers functions whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (113 directives: 77 wraps,
+#   15 inline-call reuses, kvm_pv_send_ipi + nested hc relocated, 20
+#   Send/Sync proofs moved). Same operation, verbatim body, wrapper
+#   inlined back at every call site; the residual is debug-build
+#   instruction-selection drift only (base -> current bytes, same rig,
+#   debug profile):
+^rux::drivers::(hotpath::)?\{closure\}$
+#   <rux::drivers::AshmemPages as core[93ee42ca37157773]::ops::drop::Drop> rv 148->150, x86 -->-, a64 -->-
+#   <rux::drivers::AshmemPages as core[c9230c9cd16dbdec]::ops::drop::Drop> rv -->-, x86 176->184, a64 -->-
+#   <rux::drivers::AshmemPages as core[f485ab2f9f61e21a]::ops::drop::Drop> rv -->-, x86 -->-, a64 260->264
+#   <rux::drivers::BlockDeviceManager>::get_disk                           rv 172->174, x86 231->235, a64 376->380
+#   <rux::drivers::GemObject as core[93ee42ca37157773]::ops::drop::Drop>:: rv 70->76, x86 -->-, a64 -->-
+#   <rux::drivers::GemObject as core[c9230c9cd16dbdec]::ops::drop::Drop>:: rv -->-, x86 76->88, a64 -->-
+#   <rux::drivers::GemObject as core[f485ab2f9f61e21a]::ops::drop::Drop>:: rv -->-, x86 -->-, a64 92->104
+#   <rux::drivers::GenDisk>::private::<rux::drivers::VirtIOBlkDevice>::{cl rv 18->20, x86 21->25, a64 104->108
+#   <rux::drivers::VirtIONetDevice>::dealloc_rx_buffer                     rv 190->196, x86 248->268, a64 260->272
+#   <rux::drivers::VirtIONetDevice>::poll                                  rv 1386->1394, x86 1945->1956, a64 1564->1576
+#   <rux::drivers::VirtIONetDevice>::refill_rx_buffers                     rv 516->526, x86 771->828, a64 616->644
+#   <rux::drivers::VirtQueue>::desc_mut                                    rv 142->148, x86 196->204, a64 288->296
+#   <rux::drivers::VirtQueue>::notify                                      rv 98->124, x86 101->109, a64 180->196
+#   <rux::drivers::VirtioGpuDevice as core[93ee42ca37157773]::ops::drop::D rv 68->74, x86 -->-, a64 -->-
+#   <rux::drivers::VirtioGpuDevice as core[c9230c9cd16dbdec]::ops::drop::D rv -->-, x86 109->121, a64 -->-
+#   <rux::drivers::VirtioGpuDevice as core[f485ab2f9f61e21a]::ops::drop::D rv -->-, x86 -->-, a64 96->108
+#   <rux::drivers::VirtioGpuDevice>::init_framebuffer                      rv 730->738, x86 1119->1139, a64 868->876
+#   <rux::drivers::VirtioGpuDevice>::send_command::<<rux::drivers::VirtioG rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResou rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResou rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdResou rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdSetSc rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::CmdTrans rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioGpuDevice>::send_command::<rux::drivers::GpuCtrlH rv 904->960, x86 1415->1506, a64 1292->1352
+#   <rux::drivers::VirtioInputDevice as core[93ee42ca37157773]::ops::drop: rv 76->82, x86 -->-, a64 -->-
+#   <rux::drivers::VirtioInputDevice as core[c9230c9cd16dbdec]::ops::drop: rv -->-, x86 127->139, a64 -->-
+#   <rux::drivers::VirtioInputDevice as core[f485ab2f9f61e21a]::ops::drop: rv -->-, x86 -->-, a64 120->132
+#   <rux::drivers::VirtioInputDevice>::init_virtio                         rv 1016->1024, x86 1441->1449, a64 1248->1256
+#   <rux::drivers::VirtioInputDevice>::read_event                          rv 926->958, x86 1472->1505, a64 1188->1224
+#   rux::drivers::apic::kvm_pv_send_ipi                                    rv -->-, x86 148->-, a64 -->-
+#   rux::drivers::apic::kvm_pv_send_ipi::hc                                rv -->-, x86 139->-, a64 -->-
+#   rux::drivers::kvm_pv_send_ipi                                          rv -->-, x86 -->148, a64 -->-
+#   rux::drivers::kvm_pv_send_ipi::hc                                      rv -->-, x86 -->139, a64 -->-
+#   rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core rv 130->132, x86 -->-, a64 -->-
+#   rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core rv -->-, x86 154->158, a64 -->-
+#   rux::drivers::with_gpu_device::<bool, <rux::drivers::GemObject as core rv -->-, x86 -->-, a64 232->236
+#   rux::drivers::with_gpu_device::<bool, rux::drivers::{closure}>         rv 150->152, x86 193->197, a64 248->252
+#
+# --- gate-time additions for the drivers lane (same rig, all nine pass-2
+# specs vs the pre-pass-2 coordinator base; debug profile) ---
+^<rux::syscall::FdSet>::clear$
+^<rux::syscall::FdSet>::is_set$
+^<rux::syscall::FdSet>::new$
+^<rux::syscall::FdSet>::set$
+^<rux::syscall::FdSet>::zero$
+^rux::drivers::(hotpath::)?aarch64::set_timer$
+^rux::drivers::(hotpath::)?abandon_pending_completion$
+^rux::drivers::(hotpath::)?apic::ensure_phys_mapped$
+^rux::drivers::(hotpath::)?apic::init_x2apic_or_mmio$
+^rux::drivers::(hotpath::)?apic::reg_read$
+^rux::drivers::(hotpath::)?apic::reg_write$
+^rux::drivers::(hotpath::)?apic::send_icr$
+^rux::drivers::(hotpath::)?apic::timer_event_record$
+^rux::drivers::(hotpath::)?ashmem_file_read$
+^rux::drivers::(hotpath::)?begin_delivery$
+^rux::drivers::(hotpath::)?bytemod::u32_slice_as_bytes$
+^rux::drivers::(hotpath::)?clint::set_timecmp$
+^rux::drivers::(hotpath::)?create_dumb$
+#   the residual after the 77 always-inlined wrappers: (a) the drift
+#   class above, for the drivers fns whose wrapper reshaped instruction
+#   selection; (b) five <rux::syscall::FdSet> method instantiations that
+#   existed only in the base build (their call sites now inline them -
+#   current sizes [] - bodies unchanged, one audited devno edge inside);
+#   measured base -> current bytes:
+#   <rux::syscall::FdSet>::clear                                           rv 154->-, x86 -->-, a64 232->-
+#   <rux::syscall::FdSet>::is_set                                          rv 162->-, x86 -->-, a64 240->-
+#   <rux::syscall::FdSet>::new                                             rv 52->-, x86 -->-, a64 80->-
+#   <rux::syscall::FdSet>::set                                             rv 150->-, x86 -->-, a64 228->-
+#   <rux::syscall::FdSet>::zero                                            rv 32->-, x86 -->-, a64 192->-
+#   rux::drivers::aarch64::set_timer                                       rv -->-, x86 -->-, a64 40->44
+#   rux::drivers::abandon_pending_completion                               rv 1174->1182, x86 1862->1880, a64 1520->1528
+#   rux::drivers::apic::ensure_phys_mapped                                 rv -->-, x86 493->573, a64 -->-
+#   rux::drivers::apic::init_x2apic_or_mmio                                rv -->-, x86 267->277, a64 -->-
+#   rux::drivers::apic::reg_read                                           rv -->-, x86 131->138, a64 -->-
+#   rux::drivers::apic::reg_write                                          rv -->-, x86 141->154, a64 -->-
+#   rux::drivers::apic::send_icr                                           rv -->-, x86 182->186, a64 -->-
+#   rux::drivers::apic::timer_event_record                                 rv -->-, x86 738->754, a64 -->-
+#   rux::drivers::ashmem_file_read                                         rv 610->620, x86 1064->1099, a64 896->916
+#   rux::drivers::begin_delivery                                           rv 26->28, x86 23->27, a64 108->112
+#   rux::drivers::bytemod::u32_slice_as_bytes                              rv 76->80, x86 86->96, a64 -->-
+#   rux::drivers::clint::set_timecmp                                       rv 34->36, x86 -->-, a64 -->-
+#   rux::drivers::create_dumb                                              rv -->-, x86 -->-, a64 1284->1292
+#
+# --- second gate-time sweep, drivers lane (same class: debug-build
+# instruction selection / LTO inline jitter around the collected
+# edges; the four interrupt::domain and the syscall seam rows are
+# codegen cascade, no source change in those files) ---
+^rux::drivers::(hotpath::)?deliver_completion$
+^rux::drivers::(hotpath::)?evdev_file_close$
+^rux::drivers::(hotpath::)?evdev_poll_unwait$
+^rux::drivers::(hotpath::)?evdev_poll_wait$
+^rux::drivers::(hotpath::)?flush_framebuffer$
+^rux::drivers::(hotpath::)?gicv3::eoir1_write$
+^rux::drivers::(hotpath::)?gicv3::iar1_read$
+^rux::drivers::(hotpath::)?gicv3::send_sgi$
+^rux::drivers::(hotpath::)?init_virtio_input$
+^rux::drivers::(hotpath::)?io_buf_alloc$
+^rux::drivers::(hotpath::)?io_buf_free$
+^rux::drivers::(hotpath::)?io_buf_init$
+^rux::drivers::(hotpath::)?io_buf_release$
+^rux::drivers::(hotpath::)?loop_file_ioctl$
+^rux::drivers::(hotpath::)?loop_file_read$
+^rux::drivers::(hotpath::)?loop_file_write$
+^rux::drivers::(hotpath::)?pci_blk_acquire_site$
+^rux::drivers::(hotpath::)?pci_flag_sync_tombstone_timed_out$
+^rux::drivers::(hotpath::)?pci_pending_slot_reservable_len$
+^rux::drivers::(hotpath::)?pci_process_async_completions_slot$
+^rux::drivers::(hotpath::)?pci_publish_sync_chain$
+^rux::drivers::(hotpath::)?pci_submit_data_async_sg$
+^rux::drivers::(hotpath::)?present_fb$
+^rux::drivers::(hotpath::)?prime_close$
+^rux::drivers::(hotpath::)?prime_fd_to_handle$
+^rux::drivers::(hotpath::)?prime_file_gem$
+^rux::drivers::(hotpath::)?read_reg$
+^rux::drivers::(hotpath::)?resp_status_byte$
+^rux::drivers::(hotpath::)?used_ring_elem_id$
+^rux::drivers::(hotpath::)?used_ring_idx$
+^rux::drivers::(hotpath::)?wedge_put$
+^rux::drivers::(hotpath::)?with_gpu_device::<\(u8, u8, u8\), rux::drivers::(hotpath::)?\{closure\}>$
+^rux::drivers::(hotpath::)?x86_64::init$
+^rux::interrupt::domain::generic_handle_domain_irq$
+^rux::interrupt::domain::get_default_domain$
+^rux::interrupt::domain::irq_create_mapping$
+^rux::interrupt::domain::irq_domain_create_linear$
+# --- p23-p3mm (mm pass-3 collection) recorded size-differs ---
+#   the four mm wrap forwarders whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (node_data_ref / node_data_ref_mut
+#   / page_desc_ref / meta_audit_scratch). Same operation, verbatim body,
+#   wrapper inlined back at every call site; the residual is debug-build
+#   instruction-selection drift only. Measured (base -> current bytes, same
+#   rig, debug profile):
+#     rv:   node_data 90->92, node_data_mut 90->92,
+#           page_desc 58->60 (+ its second instantiation 58->60)
+#   every other mm symbol pairs 1:1 at equal size; unpaired 0.
+#   (normalized names after the pair tool's module-path strip: the two
+#   page_desc generic instantiations normalize to the bare `rux::mm` —
+#   they are distinguishable only inside the size-diff bucket, which is
+#   exactly what the patterns below classify)
+^rux::mm::(hotpath::)?node_data_mut$
+^rux::mm::(hotpath::)?node_data$
+^rux::mm$
+
+# --- p23-p3mm: the ten cfg(x86_64) vDSO/TSC edges moved out of
+# --- mod x86_track into mm/unsafe.rs (pass 3 relocation itself: same
+# --- verbatim bodies, new home module; each pairs 1:1 missing<->extra).
+# --- `x86_track::` names keep resolving through the in-module re-export,
+# --- so both normalized spellings below are the same ten functions.
+^rux::mm::(hotpath::)?(x86_track::)?(publish_tsc_anchor|rd|read_tsc_ordered|seq_end|seq_try_begin|tsc_anchor_peek|tsc_anchor_step_back|tsc_anchor_step_forward|tsc_track_now_nominal|wr)$
+
+# --- p23-p3mm aarch64-only drift of the same two classes: vdso_init's
+# --- moved body now calls build_code_page()/vdso_data_tick() across the
+# --- module boundary (100->148), and meta_audit_inner's scratch take is
+# --- the always-inlined meta_audit_scratch contract fn (2752->2672). Same
+# --- verbatim operation; debug instruction-selection/call-placement drift.
+^rux::mm::(hotpath::)?vdso_init$
+^rux::mm::(hotpath::)?meta_audit_inner$
+^rux::syscall::seam_register_default$
+#   measured base -> current bytes:
+#   rux::drivers::deliver_completion                                       rv 42->48, x86 43->54, a64 212->224
+#   rux::drivers::evdev_file_close                                         rv 252->256, x86 347->364, a64 396->404
+#   rux::drivers::evdev_poll_unwait                                        rv 550->556, x86 739->749, a64 744->748
+#   rux::drivers::evdev_poll_wait                                          rv 492->494, x86 672->676, a64 704->712
+#   rux::drivers::flush_framebuffer                                        rv 126->128, x86 143->147, a64 224->228
+#   rux::drivers::gicv3::eoir1_write                                       rv -->-, x86 -->-, a64 36->40
+#   rux::drivers::gicv3::iar1_read                                         rv -->-, x86 -->-, a64 40->44
+#   rux::drivers::gicv3::send_sgi                                          rv -->-, x86 -->-, a64 116->120
+#   rux::drivers::init_virtio_input                                        rv -->-, x86 -->-, a64 1100->1072
+#   rux::drivers::io_buf_alloc                                             rv 266->268, x86 280->284, a64 412->416
+#   rux::drivers::io_buf_free                                              rv 268->274, x86 274->289, a64 416->432
+#   rux::drivers::io_buf_init                                              rv 62->68, x86 91->102, a64 260->200
+#   rux::drivers::io_buf_release                                           rv 140->146, x86 145->157, a64 172->184
+#   rux::drivers::loop_file_ioctl                                          rv 8954->8962, x86 8252->8283, a64 7860->7864
+#   rux::drivers::loop_file_read                                           rv 630->650, x86 1116->1165, a64 1004->1048
+#   rux::drivers::loop_file_write                                          rv 734->792, x86 1323->1400, a64 1244->1320
+#   rux::drivers::pci_blk_acquire_site                                     rv 22->24, x86 23->30, a64 -->-
+#   rux::drivers::pci_flag_sync_tombstone_timed_out                        rv 214->216, x86 254->250, a64 288->292
+#   rux::drivers::pci_pending_slot_reservable_len                          rv 296->298, x86 335->346, a64 400->404
+#   rux::drivers::pci_process_async_completions_slot                       rv 2786->2794, x86 3882->3910, a64 3332->3340
+#   rux::drivers::pci_publish_sync_chain                                   rv 578->580, x86 880->891, a64 748->752
+#   rux::drivers::pci_submit_data_async_sg                                 rv 2356->2358, x86 3505->3510, a64 2832->2836
+#   rux::drivers::present_fb                                               rv 2012->2062, x86 3041->3143, a64 2560->2632
+#   rux::drivers::prime_close                                              rv 80->82, x86 85->89, a64 100->104
+#   rux::drivers::prime_fd_to_handle                                       rv 1848->1700, x86 2534->2321, a64 2192->2032
+#   rux::drivers::prime_file_gem                                           rv 78->80, x86 84->88, a64 176->180
+#   rux::drivers::read_reg                                                 rv 76->80, x86 84->92, a64 128->136
+#   rux::drivers::resp_status_byte                                         rv 58->60, x86 53->57, a64 104->108
+#   rux::drivers::used_ring_elem_id                                        rv 146->152, x86 172->184, a64 240->252
+#   rux::drivers::used_ring_idx                                            rv 88->90, x86 -->-, a64 144->148
+#   rux::drivers::wedge_put                                                rv 28->32, x86 28->31, a64 32->36
+#   rux::drivers::with_gpu_device::<(u8, u8, u8), rux::drivers::{closure}> rv 202->204, x86 182->186, a64 304->308
+#   rux::drivers::x86_64::init                                             rv -->-, x86 75->81, a64 -->-
+#   rux::interrupt::domain::generic_handle_domain_irq                      rv -->-, x86 150->-, a64 -->-
+#   rux::interrupt::domain::get_default_domain                             rv -->-, x86 72->-, a64 -->-
+#   rux::interrupt::domain::irq_create_mapping                             rv -->-, x86 358->-, a64 -->-
+#   rux::interrupt::domain::irq_domain_create_linear                       rv -->-, x86 217->-, a64 -->-
+#   rux::syscall::seam_register_default                                    rv 16->-, x86 -->-, a64 16->-
+#
+# --- the pass-3 debug collection (p23-p3debug lane, 2026-11-26) ---
+^rux::debug::(hotpath::)?(canary_qword_read|canary_selftest_fire|clear_record_magic|csr_quad_read_aarch64|csr_quad_read_riscv|enable_write_protect|fill_canary|gs_percpu_magic_read|gs_triple_read|kernel_pa_offset|leak_page_counts3|leak_page_flags4|page_desc_report|page_table_virt_raw|page_view|ppage_slot_load|ppage_stamp_slot|protect_page|provoke_illegal_riscv|provoke_illegal_x86|provoke_pagefault_read|pstore_commit|putchar_no_lock_raw|raw_qword|read_volatile_t|record_header_at|record_payload|resolve_phys|save_regs_aarch64|save_regs_riscv64|save_regs_x86_64|sched_slot_current|stash_slot_at|stash_slot_for|table_virt|task_view|t_state_bits|t_state_dead|wild_link_aliases)$
+^rux::debug::(hotpath::)?location_ref::<rux::arch::x86_64::pt_regs::PtRegs>$
+#   the pass-3 contract fns (scripts/refactor/pass3/debug.json, 34 wraps +
+#   25 move-fns + 1 move-item + 20 inline-calls over the census's 101
+#   regions): NEW symbols on the current side. Unlike the sched pilot the
+#   debug wrappers are NOT inline(always) — debug is the diagnostic
+#   subsystem, the wrapped sites sit on gated-off print/hunt paths, so a
+#   named #[inline] fn keeps the debug-build profiles readable (the
+#   wrapper's symbol names the contract). Three of the rows are not new
+#   code at all: location_ref::<PtRegs> / raw_qword are new OUT-OF-LINE
+#   materializations of EXISTING audited unsafe.rs edges (the audit_frames
+#   and frozen_ipi_probe inline-calls now reference them by name), and the
+#   four moved wildwatch engines (enable_write_protect/fill_canary/
+#   protect_page/resolve_phys) re-materialize under their new home
+#   rux::debug::* while the old rux::debug::x86::* copies retire (see the
+#   GONE list). Measured (base -> current bytes, same rig, debug profile):
+#     rv:   wrappers new at 26..714 bytes (pstore_commit 714,
+#           save_regs_riscv64 132, page_desc_report 122, task_view 26,
+#           clear_record_magic 28; full table run/pair-rv-sizes.tsv);
+#           nothing grew — every base-only symbol's body reappears inside
+#           its wrapper.
+#     x86:  wrappers new at 22..1541 bytes (wild_link_aliases 728,
+#           protect_page 1541, save_regs_x86_64 106; full table
+#           run/pair-x86-sizes.tsv).
+#     a64:  wrappers new at 22..819 bytes (pstore_commit 819; full table
+#           run/pair-a64-sizes.tsv).
+^(<rux::process::(hotpath::)?types::Task>::state|<rux::process::(hotpath::)?types::TaskState>::(bits|contains|is_dead|new))$
+#   GONE (base-only): out-of-line copies of process's TaskState accessors
+#   that used to materialize at the locktrace call sites (note_acquire and
+#   friends read pid/state/preempt_count through inline blocks). The reads
+#   now run inside the unsafe.rs adopt edges (t_pid / t_state_bits /
+#   t_state_dead / task_view — all verbatim bodies), so the accessor
+#   copies inline into THOSE and the standalone copies vanish. Same
+#   instruction stream, different home.
+#     rv:   base copies gone at [42x2, 20, 28x5, 66x8, 18] bytes
+#     x86:  base copies gone at [42x2, 20, 28x5, 66x8, 18] bytes
+#     a64:  base copies gone at [42x2, 20, 28x5, 66x8, 18] bytes
+^rux::debug::(hotpath::)?x86::(enable_write_protect|fill_canary|protect_page|resolve_phys)$
+#   GONE (x86 only): the wildwatch engines' OLD module-path copies — the
+#   functions moved whole to debug/unsafe.rs (verbatim bodies, same
+#   symbols at the new rux::debug:: path, where they pair 1:1 in size).
+core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
+#   GONE (aarch64 only): core's volatile-read precondition-check stub —
+#   an ABI-adjacent helper whose single materialization moved with the
+#   wrapper bodies (read_volatile call sites unchanged).
+
+# --- p3dbg2 nine-subsystem gate (2026-11-27, after the debug collection) ---
+# debug collection contract fns: the wrapped/moved bodies recompile smaller
+# (base 504 -> current 458 for note_page_alloc; all 15 same class) — the
+# debug lane's own pair run recorded the same names against its in-lane base.
+^rux::debug::(hotpath::)?capture_frame|rux::debug::(hotpath::)?\{closure\}|rux::debug::(hotpath::)?dump|rux::debug::(hotpath::)?dump_csrs|rux::debug::(hotpath::)?early_scan|rux::debug::(hotpath::)?lookup_file|rux::debug::(hotpath::)?note_acquire|rux::debug::(hotpath::)?note_page_alloc|rux::debug::(hotpath::)?note_page_free|rux::debug::(hotpath::)?note_ref|rux::debug::(hotpath::)?note_softirq_acquire|rux::debug::(hotpath::)?read_record|rux::debug::(hotpath::)?save_regs|rux::debug::(hotpath::)?stash_file|rux::debug::(hotpath::)?write_record$
+# process TaskState accessors + Task::state: identical size multisets on
+# both sides (18x8 == 18x8); the pass-2-introduced types:: module segment
+# splits the normalized keys — pure bookkeeping, zero semantic delta.
+^<rux::process::(hotpath::)?TaskState>::(new|is_dead|contains|bits)$
+^<rux::process::(hotpath::)?Task>::state$
+# x86_64-only debug fns (cfg-gated; p3dbg2 x86 gate 2026-11-27): same
+# collection-drift class as the rv list above.
+^rux::debug::(hotpath::)?(audit_frames|frozen_ipi_probe|verify_gs)$
+^rux::debug::(hotpath::)?x86::(arm|table_virt|verify)$
+# process TaskState accessors + Task::state (impl form): identical size
+# multisets both sides; pass-2 types:: module segment splits the keys.
+^<rux::process::(hotpath::)?TaskState>::(new|is_dead|contains|bits)$
+^<rux::process::(hotpath::)?Task>::state$
+# aarch64-only debug fns (p3dbg2 a64 gate 2026-11-27): same collection-
+# drift class as the rv/x86 lists above.
+^rux::debug::(hotpath::)?(emit|report_hardirq_origin|report_incumbent_site|report_outermost|report_parked_site|report_softirq_origin)$
+# --- the pass-3 fs collection (p23-p3fs lane, 2026-11-26) ---
+#   the 59 renamed pairings (58 on aarch64, where BlockCache::
+#   invalidate_device still pairs by size): fs methods and free fns
+#   whose inline unsafe block became an always-inlined unsafe.rs
+#   contract fn — BlockCache::drop_block/evict_one/get/get_zero_impl/
+#   invalidate/invalidate_device, CacheEntry::bh/bh_mut/Drop, FdTable::
+#   close_fd/close_fd_report/dup2_fd/for_each_file/Drop, Dentry::
+#   big_memo_ensure_locked/get_inode_fast/lookup_child_fast/
+#   lookup_child_walk/refill_memo_locked, BufferHead::new_uninit,
+#   ElfLoader::load_segment, plus the moved free fns (list_*/boxed_*/
+#   entry_ref/bh_pinned/bh_data_mut/mem_file_*/stat_dev_for_fs/
+#   copy_into_page/copy_user_into_page/claim_entry_arc/dentry_arc_
+#   from_raw/inode_arc_from_raw/bread_wait/verify_arc_inner_layout).
+#   Same operation, verbatim body, wrapper inlined back at every call
+#   site; residual debug-build instruction-selection drift only.
+#   Measured (base -> current bytes, same rig, debug profile):
+#     rv:   BlockCache::get 2750->2754, FdTable::dup2_fd 812->816,
+#           Dentry::refill_memo_locked 730->740, ElfLoader::load_segment
+#           456->496, CacheEntry::bh 50->52
+#     x86:  BlockCache::get 4019->4031, FdTable::dup2_fd 1256->1288,
+#           Dentry::refill_memo_locked 1257->1292, ElfLoader::load_segment
+#           760->876, CacheEntry::bh 61->65
+#     a64:  BlockCache::get 3856->3860, FdTable::dup2_fd 1888->1896,
+#           Dentry::refill_memo_locked 1404->1424, ElfLoader::load_segment
+#           712->796, CacheEntry::bh 160->164
+#   every other fs symbol pairs 1:1 at equal size on all three arches
+#   (after module-path, moved-nested-fn and closure normalization), and
+#   the 53 same-name size drifts below are recorded per symbol with
+#   their per-arch byte counts.
+^<rux::fs::(hotpath::)?BlockCache>::drop_block$
+^<rux::fs::(hotpath::)?BlockCache>::evict_one$
+^<rux::fs::(hotpath::)?BlockCache>::get$
+^<rux::fs::(hotpath::)?BlockCache>::get_zero_impl$
+^<rux::fs::(hotpath::)?BlockCache>::invalidate$
+^<rux::fs::(hotpath::)?BlockCache>::invalidate_device$
+^<rux::fs::(hotpath::)?BufferHead>::new_uninit$
+^<rux::fs::(hotpath::)?CacheEntry as core\[[0-9a-f]+\]::ops::drop::Drop>::drop$
+^<rux::fs::(hotpath::)?CacheEntry>::bh$
+^<rux::fs::(hotpath::)?CacheEntry>::bh_mut$
+^<rux::fs::(hotpath::)?Dentry>::big_memo_ensure_locked$
+^<rux::fs::(hotpath::)?Dentry>::get_inode_fast$
+^<rux::fs::(hotpath::)?Dentry>::lookup_child_fast$
+^<rux::fs::(hotpath::)?Dentry>::lookup_child_walk$
+^<rux::fs::(hotpath::)?Dentry>::refill_memo_locked$
+^<rux::fs::(hotpath::)?ElfLoader>::load_segment$
+^<rux::fs::(hotpath::)?FdTable as core\[[0-9a-f]+\]::ops::drop::Drop>::drop$
+^<rux::fs::(hotpath::)?FdTable>::close_fd$
+^<rux::fs::(hotpath::)?FdTable>::close_fd_report$
+^<rux::fs::(hotpath::)?FdTable>::dup2_fd$
+^<rux::fs::(hotpath::)?FdTable>::for_each_file::<rux::fs::(hotpath::)?{closure}::{closure#0}>$
+^<rux::fs::(hotpath::)?FdTable>::for_each_file::<syscall\[[0-9a-f]+\]::misc::{closure}::{closure#0}>$
+^<rux::fs::(hotpath::)?FdTable>::for_each_file::<syscall\[[0-9a-f]+\]::misc::{closure}::{closure#1}>$
+^<rux::fs::(hotpath::)?FdTable>::for_each_file::<syscall\[[0-9a-f]+\]::misc::{closure}>$
+^<rux::fs::(hotpath::)?FdTable>::fork_from$
+^<rux::fs::(hotpath::)?FdTable>::get_file$
+^<rux::fs::(hotpath::)?FdTable>::get_file_borrow$
+^<rux::fs::(hotpath::)?File>::clear_private_data$
+^<rux::fs::(hotpath::)?File>::get_dentry$
+^<rux::fs::(hotpath::)?File>::get_inode$
+^<rux::fs::(hotpath::)?File>::get_ops$
+^<rux::fs::(hotpath::)?File>::path$
+^<rux::fs::(hotpath::)?File>::positional_capable$
+^<rux::fs::(hotpath::)?File>::private_data_ptr$
+^<rux::fs::(hotpath::)?File>::set_dentry$
+^<rux::fs::(hotpath::)?File>::set_inode$
+^<rux::fs::(hotpath::)?File>::set_ops$
+^<rux::fs::(hotpath::)?File>::set_private_data$
+^<rux::fs::(hotpath::)?File>::take_private_data$
+^<rux::fs::(hotpath::)?FileBuffer>::read$
+^<rux::fs::(hotpath::)?FileBuffer>::resize$
+^<rux::fs::(hotpath::)?FileBuffer>::write$
+^<rux::fs::(hotpath::)?FileChunk>::new$
+^<rux::fs::(hotpath::)?FrameWindow>::copy_frame_from$
+^<rux::fs::(hotpath::)?FrameWindow>::fill_from$
+^<rux::fs::(hotpath::)?Inode>::update_cached_mode$
+^<rux::fs::(hotpath::)?Page>::from_bytes$
+^<rux::fs::(hotpath::)?Page>::new$
+^<rux::fs::(hotpath::)?PageCache>::collect_wb_work$
+^<rux::fs::(hotpath::)?PageCache>::evict_one_locked$
+^<rux::fs::(hotpath::)?PageCache>::flush_all_dirty$
+^<rux::fs::(hotpath::)?PageCache>::probe_slot_ptr$
+^<rux::fs::(hotpath::)?PageCache>::remove_entry$
+^<rux::fs::(hotpath::)?PageCache>::table_find$
+^<rux::fs::(hotpath::)?PageCache>::table_publish$
+^<rux::fs::(hotpath::)?WriteSource>::as_slice$
+^core\[[0-9a-f]+\]::mem::drop::<alloc\[[0-9a-f]+\]::boxed::Box<rux::fs::(hotpath::)?CacheEntry>>$
+^rux::fs::(hotpath::)?boxed_drop::<rux::fs::(hotpath::)?BufferHead>$
+^rux::fs::(hotpath::)?boxed_drop::<rux::fs::(hotpath::)?CacheEntry>$
+^rux::fs::(hotpath::)?alloc_staging_buf
+^rux::fs::(hotpath::)?bfree_multi
+^rux::fs::(hotpath::)?bread_async
+^rux::fs::(hotpath::)?claim_entry_arc
+^rux::fs::(hotpath::)?copy_stat_to_user
+^rux::fs::(hotpath::)?data_of
+^rux::fs::(hotpath::)?free_pidfd_data
+^rux::fs::(hotpath::)?fsctx_close
+^rux::fs::(hotpath::)?fsctx_of
+^rux::fs::(hotpath::)?fsctx_of_mut
+^rux::fs::(hotpath::)?gather_append_user
+^rux::fs::(hotpath::)?get_file_fd_fast
+^rux::fs::(hotpath::)?get_vfs_root
+^rux::fs::(hotpath::)?inode_permission
+^rux::fs::(hotpath::)?make_detached_mount
+^rux::fs::(hotpath::)?memo_slot_read
+^rux::fs::(hotpath::)?mount_is_busy::\{closure\#0\}
+^rux::fs::(hotpath::)?mountfd_close
+^rux::fs::(hotpath::)?mountfd_of
+^rux::fs::(hotpath::)?path_lookup
+^rux::fs::(hotpath::)?pcache_dirty_histogram
+^rux::fs::(hotpath::)?pidfd_close
+^rux::fs::(hotpath::)?pin_leader
+^rux::fs::(hotpath::)?publication_capture_note_dirty
+^rux::fs::(hotpath::)?reg_file_lseek
+^rux::fs::(hotpath::)?reg_file_read
+^rux::fs::(hotpath::)?reg_file_write
+^rux::fs::(hotpath::)?resolve_alive
+^rux::fs::(hotpath::)?shared_file_fault_page
+^rux::fs::(hotpath::)?sync_block_ordered
+^rux::fs::(hotpath::)?sync_dirty_blocks_batched
+^rux::fs::(hotpath::)?sync_dirty_buffer
+^rux::fs::(hotpath::)?target_exited
+^rux::fs::(hotpath::)?treepath_dentry
+^rux::fs::(hotpath::)?vt_file_ioctl
+^rux::fs::(hotpath::)?vtdev_close
+^rux::fs::(hotpath::)?wait_buffer_io_done
+^rux::fs::(hotpath::)?with_block::
+^rux::fs::(hotpath::)?with_block_deferred_mut::
+^rux::fs::(hotpath::)?with_block_mut::
+
+^rux::fs::(hotpath::)?alloc_staging_buf.*
+#   rv: 60->64, x86: 83->95, a64: 88->96
+^rux::fs::(hotpath::)?bfree_multi.*
+#   rv: 52->44, x86: 48->40, a64: 60->56
+^rux::fs::(hotpath::)?bread_async.*
+#   rv: 2226->2238, x86: 3356->3395, a64: 3344->3360
+^rux::fs::(hotpath::)?claim_entry_arc.*
+#   rv: 38->40, x86: 36->40, a64: 44->48
+^rux::fs::(hotpath::)?copy_stat_to_user.*
+#   rv: 32->38, x86: 71->94, a64: 44->56
+^rux::fs::(hotpath::)?data_of.*
+#   rv: 96->100, x86: 117->125, a64: 288->276
+^rux::fs::(hotpath::)?free_pidfd_data.*
+#   rv: 68->70, x86: 65->69, a64: 160->164
+^rux::fs::(hotpath::)?fsctx_close.*
+#   rv: 80->86, x86: 109->121, a64: 272->240
+^rux::fs::(hotpath::)?fsctx_of.*
+#   rv: 138->142, x86: 194->202, a64: 352->336
+^rux::fs::(hotpath::)?fsctx_of_mut.*
+#   rv: 138->142, x86: 194->202, a64: 352->336
+^rux::fs::(hotpath::)?gather_append_user.*
+#   rv: 186->226, x86: 225->313, a64: 256->320
+^rux::fs::(hotpath::)?get_file_fd_fast.*
+#   rv: 188->206, x86: 253->284, a64: 216->468
+^rux::fs::(hotpath::)?get_vfs_root.*
+#   rv: 160->162, x86: 161->165, a64: 180->184
+^rux::fs::(hotpath::)?inode_permission.*
+#   rv: 160->162, x86: 179->183, a64: 184->268
+^rux::fs::(hotpath::)?make_detached_mount.*
+#   rv: 508->514, x86: 729->748, a64: 628->632
+^rux::fs::(hotpath::)?memo_slot_read.*
+#   rv: 234->236, x86: 359->369, a64: 448->452
+^rux::fs::(hotpath::)?mount_is_busy::\{closure\#0\}.*
+#   rv: 306->310, x86: 443->451, a64: 388->468
+^rux::fs::(hotpath::)?mountfd_close.*
+#   rv: 80->86, x86: 109->121, a64: 272->240
+^rux::fs::(hotpath::)?mountfd_of.*
+#   rv: 138->142, x86: 194->202, a64: 352->336
+^rux::fs::(hotpath::)?path_lookup.*
+#   rv: 12860->12968, x86: 15799->15946, a64: 11756->11860
+^rux::fs::(hotpath::)?pcache_dirty_histogram.*
+#   rv: 1346->1350, x86: 2102->2112, a64: 1740->1744
+^rux::fs::(hotpath::)?pidfd_close.*
+#   rv: 72->76, x86: 101->109, a64: 268->232
+^rux::fs::(hotpath::)?pin_leader.*
+#   rv: 132->142, x86: 153->172, a64: 324->344
+^rux::fs::(hotpath::)?publication_capture_note_dirty.*
+#   rv: 464->466, x86: 867->874, a64: 844->848
+^rux::fs::(hotpath::)?reg_file_lseek.*
+#   rv: 250->258, x86: 401->428, a64: 452->440
+^rux::fs::(hotpath::)?reg_file_read.*
+#   rv: 174->184, x86: 247->272, a64: 324->316
+^rux::fs::(hotpath::)?reg_file_write.*
+#   rv: 616->626, x86: 1112->1131, a64: 940->936
+^rux::fs::(hotpath::)?resolve_alive.*
+#   rv: 76->80, x86: 88->95, a64: 200->208
+^rux::fs::(hotpath::)?shared_file_fault_page.*
+#   rv: 374->348, x86: 675->662, a64: 648->552
+^rux::fs::(hotpath::)?sync_block_ordered.*
+#   rv: 124->126, x86: 148->152, a64: 252->256
+^rux::fs::(hotpath::)?sync_dirty_blocks_batched.*
+#   rv: 670->674, x86: 797->819, a64: 800->812
+^rux::fs::(hotpath::)?sync_dirty_buffer.*
+#   rv: 170->172, x86: 203->207, a64: 356->360
+^rux::fs::(hotpath::)?target_exited.*
+#   rv: 102->106, x86: 102->109, a64: 200->208
+^rux::fs::(hotpath::)?treepath_dentry.*
+#   rv: 106->134, x86: 142->168, a64: 224->232
+^rux::fs::(hotpath::)?vt_file_ioctl.*
+#   rv: 2956->3048, x86: 4259->4498, a64: 3916->3984
+^rux::fs::(hotpath::)?vtdev_close.*
+#   rv: 102->108, x86: 140->152, a64: 388->356
+^rux::fs::(hotpath::)?wait_buffer_io_done.*
+#   rv: 394->396, x86: 501->511, a64: 548->564
+^rux::fs::(hotpath::)?with_block::<core\[93ee42ca37157773\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[a4152748d33ef3db\]::ext4::extent::find_block_in_external_extent_ex:.*
+#   rv: 152->154, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block::<core\[93ee42ca37157773\]::result::Result<u64,\ i32>,\ ext4\[a4152748d33ef3db\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
+#   rv: 142->144, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block::<core\[c9230c9cd16dbdec\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[d12844bc12980c48\]::ext4::extent::find_block_in_external_extent_ex:.*
+#   rv: -->-, x86: 259->272, a64: -->-
+^rux::fs::(hotpath::)?with_block::<core\[c9230c9cd16dbdec\]::result::Result<u64,\ i32>,\ ext4\[d12844bc12980c48\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
+#   rv: -->-, x86: 217->227, a64: -->-
+^rux::fs::(hotpath::)?with_block::<core\[f485ab2f9f61e21a\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[42200414761e858b\]::ext4::extent::find_block_in_external_extent_ex:.*
+#   rv: -->-, x86: -->-, a64: 276->280
+^rux::fs::(hotpath::)?with_block::<core\[f485ab2f9f61e21a\]::result::Result<u64,\ i32>,\ ext4\[42200414761e858b\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
+#   rv: -->-, x86: -->-, a64: 252->256
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 512->520
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 488->496
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
+#   rv: -->-, x86: -->-, a64: 512->520
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 512->520
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 488->496
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
+#   rv: 268->272, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
+#   rv: 260->264, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
+#   rv: 268->272, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
+#   rv: 268->272, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
+#   rv: 260->264, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
+#   rv: -->-, x86: 413->430, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
+#   rv: -->-, x86: 391->405, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
+#   rv: -->-, x86: 413->430, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
+#   rv: -->-, x86: 413->430, a64: -->-
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
+#   rv: -->-, x86: 391->405, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 624->632
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 624->632
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
+#   rv: 366->370, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
+#   rv: 366->370, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
+#   rv: -->-, x86: 514->534, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
+#   rv: -->-, x86: 514->534, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 644->652
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 584->600
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::write_node::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 608->616
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::write_node::\{closure\#1\}>.*
+#   rv: -->-, x86: -->-, a64: 624->632
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 584->600
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
+#   rv: -->-, x86: -->-, a64: 584->600
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
+#   rv: -->-, x86: -->-, a64: 624->632
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
+#   rv: 390->394, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
+#   rv: 344->348, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::write_node::\{closure\#0\}>.*
+#   rv: 352->356, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::write_node::\{closure\#1\}>.*
+#   rv: 366->370, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
+#   rv: 344->348, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
+#   rv: 344->348, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
+#   rv: 366->370, x86: -->-, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
+#   rv: -->-, x86: 566->583, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
+#   rv: -->-, x86: 472->486, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::write_node::\{closure\#0\}>.*
+#   rv: -->-, x86: 490->510, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::write_node::\{closure\#1\}>.*
+#   rv: -->-, x86: 514->534, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
+#   rv: -->-, x86: 472->486, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
+#   rv: -->-, x86: 472->486, a64: -->-
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
+#   rv: -->-, x86: 514->534, a64: -->-
+#   the fs::hotpath fns whose inline unsafe blocks became
+#   always-inlined unsafe.rs contract calls (same-name size drift,
+#   debug-build instruction selection only; release builds are
+#   pinned by the pbench gate). The 59 renamed pairings the other
+#   patterns below cover: the BlockCache/Dentry/FdTable/CacheEntry
+#   methods and the moved free fns + for_each_file closures.
+# fs collection closures: same collection-drift class (p3fs2 gate 2026-11-27).
+^rux::fs::(hotpath::)?\{closure\}$
+# --- the pass-3 sync collection (p23-p3sync lane, 2026-11-26) ---
+^<rux::sync::(hotpath::)?(SpinlockGuard|SpinlockIrqGuard|SpinlockBhGuard|RwSpinlockReadGuard|RwSpinlockWriteGuard|RwSpinlockIrqReadGuard|RwSpinlockBhReadGuard|RwSpinlockBhWriteGuard|RwsemReadGuard|RwsemWriteGuard|SeqLockWriteGuard|RwSpinlockIrqWriteGuard)<.* as core\[[0-9a-f]+\]::ops::deref::Deref(Mut)?>::deref(_mut)?$
+^<rux::sync::(hotpath::)?CpuLocalRef<.* as core\[[0-9a-f]+\]::ops::drop::Drop>::drop$
+^<rux::sync::(hotpath::)?SleepMutex>::(release|release_if_owner)$
+^rux::sync::(hotpath::)?(call_rcu|rcu_softirq_handler|init)$
+#   the sync guard deref/deref_mut/drop monomorphizations, the SleepMutex
+#   handoff pair and the RCU wrap sites: each had an inline unsafe block
+#   become an always-inlined unsafe.rs contract fn (guard_shared /
+#   guard_exclusive / keyed_guard_unlock / wake_task_pid /
+#   cpu_local_row_release / rcu_* ). Same operation, verbatim body,
+#   wrapper inlined back at every call site; the residual is debug-build
+#   instruction-selection drift only (release equality is pinned by the
+#   pbench gate). Measured worst deltas, x86 debug (base -> current bytes):
+#     RwSpinlockReadGuard<bool>::deref 29->33, SleepMutex::release
+#     437->455, call_rcu 147->155, init 204->206,
+#     rcu_softirq_handler 418->386. Every other sync symbol pairs 1:1
+#     at equal size (after module-path normalization) on all three arches.
+^(<rux::syscall::FdSet>::(clear|is_set|new|set|zero)|rux::syscall::seam_register_default)$
+#   base-only symbols (sizes base->[]): fully inlined at their call sites
+#   since the Nov-25 baseline — the same LTO inline-jitter class as
+#   IrqDomain::new; the sync lane's pair run surfaced them (stale base),
+#   no sync touch involved. first seen: p23-p3sync lane, 2026-11-26.
+^rux::interrupt::domain::(generic_handle_domain_irq|get_default_domain|irq_create_mapping|irq_domain_create_linear)$
+#   same class on x86: base-only, inlined away since the baseline.
+#   first seen: p23-p3sync lane pair, 2026-11-26.
+
+# --- net stage B vs the refreshed base ELFs (2026-11-27): nested-module
+# forms (scribble:: / closure#N) under the collection; same drift class.
+rux::debug::(hotpath::)?register_debugfs_knobs::\{closure#\d+\}$
+rux::debug::(hotpath::)?scribble::(audit_frames|verify_gs)$
+^rux::mm::vdso_init$
+^rux::mm::meta_audit_inner$
+
+# --- the pass-3 process collection (p23-p3process lane, 2026-11-27) ---
+^rux::process::\{closure\}$
+^rux::process::find_task_by_pid$
+^<rux::process::TaskBorrow as core\[[0-9a-f]+\]::ops::deref::Deref>::deref$
+^<rux::process::TaskBorrow as core\[[0-9a-f]+\]::ops::deref::DerefMut>::deref_mut$
+^<rux::process::TaskRef as core\[[0-9a-f]+\]::ops::deref::Deref>::deref$
+^<rux::process::TaskRef as core\[[0-9a-f]+\]::ops::deref::DerefMut>::deref_mut$
+#   the six process functions whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (task_pgid_raw / task_from_pid_ptr /
+#   task_borrow_deref / task_borrow_deref_mut / task_ref_deref /
+#   task_ref_deref_mut); the {closure} is current_pgid's map_or closure.
+#   Same operation, verbatim body, wrapper inlined back at every call site;
+#   the residual is debug-build instruction-selection drift only (the call
+#   target and its relocation encoding change). Measured (base -> current
+#   bytes, same rig, debug profile):
+#     rv:   {closure} 26->28, find_task_by_pid 58->60, each Deref/DerefMut
+#           body 22->24
+#     x86:  {closure} 23->27, find_task_by_pid 64->68, each Deref/DerefMut
+#           body 25->29
+#     a64:  {closure} 32->112 (the a64 debug inliner materializes the
+#           wrapper body in the closure), find_task_by_pid 156->160, each
+#           Deref/DerefMut body 36->40
+#   every other process symbol pairs 1:1 at equal size on all three arches;
+#   the moved TaskBorrow::from_raw pairs 1:1 at equal size under module-path
+#   normalization (its home moved to process::r#unsafe, body verbatim).
+
+# --- pass3final nine-subsystem gate (2026-11-27): the process collection's
+# drift, in both name forms (base without / current with the types::
+# segment); loose search patterns, same drift class as recorded above.
+rux::process::(types::)?TaskBorrow as .*deref::Deref(Mut)?>::deref(_mut)?$
+rux::process::(types::)?TaskRef as .*deref::Deref(Mut)?>::deref(_mut)?$
+rux::process::(hotpath::)?(types::)?current_pgid::\{closure#\d+\}$
+rux::process::(hotpath::)?(types::)?find_task_by_pid$

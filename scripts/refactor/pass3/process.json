@@ -1,0 +1,203 @@
+{
+ "sub": "process",
+ "target": "kernel/core/src/process",
+ "imports_rs": [
+  "use core::ptr::NonNull;",
+  "use super::types::TaskBorrow;"
+ ],
+ "moves": [
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "current_pgid",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "044820fcb017",
+   "inv": "INV-PROC-BORROW-1",
+   "section": "pid-handle leaf reads (INV-PROC-BORROW-1)",
+   "name": "task_pgid_raw",
+   "params": "t: *mut Task",
+   "ret": "u32",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "crate::process::r#unsafe::task_pgid_raw(t)",
+   "inline": true,
+   "doc": [
+    "One pgid read off the current task's page (collected by pass 3)."
+   ],
+   "contract": [
+    "`t` is the pointer sched::current() handed out: the currently",
+    "running task on this CPU. The reaper (the task's parent) cannot run",
+    "on this CPU while the reader executes, so the page cannot be freed",
+    "under the read (INV-PROC-BORROW-1's current-task discipline)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "find_task_by_pid",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d0c0b691cdb1",
+   "inv": "INV-PROC-BORROW-1",
+   "section": "pid-handle leaf reads (INV-PROC-BORROW-1)",
+   "name": "task_from_pid_ptr",
+   "params": "ptr: *mut Task",
+   "ret": "&'static mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "crate::process::r#unsafe::task_from_pid_ptr(ptr)",
+   "inline": true,
+   "doc": [
+    "Turn a pid-hash lookup's raw pointer into the &'static mut handle",
+    "find_task_by_pid returns (collected by pass 3)."
+   ],
+   "contract": [
+    "`ptr` came from pid_hash_lookup: a live Task pointer published by",
+    "the hash insert. The returned &'static mut continues the lookup's",
+    "liveness proof — the task stays alive (not reaped) for the",
+    "caller's use, mutation excluded by the caller's existing",
+    "ownership argument (this CPU runs the task, or the caller holds",
+    "the serializing lock) — INV-PROC-BORROW-1's mutable half."
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "from_raw",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "0b0f18e6d190",
+   "inv": "INV-TASKREF-1",
+   "section": "TaskBorrow/TaskRef deref edges (INV-TASKREF-1)",
+   "impl_owner": "TaskBorrow",
+   "inv_note": "INV-TASKREF-1: adopt-once under the caller's liveness proof — the # Safety section in the doc below is the contract."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "837c6e191b9c",
+   "inv": "INV-TASKREF-1",
+   "section": "TaskBorrow/TaskRef deref edges (INV-TASKREF-1)",
+   "name": "task_borrow_deref",
+   "params": "nn: &core::ptr::NonNull<Task>",
+   "ret": "&Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::process::r#unsafe::task_borrow_deref(&self.0)",
+   "body_edits": [
+    {
+     "find": "self.0.as_ref()",
+     "replace": "nn.as_ref()"
+    }
+   ],
+   "doc": [
+    "TaskBorrow's shared dereference (collected by pass 3): the one",
+    "consolidated raw-pointer read behind the Deref impl."
+   ],
+   "contract": [
+    "Syscall-context short read (the TaskBorrow type doc): the reaper",
+    "cannot run on this CPU while the borrower executes, so the task",
+    "page cannot be freed under the returned reference for the",
+    "duration of the read (INV-TASKREF-1)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "63944b509bf3",
+   "inv": "INV-TASKREF-1",
+   "section": "TaskBorrow/TaskRef deref edges (INV-TASKREF-1)",
+   "name": "task_borrow_deref_mut",
+   "params": "nn: &mut core::ptr::NonNull<Task>",
+   "ret": "&mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::process::r#unsafe::task_borrow_deref_mut(&mut self.0)",
+   "body_edits": [
+    {
+     "find": "self.0.as_mut()",
+     "replace": "nn.as_mut()"
+    }
+   ],
+   "doc": [
+    "TaskBorrow's exclusive dereference (collected by pass 3)."
+   ],
+   "contract": [
+    "Same liveness as the shared deref; mutation additionally relies on",
+    "the caller's existing exclusion (this CPU owns the task, or the",
+    "caller holds the lock that serializes the write) — INV-TASKREF-1's",
+    "mutable half, the same argument the pre-conversion call sites made."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "f2d3d21d860a",
+   "inv": "INV-TASKREF-1",
+   "section": "TaskBorrow/TaskRef deref edges (INV-TASKREF-1)",
+   "name": "task_ref_deref",
+   "params": "nn: &core::ptr::NonNull<Task>",
+   "ret": "&Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::process::r#unsafe::task_ref_deref(&self.0)",
+   "body_edits": [
+    {
+     "find": "self.0.as_ref()",
+     "replace": "nn.as_ref()"
+    }
+   ],
+   "doc": [
+    "TaskRef's shared dereference (collected by pass 3)."
+   ],
+   "contract": [
+    "The pin defers free_task_slot (task_put) until after this handle",
+    "is dropped, so the task page stays alive and mapped for the whole",
+    "lifetime of the returned reference (INV-TASKREF-1)."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/process/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "ec03ad8e53c4",
+   "inv": "INV-TASKREF-1",
+   "section": "TaskBorrow/TaskRef deref edges (INV-TASKREF-1)",
+   "name": "task_ref_deref_mut",
+   "params": "nn: &mut core::ptr::NonNull<Task>",
+   "ret": "&mut Task",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::process::r#unsafe::task_ref_deref_mut(&mut self.0)",
+   "body_edits": [
+    {
+     "find": "self.0.as_mut()",
+     "replace": "nn.as_mut()"
+    }
+   ],
+   "doc": [
+    "TaskRef's exclusive dereference (collected by pass 3)."
+   ],
+   "contract": [
+    "Same liveness as the shared deref (the pin serializes freeing,",
+    "not writing); mutation exclusion is the caller's —",
+    "INV-TASKREF-1's mutable half."
+   ]
+  }
+ ],
+ "forbid": [
+  "kernel/core/src/process/hotpath.rs"
+ ]
+}

@@ -564,7 +564,7 @@ pub struct CommCount {
 
 /// The record header, 32 bytes, at the region start.
 #[repr(C)]
-pub(super) struct RecordHeader {
+pub(crate) struct RecordHeader {
     pub(super) magic: u64,
     pub(super) version: u32,
     /// Payload length in bytes (after this header).
@@ -580,10 +580,10 @@ pub(super) struct RecordHeader {
 
 /// A byte cell the panic sink can write without any lock (atomics only;
 /// `AtomicU8` directly would also do, this keeps the array decl short).
-pub(super) struct AtomicU8Cell(pub(super) core::sync::atomic::AtomicU8);
+pub(crate) struct AtomicU8Cell(pub(super) core::sync::atomic::AtomicU8);
 
 /// Stack-buffer fmt sink for the record head (no allocation).
-pub(super) struct HeadWriter {
+pub(crate) struct HeadWriter {
     pub(super) buf: [u8; 512],
     pub(super) len: usize,
 }
@@ -646,7 +646,7 @@ pub(super) struct Watch {
 // the leak-origin probe slot
 // ---------------------------------------------------------------------------
 
-pub(super) struct LoSlot {
+pub(crate) struct LoSlot {
     pub(super) task: AtomicUsize,
     /// `&'static Location` of the most recent PREEMPT_OFFSET acquire.
     pub(super) site: AtomicUsize,
@@ -723,7 +723,7 @@ pub(super) struct LoSlot {
 
 pub(super) const CAP: usize = 128;
 
-pub(super) struct Slot {
+pub(crate) struct Slot {
     pub(super) tid: AtomicU32,
     pub(super) op: AtomicU32,
     pub(super) len: AtomicU32,

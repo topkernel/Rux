@@ -582,6 +582,8 @@ line per id; the contract lives in the owning module.
 - **INV-SREF-1** — StaticRef machine-lifetime storage (kernel/src/safety/ptr.rs)
 - **INV-SY-1** — sync framework edges (kernel/core/src/sync/unsafe.rs, L1)
 - **INV-SY-3** — sync framework edges (kernel/core/src/sync/unsafe.rs, L1)
+- **INV-SY-4** — sync framework edges: guard-held data dereference (kernel/core/src/sync/unsafe.rs, guard_shared/guard_exclusive)
+- **INV-SY-5** — sync framework edges: keyed-guard release (kernel/core/src/sync/unsafe.rs, keyed_guard_unlock)
 - **INV-UACCESS-1** — UserPtr family (arch/uaccess_safe.rs)
 - **INV-WINDOW-1** — KernelStackWindow stack reads (kernel/src/safety/frame.rs)
 
@@ -1418,7 +1420,294 @@ Mechanics and evidence, all in the lane worktree `run/`:
   citing the block's pre-move artifact row; final bank: sched/unsafe.rs
   101 annotated / 7 GAP, all 7 pre-existing).
 
+## 5.x addendum: the pass-3 unsafe collection, mm (2026-11-26, p23-p3mm lane)
+
+Seed-core pass 3 (§2c.5), second subsystem: mm's scattered unsafe
+collected into `kernel/core/src/mm/unsafe.rs`. Before: 53 inline unsafe
+regions in `mm/hotpath.rs` (15,012 lines), 45 regions in `unsafe.rs`.
+After: `mm/hotpath.rs` holds ZERO unsafe regions and zero `unsafe`
+keywords — audited by `scripts/core_unsafe_gate.py --strict --dir
+kernel/core/src/mm` (rc=0) — and `unsafe.rs` carries all 98 mm regions,
+98 annotated, 0 GAP (the pre-existing 45 rows keep their artifacts; the
+53 collected regions carry their INV contracts as doc comments citing
+the registry — INV-HEAP-3, INV-SMALLALLOC-1, INV-PAGEDESC-1, INV-MM-1/
+2/3/12, INV-VDSO-DATA-1 — plus the invariant the ledger's artifacts.tsv
+had already attached to each block at the base commit).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 40 directives (880 cut lines relocated): 28
+  move-fn, 8 move-item, 4 wrap. The ALLOC-HOT-PATH blocks are all
+  verbatim relocations, not new wrappers (MetaArray get/get_mut and
+  fill_interior_order, buddy_block_span, the two GlobalAlloc impls, the
+  kmem trace boundary fns, dealloc_direct) — no new call layer exists
+  on the alloc/free path; the 4 wrap ops (`node_data_ref`,
+  `node_data_ref_mut`, `page_desc_ref`, `meta_audit_scratch`) are
+  `#[inline(always)]` contract fns OFF the allocation fast path. The
+  manifest-closed verbatim audit (`pass3.py verify --base 1ae2a43c2`)
+  shows the aggregate line multiset changed only by claimed mechanical
+  lines (35 removed / 83 added) — zero unclaimed edits;
+- compiled-kernel identity: pair vs freshly built 1ae2a43c2 base ELFs
+  rc=0 on all three arches with the drift recorded in
+  docs/development/pass3-pair-exceptions.txt — the four wrap forwarders
+  drift +2..4 B of debug instruction selection (node_data 90->92,
+  node_data_mut 90->92, page_desc 58->60; rv counts), a64 shows the
+  same class on vdso_init (100->148) and meta_audit_inner
+  (2752->2672), and the ten cfg(x86_64) vDSO/TSC edges appear as
+  1:1 missing/extra pairs from their move out of mod x86_track (each
+  resolves through the in-module re-export); release-codegen equality
+  is pinned by the pbench gate below;
+- warning count unchanged (2216 = baseline 2216 rv, 2182 = 2182 x86,
+  2164 a64 vs 2165 — the delta is a dtb-regeneration environment
+  notice in the base log, not a code warning);
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code (30 regions recovered by moved-item pairing) plus 25 hand
+  decision rows in 18 groups (run/pass3-mm-decisions.tsv), each citing
+  the block's pre-move artifact row; final bank: mm/unsafe.rs 98
+  annotated / 0 GAP;
+- pbench (x86_64, PBENCH DONE rc=0, same rig as the p3sched gate log:
+  tcg,thread=multi smp=2 mem=2G): worst median delta vs
+  p23-coord/gate-p3sched/pbench-x86.log is +14.7% (p5e_child_spin,
+  n=323) — WITHIN the ±20% Tier-2 band. The rows above +5% decompose
+  as measurement physics, not code: p1_null +6.3% and p3c_fault_file
+  0.070->0.080 are one timer-quantum steps whose values sit inside the
+  11 gate logs' historical ranges (p3c 0.060-0.080 across gates),
+  p6_unlink +6.7% is mid-band (74.5-82.6 across gates), and
+  p5e_child_spin ran with two other lanes' QEMUs live on the host (the
+  band across gate logs is 251-274). The load-sensitive rows that
+  could plausibly touch mm code measured flat in the solo run:
+  p5a_pipe +1.5%, p2_ctxsw +0.5%, p4_fork_exec -4.2% — consistent with
+  no new call layer on any hot path (the wrap blocks are pglist/
+  page-desc accessors and an audit scratch borrow, none on these
+  paths). One earlier pbench attempt ran concurrently with this lane's
+  own rv suite QEMU and showed p5a_pipe +21.6% / p2_ctxsw +18.5%; the
+  solo rerun collapses both to noise-level, pinning that run's deltas
+  on host contention.
+## 5.x addendum: the pass-3 unsafe collection, debug (2026-11-26, p23-p3debug lane)
+
+Seed-core pass 3 on debug, the diagnostic subsystem — the lane the
+coordinator's brief flagged as the print-site-heavy one. Before: 101
+inline unsafe regions in `debug/hotpath.rs` (15,674 lines; the whole
+subsystem), 8 regions in `unsafe.rs`. After: `debug/hotpath.rs` holds
+ZERO unsafe regions and zero `unsafe` keywords — audited by
+`scripts/core_unsafe_gate.py --strict --dir kernel/core/src/debug`
+(rc=0) — and `unsafe.rs` carries 88 regions, 85 annotated (44 INV:F1,
+12 INV:F2, 9 INV:F18, 6 INV:F3, 4 INV:F4, 2 INV:F10 + the 8 pre-existing
+INV-FOR rows); the 3 GAP rows are the provoke-oops deliberate faults,
+GAP at the base too. The scribble and wildwatch cfg-exception inline
+modules keep their module structure: their engines moved whole into
+unsafe.rs (verbatim bodies, `#[cfg(feature = "x86_64")]` preserved) and
+the modules re-export them, so `crate::debug::hotpath::scribble::*` and
+the arch callers' paths are unchanged.
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 80 directives (1,956 cut lines relocated): 25
+  move-fn (whole-function engines: the fp/ra/walk_fp_chain readers, the
+  scribble detection/report set, the wildwatch PTE engines, the
+  locktrace big reports), 34 wrap (contract fns: per-arch save_regs /
+  CSR quads, the pstore record edges, the ppage table slots, the stale
+  TaskBorrow/task-state adopt edges, the sched-slot volatile read), 20
+  inline-call (re-use of ALREADY audited unsafe.rs edges — t_pid /
+  t_preempt_count x11, location_ref, raw_qword x2, and the new canary /
+  sched_slot_current / task_view edges), 1 move-item (the ReportBuf
+  Sync proof). The manifest-closed verbatim audit (`pass3.py verify
+  --base 1ae2a43c2`) closes clean: 127 aggregate lines removed, 272
+  added, every one a claimed mechanical line (braces, wrapper
+  signatures, call-site lines, the visibility widenings the moves
+  force).
+- print behavior: the raw print helpers (scribble's putc/puts/put_hex/
+  put_dec, the ReportBuf mirror, taskdump lines) moved VERBATIM with
+  their callers; `scripts/hotpath_print_check.py` shows debug/hotpath.rs
+  104 -> 98 un-annotated print sites (the 6 moved into unsafe.rs with
+  their fns — sites re-homed, none removed) and the ratchet is updated
+  as the tool instructs. The one intentional print-path cleanup: the
+  slowtask heartbeat's `unsafe { audit(now) }` was an unsafe block
+  around a SAFE call (audit is a plain fn) — the block is dropped, the
+  call unchanged.
+- compiled-kernel identity: pair vs the base ELFs built at 1ae2a43c2
+  in the lane worktree pairs 1:1 at equal size on all three arches
+  after module-path normalization EXCEPT the recorded classes in
+  docs/development/pass3-pair-exceptions.txt: 34 new contract-fn
+  symbols (debug is diagnostic cold path — the wrappers are named
+  #[inline] fns, NOT inline(always), so debug profiles name the
+  contract), the vanished base-only TaskState accessor copies (their
+  bodies inline into the adopt edges now), the wildwatch engines'
+  old rux::debug::x86::* copies (moved whole to rux::debug::*, equal
+  size), and 2 new out-of-line materializations of EXISTING edges
+  (location_ref::<PtRegs>, raw_qword). rv/x86/a64 pair rc=0 with the
+  recorded patterns.
+- warning count: rux-core lib (riscv64 debug clean rebuild) 577 ->
+  438. No NEW warning class appears; the drop is entirely the
+  dead-code family (`constant/function/field/static is never used`,
+  `creating a mutable reference to mutable static`) in NON-debug files
+  (drivers/fs/console/perf): the collection widens the reference ROOTS
+  (pub(crate) statics and the moved engines' new call edges), so
+  reference chains that were dead-through-private at the base are now
+  reachable. The lane's own regressions (2 feature-gated wrappers
+  dead in default builds, 6 pub(super)-type-exposure warnings) were
+  fixed in the spec, not allowed.
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code — 45 regions carried automatically (moved-item pairing), 35
+  wrapped/impl regions re-attached by hand decisions
+  (`run/pass3-debug-decisions.tsv`, each citing the block's pre-move
+  artifact row), 20 inline-call regions retired INTO the already
+  annotated unsafe.rs edges they now call; final bank: debug/unsafe.rs
+  85 annotated / 3 GAP (all 3 pre-existing GAPs). The exemption row
+  for debug/hotpath.rs 98 -> 0 records the retirement.
+
+Tool fixes landed in scripts/refactor/pass3.py (reported to the
+coordinator): unsafe-fn region location (two bugs), multi-line inline
+block splice, gitignored-build-artifact exclusion from the verify
+multiset, and rewrite_vis stripping the existing visibility instead of
+stacking (`pub pub fn`).
+## 5.x addendum: the pass-3 unsafe collection, sync (2026-11-26, p23-p3sync lane)
+
+Seed-core pass 3 (seed-core-design.md §2c.5): the sync subsystem — the
+lock-primitive foundation every other subsystem spins on — collected.
+Before: 95 inline unsafe regions in `sync/hotpath.rs` (14,077 lines;
+the largest subsystem bank), 11 in `unsafe.rs`. After: `hotpath.rs`
+holds ZERO unsafe regions and zero `unsafe` keywords under
+`#![forbid(unsafe_code)]` (`types.rs` too) — audited by
+`scripts/core_unsafe_gate.py --strict --dir kernel/core/src/sync`
+(rc=0) — and `unsafe.rs` carries 87 regions, ALL 87 annotated, zero
+GAP (the 11 pre-existing INV-SY rows carried; every collected region
+re-banked with an artifact).
+
+Region dispositions (73 directives in scripts/refactor/pass3/sync.json,
+spec coverage 95/95):
+- move-item (29): every Send/Sync proof of the guard family — verbatim
+  whole-item relocations, zero runtime surface;
+- move-fn (16): the six `unsafe fn` accessors (reset, get_ref,
+  get_mut_unchecked, two into_inner, read_preempt_disabled) plus
+  read_inner, caller_return_address (the per-lock acquire asm read),
+  deadlock_warn/puthex/putdec (cold diagnostics), locked_owner_alive_wait,
+  optimistic_probe, release-path-adjacent free fns, wait_qs_sleepy, and
+  with/with_preempt — the D-7 per-CPU windows, moved whole so the two
+  hottest fn entries in the kernel (small_alloc's 46M+/boot windows)
+  keep byte-identical call graphs (no new call, not even an inlined one);
+- wrap (6): rcu_link_tail, rcu_splice_cbs, rcu_run_cbs, rcu_cbs_row_init
+  (self-contained RCU guarded ops, slow paths), wake_task_pid (the
+  SleepMutex handoff pid read, shared by release and release_if_owner
+  via inline-call) and cpu_local_row_release (CpuLocalRef::drop's
+  in_use store) — all #[inline(always)];
+- inline-call (22): the 20 guard Deref/DerefMut derefs plus the two
+  shared-edge call sites, ending in the hand-written INV-SY-4
+  (guard_shared/guard_exclusive) and INV-SY-5 (keyed_guard_unlock)
+  contract fns from unsafe.rs — a per-block decision: trait-impl
+  methods cannot relocate (move-fn is structurally impossible for a
+  Deref impl), so the edge is named once in unsafe.rs and every call
+  site carries zero extra code in release (the wrapper is
+  always-inlined; pbench below pins release equality).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 73 directives (1040 cut lines relocated); the
+  manifest-closed verbatim audit (`pass3.py verify --base HEAD`)
+  shows the aggregate line multiset changed only by the claimed
+  mechanical lines (51 removed / 120 added: `unsafe {` braces,
+  wrapper signatures, call-site rewrites) — zero unclaimed edits;
+- warning count unchanged-or-lower (2222 -> 2218 raw warning lines,
+  riscv64 debug build; no new warning class);
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code (moved-item pairing for 82 of 86 annotated movable regions;
+  15 hand decision rows, each citing the pre-move artifact row — the
+  six non-generic one-line impls whose cross-file pairing missed, and
+  the nine wrapper blocks whose pre-move blocks the collection
+  replaced; final bank: sync/unsafe.rs 87/87 annotated, 0 GAP);
+- the hot-path print ratchet improved (un-annotated sites 8 -> 6 in
+  sync/hotpath.rs; the 61 annotated futex print sites all moved
+  verbatim with their annotations — behavior unchanged);
+- compiled-kernel identity: pair vs the pass-2 baseline ELFs (all
+  merged subsystems normalized) pairs 1:1 at equal size with 473/478/474
+  recorded exceptions per arch (rv/x86/a64) — the guard
+  deref/deref_mut/drop monomorphizations whose inline block became an
+  always-inlined contract fn (debug instruction selection shifts a few
+  bytes: RwSpinlockReadGuard<bool>::deref 29->33, SleepMutex::release
+  437->455, call_rcu 147->155, init 204->206,
+  rcu_softirq_handler 418->386), the five pre-existing
+  SeqLock<HugePageStats> zero-reference monomorphizations, the four
+  p3sched drift symbols, and 11 stale-base inline-jitter vanishings
+  (FdSet methods + interrupt::domain fns, no sync touch) — recorded in
+  docs/development/pass3-pair-exceptions.txt; release-codegen equality
+  is pinned by the pbench gate below;
+- pbench (x86_64 release, PBENCH DONE rc=0, two runs): every median
+  within band of the gate-debug9 baseline. Run 1 flagged two probes
+  whose history is quantization noise, not code: p3c_fault_file
+  0.070 vs baseline 0.060 (+16.7%) and p5e_child_spin 274.0 vs 250.9
+  (+9.2%) — both reproduce at baseline in run 2 (0.060, +0.0%;
+  251.8, +0.3%), and the ten prior gate logs show the same probes
+  swinging the full band (p3c 0.060-0.080 = one 10 ns TSC quantum;
+  p5e 250.9-274.1) with zero sync changes. Run 2 worst delta
+  +4.6% (p5b_dgram_recv_peek); improvements p5a_pipe -10.5%,
+  p6_unlink -6.9%, p1_null -3.2%. The always-inlined guard deref
+  wrappers keep release codegen identical, as designed;
+- pass-3 tool fixes (separate commit, reported to the coordinator):
+  generic `unsafe impl<K: ..>` regions were unlocatable by apply, and
+  an `unsafe fn`'s own signature keyword found no enclosing fn span.
+
 ## 6. Process (how this grows)
+## 5.x addendum: the pass-3 unsafe collection, drivers (2026-11-26, p23-p3drivers lane)
+
+Seed-core pass 3 (seed-core-design.md §2c.5), the largest subsystem:
+drivers' scattered unsafe collected into
+`kernel/core/src/drivers/unsafe.rs` (the file did not exist — drivers
+had no edge file at the pass-2 flip). Before: 115 inline unsafe regions
+in `drivers/hotpath.rs` (22,607 lines, the inline timer/intc modules
+included). After: `drivers/hotpath.rs` holds ZERO unsafe regions and
+zero `unsafe` keywords — audited by `scripts/core_unsafe_gate.py
+--strict --dir kernel/core/src/drivers` (rc=0) — and `unsafe.rs`
+carries 99 regions, 67 annotated / 32 GAP (every GAP row is a base
+GAP carried by id: the 20 Send/Sync proofs plus 12 blocks whose
+baseline rows had no harness; none regressed). Every moved region
+carries its contract as a doc comment citing the registry (INV-MMIO-1,
+INV-BLKDEV-1/2/3, INV-SAFECALL-1, INV-DMA-2/3, INV-KPTR-3, INV-SLOT-1,
+INV-SREF-1, INV-CHARDEV-PRIV-1, INV-KTASK-1, INV-FS-FILEPRIV-1, and
+the F5/F7/F9 rows).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 113 directives (77 wraps, 15 inline-call
+  reuses of an edge a wrap above created, 1 move-fn — `kvm_pv_send_ipi`
+  relocates whole and its NESTED `unsafe fn hc` (the one unsafe-fn
+  census region) rides with it, callers rewritten by callmap — and
+  20 move-items), 400 cut lines relocated; the manifest-closed verbatim
+  audit (`pass3.py verify --base <staging commit>`) shows the aggregate
+  line multiset changed only by the claimed mechanical lines
+  (93 removed / 483 added) — zero unclaimed edits. The
+  `IO_BUF_LAYOUT` const is the one body-level divergence: a const
+  context cannot call an unsafe.rs wrapper, so the unchecked
+  `Layout::from_size_align_unchecked` became its const-checked
+  constructor (the 64/16 proof moved from assert to compile time).
+- compiled-kernel identity: pair (all nine pass-2 specs, vs the
+  pre-pass-2 coordinator base ELFs) is rc=0 on all three arches with
+  74/81/76 symbols recorded in docs/development/pass3-pair-exceptions.txt
+  — debug-build instruction-selection drift around the
+  always-inlined contract edges plus base-only FdSet method
+  instantiations whose call sites now inline them; release-codegen
+  equality is pinned by the pbench gate below;
+- warning count 2214 vs baseline 2216 (riscv64 debug build): two
+  fewer — the collection orphaned the `read_volatile`/`write_volatile`
+  and `alloc`/`alloc_zeroed`/`dealloc` imports (removed) and widened
+  `PendingIo` one step, silencing six private-interface warnings the
+  new pub(crate) pending-table edges would have added; the two edges
+  whose parent fn was already dead at base (`vq_avail_mut`,
+  `timer_riscv64_stimecmp_set`) carry `#[allow(dead_code)]`;
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code (reference remap for the unchanged-owner regions plus a
+  generated hand-decisions file — one row per wrapper, artifact read
+  off the 1ae2a43c2 sidecar by the moved region's base id; final bank:
+  drivers/unsafe.rs 67 annotated / 32 GAP, hotpath.rs gone from the
+  ledger; unsafe-verification-exemptions.tsv row drivers/hotpath.rs
+  24->0);
+- suites on the final tree: riscv64 912/912 (verdict green, rc=0),
+  x86_64 914/914 (verdict green, rc=0); x86 pbench release build
+  `PBENCH DONE rc=0` — every probe median shared with the
+  gate-p3sched baseline is inside the ±20% Tier-2 band, worst delta
+  p5e_child_spin +11.4% (all other common rows +0.0%..+8.8%;
+  p3b_fault_anon/p3c_fault_file exactly flat). The probe set itself
+  moved between the two runs (the pbench tool gained p4_fork_exit,
+  p5c_stream_write, p6_getdents, p7_sleep1ms and dropped p3b_fault_cow,
+  p5a_pipe, p5f_stream_dwait) — those rows have no same-rig baseline
+  pair; the numbers accrue for the next gate.
+
+
 - Every merged round that lands a safety property, a perf number, or a
   bug-class elimination appends its evidence here (AGENTS.md rule,
   2026-11-03) — same change, not a follow-up.
