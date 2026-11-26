@@ -589,7 +589,7 @@ fn timeout_to_deadline(us: u64) -> Option<u64> {
     if us == 0 {
         return None;
     }
-    Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+    Some(crate::drivers::hotpath::timer::get_jiffies() + (us / 10_000).max(1))
 }
 
 /// Snapshot the current task's credentials for SO_PEERCRED/SCM_CREDENTIALS.
@@ -967,7 +967,7 @@ fn unix_wait_round(
             );
             static LAST_J: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::drivers::hotpath::timer::get_jiffies();
             let prev_j = LAST_J.swap(now, core::sync::atomic::Ordering::Relaxed);
             crate::pr_warn!(
                 "WQ-PARK #{} pid={} sock={:#x} segs={} kind={:?} jif={} dt={}",
@@ -1023,7 +1023,7 @@ fn unix_wait_round(
         return Err(-4); // EINTR
     }
     if let Some(dl) = deadline {
-        if crate::drivers::timer::get_jiffies() >= dl {
+        if crate::drivers::hotpath::timer::get_jiffies() >= dl {
             // Linux SO_RCVTIMEO/SO_SNDTIMEO expiry surfaces as EAGAIN.
             return Err(-11);
         }

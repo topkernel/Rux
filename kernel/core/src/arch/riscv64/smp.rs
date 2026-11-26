@@ -217,7 +217,7 @@ pub fn start_secondaries() {
     // delivery state. Re-establish thresholds and re-arm every
     // registered IRQ now that the bringup window is closed (reference
     // parity: Linux's sifive-plic cpu-online notifier).
-    crate::drivers::intc::plic::after_smp_online_restore();
+    crate::drivers::hotpath::intc::plic::after_smp_online_restore();
     // Post-bring-up affinity refresh: every task created before this point
     // (boot init + early kthreads) gets its default mask widened to the
     // online set (see Task::refresh_default_affinity_to_online).

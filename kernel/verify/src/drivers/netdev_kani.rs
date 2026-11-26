@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for network device flags and operations.
 //!
-//! Types copied from: kernel/core/src/drivers/net/space.rs
+//! Types copied from: kernel/core/src/drivers/hotpath.rs
 
 #![cfg(kani)]
 

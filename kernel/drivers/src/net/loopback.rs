@@ -5,7 +5,7 @@
 //! Loopback network device
 
 #![forbid(unsafe_code)]
-use crate::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
+use crate::net::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use rux::net::types::SkBuff;
 use crate::sync::types::SeqLock;
 use crate::sync::types::Spinlock;

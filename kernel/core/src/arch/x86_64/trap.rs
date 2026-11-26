@@ -488,12 +488,12 @@ pub fn init() {
         for (v, entry) in unsafe { (*idt).iter_mut() }.enumerate() {
             // int1/int3/into are reachable from user mode (DPL 3); #DF
             // uses IST1; everything else is a plain kernel interrupt gate.
-            let lv = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as usize;
+            let lv = crate::drivers::hotpath::intc::apic::LOCAL_TIMER_VECTOR as usize;
             let stub: *const u8 = if v < 48 {
                 stubs[v]
             } else if v >= lv && v <= crate::arch::ipi::IPI_LAST as usize {
                 apic_stubs[v - lv]
-            } else if v == crate::drivers::virtio::MSIX_BLK_VECTOR as usize {
+            } else if v == crate::drivers::hotpath::MSIX_BLK_VECTOR as usize {
                 &raw const stub_129
             } else {
                 &raw const stub_spurious
@@ -806,7 +806,7 @@ extern "C" fn intx_irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
 /// thread runs delivers a fresh vector and re-pends, coalesced by the
 /// pending flag; the walker drains the whole used ring anyway).
 extern "C" fn blk_msix_irq_thread_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    BLK_MSIX_IRQ_THREAD.thread_loop(crate::drivers::virtio::msix_blk_isr)
+    BLK_MSIX_IRQ_THREAD.thread_loop(crate::drivers::hotpath::msix_blk_isr)
 }
 
 /// Spawn (idempotent) the per-line thread at registration time. The
@@ -902,8 +902,8 @@ pub fn irq_threads_boot_init() -> usize {
 /// forever.
 pub fn enable_timer_interrupt() {
     let mut lapic_armed = false;
-    if crate::drivers::intc::apic::ready() {
-        lapic_armed = crate::drivers::intc::apic::timer_start();
+    if crate::drivers::hotpath::intc::apic::ready() {
+        lapic_armed = crate::drivers::hotpath::intc::apic::timer_start();
     }
     if lapic_armed {
         // The free-running PIT tick (if it was ever unmasked) would now
@@ -913,8 +913,8 @@ pub fn enable_timer_interrupt() {
         // PIT fallback tick: program channel 0 at HZ (nothing programs
         // it on the LAPIC path — QEMU's reset default is the 18.2 Hz
         // DOS divider) and open the line.
-        crate::drivers::timer::init();
-        crate::drivers::timer::set_next_trigger();
+        crate::drivers::hotpath::timer::init();
+        crate::drivers::hotpath::timer::set_next_trigger();
         unmask_irq_line(IRQ_TIMER);
     }
     // SAFETY: sti enables interrupts at the end of boot bring-up, the
@@ -925,8 +925,8 @@ pub fn enable_timer_interrupt() {
 /// Disable the timer interrupt (mask the LAPIC timer, or PIC IRQ0 on
 /// the no-APIC fallback path).
 pub fn disable_timer_interrupt() {
-    if crate::drivers::intc::apic::ready() {
-        crate::drivers::intc::apic::timer_mask();
+    if crate::drivers::hotpath::intc::apic::ready() {
+        crate::drivers::hotpath::intc::apic::timer_mask();
     } else {
         mask_irq_line(IRQ_TIMER);
     }
@@ -1079,7 +1079,7 @@ mod vec {
 }
 
 /// LAPIC timer vector (per-CPU tick; same handler body as the PIC path).
-const LOCAL_TIMER: u64 = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as u64;
+const LOCAL_TIMER: u64 = crate::drivers::hotpath::intc::apic::LOCAL_TIMER_VECTOR as u64;
 
 /// Trap handler — called by trap.S stubs with the frame pointer, CPU id,
 /// and the raw vector number (third argument: x86 has no scause-like
@@ -1241,9 +1241,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     // entry, at entry before anything else (the re-arm
                     // lands as its own TIMER_OP_ONESHOT entry later in
                     // the tick handling).
-                    crate::drivers::intc::apic::timer_event_record(
+                    crate::drivers::hotpath::intc::apic::timer_event_record(
                         cpu_id,
-                        crate::drivers::intc::apic::TIMER_OP_SERVICE,
+                        crate::drivers::hotpath::intc::apic::TIMER_OP_SERVICE,
                         0,
                         0,
                     );
@@ -1407,7 +1407,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
                     // in-service bit would block further delivery.
-                    crate::drivers::intc::apic::eoi();
+                    crate::drivers::hotpath::intc::apic::eoi();
                     handle_timer_tick(regs_ref, cpu_id);
                     crate::interrupt::preempt::irq_exit();
                     irq_exit_maybe_preempt_kernel(regs_ref);
@@ -1417,7 +1417,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     .contains(&v) =>
                 {
                     crate::interrupt::preempt::irq_enter();
-                    crate::drivers::intc::apic::eoi();
+                    crate::drivers::hotpath::intc::apic::eoi();
                     crate::arch::ipi::handle_ipi_vector(v, regs_ref);
                     crate::interrupt::preempt::irq_exit();
                     irq_exit_maybe_preempt_kernel(regs_ref);
@@ -1441,15 +1441,15 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                 // thread runs posts a fresh vector and re-pends; the
                 // pending flag coalesces and the walker drains the whole
                 // used ring, so nothing is lost.
-                v if v == crate::drivers::virtio::MSIX_BLK_VECTOR as u64 => {
+                v if v == crate::drivers::hotpath::MSIX_BLK_VECTOR as u64 => {
                     crate::interrupt::preempt::irq_enter();
-                    crate::drivers::intc::apic::eoi();
+                    crate::drivers::hotpath::intc::apic::eoi();
                     if !crate::interrupt::irqdesc::force_threaded()
                         || !BLK_MSIX_IRQ_THREAD.wake()
                     {
                         // Unthreaded, or the spawn race (vector live
                         // before the thread): run the walker inline.
-                        crate::drivers::virtio::msix_blk_isr();
+                        crate::drivers::hotpath::msix_blk_isr();
                     }
                     crate::interrupt::preempt::irq_exit();
                     irq_exit_maybe_preempt_kernel(regs_ref);
@@ -1930,7 +1930,7 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // due high-resolution timers HERE, at the top of the IRQ — the
     // reference's hrtimer_interrupt shape; see
     // drivers/timer/x86_64.rs and timer::expire_hres_inline).
-    let jiffies_advanced = crate::drivers::timer::timer_interrupt_handler();
+    let jiffies_advanced = crate::drivers::hotpath::timer::timer_interrupt_handler();
 
     // RT-2X item 4, light exit: an hres-only fire (a precise deadline
     // between grid ticks — jiffies did not move) carries no scheduler
@@ -1958,9 +1958,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // timekeeper (offset-only forward steps, clamped; see
     // x86_64::resync_tsc_against_hpet).
     {
-        let j = crate::drivers::timer::x86_64::get_jiffies();
+        let j = crate::drivers::hotpath::timer::x86_64::get_jiffies();
         if j % crate::config::KERNEL_HZ as u64 == 0 {
-            crate::drivers::timer::x86_64::resync_tsc_against_hpet();
+            crate::drivers::hotpath::timer::x86_64::resync_tsc_against_hpet();
             // leg-40C perf rider: 1 Hz boundary rides the drift block;
             // self-throttled to 60 s inside.
             utime_ripsample_report();
@@ -2001,9 +2001,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
 fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // SP-5 r6 freeze ring: the service heartbeat entry (the following
     // set_next_trigger re-arm lands as its own TIMER_OP_ONESHOT entry).
-    crate::drivers::intc::apic::timer_event_record(
+    crate::drivers::hotpath::intc::apic::timer_event_record(
         cpu,
-        crate::drivers::intc::apic::TIMER_OP_SERVICE,
+        crate::drivers::hotpath::intc::apic::TIMER_OP_SERVICE,
         0,
         0,
     );
@@ -2014,10 +2014,10 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     pic_send_eoi(IRQ_TIMER);
     // With the local APIC enabled, PIC lines arrive through LINT0 and
     // the APIC needs its EOI as well or delivery wedges.
-    crate::drivers::intc::apic::eoi();
+    crate::drivers::hotpath::intc::apic::eoi();
 
     // Re-arm the PIT (no-op while it free-runs).
-    crate::drivers::timer::set_next_trigger();
+    crate::drivers::hotpath::timer::set_next_trigger();
 
     handle_timer_tick(regs, cpu);
 }
@@ -2075,7 +2075,7 @@ fn handle_external_interrupt(vector: u64) {
         pic_send_eoi(line);
         // PIC lines arrive through LINT0 (virtual wire) when the local
         // APIC is enabled: the APIC EOI must pair with the PIC EOI.
-        crate::drivers::intc::apic::eoi();
+        crate::drivers::hotpath::intc::apic::eoi();
         claimed += 1;
         if claimed >= 16 {
             break; // storm guard

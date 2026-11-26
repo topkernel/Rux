@@ -14,7 +14,7 @@
 //! route table entries this group plants must not disturb the socket
 //! groups that run before it.
 
-use crate::drivers::net::loopback::{loopback_init, loopback_poll, loopback_send, LO_STATS};
+use crate::drivers::hotpath::loopback::{loopback_init, loopback_poll, loopback_send, LO_STATS};
 use crate::net::hotpath::arp::{arp_lookup, ARP_CACHE};
 use crate::net::types::SkBuff;
 use crate::net::hotpath::ethernet::{eth_is_broadcast_addr, EthHdr};

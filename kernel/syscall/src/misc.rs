@@ -82,7 +82,7 @@ static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// on the instance's wait queue and are re-woken at least every 10ms to
 /// re-poll readiness (one jiffy at the default HZ=100).
 const EPOLL_RECHECK_JIFFIES: u64 = {
-    let j = crate::drivers::timer::msecs_to_jiffies(10);
+    let j = crate::drivers::hotpath::timer::msecs_to_jiffies(10);
     if j == 0 { 1 } else { j }
 };
 
@@ -679,7 +679,7 @@ fn poll_deadline_ns(timeout_ns: i64) -> Option<u64> {
         return None;
     }
     Some(
-        crate::drivers::timer::monotonic_ns_since_boot().saturating_add(timeout_ns as u64),
+        crate::drivers::hotpath::timer::monotonic_ns_since_boot().saturating_add(timeout_ns as u64),
     )
 }
 
@@ -696,16 +696,16 @@ fn poll_deadline_ns(timeout_ns: i64) -> Option<u64> {
 pub fn deadline_ns_to_hres_ticks(deadline_ns: u64) -> u64 {
     let freq_hz = crate::config::TIMER_CLOCK_FREQ_HZ as u128;
     let ticks = (deadline_ns as u128 * freq_hz / 1_000_000_000u128) as u64;
-    let now = crate::drivers::timer::read_time();
+    let now = crate::drivers::hotpath::timer::read_time();
     ticks.saturating_add(1).max(now + 1)
 }
 
 pub fn jiffies_covering_deadline(deadline_ns: u64) -> u64 {
-    let now_ns = crate::drivers::timer::monotonic_ns_since_boot();
+    let now_ns = crate::drivers::hotpath::timer::monotonic_ns_since_boot();
     let rem_ns = deadline_ns.saturating_sub(now_ns);
-    let j = ((rem_ns as u128 * crate::drivers::timer::HZ as u128)
+    let j = ((rem_ns as u128 * crate::drivers::hotpath::timer::HZ as u128)
         .div_ceil(1_000_000_000u128)) as u64;
-    crate::drivers::timer::get_jiffies().saturating_add(j.max(1))
+    crate::drivers::hotpath::timer::get_jiffies().saturating_add(j.max(1))
 }
 
 pub fn sys_poll(args: SyscallArgs) -> i64 {
@@ -847,7 +847,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             // hunt's openers (same discipline as PPARK).
             if crate::trace::EVENT_EVDEV_WAKE.armed()
                 && (nfds <= 32)
-                && crate::drivers::input::evdev::evdev_opener_pid(
+                && crate::drivers::hotpath::evdev_opener_pid(
                     ::process::current_pid() as u32,
                 )
             {
@@ -855,7 +855,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 pub static PR_N: AtomicU64 = AtomicU64::new(0);
                 let n = PR_N.fetch_add(1, Ordering::Relaxed);
                 if n < 400 || n % 10 == 0 {
-                    let mut l = crate::drivers::input::evdev::HuntLine::new();
+                    let mut l = crate::drivers::types::HuntLine::new();
                     l.push(b"PRET[");
                     l.u64(n);
                     l.push(b"] pid=");
@@ -891,7 +891,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         if timeout_ms > 0 {
             // Check if timeout expired (high-resolution; never early)
             if let Some(dl) = deadline_ns {
-                if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
+                if crate::drivers::hotpath::timer::monotonic_ns_since_boot() >= dl {
                     return 0;
                 }
             }
@@ -971,7 +971,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                                 let is = |p: &crate::fs::FileOps| {
                                     ops == (p as *const _ as *const ())
                                 };
-                                if is(&crate::drivers::input::evdev::EVDEV_OPS) {
+                                if is(&crate::drivers::hotpath::EVDEV_OPS) {
                                     has_evdev = true;
                                     b'e'
                                 } else if is(&crate::net::unix::UNIX_SOCKET_OPS) {
@@ -1007,13 +1007,13 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                         kinds_n += 1;
                     }
                     let want = has_evdev
-                        || crate::drivers::input::evdev::evdev_opener_pid(my_pid);
+                        || crate::drivers::hotpath::evdev_opener_pid(my_pid);
                     if want {
                         pub static PP_N: AtomicU64 = AtomicU64::new(0);
                         let n = PP_N.fetch_add(1, Ordering::Relaxed);
                         if n < 400 || n % 10 == 0 {
                             let mut l =
-                                crate::drivers::input::evdev::HuntLine::new();
+                                crate::drivers::types::HuntLine::new();
                             l.push(b"PPARK[");
                             l.u64(n);
                             l.push(b"] pid=");
@@ -1105,7 +1105,7 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
     // current is the running task's reference.
     let my_pid = current.pid();
     let slice_ns: u64 = EPOLL_RECHECK_JIFFIES
-        .saturating_mul(1_000_000_000 / crate::drivers::timer::HZ as u64);
+        .saturating_mul(1_000_000_000 / crate::drivers::hotpath::timer::HZ as u64);
     // Deadline precision (nanosleep discipline): when the remaining wait
     // fits inside one re-check slice, arm a HIGH-RESOLUTION wake at the
     // precise ns deadline (between grid ticks); earlier slices keep the
@@ -1113,7 +1113,7 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
     // timeout up to the next 10 ms grid tick — a 1 ms poll timeout slept
     // ~10 ms (LTP epoll_wait02/pselect01 precision budgets).
     let remaining_ns = deadline_ns.map(|dl| {
-        dl.saturating_sub(crate::drivers::timer::monotonic_ns_since_boot())
+        dl.saturating_sub(crate::drivers::hotpath::timer::monotonic_ns_since_boot())
     });
     let timer_id = match deadline_ns {
         // Remaining wait fits inside one slice (or already due): precise
@@ -1125,12 +1125,12 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
                 deadline_ns_to_hres_ticks(dl),
                 my_pid,
             );
-            crate::drivers::timer::rearm_for_hres();
+            crate::drivers::hotpath::timer::rearm_for_hres();
             id
         }
         // Longer than a slice (or no deadline): plain jiffy-cadence slice.
         _ => crate::timer::add_timer_wakeup(
-            crate::drivers::timer::get_jiffies() + EPOLL_RECHECK_JIFFIES,
+            crate::drivers::hotpath::timer::get_jiffies() + EPOLL_RECHECK_JIFFIES,
             my_pid,
         ),
     };
@@ -1148,7 +1148,7 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
     // deadline the check is the precise ns clock (the hres wake may be
     // mid-tick); without one the slice never "expires" early.
     let already_due = match deadline_ns {
-        Some(dl) => crate::drivers::timer::monotonic_ns_since_boot() >= dl,
+        Some(dl) => crate::drivers::hotpath::timer::monotonic_ns_since_boot() >= dl,
         None => false,
     };
     if already_due {
@@ -1227,10 +1227,10 @@ fn poll_wait_impls(file: &rux::fs::types::File) -> Option<(PollWaitRegFn, PollWa
             rux::ipc::hotpath::binder_poll_unwait,
         ));
     }
-    if is(&crate::drivers::input::evdev::EVDEV_OPS) {
+    if is(&crate::drivers::hotpath::EVDEV_OPS) {
         return Some((
-            crate::drivers::input::evdev::evdev_poll_wait,
-            crate::drivers::input::evdev::evdev_poll_unwait,
+            crate::drivers::hotpath::evdev_poll_wait,
+            crate::drivers::hotpath::evdev_poll_unwait,
         ));
     }
     if is(&TIMERFD_OPS) {
@@ -1401,7 +1401,7 @@ fn poll_event_wait_round(
             // We are on the CPU that is about to sleep: re-arm the local
             // timer so the precise deadline is not delayed to the next
             // grid tick (nanosleep discipline).
-            crate::drivers::timer::rearm_for_hres();
+            crate::drivers::hotpath::timer::rearm_for_hres();
             id
         })
         .unwrap_or(0);
@@ -1950,7 +1950,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ns: i64, has_timeout: bool) -> i64
 
         if has_timeout && timeout_ns > 0 {
             let expired = deadline_ns
-                .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
+                .map(|dl| crate::drivers::hotpath::timer::monotonic_ns_since_boot() >= dl)
                 .unwrap_or(true);
             if expired {
                 // fd set pointers validated with access_ok above;
@@ -2271,7 +2271,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 .and_then(|t| t.get_file(fd))
                 .map(|f| f.file_id)
                 .unwrap_or(0);
-            let is_input = crate::drivers::input::evdev::file_id_is_input(fid);
+            let is_input = crate::drivers::hotpath::file_id_is_input(fid);
             if is_input {
                 crate::pr_warn!(
                     "IN-EPCTL #{} pid={} op={} fd={} fid={:#x}",
@@ -2933,7 +2933,7 @@ pub fn param_stall_dump() {
             rux::sched::hotpath::ww_append_dump(
                 &mut wws,
                 t,
-                crate::drivers::timer::get_jiffies(),
+                crate::drivers::hotpath::timer::get_jiffies(),
             );
             if !wws.is_empty() {
                 crate::pr_warn!("PARAM-INIT-WW{}", wws);
@@ -3832,7 +3832,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         }
         if timeout_ms > 0 {
             let expired = deadline_ns
-                .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
+                .map(|dl| crate::drivers::hotpath::timer::monotonic_ns_since_boot() >= dl)
                 .unwrap_or(true);
             if expired {
                 if crate::debug::spinwatch::record() {
@@ -4010,11 +4010,11 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // rounding made a 1 ms epoll_wait timeout sleep ~10 ms; LTP
         // epoll_wait02 precision budget, median 9998us for a 1000us).
         let slice_ns: u64 = EPOLL_RECHECK_JIFFIES
-            .saturating_mul(1_000_000_000 / crate::drivers::timer::HZ as u64);
+            .saturating_mul(1_000_000_000 / crate::drivers::hotpath::timer::HZ as u64);
         // current is the running task's reference.
         let my_pid = current.pid();
         let remaining_ns = deadline_ns
-            .map(|dl| dl.saturating_sub(crate::drivers::timer::monotonic_ns_since_boot()));
+            .map(|dl| dl.saturating_sub(crate::drivers::hotpath::timer::monotonic_ns_since_boot()));
         let timer_id = match (deadline_ns, remaining_ns) {
             (Some(dl), Some(_rem)) if _rem <= slice_ns => {
                 let id = crate::timer::add_timer_wakeup_hres(
@@ -4022,11 +4022,11 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     deadline_ns_to_hres_ticks(dl),
                     my_pid,
                 );
-                crate::drivers::timer::rearm_for_hres();
+                crate::drivers::hotpath::timer::rearm_for_hres();
                 id
             }
             _ => crate::timer::add_timer_wakeup(
-                crate::drivers::timer::get_jiffies() + EPOLL_RECHECK_JIFFIES,
+                crate::drivers::hotpath::timer::get_jiffies() + EPOLL_RECHECK_JIFFIES,
                 my_pid,
             ),
         };
@@ -4522,7 +4522,7 @@ fn timerfd_poll(file: &rux::fs::types::File, events: u16) -> u16 {
 /// BEFORE the new settings were applied.
 fn timerfd_old_values(tfd: &TimerFd) -> (i64, i64, i64, i64) {
     // it_interval (ns-precise from the stored interval)
-    let interval_ms = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
+    let interval_ms = crate::drivers::hotpath::timer::jiffies_to_msecs(tfd.interval_jiffies);
     let interval_ns = (interval_ms as u64).saturating_mul(1_000_000);
     // it_value: real remaining time from the wheel
     let (val_sec, val_nsec) = tfd_remaining(tfd);
@@ -4560,11 +4560,11 @@ fn tfd_remaining(tfd: &TimerFd) -> (i64, i64) {
     }
     match crate::timer::get_timer_state(tfd.kernel_timer_id) {
         Some((expires, _interval)) => {
-            let now = crate::drivers::timer::get_jiffies();
+            let now = crate::drivers::hotpath::timer::get_jiffies();
             if expires <= now {
                 return (0, 0);
             }
-            let ms = crate::drivers::timer::jiffies_to_msecs(expires - now);
+            let ms = crate::drivers::hotpath::timer::jiffies_to_msecs(expires - now);
             ((ms / 1000) as i64, ((ms % 1000) * 1_000_000) as i64)
         }
         None => (0, 0),
@@ -5147,7 +5147,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
             core::sync::atomic::AtomicU64::new(0);
         static WIN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        let jif = crate::drivers::timer::get_jiffies();
+        let jif = crate::drivers::hotpath::timer::get_jiffies();
         let win = WIN_JIF.load(core::sync::atomic::Ordering::Relaxed);
         if jif.wrapping_sub(win) >= 500
             && WIN_JIF
@@ -5391,12 +5391,12 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
 
     // Convert to jiffies
     let value_msecs = (total_nsec / 1_000_000) as u64;
-    let value_jiffies = crate::drivers::timer::msecs_to_jiffies(value_msecs).max(1);
+    let value_jiffies = crate::drivers::hotpath::timer::msecs_to_jiffies(value_msecs).max(1);
 
     let interval_nsec = int_sec.saturating_mul(1_000_000_000).saturating_add(int_nsec); // M-19
     let interval_jiffies = if interval_nsec > 0 {
         let interval_msecs = (interval_nsec / 1_000_000) as u64;
-        crate::drivers::timer::msecs_to_jiffies(interval_msecs).max(1)
+        crate::drivers::hotpath::timer::msecs_to_jiffies(interval_msecs).max(1)
     } else {
         0
     };
@@ -5411,10 +5411,10 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // back by the wall epoch), then add to the current jiffies. A deadline
     // already in the past yields expires == now and fires on the next
     // softirq scan — matching Linux's immediate expiry.
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::drivers::hotpath::timer::get_jiffies();
     let expires = if flags & 1 != 0 {
         let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-        let now_ns = (crate::drivers::timer::read_time() as u64)
+        let now_ns = (crate::drivers::hotpath::timer::read_time() as u64)
             .saturating_mul(1_000_000_000 / freq_hz);
         let abs_ns = (val_sec.max(0) as u64)
             .saturating_mul(1_000_000_000)
@@ -5430,7 +5430,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
             now
         } else {
             let rel_ms = rel_ns / 1_000_000;
-            now.saturating_add(crate::drivers::timer::msecs_to_jiffies(rel_ms).max(1))
+            now.saturating_add(crate::drivers::hotpath::timer::msecs_to_jiffies(rel_ms).max(1))
         }
     } else {
         now + value_jiffies
@@ -5733,7 +5733,7 @@ impl ChaCha20Crng {
     /// and the address of a stack local (ASLR/scheduler placement).
     fn new() -> Self {
         let clint = crate::arch::cpu::read_time();
-        let jiffies = crate::drivers::timer::get_jiffies() as u64;
+        let jiffies = crate::drivers::hotpath::timer::get_jiffies() as u64;
         static BOOT_NONCE: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
         let stack_addr = &clint as *const _ as u64;
@@ -5953,7 +5953,7 @@ pub fn timerfd_wheel_audit() {
         return;
     }
     use core::fmt::Write as _;
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::drivers::hotpath::timer::get_jiffies();
     let mut out = alloc::string::String::new();
     for t in crate::timer::snapshot_timers() {
         if t.tfd_addr == 0 {

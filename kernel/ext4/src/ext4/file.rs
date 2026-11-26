@@ -281,7 +281,7 @@ fn ext4_dio_read_batched(
         () => {{
             if count > 0 {
                 const MAX_SEGS: usize =
-                    crate::drivers::virtio::MAX_SG_SEGS_PER_CHAIN;
+                    crate::drivers::hotpath::MAX_SG_SEGS_PER_CHAIN;
                 // GUP packing cap: bounded stack segment array (2 KiB),
                 // clipped by the negotiated seg_max at drain time.
                 const GUP_SEG_CAP: usize = 128;
@@ -297,13 +297,13 @@ fn ext4_dio_read_batched(
                 let mut chains = 0usize;
                 let mut cut_at = usize::MAX;
 
-                let mut segs: [crate::drivers::blkdev::DmaSeg; MAX_SEGS] =
-                    [crate::drivers::blkdev::DmaSeg {
+                let mut segs: [crate::drivers::types::DmaSeg; MAX_SEGS] =
+                    [crate::drivers::types::DmaSeg {
                         ptr: core::ptr::null_mut(),
                         len: 0,
                     }; MAX_SEGS];
-                let mut gup_segs: [crate::drivers::blkdev::DmaSeg; GUP_SEG_CAP] =
-                    [crate::drivers::blkdev::DmaSeg {
+                let mut gup_segs: [crate::drivers::types::DmaSeg; GUP_SEG_CAP] =
+                    [crate::drivers::types::DmaSeg {
                         ptr: core::ptr::null_mut(),
                         len: 0,
                     }; GUP_SEG_CAP];
@@ -312,7 +312,7 @@ fn ext4_dio_read_batched(
                     .map(|p| p as usize)
                     .unwrap_or(0);
                 let (seg_max, desc_budget) =
-                    crate::drivers::virtio::pci_blk_sg_limits(gup_slot);
+                    crate::drivers::hotpath::pci_blk_sg_limits(gup_slot);
                 // Two full-cap chains fit one wave by construction.
                 let pack_cap = seg_max.min(GUP_SEG_CAP).min(desc_budget / 2);
                 let mut window_descs = 0usize;
@@ -369,7 +369,7 @@ fn ext4_dio_read_batched(
                             }
                         }
                         let armed = chains < MAX_BATCH
-                            && crate::drivers::blkdev::blkdev_read_async_sg(
+                            && crate::drivers::hotpath::blkdev_read_async_sg(
                                 fs.device,
                                 req_sector[i],
                                 &segs[..k],
@@ -404,7 +404,7 @@ fn ext4_dio_read_batched(
                                     }
                                     _ => unreachable!(),
                                 };
-                                let ok = crate::drivers::blkdev::blkdev_read_async(
+                                let ok = crate::drivers::hotpath::blkdev_read_async(
                                     fs.device,
                                     req_sector[r],
                                     slice,
@@ -473,7 +473,7 @@ fn ext4_dio_read_batched(
                                 let base_sector = req_sector[r]
                                     + ((chain_dst_o - req_dst[r]) / 512) as u64;
                                 let armed = chains < MAX_BATCH
-                                    && crate::drivers::blkdev::blkdev_read_async_sg(
+                                    && crate::drivers::hotpath::blkdev_read_async_sg(
                                         fs.device,
                                         base_sector,
                                         &gup_segs[..k],
@@ -507,7 +507,7 @@ fn ext4_dio_read_batched(
                 }
 
                 // ---- Phase 2: one kick, then wait in order ----
-                crate::drivers::blkdev::kick_all_pending_disks();
+                crate::drivers::hotpath::kick_all_pending_disks();
                 for c in 0..chains {
                     let mut ok = false;
                     if chain_armed[c] {
@@ -1527,7 +1527,7 @@ fn drain_batch(
     let mut status = [0i32; MAX_BATCH_DRAIN];
     // One device kick for the whole quietly-submitted batch (see
     // pci_submit_read_async): publish N chains, notify once, then wait.
-    crate::drivers::blkdev::kick_all_pending_disks();
+    crate::drivers::hotpath::kick_all_pending_disks();
     for i in 0..count {
         status[i] = hotpath::bread_wait(bh_ptrs[i], &completions[i]);
     }
@@ -1681,7 +1681,7 @@ const MAX_GUP_WRITE_SPANS: usize = 32;
 /// beyond it). The frames are unpinned after the caller's fail-cut
 /// accounting, exactly like a staging buffer would be released.
 struct GupWriteChains {
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     completions: [IoCompletion; MAX_GUP_WRITE_SPANS],
     /// Per span: the chain's first-segment pointer (the completion
     /// token the virtio walker stamps).
@@ -1692,7 +1692,7 @@ struct GupWriteChains {
 }
 
 impl GupWriteChains {
-    fn new(device: &'static crate::drivers::blkdev::GenDisk) -> Self {
+    fn new(device: &'static crate::drivers::types::GenDisk) -> Self {
         Self {
             device,
             completions: [const { IoCompletion::new() }; MAX_GUP_WRITE_SPANS],
@@ -1708,7 +1708,7 @@ impl GupWriteChains {
     /// device refused (caller keeps the per-block body).
     fn submit_span(
         &mut self,
-        segs: &[crate::drivers::blkdev::DmaSeg],
+        segs: &[crate::drivers::types::DmaSeg],
         k: usize,
         base_sector: u64,
     ) -> bool {
@@ -1718,7 +1718,7 @@ impl GupWriteChains {
         let i = self.n;
         // The GUP write contract: the caller guarantees the pinned
         // frames stable (and the user bytes unmodified) until the drain.
-        let ok = crate::drivers::blkdev::blkdev_write_async_sg(
+        let ok = crate::drivers::hotpath::blkdev_write_async_sg(
             self.device,
             base_sector,
             &segs[..k],
@@ -1742,7 +1742,7 @@ impl GupWriteChains {
         if self.n == 0 {
             return 0;
         }
-        crate::drivers::blkdev::kick_all_pending_disks();
+        crate::drivers::hotpath::kick_all_pending_disks();
         let mut first_err = 0i32;
         for i in 0..self.n {
             let rc = self.completions[i].wait();
@@ -2129,10 +2129,10 @@ fn ext4_file_write_src(
                                     .map(|p| p as usize)
                                     .unwrap_or(0);
                                 let (seg_max, _w_budget) =
-                                    crate::drivers::virtio::pci_blk_sg_limits(gup_slot);
+                                    crate::drivers::hotpath::pci_blk_sg_limits(gup_slot);
                                 let pack_cap = seg_max.min(W_SEG_CAP);
-                                let mut segs: [crate::drivers::blkdev::DmaSeg; W_SEG_CAP] =
-                                    [crate::drivers::blkdev::DmaSeg {
+                                let mut segs: [crate::drivers::types::DmaSeg; W_SEG_CAP] =
+                                    [crate::drivers::types::DmaSeg {
                                         ptr: core::ptr::null_mut(),
                                         len: 0,
                                     }; W_SEG_CAP];
@@ -2512,7 +2512,7 @@ fn ext4_file_write_src(
     }
 
     // Update inode timestamp
-    let sec = crate::drivers::rtc::wall_secs() as u32;
+    let sec = crate::drivers::hotpath::wall_secs() as u32;
     inode.mtime = sec;
     inode.ctime = sec;
 
@@ -3873,7 +3873,7 @@ pub fn ext4_file_pread_dio_user_vfs(
         // arm owns the notify on this path's staged twin, and the
         // syscall layer dispatches here INSTEAD of it, so mirror the
         // entry it replaces (none fired for the O_DIRECT arm).
-        let atime = crate::drivers::rtc::wall_secs() as u32;
+        let atime = crate::drivers::hotpath::wall_secs() as u32;
         // Audited advisory-field store (INV-EXT4-ATIME); the sb Box
         // is exclusively ours while io_lock is held. Volatile by the
         // same discipline as stamp_atime_relatime.
@@ -5016,7 +5016,7 @@ fn ext4_buffered_write(
     // copied prefix.)
     {
         let _g = crate::ext4::EXT4_BIG_LOCK.lock();
-        let now = crate::drivers::rtc::wall_secs() as u32;
+        let now = crate::drivers::hotpath::wall_secs() as u32;
         // Audited advisory-field store (INV-EXT4-ATIME discipline):
         // the write-tail epilog. sb_ptr is the inode's boxed copy,
         // installed at open and never freed while the inode lives
@@ -5810,7 +5810,7 @@ struct SpanFlusher {
     /// our span persists the older-but-valid snapshot (harmless).
     pending_snaps: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// Device of the in-flight spans (one fs per flush pass).
-    dev: Option<&'static crate::drivers::blkdev::GenDisk>,
+    dev: Option<&'static crate::drivers::types::GenDisk>,
 }
 
 impl SpanFlusher {
@@ -5832,7 +5832,7 @@ impl SpanFlusher {
     /// `pending_snaps`); pass None for unguarded data spans.
     fn submit_span(
         &mut self,
-        dev: &'static crate::drivers::blkdev::GenDisk,
+        dev: &'static crate::drivers::types::GenDisk,
         sector: u64,
         bytes: &[u8],
         bhs: &mut alloc::vec::Vec<*mut rux::fs::types::BufferHead>,
@@ -5854,7 +5854,7 @@ impl SpanFlusher {
                 // re-dirties the buffer under its own lock.
                 // dev is the fs's registered GenDisk; bytes covers exactly
                 // the span's consecutive blocks.
-                let rc = crate::drivers::blkdev::blkdev_write(dev, sector, bytes);
+                let rc = crate::drivers::hotpath::blkdev_write(dev, sector, bytes);
                 if rc.is_ok() {
                     for &bh in bhs.iter() {
                         // SAFETY: bh is a pinned cached BufferHead whose
@@ -6130,11 +6130,11 @@ fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
     // read-only here and written once below.
     let i = crate::syscall::r#unsafe::boxed_mut(ino);
     let now = {
-        let cached = crate::drivers::rtc::cached_wall_secs();
+        let cached = crate::drivers::hotpath::cached_wall_secs();
         if cached != 0 {
             cached
         } else {
-            crate::drivers::rtc::wall_secs() as u32
+            crate::drivers::hotpath::wall_secs() as u32
         }
     };
     let stale = now.wrapping_sub(i.atime) >= 86_400;
@@ -6270,7 +6270,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
         }
     };
     if atime_pending {
-        let atime = crate::drivers::rtc::wall_secs() as u32;
+        let atime = crate::drivers::hotpath::wall_secs() as u32;
         // The cached Ext4Inode in inode.sb is a Box owned by this
         // VFS inode; advisory field (INV-EXT4-ATIME, same discipline
         // as ext4_file_read_vfs).

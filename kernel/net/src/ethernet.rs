@@ -429,7 +429,7 @@ pub fn ethernet_send_to(mut skb: SkBuff, dest_mac: [u8; ETH_ALEN], protocol: Eth
 /// dropped every slirp reply, because the peer answered the MAC it saw, not
 /// the one the device owns.
 fn get_device_mac() -> Option<[u8; 6]> {
-    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+    if let Some(device) = crate::drivers::hotpath::virtio_net_get_device() {
         return Some(device.get_mac());
     }
 
@@ -439,7 +439,7 @@ fn get_device_mac() -> Option<[u8; 6]> {
 /// Send packet to network device (pub(crate): also used by the ARP
 /// pending-queue flush in arp.rs)
 pub(crate) fn transmit_to_device(skb: SkBuff) -> i32 {
-    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+    if let Some(device) = crate::drivers::hotpath::virtio_net_get_device() {
         return device.xmit(skb);
     }
 
@@ -562,7 +562,7 @@ pub fn ethernet_poll() {
         );
     }
 
-    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+    if let Some(device) = crate::drivers::hotpath::virtio_net_get_device() {
         let mut dev_n = 0;
         while dev_n < POLL_BUDGET_PER_SRC {
             let Some(skb) = device.poll() else {

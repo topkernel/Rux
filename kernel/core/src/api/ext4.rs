@@ -25,7 +25,7 @@
 use crate::fs::types::BufferHead;
 use crate::fs::types::{Inode, INodeOps};
 use crate::fs::types::File;
-use crate::drivers::blkdev::GenDisk;
+use crate::drivers::types::GenDisk;
 use alloc::sync::Arc;
 
 /// The ext4 service hook set. Signatures copy the leaf's current fns

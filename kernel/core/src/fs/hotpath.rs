@@ -164,7 +164,7 @@ pub use crate::api::fs::{LOCKS_HOOKS, LocksHooks, register_locks_hooks};
 use crate::errno;
 use crate::api::fs::{boot_hooks, path_hooks, populate_hooks};
 use crate::arch::mm::{PhysAddr, phys_to_virt};
-use crate::drivers::blkdev;
+use crate::drivers::hotpath;
 use crate::errno::Errno;
 use crate::list::ListHead;
 use crate::mm::hotpath::pfn_to_phys;
@@ -6422,7 +6422,7 @@ impl BufferHead {
     }
 
     /// Set block device
-    pub fn set_device(&mut self, device: &'static blkdev::GenDisk) {
+    pub fn set_device(&mut self, device: &'static crate::drivers::types::GenDisk) {
         self.b_device = Some(device);
     }
 
@@ -6506,7 +6506,7 @@ impl BufferHead {
         }
 
         if let Some(device) = self.b_device {
-            blkdev::blkdev_write(
+            hotpath::blkdev_write(
                 device,
                 self.b_blocknr * (self.b_size as u64 / 512),
                 &self.b_data,
@@ -7008,7 +7008,7 @@ impl BlockCache {
     }
 
     /// Get or create buffer (synchronous read on cache miss).
-    fn get(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    fn get(&self, device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         // Chain walks go through entry_ref()/CacheEntry::bh() (INV-BIO-ENTRY
         // / INV-BIO-BH); the only raw windows left are the relink writes,
         // each marked inline.
@@ -7172,7 +7172,7 @@ impl BlockCache {
             }
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
-            if let Err(_) = blkdev::blkdev_read(
+            if let Err(_) = hotpath::blkdev_read(
                 device,
                 blocknr * (self.block_size as u64 / 512),
                 &mut bh.b_data,
@@ -7247,7 +7247,7 @@ impl BlockCache {
     /// disk read a bread() would do. Only for blocks whose existing disk
     /// contents are irrelevant (freshly allocated blocks being zeroed) —
     /// reading through this API would fabricate zeros for real data.
-    fn get_zero(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    fn get_zero(&self, device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         self.get_zero_impl(device, blocknr, true)
     }
 
@@ -7259,13 +7259,13 @@ impl BlockCache {
     /// rewrite whole blocks (directory blocks, bitmaps, group descriptors):
     /// reading a just-allocated directory block from disk before rewriting
     /// it cost one synchronous round trip per create.
-    fn get_overwrite(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    fn get_overwrite(&self, device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         self.get_zero_impl(device, blocknr, false)
     }
 
     fn get_zero_impl(
         &self,
-        device: &'static blkdev::GenDisk,
+        device: &'static crate::drivers::types::GenDisk,
         blocknr: u64,
         zero_on_hit: bool,
     ) -> Option<*mut BufferHead> {
@@ -7464,7 +7464,7 @@ impl BlockCache {
     /// with a refcount bump, sync without any lock held).
     fn sync_all_excluding(
         &self,
-        device: &'static blkdev::GenDisk,
+        device: &'static crate::drivers::types::GenDisk,
         skip: Option<u64>,
     ) -> Result<(), i32> {
         let mut dirty_list: Vec<*mut BufferHead> = Vec::new();
@@ -7707,7 +7707,7 @@ pub fn bh_is_dirty(bh: &*mut BufferHead) -> bool {
     bh_pinned(bh).is_dirty()
 }
 
-pub fn bread(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+pub fn bread(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     crate::debug::fsw::note_bread();
     get_block_cache().get(device, blocknr)
 }
@@ -7715,7 +7715,7 @@ pub fn bread(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut Buff
 /// Fetch a block for a full-block overwrite: no disk read on a miss — the
 /// buffer is created zeroed and dirty (see BlockCache::get_zero). Callers
 /// must overwrite the whole block (or rely on the zeros).
-pub fn getblk_zero(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+pub fn getblk_zero(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_zero(device, blocknr)
 }
 
@@ -7723,14 +7723,14 @@ pub fn getblk_zero(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mu
 /// buffer is created zeroed and dirty) and no zeroing on a hit. The caller
 /// MUST overwrite the whole block before the buffer becomes observable.
 /// See BlockCache::get_overwrite.
-pub fn getblk_overwrite(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+pub fn getblk_overwrite(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_overwrite(device, blocknr)
 }
 
 /// Forget a FREED block's dirty buffer without writing it (see
 /// BlockCache::drop_block). Best-effort: pinned or clean buffers are
 /// left in place.
-pub fn drop_freed_block(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64) {
+pub fn drop_freed_block(device: &'static crate::drivers::types::GenDisk, blocknr: u64) {
     get_block_cache().drop_block(device.major, device.first_minor, blocknr);
 }
 
@@ -7742,7 +7742,7 @@ pub fn drop_freed_block(device: &'static crate::drivers::blkdev::GenDisk, blockn
 /// allocator's free path, which always runs inside the freeing op's
 /// journal bracket.
 pub fn drop_freed_block_forgotten(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocknr: u64,
 ) {
     let (mj, mi) = (device.major, device.first_minor);
@@ -7763,7 +7763,7 @@ pub fn drop_freed_block_forgotten(
 
 /// Invalidate every cached buffer of `device` without writing anything
 /// back (loop detach — see BlockCache::invalidate_device).
-pub fn invalidate_device(device: &blkdev::GenDisk) {
+pub fn invalidate_device(device: &crate::drivers::types::GenDisk) {
     get_block_cache().invalidate_device(device.major, device.first_minor);
 }
 
@@ -7771,7 +7771,7 @@ pub fn invalidate_device(device: &blkdev::GenDisk) {
 ///
 /// On cache hit: returns buffer with `BH_Uptodate` set (no I/O needed).
 /// On cache miss: creates a new BufferHead, submits async I/O via
-/// `blkdev::blkdev_read_async`, inserts into cache, and returns the buffer.
+/// `hotpath::blkdev_read_async`, inserts into cache, and returns the buffer.
 /// The buffer data is **not** valid until `bread_wait()` completes.
 /// Wait for a buffer whose I/O was submitted by ANOTHER caller to settle.
 /// BH_Req is cleared by the owning bread_wait(), so poll it with short
@@ -7828,7 +7828,7 @@ fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
 }
 
 pub fn bread_async(
-    device: &'static blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocknr: u64,
     completion: &super::types::IoCompletion,
 ) -> Option<*mut BufferHead> {
@@ -7969,7 +7969,7 @@ pub fn bread_async(
         bh.set_state_bit(BufferState::BH_Req);
 
         let sectors_per_block = block_size as u64 / 512;
-        if let Err(_) = blkdev::blkdev_read_async(
+        if let Err(_) = hotpath::blkdev_read_async(
             device,
             blocknr * sectors_per_block,
             &mut bh.b_data,
@@ -8140,7 +8140,7 @@ pub fn brelse(bh: *const BufferHead) {
 /// bytes and poison the page cache with them. Callers must split such
 /// runs and use per-block `bread_async`, which returns the cached
 /// (uptodate, possibly dirty) contents instead.
-pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
+pub fn block_cached(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> bool {
     // Entry traversal mirrors bread_async Phase 1 under the bucket lock
     // (INV-BIO-ENTRY / INV-BIO-BH).
     {
@@ -8189,7 +8189,7 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
 /// operations per fsync (the measured 3.9M breads/s burn on the
 /// write+fsync row). A mid-eviction entry reports true (the caller's
 /// bread slow path sees the settled state).
-pub fn block_dirty_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
+pub fn block_dirty_cached(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> bool {
     // Entry walk mirrors block_cached under the same bucket lock
     // (INV-BIO-ENTRY / INV-BIO-BH).
     {
@@ -8234,7 +8234,7 @@ pub fn block_dirty_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> boo
 /// synchronous re-read of every evicted block (the post-flush wall:
 /// a 128 MB file turns over the 8192-entry cache ~4x, and the loop's
 /// bread() of each absent block paid one 4 KiB device read apiece).
-pub fn block_absent_durable(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
+pub fn block_absent_durable(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> bool {
     // Bucket traversal mirrors block_cached under the same bucket lock
     // (INV-BIO-ENTRY / INV-BIO-BH).
     {
@@ -8276,7 +8276,7 @@ pub fn block_absent_durable(device: &'static blkdev::GenDisk, blocknr: u64) -> b
 /// A return of None means submission failed (no async support / queue
 /// full); the caller falls back to per-block reads.
 pub fn bread_async_multi(
-    device: &'static blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     start_blocknr: u64,
     nblocks: u32,
     completion: &super::types::IoCompletion,
@@ -8296,7 +8296,7 @@ pub fn bread_async_multi(
     let sectors_per_block = cache.block_size as u64 / 512;
     // SAFETY-free: device/buffer validity mirrors bread_async Phase 2; the
     // caller keeps the BufferHead (and its Vec) alive until bread_wait.
-    if blkdev::blkdev_read_async(
+    if hotpath::blkdev_read_async(
         device,
         start_blocknr * sectors_per_block,
         &mut bh.b_data,
@@ -8438,7 +8438,7 @@ impl WriteBatch {
     /// Decide the submission mode from the device's capability (first
     /// submit). Returns false when the device has NEITHER SG NOR plain
     /// async write (the caller's synchronous fallback owns the span).
-    fn mode_probe(&mut self, device: &'static blkdev::GenDisk) -> bool {
+    fn mode_probe(&mut self, device: &'static crate::drivers::types::GenDisk) -> bool {
         if !self.mode_set {
             let (has_sg, has_plain) =
                 (device.has_async_write_sg(), device.async_write_fn.is_some());
@@ -8460,7 +8460,7 @@ impl WriteBatch {
     /// submission happens at flush() — see the struct's FUSION note.
     pub fn submit(
         &mut self,
-        device: &'static blkdev::GenDisk,
+        device: &'static crate::drivers::types::GenDisk,
         sector: u64,
         data: &[u8],
     ) -> bool {
@@ -8483,7 +8483,7 @@ impl WriteBatch {
         // The write-batch contract lives on: `owned` and the slot's inline
         // completion stay valid (and unmodified) until the completion
         // fires — now enforced by the DMA-source discipline comments.
-        let rc = blkdev::blkdev_write_async(
+        let rc = hotpath::blkdev_write_async(
             device,
             sector,
             &owned,
@@ -8516,7 +8516,7 @@ impl WriteBatch {
     /// machine is wedged far beyond this span).
     pub fn submit_ref(
         &mut self,
-        device: &'static blkdev::GenDisk,
+        device: &'static crate::drivers::types::GenDisk,
         sector: u64,
         data: &[u8],
     ) -> bool {
@@ -8539,7 +8539,7 @@ impl WriteBatch {
         // submit_ref contract above: the caller's `data` and the slot's
         // inline completion stay valid (and the bytes unmodified) until
         // the drain.
-        let rc = blkdev::blkdev_write_async(
+        let rc = hotpath::blkdev_write_async(
             device,
             sector,
             data,
@@ -8581,7 +8581,7 @@ impl WriteBatch {
         // One device kick for the whole quietly-submitted batch (the PCI
         // submit path publishes chains quietly; every notify is an MMIO
         // trap). The MMIO device notifies inline per chain — a no-op kick.
-        crate::drivers::blkdev::kick_all_pending_disks();
+        crate::drivers::hotpath::kick_all_pending_disks();
 
         let n = self.len;
         self.results_n = n;
@@ -8671,7 +8671,7 @@ impl WriteBatch {
     /// SG failure), kick once, wait in order, propagate group status to
     /// member slots.
     fn flush_deferred(&mut self) -> i32 {
-        const MAX_SEGS: usize = crate::drivers::virtio::MAX_SG_SEGS_PER_CHAIN;
+        const MAX_SEGS: usize = crate::drivers::hotpath::MAX_SG_SEGS_PER_CHAIN;
         let n = self.len;
         self.results_n = n;
 
@@ -8706,7 +8706,7 @@ impl WriteBatch {
             }
 
             // Build the segment list from the group's slots.
-            let mut segs: [blkdev::DmaSeg; MAX_SEGS] = [blkdev::DmaSeg {
+            let mut segs: [crate::drivers::types::DmaSeg; MAX_SEGS] = [crate::drivers::types::DmaSeg {
                 ptr: core::ptr::null_mut(),
                 len: 0,
             }; MAX_SEGS];
@@ -8721,7 +8721,7 @@ impl WriteBatch {
             // segment's buffer stays a stable DMA source until this
             // flush's waits return — the write-batch contract.
             let submitted = match dev {
-                Some(d) => blkdev::blkdev_write_async_sg(
+                Some(d) => hotpath::blkdev_write_async_sg(
                     d,
                     sector0,
                     &segs[..k],
@@ -8745,7 +8745,7 @@ impl WriteBatch {
                         let d = self.slots[si].data.as_slice();
                         // Same dev/sector contract as the SG arm.
                         let rc = match dev {
-                            Some(disk) => blkdev::blkdev_write_async(
+                            Some(disk) => hotpath::blkdev_write_async(
                                 disk,
                                 self.slots[si].sector,
                                 d,
@@ -8766,7 +8766,7 @@ impl WriteBatch {
 
         // ---- Phase 2: kick + wait ----
         // One kick for the whole window (chains were published quietly).
-        crate::drivers::blkdev::kick_all_pending_disks();
+        crate::drivers::hotpath::kick_all_pending_disks();
 
         let mut first_error = 0i32;
         // Group heads and fallback spans, in slot order — the device
@@ -8902,7 +8902,7 @@ impl Drop for WriteBatch {
 /// the call (the ext4 callers hold EXT4_BIG_LOCK, the same
 /// serialization SpanFlusher::drain applies to its settle).
 pub fn sync_dirty_blocks_batched(
-    device: &'static blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocks: &[u64],
     force_dirty: bool,
 ) -> i32 {
@@ -9052,7 +9052,7 @@ pub fn sync_buffers() -> Result<(), i32> {
 /// Unlike sync_dirty_buffer this flushes regardless of any active ext4
 /// journal handle.
 pub fn sync_device_buffers_excluding(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     skip: Option<u64>,
 ) -> Result<(), i32> {
     // Ordered-publication guard (same rationale as sync_buffers).
@@ -9249,13 +9249,13 @@ fn publication_cookie() -> u64 {
     }
 }
 
-fn dev_key(device: &blkdev::GenDisk) -> (u32, u32) {
+fn dev_key(device: &crate::drivers::types::GenDisk) -> (u32, u32) {
     (device.major, device.first_minor)
 }
 
 /// Public (major, minor) of a GenDisk — used by ext4 to address a
 /// handle's post-capture window to the right device.
-pub fn dev_key_of(device: &blkdev::GenDisk) -> (u32, u32) {
+pub fn dev_key_of(device: &crate::drivers::types::GenDisk) -> (u32, u32) {
     dev_key(device)
 }
 
@@ -9263,7 +9263,7 @@ pub fn dev_key_of(device: &blkdev::GenDisk) -> (u32, u32) {
 /// before `entry_block`. Returns the record id (used by the delete-side
 /// capture; create-side callers ignore it).
 pub fn publication_defer(
-    device: &blkdev::GenDisk,
+    device: &crate::drivers::types::GenDisk,
     pre_blocks: &[u64],
     entry_block: u64,
 ) -> u64 {
@@ -9304,7 +9304,7 @@ pub fn publication_defer(
 /// caller performs next, which it captures via
 /// jbd2::Handle::begin_post_capture. Returns the record id.
 pub fn publication_defer_entry_only(
-    device: &blkdev::GenDisk,
+    device: &crate::drivers::types::GenDisk,
     entry_block: u64,
 ) -> u64 {
     let id = NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed);
@@ -9342,7 +9342,7 @@ pub fn publication_defer_entry_only(
 /// Runs in the dirty-marking hot path; the unarmed fast path is two loads
 /// (task, handle).
 fn publication_capture_note_dirty(
-    device: Option<&'static blkdev::GenDisk>,
+    device: Option<&'static crate::drivers::types::GenDisk>,
     blocknr: u64,
 ) {
     use crate::fs::{hotpath::CAPTURE_POST, hotpath::CAPTURE_PRE, types::JournalCaptureState};
@@ -9886,7 +9886,7 @@ impl BlockCache {
 /// block's data (exactly b_size bytes) and the raw handle for the
 /// journal tag; the protocol completes (sync+brelse) on every path.
 pub fn with_block_mut<T>(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&mut [u8], *mut BufferHead) -> Result<T, i32>,
 ) -> Result<T, i32> {
@@ -9915,7 +9915,7 @@ pub fn with_block_mut<T>(
 /// counters: group-desc and superblock free counts; the next barrier
 /// flushes them). INV-BIO-BLOCKUPD as above.
 pub fn with_block_deferred_mut<T>(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&mut [u8], *mut BufferHead) -> Result<T, i32>,
 ) -> Result<T, i32> {
@@ -9938,7 +9938,7 @@ pub fn with_block_deferred_mut<T>(
 /// -> caller reads -> brelse. No mutation, no BH_Dirty, no journal —
 /// INV-BIO-BLOCKUPD's read contract (the pin is this scope's refcount).
 pub fn with_block<T>(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&[u8]) -> T,
 ) -> Option<T> {
@@ -9961,7 +9961,7 @@ pub fn with_block<T>(
 /// pin on every path (the closure cannot early-return past the
 /// release — the release runs after `f` returns).
 pub fn with_block_ro<T>(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     blocknr: u64,
     f: impl FnOnce(&[u8]) -> T,
 ) -> Option<T> {
@@ -10728,7 +10728,7 @@ pub fn sync_dirty_filesystems() -> Result<(), i32> {
     // metadata lands after the data it describes (ordered data).
     let _ = crate::api::ext4::sync_inode_tables(&flushed_targets);
     // And persist the disk's volatile cache (see sys_fsync).
-    crate::drivers::virtio::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
+    crate::drivers::hotpath::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
 }
 
 /// Unmount a filesystem from the dentry tree.
@@ -15893,7 +15893,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // DRM nodes + exported prime (dma-buf) fds: dma-buf must
                 // stat as a regular file with st_size == buffer size (the
                 // EGL/gbm importers validate through it).
-                if crate::drivers::drm::drm_file_stat(&file, stat).is_some() {
+                if crate::drivers::hotpath::drm_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 if mem_file_stat(&file, stat).is_some() {
@@ -23140,7 +23140,7 @@ impl PageCache {
         if crate::sched::hotpath::current_is_dying() {
             return self.shrink(want);
         }
-        if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
+        if crate::drivers::hotpath::loop_io_claim_held_by_current() {
             SR_LOOP_DEFER.fetch_add(1, Ordering::Relaxed);
             return self.shrink(want);
         }
@@ -23286,7 +23286,7 @@ impl PageCache {
             // clean-only here, the deferred pages are flushed by the
             // writer-side dirty-balloon watermark or a later reclaim
             // outside any io claim.
-            if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
+            if crate::drivers::hotpath::loop_io_claim_held_by_current() {
                 SR_LOOP_DEFER.fetch_add(1, Ordering::Relaxed);
                 break;
             }
@@ -23959,7 +23959,7 @@ impl IoCompletion {
     /// zero-serve family).
     pub fn complete_with_token(&self, status: i32, token: usize) {
         #[cfg(debug_assertions)]
-        crate::drivers::virtio::assert_no_virtio_lock("IoCompletion::complete");
+        crate::drivers::hotpath::assert_no_virtio_lock("IoCompletion::complete");
         self.status.store(status, Ordering::Release);
         self.token.store(token, Ordering::Release);
         self.done.store(true, Ordering::Release);
@@ -24094,9 +24094,9 @@ impl IoCompletion {
                 crate::sched::hotpath::dequeue_task(&*current);
                 // Final chance (GSD fix): kick the queue and drain
                 // completions once — recovers lost-kick stalls.
-                crate::drivers::virtio::vw_report("async-deadline");
-                crate::drivers::blkdev::kick_all_pending_disks();
-                crate::drivers::virtio::pci_process_async_completions();
+                crate::drivers::hotpath::vw_report("async-deadline");
+                crate::drivers::hotpath::kick_all_pending_disks();
+                crate::drivers::hotpath::pci_process_async_completions();
                 if self.done.load(Ordering::Acquire) {
                     crate::pr_err!("io_completion: recovered by final kick/drain");
                     result = self.status.load(Ordering::Acquire);
@@ -24109,7 +24109,7 @@ impl IoCompletion {
                 // dereferences this memory after we return (GSD fix).
                 // This also waits out any walker delivery of OUR entries
                 // that is still in flight (see `delivering`).
-                crate::drivers::virtio::abandon_pending_completion(
+                crate::drivers::hotpath::abandon_pending_completion(
                     self as *const _ as *mut _,
                 );
                 // The drained delivery may have completed us after the
@@ -24190,7 +24190,7 @@ impl IoCompletion {
             // re-sleeping — cheap when caught up, and it converts any
             // lost-IRQ engine into at most one extra 250 ms poll round
             // instead of a 10 s deadline batch stall.
-            crate::drivers::virtio::pci_rescue_all_lagged();
+            crate::drivers::hotpath::pci_rescue_all_lagged();
         }
         if deadline_armed && deadline_timer != 0 {
             crate::timer::del_timer(deadline_timer);

@@ -18,7 +18,7 @@ pub mod icmpv6;
 
 use rux::net::types::SkBuff;
 use crate::sync::types::Spinlock;
-use crate::drivers::timer::HZ;
+use crate::drivers::hotpath::timer::HZ;
 
 /// IPv6 address (wire/network byte order)
 pub type Ipv6Addr = [u8; 16];
@@ -221,7 +221,7 @@ pub fn is_local_addr(a: &Ipv6Addr) -> bool {
 /// device MAC, then emit a Router Solicitation (best effort — a slirp
 /// network has no routers, which is fine).
 pub fn ipv6_init() {
-    let mac = match crate::drivers::net::virtio_net::get_device() {
+    let mac = match crate::drivers::hotpath::virtio_net_get_device() {
         Some(d) => d.get_mac(),
         None => return, // no NIC: no link-local
     };
@@ -284,7 +284,7 @@ static NEIGHBOR_CACHE: Spinlock<NeighborCache> = Spinlock::new(NeighborCache::ne
 const NEIGHBOR_TIMEOUT_SECS: u64 = 300;
 
 fn jiffies_now() -> u64 {
-    crate::drivers::timer::get_jiffies()
+    crate::drivers::hotpath::timer::get_jiffies()
 }
 
 /// Look up a neighbor's MAC (None = unresolved)

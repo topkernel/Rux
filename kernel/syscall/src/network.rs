@@ -4258,9 +4258,9 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                 + (nsec as u64) / 1_000;
             if us == 0 {
                 // Zero timeout = poll once (deadline already due).
-                deadline = Some(crate::drivers::timer::get_jiffies());
+                deadline = Some(crate::drivers::hotpath::timer::get_jiffies());
             } else {
-                deadline = Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1));
+                deadline = Some(crate::drivers::hotpath::timer::get_jiffies() + (us / 10_000).max(1));
             }
         }
     }

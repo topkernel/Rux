@@ -37,7 +37,6 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use crate::errno;
-use crate::drivers::blkdev;
 use rux::fs::hotpath;
 use rux::fs::types::{FileSystemType, FsContext, SuperBlock};
 
@@ -140,8 +139,8 @@ fn superblock_on_disk(disk: &[u8]) -> &superblock::Ext4SuperBlockOnDisk {
 }
 
 pub struct Ext4FileSystem {
-    /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
-    pub device: &'static blkdev::GenDisk,
+    /// Block device (typed handle; INV-BLKDEV-1 on hotpath::get_disk)
+    pub device: &'static rux::drivers::types::GenDisk,
     /// Superblock information
     pub sb_info: Option<Box<superblock::Ext4SuperBlockInfo>>,
     /// Block group descriptor table (Mutex-protected for safe concurrent access)
@@ -202,7 +201,7 @@ pub struct Ext4FileSystem {
 
 impl Ext4FileSystem {
     /// Create new ext4 filesystem instance
-    pub fn new(device: &'static blkdev::GenDisk) -> Self {
+    pub fn new(device: &'static rux::drivers::types::GenDisk) -> Self {
         Self {
             device,
             sb_info: None,
@@ -1099,12 +1098,12 @@ fn ext4_kill_sb(sb: *mut SuperBlock) {
 /// # Returns
 /// - `Some(data)`: File content
 /// - `None`: Read failed
-pub fn read_file(device: &'static blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
+pub fn read_file(device: &'static rux::drivers::types::GenDisk, path: &str) -> Option<Vec<u8>> {
     read_file_internal(device, path, 0)
 }
 
 /// Internal implementation, supports recursion depth limit to prevent circular symbolic links
-fn read_file_internal(device: &'static blkdev::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
+fn read_file_internal(device: &'static rux::drivers::types::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
     use alloc::vec::Vec;
 
     // Prevent circular symbolic links, max recursion depth 8
@@ -1495,7 +1494,7 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
 /// # Returns
 /// - `Ok(())`: Mount successful
 /// - `Err(code)`: Mount failed
-pub fn mount_ext4(device: &'static blkdev::GenDisk) -> Result<(), i32> {
+pub fn mount_ext4(device: &'static rux::drivers::types::GenDisk) -> Result<(), i32> {
     mount_ext4_flags(device, false)
 }
 
@@ -1503,7 +1502,7 @@ pub fn mount_ext4(device: &'static blkdev::GenDisk) -> Result<(), i32> {
 /// mounts read-only (the write path does not maintain checksums yet);
 /// the read path verifies superblock/group/inode crc32c (csum.rs).
 pub fn mount_ext4_flags(
-    device: &'static blkdev::GenDisk,
+    device: &'static rux::drivers::types::GenDisk,
     read_only: bool,
 ) -> Result<(), i32> {
     use core::sync::atomic::Ordering;
@@ -1675,7 +1674,7 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
     }
 
     // 3. Disk-side volatile cache.
-    crate::drivers::virtio::flush_pci_blk()
+    crate::drivers::hotpath::flush_pci_blk()
 }
 
 /// Create a VFS inode for the ext4 root directory (inode 2).
@@ -2245,7 +2244,7 @@ pub fn ext4_fallocate_on(
             }
         }
 
-        let sec = crate::drivers::rtc::wall_secs() as u32;
+        let sec = crate::drivers::hotpath::wall_secs() as u32;
         ext4_inode.mtime = sec;
         ext4_inode.ctime = sec;
         // write_inode_disk expects the on-disk layout; convert.
@@ -2294,7 +2293,7 @@ pub fn ext4_fallocate_on(
             // deletes the file (the r4/r5 /tmp-exhaustion leak).
             // Linux keeps partial fallocate allocations too; the file
             // stays deletable and truncatable, reclaiming its blocks.
-            let sec = crate::drivers::rtc::wall_secs() as u32;
+            let sec = crate::drivers::hotpath::wall_secs() as u32;
             ext4_inode.mtime = sec;
             ext4_inode.ctime = sec;
             let on_disk = ext4_inode.to_on_disk();
@@ -2311,7 +2310,7 @@ pub fn ext4_fallocate_on(
         ext4_inode.set_size(end);
     }
     {
-        let sec = crate::drivers::rtc::wall_secs() as u32;
+        let sec = crate::drivers::hotpath::wall_secs() as u32;
         ext4_inode.mtime = sec;
         ext4_inode.ctime = sec;
         let on_disk = ext4_inode.to_on_disk();
@@ -3034,7 +3033,7 @@ fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     // size changes — a second setattr call in a utimensat pair (ATIME after
     // MTIME) used to stomp the just-stored explicit mtime back to "now"
     // (LTP utime01/utime02/utime04).
-    let sec = crate::drivers::rtc::wall_secs() as u32;
+    let sec = crate::drivers::hotpath::wall_secs() as u32;
     ext4_inode.ctime = sec;
     if attr == setattr_attr::ATTR_SIZE {
         ext4_inode.mtime = sec;
@@ -3894,7 +3893,7 @@ static LOOP_INSTANCE_REUSE: [LoopInstanceReuse; LOOP_REUSE_SLOTS] = [const {
 /// Read the on-disk superblock UUID of `disk` through the buffer cache
 /// (same read init() uses: block 0, byte offset 1024; s_uuid at +0x68).
 /// None when the block cannot be read.
-fn sb_uuid_of(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)> {
+fn sb_uuid_of(disk: &'static crate::drivers::types::GenDisk) -> Option<(u64, u64)> {
     // INV-BIO-BHREF: bread on a live GenDisk returns a pinned BufferHead
     // whose b_data covers the full block; the UUID fields are read as
     // little-endian byte slices (equivalent to the old unaligned loads).
@@ -3912,7 +3911,7 @@ fn sb_uuid_of(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<(u64, u6
 
 /// Publish a fresh instance for its device (replacing any stale row for
 /// the same disk). Called under EXT4_BIG_LOCK.
-fn loop_instance_publish(disk: &'static crate::drivers::blkdev::GenDisk, fs_ptr: *mut Ext4FileSystem) {
+fn loop_instance_publish(disk: &'static crate::drivers::types::GenDisk, fs_ptr: *mut Ext4FileSystem) {
     use core::sync::atomic::Ordering;
     let disk_bits = disk as *const _ as u64;
     let fs_bits = fs_ptr as u64;
@@ -3937,12 +3936,12 @@ fn loop_instance_publish(disk: &'static crate::drivers::blkdev::GenDisk, fs_ptr:
 /// Drop the reuse row for a device. The loop driver's re-bind path calls
 /// this (takes EXT4_BIG_LOCK); the mount-failure path uses the _locked
 /// variant (already under the lock — SleepMutex is not reentrant).
-pub fn loop_instance_invalidate(disk: &crate::drivers::blkdev::GenDisk) {
+pub fn loop_instance_invalidate(disk: &crate::drivers::types::GenDisk) {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     loop_instance_invalidate_locked(disk);
 }
 
-fn loop_instance_invalidate_locked(disk: &crate::drivers::blkdev::GenDisk) {
+fn loop_instance_invalidate_locked(disk: &crate::drivers::types::GenDisk) {
     use core::sync::atomic::Ordering;
     let disk_bits = disk as *const _ as u64;
     for slot in LOOP_INSTANCE_REUSE.iter() {
@@ -3962,7 +3961,7 @@ fn loop_instance_invalidate_locked(disk: &crate::drivers::blkdev::GenDisk) {
 /// The instance is intentionally leaked (single mount per boot test
 /// lifecycle; umount drops the dentry tree).
 pub fn mount_loop_instance(
-    disk: &'static blkdev::GenDisk,
+    disk: &'static rux::drivers::types::GenDisk,
     read_only: bool,
 ) -> Result<(alloc::sync::Arc<Inode>, bool), i32> {
     // SUPERBLOCK REUSE (reference get_tree_bdev/sget shape): a mount of
@@ -3982,7 +3981,7 @@ pub fn mount_loop_instance(
     {
         use core::sync::atomic::Ordering;
         for slot in LOOP_INSTANCE_REUSE.iter() {
-            if slot.disk.load(Ordering::Acquire) as *const blkdev::GenDisk == disk {
+            if slot.disk.load(Ordering::Acquire) as *const rux::drivers::types::GenDisk == disk {
                 let fs_ptr =
                     slot.fs.load(Ordering::Acquire) as *mut Ext4FileSystem;
                 if !fs_ptr.is_null() {

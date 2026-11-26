@@ -101,7 +101,7 @@ mod x86 {
         let tries = ARM_TRIES.fetch_add(1, Ordering::AcqRel);
         // Fill the hpet cluster's canary page BEFORE RO-ing it (the fill
         // doubles as the mapped-ness probe: it cannot fault).
-        let (start, len) = crate::drivers::timer::hpet::wild_guard_range();
+        let (start, len) = crate::drivers::hotpath::timer::hpet::wild_guard_range();
         fill_canary(start);
         record(start, len);
         let mut ok_pages = 0usize;
@@ -225,7 +225,7 @@ mod x86 {
                 core::sync::atomic::AtomicBool::new(false);
             let armed = ARMED_START[0].load(Ordering::Relaxed) != 0;
             if armed && !SELFTEST_FIRED.swap(true, Ordering::AcqRel) {
-                let (start, _len) = crate::drivers::timer::hpet::wild_guard_range();
+                let (start, _len) = crate::drivers::hotpath::timer::hpet::wild_guard_range();
                 let victim = (start + 4096) as *mut u64; // GUARD.base_locked
                 crate::pr_err!("WILDWATCH-SELFTEST firing: deliberate store to {:#x}", start + 4096);
                 // SAFETY: deliberate wild-store emulation onto the RO

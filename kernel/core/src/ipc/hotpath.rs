@@ -10762,8 +10762,8 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
             return -(errno::EINVAL as i64);
         }
-        let timeout_jiffies = (ts_sec as u64) * crate::drivers::timer::HZ as u64
-            + (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000;
+        let timeout_jiffies = (ts_sec as u64) * crate::drivers::hotpath::timer::HZ as u64
+            + (ts_nsec as u64) * crate::drivers::hotpath::timer::HZ as u64 / 1_000_000_000;
         if timeout_jiffies == 0 {
             sub_jiffy_timeout = true;
             None
@@ -11924,7 +11924,7 @@ pub fn ipc_current_time() -> i64 {
     // against the CLINT-based wall clock within one test (msgctl01 ctime
     // 4s stale, msgrcv01 rtime 3s stale) — use wall_secs() so both
     // clocks tick from the same counter.
-    crate::drivers::rtc::wall_secs() as i64
+    crate::drivers::hotpath::wall_secs() as i64
 }
 
 

@@ -177,7 +177,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
         // clock must agree with rtc::wall_secs() (fs timestamps): LTP
         // utime01 brackets utime(NULL) stamps between coarse samples.
         CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
-            let mut total_ns = crate::drivers::timer::coarse_ns_since_boot();
+            let mut total_ns = crate::drivers::hotpath::timer::coarse_ns_since_boot();
             if clk_id == CLOCK_REALTIME_COARSE {
                 total_ns = total_ns.saturating_add(wall_epoch_offset_ns());
             }
@@ -231,7 +231,7 @@ pub struct Timespec {
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
-    use crate::drivers::timer;
+    use crate::drivers::hotpath::timer;
     use ::process;
 
     let req_ptr = args[0] as *const Timespec;
@@ -275,7 +275,7 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
 
 /// Internal nanosleep implementation shared by sys_nanosleep and sys_clock_nanosleep
 fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
-    use crate::drivers::timer;
+    use crate::drivers::hotpath::timer;
     use ::process;
 
     let total_nanos = req.tv_sec.saturating_mul(1_000_000_000).saturating_add(req.tv_nsec);
@@ -625,7 +625,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
     let res_ns: u64 = if clk_id as u32 == CLOCK_REALTIME_COARSE
         || clk_id as u32 == CLOCK_MONOTONIC_COARSE
     {
-        1_000_000_000 / crate::drivers::timer::HZ
+        1_000_000_000 / crate::drivers::hotpath::timer::HZ
     } else {
         100
     };
@@ -904,7 +904,7 @@ fn disarm_itimer_real() {
 
 /// Set ITIMER_REAL timer for the current process.
 fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_usec: i64) {
-    use crate::drivers::timer;
+    use crate::drivers::hotpath::timer;
 
     let task = match ::process::current_task() {
         Some(t) => t,
@@ -1386,7 +1386,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     let interval_nsec = int_sec.saturating_mul(1_000_000_000).saturating_add(int_nsec);
     let interval_jiffies = if interval_nsec > 0 {
         let interval_msecs = (interval_nsec / 1_000_000) as u64;
-        crate::drivers::timer::msecs_to_jiffies(interval_msecs).max(1)
+        crate::drivers::hotpath::timer::msecs_to_jiffies(interval_msecs).max(1)
     } else {
         0
     };
@@ -1417,7 +1417,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
 
     // ---- Wall clocks (REALTIME / MONOTONIC): precise deadline ----
     let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-    let now_ticks = crate::drivers::timer::read_time();
+    let now_ticks = crate::drivers::hotpath::timer::read_time();
     // Relative or absolute target, in MONOTONIC ns.
     // Signed monotonic target: TIMER_ABSTIME values BEFORE the clock's
     // zero point are legal (LTP timer_settime03 arms ~300 s in the past)
@@ -1460,8 +1460,8 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
 
     // Jiffy fallback (>= the jiffy covering the precise deadline + 1 grid
     // tick); the hres deadline normally fires first.
-    let ticks_per_jiffy = freq_hz / crate::drivers::timer::HZ;
-    let now_j = crate::drivers::timer::get_jiffies();
+    let ticks_per_jiffy = freq_hz / crate::drivers::hotpath::timer::HZ;
+    let now_j = crate::drivers::hotpath::timer::get_jiffies();
     let expires = if deadline_ticks <= now_ticks {
         // Already expired. With an interval, Linux reports the number of
         // MISSED periods as the overrun (capped at INT_MAX — LTP
@@ -1528,7 +1528,7 @@ fn posix_timer_current(timer: &rux::process::types::PosixTimerState) -> (i64, i6
         if deadline_ticks == 0 {
             return (oi, on, 0, 0);
         }
-        let now = crate::drivers::timer::read_time();
+        let now = crate::drivers::hotpath::timer::read_time();
         if deadline_ticks <= now {
             return (oi, on, 0, 0);
         }
@@ -1814,7 +1814,7 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     if modes & ADJ_TICK != 0 {
         let tick = i32::from_le_bytes(buf[88..92].try_into().unwrap());
         if tick != 0 {
-            let hz = crate::drivers::timer::HZ as i32;
+            let hz = crate::drivers::hotpath::timer::HZ as i32;
             let low = 900_000 / hz;
             let high = 1_100_000 / hz;
             if !(low..=high).contains(&tick) {
@@ -1830,7 +1830,7 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     // ADJ_TICK delta from the GET value stays inside the valid window
     // (clock_adjtime01 reads tick then adds delta).
     if state[88..96] == [0u8; 8] {
-        let def_tick: u64 = 1_000_000 / crate::drivers::timer::HZ;
+        let def_tick: u64 = 1_000_000 / crate::drivers::hotpath::timer::HZ;
         state[88..96].copy_from_slice(&def_tick.to_le_bytes());
     }
     const ADJ_OFFSET: u32 = 0x001;

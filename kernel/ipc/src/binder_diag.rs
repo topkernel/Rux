@@ -1784,7 +1784,7 @@ pub fn txn_hang_audit() {
                 // window) in one line. DIRECT console (pr_err from this
                 // context was dropped on lb70/lb71 — printk contention;
                 // the TXN-HANG lines themselves print via ConsoleWriter).
-                crate::drivers::virtio::vw_snap_direct();
+                crate::drivers::hotpath::vw_snap_direct();
             }
         }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server

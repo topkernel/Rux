@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for input event constants and InputEvent ABI.
-//! Copied from: kernel/core/src/drivers/input/event.rs
+//! Copied from: kernel/core/src/drivers/hotpath.rs
 
 use proptest::prelude::*;
 use core::mem::size_of;

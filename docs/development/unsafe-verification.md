@@ -28,17 +28,17 @@ FILE` owns one), and the gate fails on a drop that
 ## Totals
 
 - unsafe regions: **1996**
-- with artifact (non-GAP): **1936** (97.0%)
-- GAP: **60**
+- with artifact (non-GAP): **1897** (95.0%)
+- GAP: **99**
 - by kind: block=1764, unsafe-extern=6, unsafe-fn=97, unsafe-impl=129
 - by category (regions carry 0..n tags): ptr-ops=478, asm=267, volatile=148, raw-construct=31, addr-arith=26, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1936**
-- recovered from reference versions: **0**
-- references consulted: HEAD, MERGE_HEAD, 1354d238f, faac76304, e764797a8
-- annotated regions, baseline -> this bank: **2252 -> 1936**
+- artifacts kept by id: **1821**
+- recovered from reference versions: **76** (same-file 0, edited-site 0, file-move 0, moved-item 76)
+- references consulted: HEAD, MERGE_HEAD, 1354d238f
+- annotated regions, baseline -> this bank: **2328 -> 1897**
 
 ## Per-subsystem
 
@@ -46,7 +46,7 @@ FILE` owns one), and the gate fails on a drop that
 |-----------|---------|---------|-----|
 | arch | 690 | 684 | 6 |
 | fs | 304 | 275 | 29 |
-| drivers | 115 | 115 | 0 |
+| drivers | 115 | 76 | 39 |
 | debug | 109 | 109 | 0 |
 | sched | 108 | 101 | 7 |
 | sync | 106 | 103 | 3 |
@@ -1371,225 +1371,125 @@ FILE` owns one), and the gate fails on a drop that
 
 ## drivers
 
-### kernel/core/src/drivers/ashmem.rs (3)
+### kernel/core/src/drivers/hotpath.rs (115)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 136 | drop | block | - | INV:INV-PAGEDESC-1 | `c23b2c2fb5ec` |
-| 335 | ashmem_file_read | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `ee08817b2ef7` |
-| 745 | ashmem_mmap | block | - | INV:INV-FS-FILEPRIV-1 | `37c186372be0` |
-
-### kernel/core/src/drivers/blkdev/mod.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 106 | <module> | unsafe-impl | - | INV:INV-BLKDEV-2 | `a811b9a02488` |
-| 107 | <module> | unsafe-impl | - | INV:INV-BLKDEV-2 | `dcac489de36f` |
-| 161 | private | block | ptr-ops | INV:INV-BLKDEV-3 | `d4e672163f6a` |
-| 267 | <module> | unsafe-impl | - | INV:INV-BLKDEV-1 | `57b31e7df966` |
-| 268 | <module> | unsafe-impl | - | INV:INV-BLKDEV-1 | `a7dbc40687b7` |
-| 311 | get_disk | block | ptr-ops | INV:INV-BLKDEV-1 | `6fac807742e6` |
-
-### kernel/core/src/drivers/drm/mod.rs (9)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 574 | <module> | unsafe-impl | - | INV:F9 | `9165d2c32c0c` |
-| 575 | <module> | unsafe-impl | - | INV:F9 | `5f2c63ba5fc5` |
-| 587 | drop | block | - | INV:F9 | `36f1190e0069` |
-| 687 | prime_close | block | ptr-ops | INV:F9 | `25e535ea4901` |
-| 784 | prime_file_gem | block | ptr-ops | INV:F9 | `90e4923fa89b` |
-| 826 | u32_slice_as_bytes | block | raw-construct,ptr-ops | INV:F9 | `a66521fd4c81` |
-| 1637 | create_dumb | block | - | INV:F9 | `0b05c2e19750` |
-| 1828 | prime_fd_to_handle | block | volatile,ptr-ops | INV:F9 | `3cd92e46b4a3` |
-| 2042 | present_fb | block | volatile,ptr-ops | INV:F9 | `bb6b43bdf660` |
-
-### kernel/core/src/drivers/gpu/framebuffer.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 54 | <module> | unsafe-impl | - | INV:INV-MMIO-1 | `03c1168f17f8` |
-| 55 | <module> | unsafe-impl | - | INV:INV-MMIO-1 | `17880a0e847a` |
-
-### kernel/core/src/drivers/gpu/mod.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 79 | flush_framebuffer | block | - | INV:INV-SLOT-1 | `5bbc2a8d5722` |
-| 98 | with_gpu_device | block | - | INV:INV-SLOT-1 | `96a5b26bebca` |
-
-### kernel/core/src/drivers/gpu/virtio_gpu.rs (10)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 155 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `0708d2044204` |
-| 156 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `a274c45fcdc7` |
-| 344 | init_framebuffer | block | - | INV:INV-MMIO-1 | `dbb2c3b398bb` |
-| 736 | send_command | block | - | INV:F7 | `081962c03f7b` |
-| 743 | send_command | block | ptr-ops | INV:F7 | `b32e453ad930` |
-| 745 | send_command | block | ptr-ops | INV:INV-SENDSYNC-1 | `c47d45370347` |
-| 798 | send_command | block | asm | INV:INV-DMA-2 | `8b0e20a99e03` |
-| 868 | send_command | block | ptr-ops | INV:INV-DMA-3 | `827ea6e2d5ca` |
-| 889 | send_command | block | - | INV:INV-DMA-3 | `ee79febf228c` |
-| 935 | drop | block | - | INV:INV-DMA-3 | `455748638027` |
-
-### kernel/core/src/drivers/input/evdev.rs (6)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 590 | device_of_file | block | ptr-ops | INV:INV-SREF-1 | `6da5835f755a` |
-| 670 | node_of_file | block | ptr-ops | INV:INV-SREF-1 | `6fbf5686cdc3` |
-| 844 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `2e0a76453b86` |
-| 860 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `a2c2e5906862` |
-| 946 | evdev_poll_wait | block | - | INV:INV-KTASK-1 | `bd35baffbfe8` |
-| 991 | evdev_poll_unwait | block | - | INV:INV-KTASK-1 | `d5ad93c9d5ee` |
-
-### kernel/core/src/drivers/input/mod.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 245 | init_virtio_input | block | - | INV:INV-MMIO-1 | `4eb90ba0463d` |
-
-### kernel/core/src/drivers/input/virtio_input.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 113 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `011c5fdab38c` |
-| 114 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `e9c9d38f13e4` |
-| 191 | init_virtio | block | - | INV:INV-MMIO-2 | `332851722fad` |
-| 388 | read_event | block | volatile | INV:INV-DMA-3 | `3a264bd67501` |
-| 542 | drop | block | ptr-ops | INV:INV-MMIO-1 | `a77d28a052b8` |
-
-### kernel/core/src/drivers/intc/apic.rs (14)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 139 | reg_read | block | - | INV:F5 | `e61e7e9797fa` |
-| 149 | reg_read | block | volatile,ptr-ops | INV:F5 | `c4ed89ab3e2f` |
-| 158 | reg_write | block | - | INV:F5 | `426a7c74e141` |
-| 164 | reg_write | block | volatile,ptr-ops | INV:F5 | `c1c77f05d1a6` |
-| 311 | kvm_pv_send_ipi | unsafe-fn | asm | INV:F5 | `e67a1fd782d3` |
-| 341 | kvm_pv_send_ipi | block | - | INV:F5 | `bb0299210b71` |
-| 367 | send_icr | block | - | INV:F5 | `cff4fafe5906` |
-| 568 | tick_arm_ra | block | asm | INV:F5 | `2e3a5a77ea19` |
-| 1019 | ensure_phys_mapped | block | - | INV:INV-MMIO-1 | `0af6ece22fb6` |
-| 1297 | this_lapic_id_raw | block | - | INV:INV-MMIO-1 | `28a98ee7c22b` |
-| 1339 | init_x2apic_or_mmio | block | - | INV:INV-MMIO-1 | `54c2fc1059e6` |
-| 1353 | init_x2apic_or_mmio | block | - | INV:INV-MMIO-1 | `28dd7407cec7` |
-| 1357 | init_x2apic_or_mmio | block | - | INV:INV-MMIO-1 | `e5133feee894` |
-| 1422 | init_secondary | block | - | INV:INV-MMIO-1 | `43d1ed1b406a` |
-
-### kernel/core/src/drivers/intc/clint.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 102 | read_time | block | asm | INV:F5 | `ed5f6261e5ef` |
-| 125 | set_timecmp | block | - | INV:F5 | `62b3cad5526a` |
-
-### kernel/core/src/drivers/intc/gicv3.rs (4)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 204 | iar1_read | block | asm | INV:INV-MMIO-1 | `4e5c19568932` |
-| 213 | eoir1_write | block | asm | INV:INV-MMIO-1 | `7413096eb528` |
-| 233 | send_sgi | block | asm | INV:INV-MMIO-1 | `593e2ce27aab` |
-| 397 | enable_cpu_interface | block | asm | INV:INV-MMIO-1 | `9d3db1671c3e` |
-
-### kernel/core/src/drivers/loop_dev.rs (4)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 478 | loop_devno_of | block | ptr-ops | INV:INV-BLKDEV-2 | `4681d33c0b8d` |
-| 512 | loop_file_read | block | ptr-ops | INV:INV-BLKDEV-2 | `21acb65324eb` |
-| 559 | loop_file_write | block | ptr-ops | INV:INV-BLKDEV-2 | `0a03164bb6b6` |
-| 720 | loop_file_ioctl | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `23c170ec505f` |
-
-### kernel/core/src/drivers/net/space.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 106 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `7d055dcd34f8` |
-| 111 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `069c931ee007` |
-
-### kernel/core/src/drivers/net/virtio_net.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 74 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `ea9d28a6fdf8` |
-| 566 | poll | block | raw-construct,ptr-ops | INV:INV-KPTR-3 | `9f24c1b38f47` |
-| 634 | dealloc_rx_buffer | block | ptr-ops | INV:INV-KPTR-3 | `17d32bb9cb68` |
-| 666 | refill_rx_buffers | block | ptr-ops | INV:INV-KPTR-3 | `9d52e708109d` |
-| 678 | refill_rx_buffers | block | - | INV:INV-KPTR-3 | `295d5177c693` |
-
-### kernel/core/src/drivers/rtc.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 63 | read_reg | block | volatile,ptr-ops | INV:INV-MMIO-1 | `9fd334a2da32` |
-
-### kernel/core/src/drivers/timer/aarch64.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 128 | set_timer | block | asm | INV:F5 | `6570e24c8240` |
-
-### kernel/core/src/drivers/timer/riscv64.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 139 | set_timer_stimecmp | block | asm | INV:F5 | `34c92f3f7c69` |
-
-### kernel/core/src/drivers/timer/x86_64.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 422 | init | block | - | INV:F5 | `280551d3cae8` |
-
-### kernel/core/src/drivers/virtio/mod.rs (24)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 86 | <module> | unsafe-impl | - | INV:F7 | `a4e3b0117a27` |
-| 89 | <module> | unsafe-impl | - | INV:F7 | `5f89568dafe9` |
-| 1069 | <module> | block | - | INV:INV-BLKDEV-2 | `f22d34f0c68f` |
-| 1105 | io_buf_alloc | block | ptr-ops | INV:INV-BLKDEV-2 | `c5bfac1d0bb3` |
-| 1111 | io_buf_alloc | block | - | INV:INV-BLKDEV-2 | `6fe34035dfb7` |
-| 1126 | io_buf_free | block | ptr-ops | INV:INV-BLKDEV-2 | `59e9ed6a4b9a` |
-| 1133 | io_buf_free | block | - | INV:INV-BLKDEV-2 | `f5c27df391b8` |
-| 1148 | io_buf_init | block | ptr-ops | INV:INV-SAFECALL-1 | `e35daa929d00` |
-| 1174 | io_buf_release | block | - | INV:INV-SAFECALL-1 | `181d753ce19e` |
-| 1187 | begin_delivery | block | - | INV:INV-SAFECALL-1 | `dcfe00aaba2f` |
-| 1196 | deliver_completion | block | - | INV:INV-SAFECALL-1 | `bdb65ce7d674` |
-| 1278 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `37f59375e518` |
-| 1284 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `e68aed5b429d` |
-| 1300 | wedge_put | block | - | INV:INV-SAFECALL-1 | `ef778cc1da89` |
-| 1653 | <module> | unsafe-impl | - | INV:INV-SLOT-3 | `7b892979fa75` |
-| 2013 | pci_pending_slot_reservable_len | block | - | INV:F7 | `5cc30170c471` |
-| 2053 | pci_publish_sync_chain | block | - | INV:F7 | `8556b2e7e19a` |
-| 2100 | pci_flag_sync_tombstone_timed_out | block | - | INV:F7 | `5fc1d1822041` |
-| 2162 | abandon_pending_completion | block | - | INV:F7 | `b94215e9c1e9` |
-| 2254 | abandon_pending_completion | block | - | INV:F7 | `bd7b1efb8245` |
-| 2504 | pci_submit_data_async_sg | block | - | INV:INV-BLKDEV-2 | `200ae0aef40f` |
-| 3117 | pci_process_async_completions_slot | block | - | INV:F7 | `e3d6b2f27080` |
-| 3152 | pci_process_async_completions_slot | block | - | INV:F7 | `a6e47ac47e51` |
-| 3726 | get_pci_gen_disk_at | block | - | INV:INV-BLKDEV-2 | `574d0d335a91` |
-
-### kernel/core/src/drivers/virtio/queue.rs (12)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 144 | <module> | unsafe-impl | - | INV:INV-DMA-1 | `bd3a22544313` |
-| 145 | <module> | unsafe-impl | - | INV:INV-SAFECALL-1 | `bdefdfab27d1` |
-| 163 | used_ring_idx | block | volatile,ptr-ops | INV:INV-DMA-3 | `5098bdf9b1c8` |
-| 176 | used_ring_elem_id | block | volatile,ptr-ops | INV:INV-DMA-3 | `c801fbbf135c` |
-| 198 | resp_status_byte | block | volatile | INV:INV-DMA-3 | `b4c9020ed340` |
-| 410 | notify | block | asm | INV:INV-DMA-3 | `54ddc92186ee` |
-| 426 | notify | block | asm | INV:INV-DMA-3 | `035710a58554` |
-| 432 | notify | block | volatile,ptr-ops | INV:INV-DMA-3 | `6782f1b6fa0a` |
-| 456 | notify | block | asm | INV:INV-DMA-3 | `e5db755a13c9` |
-| 463 | notify | block | asm | INV:INV-DMA-3 | `1b358f2f8e1d` |
-| 1448 | desc_mut | block | - | INV:INV-DMA-2 | `5c5732a89c23` |
-| 1461 | avail_header_mut | block | - | INV:INV-DMA-2 | `abae60840f9a` |
+| 233 | iar1_read | block | asm | INV:INV-MMIO-1 | `0d264deae088` |
+| 242 | eoir1_write | block | asm | INV:INV-MMIO-1 | `70b1af9dbc02` |
+| 262 | send_sgi | block | asm | INV:INV-MMIO-1 | `d164ed8443ef` |
+| 426 | enable_cpu_interface | block | asm | INV:INV-MMIO-1 | `d3757d84beb6` |
+| 1062 | read_time | block | asm | INV:F5 | `9238a8157018` |
+| 1085 | set_timecmp | block | - | INV:F5 | `b03ce47a9488` |
+| 1203 | reg_read | block | - | INV:F5 | `dacb0f778567` |
+| 1213 | reg_read | block | volatile,ptr-ops | INV:F5 | `0601cdb4a3fc` |
+| 1222 | reg_write | block | - | INV:F5 | `dae8daf83943` |
+| 1228 | reg_write | block | volatile,ptr-ops | INV:F5 | `9cc3f66cb891` |
+| 1375 | kvm_pv_send_ipi | unsafe-fn | asm | INV:F5 | `92147e223643` |
+| 1405 | kvm_pv_send_ipi | block | - | INV:F5 | `dd8943d69fd5` |
+| 1431 | send_icr | block | - | INV:F5 | `7a7046ef2923` |
+| 1632 | tick_arm_ra | block | asm | INV:F5 | `54942913c252` |
+| 2083 | ensure_phys_mapped | block | - | INV:INV-MMIO-1 | `deb9d0a6bc9a` |
+| 2361 | this_lapic_id_raw | block | - | INV:INV-MMIO-1 | `a3efc92bf35d` |
+| 2403 | init_x2apic_or_mmio | block | - | INV:INV-MMIO-1 | `99d317430210` |
+| 2417 | init_x2apic_or_mmio | block | - | INV:INV-MMIO-1 | `f300f0c1ece8` |
+| 2421 | init_x2apic_or_mmio | block | - | INV:INV-MMIO-1 | `018ee9d7ff8c` |
+| 2486 | init_secondary | block | - | INV:INV-MMIO-1 | `f5b482f105d5` |
+| 2669 | set_timer_stimecmp | block | asm | INV:F5 | `03fed1689bef` |
+| 3186 | init | block | - | INV:F5 | `5204389c3b43` |
+| 4019 | set_timer | block | asm | INV:F5 | `4ee893abfed8` |
+| 4143 | read_reg | block | volatile,ptr-ops | INV:INV-MMIO-1 | `bf3a69abc5ae` |
+| 4256 | <module> | unsafe-impl | - | GAP | `1ea4aa6c5847` |
+| 4257 | <module> | unsafe-impl | - | GAP | `9fdd9167c27e` |
+| 4311 | private | block | ptr-ops | INV:INV-BLKDEV-3 | `0935f7cfe86a` |
+| 4382 | <module> | unsafe-impl | - | GAP | `7771f7d416a5` |
+| 4383 | <module> | unsafe-impl | - | GAP | `b0b40eddc9b6` |
+| 4426 | get_disk | block | ptr-ops | INV:INV-BLKDEV-1 | `759e1fd11b83` |
+| 5447 | <module> | unsafe-impl | - | GAP | `e041964ba8b7` |
+| 5450 | <module> | unsafe-impl | - | GAP | `d6c11e9b1f33` |
+| 6426 | <module> | block | - | GAP | `7770cd8601bb` |
+| 6455 | io_buf_alloc | block | ptr-ops | INV:INV-BLKDEV-2 | `650f5aa80af7` |
+| 6461 | io_buf_alloc | block | - | INV:INV-BLKDEV-2 | `2235a5beff16` |
+| 6476 | io_buf_free | block | ptr-ops | INV:INV-BLKDEV-2 | `eaf0dfb06162` |
+| 6483 | io_buf_free | block | - | INV:INV-BLKDEV-2 | `9450bde4a4a3` |
+| 6498 | io_buf_init | block | ptr-ops | GAP | `d39cf5f26067` |
+| 6524 | io_buf_release | block | - | INV:INV-SAFECALL-1 | `aa4b9b75cd90` |
+| 6537 | begin_delivery | block | - | INV:INV-SAFECALL-1 | `dd08017f8611` |
+| 6546 | deliver_completion | block | - | INV:INV-SAFECALL-1 | `bad1f04fadf3` |
+| 6628 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `28338b3ddac3` |
+| 6634 | pci_blk_acquire_site | block | asm | INV:INV-SAFECALL-1 | `6542bc03aa6b` |
+| 6650 | wedge_put | block | - | INV:INV-SAFECALL-1 | `5ac796daaa4e` |
+| 6929 | <module> | unsafe-impl | - | GAP | `bfcfbc814067` |
+| 7280 | pci_pending_slot_reservable_len | block | - | INV:F7 | `678cc925a2e3` |
+| 7320 | pci_publish_sync_chain | block | - | INV:F7 | `dbca3bd100f4` |
+| 7367 | pci_flag_sync_tombstone_timed_out | block | - | INV:F7 | `de329f41e7ce` |
+| 7429 | abandon_pending_completion | block | - | INV:F7 | `8c03bc3e26e0` |
+| 7521 | abandon_pending_completion | block | - | INV:F7 | `6f83859efe39` |
+| 7771 | pci_submit_data_async_sg | block | - | GAP | `f190918f6ded` |
+| 8384 | pci_process_async_completions_slot | block | - | GAP | `94b938abb36d` |
+| 8419 | pci_process_async_completions_slot | block | - | GAP | `8510e9c8cfec` |
+| 8993 | get_pci_gen_disk_at | block | - | GAP | `a04b416e7827` |
+| 9370 | <module> | unsafe-impl | - | GAP | `61e0d0f1da1e` |
+| 9371 | <module> | unsafe-impl | - | GAP | `51d2292110dc` |
+| 9389 | used_ring_idx | block | volatile,ptr-ops | INV:INV-DMA-3 | `c80a5894ae57` |
+| 9402 | used_ring_elem_id | block | volatile,ptr-ops | INV:INV-DMA-3 | `d18a88ddce80` |
+| 9424 | resp_status_byte | block | volatile | INV:INV-DMA-3 | `ccf2bad68487` |
+| 9636 | notify | block | asm | INV:INV-DMA-3 | `3b13ceccf713` |
+| 9652 | notify | block | asm | INV:INV-DMA-3 | `21284905d5c3` |
+| 9658 | notify | block | volatile,ptr-ops | INV:INV-DMA-3 | `5c741aaee2cb` |
+| 9682 | notify | block | asm | INV:INV-DMA-3 | `1aa46122d722` |
+| 9689 | notify | block | asm | INV:INV-DMA-3 | `1b914b49d8c2` |
+| 10674 | desc_mut | block | - | INV:INV-DMA-2 | `1fddde9075bc` |
+| 10687 | avail_header_mut | block | - | INV:INV-DMA-2 | `e3b234e3ae86` |
+| 12873 | <module> | unsafe-impl | - | GAP | `cc1bcda7b327` |
+| 12878 | <module> | unsafe-impl | - | GAP | `04f303eeaf7a` |
+| 13036 | <module> | unsafe-impl | - | GAP | `3e9ed68c4d38` |
+| 13528 | poll | block | raw-construct,ptr-ops | INV:INV-KPTR-3 | `79cfd464ed11` |
+| 13596 | dealloc_rx_buffer | block | ptr-ops | INV:INV-KPTR-3 | `51b0049bb920` |
+| 13628 | refill_rx_buffers | block | ptr-ops | INV:INV-KPTR-3 | `bcb4845079c0` |
+| 13640 | refill_rx_buffers | block | - | INV:INV-KPTR-3 | `cbec77b5dfca` |
+| 14131 | flush_framebuffer | block | - | INV:INV-SLOT-1 | `6ae02563cb55` |
+| 14150 | with_gpu_device | block | - | INV:INV-SLOT-1 | `8302007790cc` |
+| 14174 | <module> | unsafe-impl | - | GAP | `d819eac3197e` |
+| 14175 | <module> | unsafe-impl | - | GAP | `eeb772436dda` |
+| 14441 | <module> | unsafe-impl | - | GAP | `c918f731f33f` |
+| 14442 | <module> | unsafe-impl | - | GAP | `e74a05112970` |
+| 14630 | init_framebuffer | block | - | INV:INV-MMIO-1 | `572f2dcf2e70` |
+| 15022 | send_command | block | - | GAP | `ce904819159f` |
+| 15029 | send_command | block | ptr-ops | GAP | `310cfbf9bfea` |
+| 15031 | send_command | block | ptr-ops | GAP | `56449180eb49` |
+| 15084 | send_command | block | asm | GAP | `30c3b14ff307` |
+| 15154 | send_command | block | ptr-ops | GAP | `a39bf7deebf6` |
+| 15175 | send_command | block | - | GAP | `356be0afba49` |
+| 15221 | drop | block | - | INV:INV-DMA-3 | `df04d83306b5` |
+| 15470 | init_virtio_input | block | - | GAP | `c4cee12cf526` |
+| 16069 | <module> | unsafe-impl | - | GAP | `44c1bd6d6f2d` |
+| 16070 | <module> | unsafe-impl | - | GAP | `7dde1d6fc2c0` |
+| 16147 | init_virtio | block | - | GAP | `7a8acc9a59b5` |
+| 16344 | read_event | block | volatile | GAP | `2310b81041e4` |
+| 16497 | drop | block | ptr-ops | GAP | `fec3bb02d6e9` |
+| 17061 | device_of_file | block | ptr-ops | INV:INV-SREF-1 | `caee36ab741d` |
+| 17141 | node_of_file | block | ptr-ops | INV:INV-SREF-1 | `96e7302141fa` |
+| 17315 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `c7f6b83cf6ae` |
+| 17331 | evdev_file_close | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `ce8c3455bcb2` |
+| 17417 | evdev_poll_wait | block | - | INV:INV-KTASK-1 | `5257632ec97b` |
+| 17462 | evdev_poll_unwait | block | - | INV:INV-KTASK-1 | `cf31fc50cd47` |
+| 18821 | loop_devno_of | block | ptr-ops | INV:INV-BLKDEV-2 | `0221856f9d31` |
+| 18855 | loop_file_read | block | ptr-ops | INV:INV-BLKDEV-2 | `f2508dba7c2a` |
+| 18902 | loop_file_write | block | ptr-ops | INV:INV-BLKDEV-2 | `ffb2b025fcbd` |
+| 19024 | loop_file_ioctl | block | ptr-ops | INV:INV-CHARDEV-PRIV-1 | `fc2c304d4039` |
+| 19487 | drop | block | - | GAP | `715923b8566e` |
+| 19659 | ashmem_file_read | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `f352fdfaa2c7` |
+| 20069 | ashmem_mmap | block | - | INV:INV-FS-FILEPRIV-1 | `a226cdd9bf47` |
+| 20662 | <module> | unsafe-impl | - | GAP | `410caff7796d` |
+| 20663 | <module> | unsafe-impl | - | GAP | `3431f9aca1a0` |
+| 20675 | drop | block | - | GAP | `079949e138b0` |
+| 20756 | prime_close | block | ptr-ops | INV:F9 | `8709748e9913` |
+| 20853 | prime_file_gem | block | ptr-ops | INV:F9 | `991829f4fc72` |
+| 20895 | u32_slice_as_bytes | block | raw-construct,ptr-ops | INV:F9 | `5ae9f499f7e4` |
+| 21706 | create_dumb | block | - | INV:F9 | `2600a08b3a1a` |
+| 21897 | prime_fd_to_handle | block | volatile,ptr-ops | INV:F9 | `554b0f02c655` |
+| 22111 | present_fb | block | volatile,ptr-ops | GAP | `26dd132566cd` |
 
 ## debug
 

@@ -145,16 +145,16 @@ fn init_candidates() -> Vec<alloc::string::String> {
 fn load_init_program(path: &str, rootfs_first: bool) -> Option<Vec<u8>> {
     let read_ext4 = |path: &str| -> Option<Vec<u8>> {
         // 1. PCI VirtIO block device's ext4 filesystem
-        if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
+        if let Some(disk) = crate::drivers::hotpath::get_pci_gen_disk() {
             if let Some(data) = crate::api::ext4::boot_read_file(disk, path) {
                 return Some(data);
             }
         }
         // 2. MMIO VirtIO block device's ext4 filesystem
-        if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
+        if let Some(virtio_dev) = crate::drivers::hotpath::virtio_blk_get_device() {
             // get_device() returns &'static VirtIOBlkDevice, so the disk
             // field borrow is machine-long.
-            let disk: &'static crate::drivers::blkdev::GenDisk = &virtio_dev.disk;
+            let disk: &'static crate::drivers::types::GenDisk = &virtio_dev.disk;
             if let Some(data) = crate::api::ext4::boot_read_file(disk, path) {
                 return Some(data);
             }

@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, UnsafeCell};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize};
 
-use crate::drivers::blkdev;
+use crate::drivers::hotpath;
 use crate::errno::Errno;
 use crate::process::types::Task;
 use crate::process::types::WaitQueueHead;
@@ -1283,8 +1283,8 @@ pub struct FileBuffer {
 pub struct BufferState(pub(super) u8);
 
 pub struct BufferHead {
-    /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
-    pub b_device: Option<&'static blkdev::GenDisk>,
+    /// Block device (typed handle; INV-BLKDEV-1 on hotpath::get_disk)
+    pub b_device: Option<&'static crate::drivers::types::GenDisk>,
     /// Block number
     pub b_blocknr: u64,
     /// Block size
@@ -1380,7 +1380,7 @@ pub(super) struct WriteSlot {
     /// fusion key. Only meaningful on the deferred path.
     pub(super) sector: u64,
     /// Target device of this span — groups never fuse across devices.
-    pub(super) dev: Option<&'static blkdev::GenDisk>,
+    pub(super) dev: Option<&'static crate::drivers::types::GenDisk>,
 }
 
 /// A batch of asynchronously-submitted device writes (plugged writes).

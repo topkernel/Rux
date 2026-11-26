@@ -457,8 +457,8 @@ const ROOT_DISK_NAME: &str = "vda";
 
 /// Is a virtio-blk GenDisk present (MMIO or PCI)?
 fn root_disk_present() -> bool {
-    crate::drivers::virtio::get_pci_gen_disk().is_some()
-        || crate::drivers::virtio::get_device().is_some()
+    crate::drivers::hotpath::get_pci_gen_disk().is_some()
+        || crate::drivers::hotpath::virtio_blk_get_device().is_some()
 }
 
 /// Populate the devtmpfs node set that Ubuntu's early boot expects
@@ -506,8 +506,8 @@ fn devtmpfs_populate() {
     // mknod would self-deadlock on it); the nodes join the same
     // char_nodes batch insert below.
     let _ = registry::register_char_device(
-        crate::drivers::ashmem::DEV_ASHMEM,
-        &crate::drivers::ashmem::ASHMEM_OPS,
+        crate::drivers::hotpath::DEV_ASHMEM,
+        &crate::drivers::hotpath::ASHMEM_OPS,
     );
     // The driver-leaf rows (access_tokenid, watchdog) come through the
     // driver service seam (api/api/drivers.rs) — the historical order is
@@ -538,7 +538,7 @@ fn devtmpfs_populate() {
         ("random", rux::fs::hotpath::DEV_RANDOM, 0o666),
         ("urandom", rux::fs::hotpath::DEV_URANDOM, 0o666),
         ("kmsg", rux::fs::hotpath::DEV_KMSG, 0o600),
-        ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
+        ("ashmem", crate::drivers::hotpath::DEV_ASHMEM, 0o666),
         // "watchdog" joins via the driver service seam's node rows below.
         // NOTE: no "access_token_id" here — the node is registered below
         // with the ipc access-token registry (single store). This batch
@@ -591,11 +591,11 @@ fn devtmpfs_populate() {
         String::from("loop-control"),
         Arc::new(DevfsEntry::new_char_device_with_mode(
             "loop-control",
-            rux::fs::types::DevNo::new(rux::fs::hotpath::MISC_MAJOR, crate::drivers::loop_dev::LOOP_CONTROL_MINOR),
+            rux::fs::types::DevNo::new(rux::fs::hotpath::MISC_MAJOR, crate::drivers::hotpath::LOOP_CONTROL_MINOR),
             0o666,
         )),
     );
-    for i in 0..crate::drivers::loop_dev::N_LOOPS {
+    for i in 0..crate::drivers::hotpath::N_LOOPS {
         let name = alloc::format!("loop{}", i);
         children.insert(
             name.clone(),
@@ -606,7 +606,7 @@ fn devtmpfs_populate() {
             )),
         );
     }
-    crate::drivers::loop_dev::init_loops();
+    crate::drivers::hotpath::init_loops();
 
     // binder IPC devices (OpenHarmony port): /dev/binder, /dev/hwbinder
     // and /dev/vndbinder each carry their own context (own context-manager
@@ -679,7 +679,7 @@ fn devtmpfs_populate() {
     // vda, vdb, ... (OH boots six disks; the node is what root= and
     // userspace `mount /dev/vdX` resolve). MMIO boot disk = vda.
     if root_disk_present() {
-        let pci_disks = crate::drivers::virtio::pci_blk_disk_count();
+        let pci_disks = crate::drivers::hotpath::pci_blk_disk_count();
         for slot in 0..pci_disks {
             let letter = b'a' + slot as u8;
             let name = alloc::format!("vd{}", letter as char);
@@ -1412,9 +1412,9 @@ fn devfs_ino_hash(name: &str) -> u64 {
 /// Loop-family file ops: everything routes through the devno stashed on
 /// the open file (open) and the loop ioctl dispatcher (sys_ioctl).
 pub static LOOP_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
-    .read(crate::drivers::loop_dev::loop_file_read)
-    .write(crate::drivers::loop_dev::loop_file_write)
-    .lseek(crate::drivers::loop_dev::loop_file_lseek)
+    .read(crate::drivers::hotpath::loop_file_read)
+    .write(crate::drivers::hotpath::loop_file_write)
+    .lseek(crate::drivers::hotpath::loop_file_lseek)
     .build();
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
@@ -1424,7 +1424,7 @@ fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
             None => return 0,
         };
 
-    if crate::drivers::loop_dev::is_loop_devno(entry.devno) {
+    if crate::drivers::hotpath::is_loop_devno(entry.devno) {
         // Stash the loop devno for the ioctl dispatcher (evdev pattern).
         let b = alloc::boxed::Box::new(entry.devno);
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
@@ -1434,10 +1434,10 @@ fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
         // Allocate the per-open binder process context (device-scoped).
         return crate::ipc::hotpath::binder_open(file, ctx);
     }
-    if entry.devno == crate::drivers::ashmem::DEV_ASHMEM {
+    if entry.devno == crate::drivers::hotpath::DEV_ASHMEM {
         // Fresh anonymous shared-memory area per open file description
         // (Linux struct ashmem_area in file->private_data).
-        return crate::drivers::ashmem::ashmem_open(file);
+        return crate::drivers::hotpath::ashmem_open(file);
     }
     if entry.devno == crate::pty::DEV_PTMX {
         return crate::pty::ptmx_open(file);
@@ -1451,8 +1451,8 @@ fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     // visibility into their startup.
     // 110th: rides the ohhunt gate with the drm census (~13 lines per
     // perf boot).
-    if (entry.devno == crate::drivers::drm::DEV_DRM_CARD0
-        || entry.devno == crate::drivers::drm::DEV_DRM_RENDER)
+    if (entry.devno == crate::drivers::hotpath::DEV_DRM_CARD0
+        || entry.devno == crate::drivers::hotpath::DEV_DRM_RENDER)
         && crate::debug::switches::oh_hunt_prints_on()
     {
         static DRM_OPENS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -1477,9 +1477,9 @@ fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
         // arrivals re-arm its epoll watchers (the evdel devices are read
         // through epoll by OH's input stack). Without it the events sit
         // in the queue: the UI renders but no gesture ever arrives.
-        if let Some(dev) = crate::drivers::input::evdev::device_of_devno(entry.devno) {
+        if let Some(dev) = crate::drivers::hotpath::device_of_devno(entry.devno) {
             dev.register_open_file(file.file_id);
-            crate::drivers::input::evdev::trace_open(dev, file, entry.devno.minor);
+            crate::drivers::hotpath::trace_open(dev, file, entry.devno.minor);
         }
     }
     // VT nodes (4, 0..=NR_VT): stash the DevNo (the ioctl layer reads
@@ -1498,7 +1498,7 @@ fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
 fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_char_device() || inode.mode.is_block_device() {
         let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
-        if crate::drivers::loop_dev::is_loop_devno(entry.devno) {
+        if crate::drivers::hotpath::is_loop_devno(entry.devno) {
             // Loop family (loop-control + /dev/loopN): the loop driver
             // owns them — open stashes the devno on the file, sys_ioctl
             // routes the LOOP_* ioctls.

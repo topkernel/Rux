@@ -8,8 +8,8 @@
 use rux::net::types::SkBuff;
 use crate::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;
-use crate::drivers::timer::get_jiffies;
-use crate::drivers::timer::HZ;
+use crate::drivers::hotpath::timer::get_jiffies;
+use crate::drivers::hotpath::timer::HZ;
 use crate::sync::types::Spinlock;
 
 /// ARP hardware types
@@ -643,7 +643,7 @@ pub fn set_local_ip(ip: u32) {
 
 /// Get local MAC address
 fn get_local_mac() -> [u8; ETH_ALEN] {
-    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+    if let Some(device) = crate::drivers::hotpath::virtio_net_get_device() {
         return device.get_mac();
     }
     [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
@@ -711,7 +711,7 @@ pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
 
 /// Transmit ARP packet
 fn transmit_arp_packet(skb: SkBuff) {
-    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+    if let Some(device) = crate::drivers::hotpath::virtio_net_get_device() {
         device.xmit(skb);
         return;
     }

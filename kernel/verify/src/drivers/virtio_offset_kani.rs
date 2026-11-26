@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for VirtIO register offsets and status bits.
 //!
-//! Types copied from: kernel/core/src/drivers/virtio/offset.rs
+//! Types copied from: kernel/core/src/drivers/hotpath.rs
 
 #![cfg(kani)]
 

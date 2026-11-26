@@ -4318,7 +4318,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 crate::syscall::support::deadline_ns_to_hres_ticks(dl),
                 crate::sched::hotpath::get_current_pid(),
             );
-            crate::drivers::timer::rearm_for_hres();
+            crate::drivers::hotpath::timer::rearm_for_hres();
             id
         });
         // R32 (NEW-3): if a deadline was requested but the timer pool is
@@ -13133,7 +13133,7 @@ pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
 fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
     use crate::process::types::TaskState;
 
-    let hz = crate::drivers::timer::HZ as u64;
+    let hz = crate::drivers::hotpath::timer::HZ as u64;
     let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
 
     loop {
@@ -13451,7 +13451,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
 
-    let hz = crate::drivers::timer::HZ as u64;
+    let hz = crate::drivers::hotpath::timer::HZ as u64;
     let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
 
     loop {

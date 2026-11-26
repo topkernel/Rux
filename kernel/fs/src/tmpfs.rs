@@ -61,7 +61,7 @@ const FS_ID_TMPFS_BASE: u64 = 0x5450_4653_0000_0000;
 /// Wall-clock seconds since epoch (RTC-armed boot offset + monotonic);
 /// tmpfs atime/mtime are Unix epoch time, as on Linux.
 fn wall_secs() -> u64 {
-    crate::drivers::rtc::wall_secs()
+    crate::drivers::hotpath::wall_secs()
 }
 
 /// One 4 KiB data page of a tmpfs file, plus the owning superblock.

@@ -8,7 +8,7 @@
 //! Tests VirtIO-GPU framebuffer drawing functionality directly in kernel
 //! Verifies the path from kernel to display device is working correctly
 
-use crate::drivers::gpu;
+use crate::drivers::hotpath;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 /// Color constants (XRGB format, compatible with VirtIO-GPU B8G8R8A8_UNORM)
@@ -95,7 +95,7 @@ pub fn test_framebuffer() {
     test_group_start("framebuffer");
 
     // Get framebuffer info
-    let fb_info = match gpu::get_framebuffer_info() {
+    let fb_info = match hotpath::get_framebuffer_info() {
         Some(info) => info,
         None => {
             test_skip("framebuffer", "no device");
@@ -110,7 +110,7 @@ pub fn test_framebuffer() {
 
     // Clear screen (black)
     fill_rect(fb_ptr, width, stride, 0, 0, width, height, COLOR_BLACK);
-    gpu::flush_framebuffer();
+    hotpath::flush_framebuffer();
 
     // Wait
     for _ in 0..1000000 {
@@ -127,7 +127,7 @@ pub fn test_framebuffer() {
         fill_rect(fb_ptr, width, stride, 0, y, width, bar_height, color);
     }
 
-    gpu::flush_framebuffer();
+    hotpath::flush_framebuffer();
 
     // Wait
     for _ in 0..2000000 {
@@ -165,7 +165,7 @@ pub fn test_framebuffer() {
     fill_rect(fb_ptr, width, stride, inner_x, inner_y, inner_size, inner_size, COLOR_RED);
 
     // Flush to display device
-    gpu::flush_framebuffer();
+    hotpath::flush_framebuffer();
 
     test_pass("framebuffer drawing");
 }

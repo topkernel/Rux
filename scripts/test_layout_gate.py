@@ -32,10 +32,9 @@ TESTS_DIR = KERNEL_SRC / "tests"
 # Test-support helpers that legitimately live inside their modules (they
 # fake time / expose fixtures the tests drive). Exact (relpath, name) pairs.
 ALLOWLIST = {
-    ("kernel/core/src/drivers/timer/riscv64.rs", "test_advance_jiffies"),
+    # the per-arch fakes live in the timer inline module of hotpath.rs
+    ("kernel/core/src/drivers/hotpath.rs", "test_advance_jiffies"),
     ("kernel/core/src/timer.rs", "test_advance_jiffies"),  # top-level twin of the per-arch fakes
-    ("kernel/core/src/drivers/timer/x86_64.rs", "test_advance_jiffies"),
-    ("kernel/core/src/drivers/timer/aarch64.rs", "test_advance_jiffies"),
     ("kernel/core/src/timer/wheel.rs", "test_shared"),
     ("kernel/core/src/process/hotpath.rs", "test_ti_flag"),
     # page_desc's atomic bit helpers: "test" as in test-and-set, not tests.
@@ -57,7 +56,7 @@ ATTR_TEST_RE = re.compile(r'#\[test\]')
 CFG_ALLOWLIST_FILES = {
     "kernel/core/src/main.rs",                    # mod tests; + run_all_tests wiring
     "kernel/core/src/lib.rs",                     # crate-flip twin of main.rs's wiring
-    "kernel/core/src/drivers/timer/riscv64.rs",   # test_advance_jiffies fake
+    "kernel/core/src/drivers/hotpath.rs",          # timer inline module: test_advance_jiffies fakes
     "kernel/core/src/timer.rs",                    # top-level test_advance_jiffies twin
     # The safety-primitives host battery: kernel/safety-tests includes
     # kernel/core/src/safety/*.rs VERBATIM (#[path]), so the #[test] fns live
@@ -69,8 +68,6 @@ CFG_ALLOWLIST_FILES = {
     "kernel/core/src/safety/ring.rs",
     "kernel/core/src/safety/ptr.rs",
     "kernel/core/src/safety/mmio.rs",
-    "kernel/core/src/drivers/timer/x86_64.rs",
-    "kernel/core/src/drivers/timer/aarch64.rs",
     "kernel/core/src/timer/wheel.rs",             # test_shared fixture
 }
 

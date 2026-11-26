@@ -1156,7 +1156,7 @@ MAPPINGS = [
     {
         "name": "drivers/virtio_offset",
         "verify": "kernel/verify/src/drivers/virtio_offset_test.rs",
-        "kernel": "kernel/core/src/drivers/virtio/offset.rs",
+        "kernel": "kernel/core/src/drivers/hotpath.rs",
         "type": None,  # constants-only, no fn copies
         "compare": [],
         "skip": [],
@@ -1165,7 +1165,7 @@ MAPPINGS = [
     {
         "name": "drivers/virtio_queue",
         "verify": "kernel/verify/src/drivers/virtio_queue_test.rs",
-        "kernel": "kernel/core/src/drivers/virtio/queue.rs",
+        "kernel": "kernel/core/src/drivers/hotpath.rs",
         "type": None,  # struct layout constants, no fn copies
         "compare": [],
         "skip": [],
@@ -1174,7 +1174,7 @@ MAPPINGS = [
     {
         "name": "drivers/pci_offset",
         "verify": "kernel/verify/src/drivers/pci_offset_test.rs",
-        "kernel": "kernel/core/src/drivers/pci/mod.rs",
+        "kernel": "kernel/core/src/drivers/hotpath.rs",
         "type": None,  # constants + free functions
         # is_io_bar / is_memory_bar / is_64bit_memory_bar were removed
         # from the kernel's PCI code; nothing left to compare.
@@ -1314,7 +1314,7 @@ MAPPINGS = [
     {
         "name": "drivers/netdev_flags",
         "verify": "kernel/verify/src/drivers/netdev_test.rs",
-        "kernel": "kernel/core/src/drivers/net/space.rs",
+        "kernel": "kernel/core/src/drivers/hotpath.rs",
         "type": None,  # constants + flag operations
         "compare": [],
         "skip": [],
@@ -1432,7 +1432,7 @@ MAPPINGS = [
     {
         "name": "drivers/input/event",
         "verify": "kernel/verify/src/drivers/input/event_test.rs",
-        "kernel": "kernel/core/src/drivers/input/event.rs",
+        "kernel": "kernel/core/src/drivers/hotpath.rs",
         "type": None,  # constants + InputEvent struct
         "compare": [],
         "skip": [],

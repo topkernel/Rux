@@ -141,9 +141,9 @@ pub fn virtio_probe_devices() -> usize {
 /// # Returns
 /// Ok(()) on success, Err(&str) on failure
 fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
-    crate::net::virtio_net::init(base_addr)?;
+    crate::net::virtio_net_init(base_addr)?;
     // Enable device interrupt
-    crate::net::virtio_net::enable_device_interrupt(base_addr);
+    crate::net::virtio_net_enable_device_interrupt(base_addr);
     // U3: registration-time uevent — notify udev/mdev the netdev exists.
     // virtio_net::init names the device "eth0" (fixed, single-function).
     crate::fs::hotpath::sysfs::netdev_uevent("eth0", "add");
@@ -158,16 +158,16 @@ fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
 /// # Returns
 /// Ok(()) on success, Err(&'static str) on failure
 fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
-    crate::virtio::init(base_addr)?;
+    crate::virtio::virtio_blk_init(base_addr)?;
     // Enable device interrupt
-    crate::virtio::enable_device_interrupt(base_addr);
+    crate::virtio::virtio_blk_enable_device_interrupt(base_addr);
     // U3: registration-time uevent for the (first) virtio-blk disk. The
     // MMIO GenDisk is "virtblk" (minor 0) and surfaces as /dev/vda.
     // Linux device-model shape (OH Phase 1b): virtio-mmio functions are
     // platform devices named "<addr>.virtio_mmio" (DT node form), and the
     // disk lives at /devices/platform/<addr>.virtio_mmio/virtioN/block/vda
     // — ueventd's /dev/block/by-name walk requires the platform ancestor.
-    let capacity = crate::virtio::get_device()
+    let capacity = crate::virtio::virtio_blk_get_device()
         .map(|d| d.disk.get_capacity())
         .unwrap_or(0);
     let mmio_host = alloc::format!("{:x}.virtio_mmio", base_addr);
@@ -241,23 +241,23 @@ pub fn init_network_devices() -> usize {
 /// Number of initialized devices
 pub fn init_pci_net_devices() -> usize {
     // The MMIO probe already published eth0 — leave the singleton alone.
-    if crate::net::virtio_net::get_device().is_some() {
+    if crate::net::virtio_net_get_device().is_some() {
         return 0;
     }
 
-    let ecam_addresses = crate::pci::find_ecam_devices(
-        crate::pci::vendor::RED_HAT,
+    let ecam_addresses = rux::drivers::hotpath::find_ecam_devices(
+        rux::drivers::hotpath::vendor::RED_HAT,
         &[
-            crate::pci::virtio_device::VIRTIO_NET,
-            crate::pci::virtio_device::VIRTIO_NET_MODERN,
+            rux::drivers::hotpath::virtio_device::VIRTIO_NET,
+            rux::drivers::hotpath::virtio_device::VIRTIO_NET_MODERN,
         ],
     );
 
     let mut device_count = 0;
     for ecam_addr in ecam_addresses {
-        match crate::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+        match crate::virtio::VirtIOPCI::new(ecam_addr) {
             Ok(mut virtio_dev) => {
-                match crate::net::virtio_net::init_pci(&mut virtio_dev) {
+                match crate::net::init_pci(&mut virtio_dev) {
                     Ok(()) => {
                         device_count += 1;
                         // U3: registration-time uevent — notify udev/mdev
@@ -296,19 +296,19 @@ pub fn init_pci_net_devices() -> usize {
 /// lib.rs call-graph's replacement. Negative probes (0 devices bound)
 /// are normal outcomes, never boot failures.
 pub fn register_probe_initcalls() {
-    crate::initcalls::register_initcall(crate::initcalls::DeviceInit {
+    rux::drivers::hotpath::register_initcall(rux::drivers::types::DeviceInit {
         name: "virtio-blk MMIO",
-        level: crate::initcalls::InitLevel::Early,
+        level: rux::drivers::types::InitLevel::Early,
         probe: init_block_devices_actual,
     });
-    crate::initcalls::register_initcall(crate::initcalls::DeviceInit {
+    rux::drivers::hotpath::register_initcall(rux::drivers::types::DeviceInit {
         name: "virtio-blk PCI",
-        level: crate::initcalls::InitLevel::Device,
+        level: rux::drivers::types::InitLevel::Device,
         probe: init_pci_block_devices,
     });
-    crate::initcalls::register_initcall(crate::initcalls::DeviceInit {
+    rux::drivers::hotpath::register_initcall(rux::drivers::types::DeviceInit {
         name: "virtio-net",
-        level: crate::initcalls::InitLevel::Late,
+        level: rux::drivers::types::InitLevel::Late,
         probe: init_network_devices,
     });
 }
@@ -353,11 +353,11 @@ pub fn init_pci_block_devices() -> usize {
     // + all 8 functions. The old local scan used a 0x1000 stride, reading
     // the FUNCTION bits as device numbers — every slot >= 4 was invisible
     // (review BUG "PCI 探测步长 0x1000 错，slot≥4 全漏").
-    let ecam_addresses = crate::pci::find_ecam_devices(
-        crate::pci::vendor::RED_HAT,
+    let ecam_addresses = rux::drivers::hotpath::find_ecam_devices(
+        rux::drivers::hotpath::vendor::RED_HAT,
         &[
-            crate::pci::virtio_device::VIRTIO_BLK,
-            crate::pci::virtio_device::VIRTIO_BLK_MODERN,
+            rux::drivers::hotpath::virtio_device::VIRTIO_BLK,
+            rux::drivers::hotpath::virtio_device::VIRTIO_BLK_MODERN,
         ],
     );
 
@@ -376,7 +376,7 @@ pub fn init_pci_block_devices() -> usize {
             break;
         }
         {
-            match crate::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+            match crate::virtio::VirtIOPCI::new(ecam_addr) {
                 Ok(mut virtio_dev) => {
                     // Reset device
                     virtio_dev.reset_device();
@@ -401,7 +401,7 @@ pub fn init_pci_block_devices() -> usize {
                     }
 
                     // Set status to ACKNOWLEDGE | DRIVER
-                    virtio_dev.set_status(crate::virtio::offset::status::ACKNOWLEDGE | crate::virtio::offset::status::DRIVER);
+                    virtio_dev.set_status(crate::virtio::status::ACKNOWLEDGE | crate::virtio::status::DRIVER);
 
                     // Read device features
                     let features = virtio_dev.read_device_features();
@@ -436,14 +436,14 @@ pub fn init_pci_block_devices() -> usize {
 
                     // Set FEATURES_OK
                     virtio_dev.set_status(
-                        crate::virtio::offset::status::ACKNOWLEDGE |
-                        crate::virtio::offset::status::DRIVER |
-                        crate::virtio::offset::status::FEATURES_OK
+                        crate::virtio::status::ACKNOWLEDGE |
+                        crate::virtio::status::DRIVER |
+                        crate::virtio::status::FEATURES_OK
                     );
 
                     // Verify FEATURES_OK was accepted by device
                     let status_after_features = virtio_dev.get_status();
-                    if status_after_features & crate::virtio::offset::status::FEATURES_OK == 0 {
+                    if status_after_features & crate::virtio::status::FEATURES_OK == 0 {
                         crate::pr_warn!(
                             "virtio-blk: device at {:#x} rejected feature set (status {:#x}, features {:#x})",
                             ecam_addr, status_after_features, features
@@ -456,14 +456,14 @@ pub fn init_pci_block_devices() -> usize {
                         virtio_dev.common_cfg_bar as usize,
                         0x1000,
                     )
-                    .write_u16(crate::virtio::offset::COMMON_CFG_QUEUE_SELECT as usize, 0);
+                    .write_u16(crate::virtio::COMMON_CFG_QUEUE_SELECT as usize, 0);
 
                     // INV-MMIO-1: the common-config window the PCI probe mapped.
                     let queue_max = crate::safety::mmio::MmioRegion::new(
                         virtio_dev.common_cfg_bar as usize,
                         0x1000,
                     )
-                    .read_u16(crate::virtio::offset::COMMON_CFG_QUEUE_SIZE as usize);
+                    .read_u16(crate::virtio::COMMON_CFG_QUEUE_SIZE as usize);
 
                     // Create VirtQueue
                     // (serial-clean: the raw "slot N queue0 notify/isr/
@@ -472,7 +472,7 @@ pub fn init_pci_block_devices() -> usize {
                     // PCI capability layout — and it polluted the
                     // structured boot table on every boot.)
                     let dummy_isr_addr = virtio_dev.common_cfg_bar;
-                    match crate::virtio::queue::VirtQueue::new(queue_max,
+                    match crate::virtio::VirtQueue::new(queue_max,
                         0,  // queue_index
                         virtio_dev.get_notify_addr(0),
                         dummy_isr_addr,
@@ -539,10 +539,10 @@ pub fn init_pci_block_devices() -> usize {
 
                                     // Set DRIVER_OK
                                     virtio_dev.set_status(
-                                        crate::virtio::offset::status::ACKNOWLEDGE |
-                                        crate::virtio::offset::status::DRIVER |
-                                        crate::virtio::offset::status::FEATURES_OK |
-                                        crate::virtio::offset::status::DRIVER_OK
+                                        crate::virtio::status::ACKNOWLEDGE |
+                                        crate::virtio::status::DRIVER |
+                                        crate::virtio::status::FEATURES_OK |
+                                        crate::virtio::status::DRIVER_OK
                                     );
 
                                     // Register PCI VirtIO device to the slot
@@ -675,13 +675,13 @@ fn pci_dev_hierarchy(ecam_addr: u64) -> alloc::vec::Vec<(alloc::string::String, 
 /// node), not I/O-wired — the virtio-blk layer has a single global
 /// vring/GenDisk pair owned by the boot disk; hot disks do not steal it.
 pub fn pci_rescan_block_hotplug() -> usize {
-    use crate::virtio::offset::status;
+    use crate::virtio::status;
 
-    let ecam_addresses = crate::pci::find_ecam_devices(
-        crate::pci::vendor::RED_HAT,
+    let ecam_addresses = rux::drivers::hotpath::find_ecam_devices(
+        rux::drivers::hotpath::vendor::RED_HAT,
         &[
-            crate::pci::virtio_device::VIRTIO_BLK,
-            crate::pci::virtio_device::VIRTIO_BLK_MODERN,
+            rux::drivers::hotpath::virtio_device::VIRTIO_BLK,
+            rux::drivers::hotpath::virtio_device::VIRTIO_BLK_MODERN,
         ],
     );
 
@@ -692,7 +692,7 @@ pub fn pci_rescan_block_hotplug() -> usize {
             continue;
         }
 
-        let dev = match crate::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+        let dev = match crate::virtio::VirtIOPCI::new(ecam_addr) {
             Ok(d) => d,
             Err(_) => continue,
         };

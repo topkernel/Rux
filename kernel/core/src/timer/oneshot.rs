@@ -88,7 +88,7 @@ impl WakeArmed {
     pub fn arm_hres(expires_time: u64, pid: u32) -> Option<WakeArmed> {
         let id = super::add_timer_wakeup_hres(0, expires_time, pid);
         if id != 0 {
-            crate::drivers::timer::rearm_for_hres();
+            crate::drivers::hotpath::timer::rearm_for_hres();
         }
         Self::wrap(WakeKind::Hres, expires_time, pid, id)
     }

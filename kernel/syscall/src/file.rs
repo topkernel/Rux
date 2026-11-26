@@ -3353,7 +3353,7 @@ pub fn sys_utime(args: SyscallArgs) -> i64 {
 
 /// Current wall-clock time in whole seconds (for UTIME_NOW).
 fn current_time_secs() -> u64 {
-    crate::drivers::rtc::wall_secs()
+    crate::drivers::hotpath::wall_secs()
 }
 
 /// Parse a user timeval[2] — the utimes(2)/futimesat(2) ABI — into the
@@ -5152,7 +5152,7 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                         // Persist the DISK's volatile cache too — draining
                         // only the kernel buffer cache was a no-op flush
                         // (review BUG: "Flush 假成功，fsync 无持久化").
-                        if crate::drivers::virtio::flush_pci_blk().is_err() {
+                        if crate::drivers::hotpath::flush_pci_blk().is_err() {
                             return -(errno::EIO as i64);
                         }
                         0

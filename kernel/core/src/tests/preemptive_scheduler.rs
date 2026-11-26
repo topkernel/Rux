@@ -5,7 +5,7 @@
 
 //! Preemptive scheduler test
 use crate::println;
-use crate::drivers::timer;
+use crate::drivers::hotpath::timer;
 use alloc::format;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 

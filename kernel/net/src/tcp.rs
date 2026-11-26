@@ -19,7 +19,7 @@ fn generate_isn(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16) -> TcpSe
         ^ dst_ip.wrapping_mul(37)
         ^ (src_port as u32).wrapping_mul(41)
         ^ (dst_port as u32).wrapping_mul(43))
-        .wrapping_add(crate::drivers::timer::get_jiffies() as u32);
+        .wrapping_add(crate::drivers::hotpath::timer::get_jiffies() as u32);
     TcpSeq::from_be(hash.wrapping_add(base))
 }
 
@@ -38,7 +38,7 @@ fn generate_isn6(
     }
     hash ^= (src_port as u32).wrapping_mul(41);
     hash ^= (dst_port as u32).wrapping_mul(43);
-    hash = hash.wrapping_add(crate::drivers::timer::get_jiffies() as u32);
+    hash = hash.wrapping_add(crate::drivers::hotpath::timer::get_jiffies() as u32);
     TcpSeq::from_be(hash.wrapping_add(base))
 }
 
@@ -1038,7 +1038,7 @@ impl TcpTimers {
 
     /// Start retransmit timer
     pub fn start_retransmit(&mut self, rto_us: u64) {
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::drivers::hotpath::timer::get_jiffies();
         // Microseconds to jiffies (1 jiffy = 10ms = 10_000us)
         let rto_jiffies = (rto_us / 10_000).max(1);
         self.retransmit_deadline = now + rto_jiffies;
@@ -1054,7 +1054,7 @@ impl TcpTimers {
         if self.retransmit_deadline == 0 {
             return false;
         }
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::drivers::hotpath::timer::get_jiffies();
         now >= self.retransmit_deadline
     }
 }
@@ -1512,7 +1512,7 @@ impl TcpSocket {
                     // remove_acked_segments' (seg_end - ack <= 0) from
                     // retiring it on the data-ACK that precedes the FIN-ACK.
             data: alloc::vec::Vec::new(),
-            tx_time: crate::drivers::timer::get_jiffies(),
+            tx_time: crate::drivers::hotpath::timer::get_jiffies(),
             retries: 0,
         });
         if self.timers.retransmit_deadline == 0 {
@@ -1524,7 +1524,7 @@ impl TcpSocket {
 
     /// Start TIME_WAIT timer (reuses retransmit_deadline field)
     fn start_timewait_timer(&mut self) {
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::drivers::hotpath::timer::get_jiffies();
         let tw_jiffies = crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000;
         self.timers.retransmit_deadline = now + tw_jiffies;
     }
@@ -1954,7 +1954,7 @@ impl TcpSocket {
             if tcp_hdr.psh() {
                 self.send_ack(tx)?;
             } else if self.timers.delack_deadline == 0 {
-                self.timers.delack_deadline = crate::drivers::timer::get_jiffies()
+                self.timers.delack_deadline = crate::drivers::hotpath::timer::get_jiffies()
                     + TCP_DELACK_TIMEOUT_US / 10_000;
             }
         } else {
@@ -2083,7 +2083,7 @@ impl TcpSocket {
                 self.state = TcpState::TCP_CLOSE_WAIT;
                 // R32-B8: timestamp the CLOSE_WAIT entry so the timer tick
                 // can bound orphaned half-closed connections.
-                self.timers.close_wait_since = crate::drivers::timer::get_jiffies();
+                self.timers.close_wait_since = crate::drivers::hotpath::timer::get_jiffies();
             }
             TcpState::TCP_FIN_WAIT2 => {
                 self.state = TcpState::TCP_TIME_WAIT;
@@ -2342,7 +2342,7 @@ impl TcpSocket {
     /// an OOM stops the loop cleanly with the send buffer intact instead
     /// of panicking under the lock.
     pub fn tx_packets(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::drivers::hotpath::timer::get_jiffies();
 
         // Calculate in-flight data
         let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
@@ -2659,7 +2659,7 @@ impl TcpSocket {
 
     /// Update RTT estimate from the transmission time of the acknowledged segment.
     fn update_rtt(&mut self, tx_time: u64) {
-        let now = crate::drivers::timer::get_jiffies();
+        let now = crate::drivers::hotpath::timer::get_jiffies();
         // Jiffies to microseconds (1 jiffy = 10ms = 10_000us)
         let rtt_us = now.saturating_sub(tx_time) * 10_000;
         if rtt_us > 0 {
@@ -2735,7 +2735,7 @@ impl TcpSocket {
                 seq: self.snd_nxt,
                 len: 1,
                 data,
-                tx_time: crate::drivers::timer::get_jiffies(),
+                tx_time: crate::drivers::hotpath::timer::get_jiffies(),
                 retries: 0,
             });
             self.snd_nxt = self.snd_nxt.wrapping_add(1);
@@ -4467,7 +4467,7 @@ pub fn tcp_parse_tsval(opts: &[u8]) -> Option<u32> {
 /// P2 TCP timestamps: the TSval clock — milliseconds since boot (jiffies
 /// × 10 ms), truncated to 32 bits like Linux's jiffies-based TS clock.
 fn tcp_ts_now() -> u32 {
-    (crate::drivers::timer::get_jiffies().wrapping_mul(10)) as u32
+    (crate::drivers::hotpath::timer::get_jiffies().wrapping_mul(10)) as u32
 }
 
 /// W3: RX segments dropped for TCP checksum mismatch (observability).

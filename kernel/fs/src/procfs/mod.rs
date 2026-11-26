@@ -2921,7 +2921,7 @@ fn generate_vmallocinfo() -> alloc::vec::Vec<u8> {
 
 fn partitions_generate() -> alloc::vec::Vec<u8> {
     let mut out = alloc::string::String::from("major minor  #blocks  name\n\n");
-    if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
+    if let Some(disk) = crate::drivers::hotpath::get_pci_gen_disk() {
         // get_pci_gen_disk returns the registration-published GenDisk
         // reference (its own safe accessor shape).
         let cap = disk.capacity.load(core::sync::atomic::Ordering::Acquire);
@@ -2931,7 +2931,7 @@ fn partitions_generate() -> alloc::vec::Vec<u8> {
         ));
     }
     out.push_str(&alloc::string::String::from_utf8_lossy(
-        &crate::drivers::loop_dev::partitions_lines(),
+        &crate::drivers::hotpath::partitions_lines(),
     ));
     out.into_bytes()
 }

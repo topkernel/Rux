@@ -102,9 +102,9 @@ pub fn send_ipi_type(target: usize, ipi_type: IpiType) {
 
     // QEMU virt: cpu N sits at MPIDR Aff0=N for N < 4 (see
     // smp::index_to_mpidr), so the SGI target list is bit N of Aff0.
-    crate::drivers::intc::gicv3::send_sgi(
+    crate::drivers::hotpath::intc::gicv3::send_sgi(
         target as u8,
-        crate::drivers::intc::gicv3::IPI_SGI_INTID,
+        crate::drivers::hotpath::intc::gicv3::IPI_SGI_INTID,
     );
 }
 

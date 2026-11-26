@@ -36,7 +36,7 @@ pub fn test_loop_flags() {
     // ---- Unbound-loop errno semantics (want ENXIO = -6) ----
     // Loop 7 is never bound by other tests; if it ever is, skip rather
     // than misreport (first probe re-checks).
-    if crate::drivers::loop_dev::loop_is_bound(7) {
+    if crate::drivers::hotpath::loop_is_bound(7) {
         super::test_skip("loop7 unbound probes", "loop7 unexpectedly bound");
         return;
     }
@@ -51,7 +51,7 @@ pub fn test_loop_flags() {
         ("LOOP_SET_CAPACITY unbound -> ENXIO", 0x4C07),
     ];
     for (name, req) in cases {
-        let ret = crate::drivers::loop_dev::loop_file_ioctl(&file, req, arg);
+        let ret = crate::drivers::hotpath::loop_file_ioctl(&file, req, arg);
         match ret {
             Some(-6) => test_pass(name),
             Some(other) => test_fail(
@@ -64,8 +64,8 @@ pub fn test_loop_flags() {
     // LOOP_CLR_FD twice: the second must still be ENXIO — EINVAL here was
     // the r10 "unexpectedly failed with: EINVAL" TWARN after every
     // device-using LTP test.
-    let _ = crate::drivers::loop_dev::loop_clr_fd(7);
-    match crate::drivers::loop_dev::loop_file_ioctl(&file, 0x4C01, 0) {
+    let _ = crate::drivers::hotpath::loop_clr_fd(7);
+    match crate::drivers::hotpath::loop_file_ioctl(&file, 0x4C01, 0) {
         Some(-6) => test_pass("LOOP_CLR_FD repeat -> ENXIO"),
         Some(other) => test_fail(
             "LOOP_CLR_FD repeat",

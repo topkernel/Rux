@@ -176,7 +176,7 @@ fn rootfs_path_hash(path: &str) -> u64 {
 /// Wall-clock seconds since epoch (RTC-armed boot offset + monotonic);
 /// rootfs timestamps are Unix epoch time, as on Linux.
 fn wall_secs() -> u64 {
-    crate::drivers::rtc::wall_secs()
+    crate::drivers::hotpath::wall_secs()
 }
 
 /// Count directory entries referencing `ino` (st_nlink for hard links).

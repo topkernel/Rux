@@ -557,8 +557,8 @@ pub fn init_irq() {
 
     // Complete any stale PLIC claims for UART IRQ on all harts.
     for hart in 0..crate::config::MAX_CPUS {
-        if let Some(claimed) = crate::drivers::intc::plic::claim(hart) {
-            crate::drivers::intc::plic::complete(hart, claimed);
+        if let Some(claimed) = crate::drivers::hotpath::intc::plic::claim(hart) {
+            crate::drivers::hotpath::intc::plic::complete(hart, claimed);
         }
     }
 
@@ -672,7 +672,7 @@ fn uart_rx_debug_magic(c: u8) {
         DUMP_MAGIC_POS.store(next, Ordering::Relaxed);
         if next == MAGIC.len() {
             DUMP_MAGIC_POS.store(0, Ordering::Relaxed);
-            crate::drivers::virtio::vw_report("dump");
+            crate::drivers::hotpath::vw_report("dump");
             crate::debug::taskdump::dump_all_tasks("uart-magic");
             crate::ipc::hotpath::binder_dfx_dump();
         }

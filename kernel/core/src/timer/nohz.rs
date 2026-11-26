@@ -315,10 +315,10 @@ fn tick_nohz_stop_tick(cpu: usize, expires: u64) {
     if tick == KTIME_MAX {
         // "If the expiration time == KTIME_MAX, then we simply stop the
         // tick timer." The one-shot arm clamps to the device maximum.
-        crate::drivers::timer::set_timer(KTIME_MAX);
+        crate::drivers::hotpath::timer::set_timer(KTIME_MAX);
         return;
     }
-    crate::drivers::timer::set_timer(tick);
+    crate::drivers::hotpath::timer::set_timer(tick);
 }
 
 /// static void tick_nohz_stop_sched_tick(ts, cpu)
@@ -330,7 +330,7 @@ fn tick_nohz_stop_sched_tick(cpu: usize, now: u64, grid: u64) {
         // tick_nohz_retain_tick(): the reference's periodic tick is a
         // forwarded hrtimer that re-arms itself; this tree's LAPIC is
         // one-shot, so the retain case re-arms the grid glue here.
-        crate::drivers::timer::set_next_trigger();
+        crate::drivers::hotpath::timer::set_next_trigger();
     }
 }
 
@@ -344,7 +344,7 @@ fn tick_nohz_restart_sched_tick(cpu: usize, now: u64, grid: u64) {
     // tick_nohz_restart(): tick_do_update_jiffies64(now) — Rux's jiffies
     // advance from the timebase in the handler; arm the next grid tick.
     let deadline = (now / grid + 1) * grid;
-    crate::drivers::timer::set_timer(deadline);
+    crate::drivers::hotpath::timer::set_timer(deadline);
 }
 
 /// static void __tick_nohz_full_update_tick(ts, now)
@@ -413,7 +413,7 @@ pub fn tick_nohz_full_update_tick(cpu: usize) {
         // the pre-nohz behavior, unchanged for CPUs outside the
         // nohz_full mask (the reference's non-nohz_full CPUs likewise
         // keep their periodic tick).
-        crate::drivers::timer::set_next_trigger();
+        crate::drivers::hotpath::timer::set_next_trigger();
         return;
     }
     let now = crate::timer::read_time();
@@ -478,6 +478,6 @@ pub fn tick_nohz_rearm_local() {
         let deadline = (now / grid + 1) * grid;
         let hres = crate::timer::hres_next_deadline();
         let deadline = if hres < deadline { hres.max(now + 1) } else { deadline };
-        crate::drivers::timer::set_timer(deadline);
+        crate::drivers::hotpath::timer::set_timer(deadline);
     }
 }

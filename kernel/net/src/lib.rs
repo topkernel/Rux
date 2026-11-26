@@ -135,7 +135,7 @@ mod hooks_impl {
             tx_bytes: lo.tx_bytes,
             tx_packets: lo.tx_packets,
         });
-        if let Some(dev) = rux::drivers::net::virtio_net::get_device() {
+        if let Some(dev) = rux::drivers::hotpath::virtio_net_get_device() {
             let s = dev.get_stats();
             rows.push(DevRow {
                 name: alloc::string::String::from("eth0"),

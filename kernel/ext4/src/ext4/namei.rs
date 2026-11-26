@@ -83,7 +83,7 @@ pub const S_IRWXO: u16 = 0o0007;
 // ============================================================================
 
 /// Read a block into a Vec<u8>
-fn read_block_to_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
+fn read_block_to_vec(device: &'static crate::drivers::types::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
     let bh = hotpath::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: bh is pinned by bread; the clone reads block_size bytes.
     let data = hotpath::bh_data(&bh).to_vec();
@@ -92,7 +92,7 @@ fn read_block_to_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: 
 }
 
 /// Write a Vec<u8> to a block
-fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
+fn write_block_from_vec(device: &'static crate::drivers::types::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
     // Full-block overwrite: fetch the buffer WITHOUT reading it from disk
     // (perf: the plain bread here read EVERY block it was about to
     // completely overwrite — a fresh dir block allocated by mkdir was
@@ -289,8 +289,8 @@ pub fn ext4_new_inode(
         *crate::ext4::extent::iblock_header_mut(&mut inode.i_block) = hdr;
     }
     // Fresh inodes are born "now" (wall-clock epoch seconds —
-    // drivers::rtc::wall_secs), as in Linux's ext4_new_inode.
-    let now = crate::drivers::rtc::wall_secs() as u32;
+    // rux::drivers::hotpath::wall_secs), as in Linux's ext4_new_inode.
+    let now = crate::drivers::hotpath::wall_secs() as u32;
     inode.i_atime = now;
     inode.i_mtime = now;
     inode.i_ctime = now;
@@ -1394,7 +1394,7 @@ fn ext4_mkdir_no_journal(
     // fix, mkdir had not).
     let mut parent = super::inode::read_inode(fs, dir_ino)?;
     parent.i_links_count += 1;
-    let sec = crate::drivers::rtc::wall_secs() as u32;
+    let sec = crate::drivers::hotpath::wall_secs() as u32;
     parent.i_mtime = sec;
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
@@ -1786,7 +1786,7 @@ fn ext4_link_inner(
     target_inode.i_links_count += 1;
 
     // Update timestamp
-    let sec = crate::drivers::rtc::wall_secs() as u32;
+    let sec = crate::drivers::hotpath::wall_secs() as u32;
     target_inode.i_ctime = sec;
 
     // Write updated inode back
@@ -2023,7 +2023,7 @@ fn find_dir_entry(
 /// ext4_setattr timestamp note).
 fn touch_parent_dir(fs: &Ext4FileSystem, dir_ino: u32) {
     if let Ok(mut dir) = super::inode::read_inode(fs, dir_ino) {
-        let sec = crate::drivers::rtc::wall_secs() as u32;
+        let sec = crate::drivers::hotpath::wall_secs() as u32;
         dir.i_mtime = sec;
         dir.i_ctime = sec;
         let _ = super::inode::write_inode_disk(fs, dir_ino, &dir);
@@ -2921,7 +2921,7 @@ fn ext4_rename_inner(
     ext4_delete_entry_locked(fs, old_dir_ino, old_name)?;
 
     // Update timestamp on renamed inode
-    let sec = crate::drivers::rtc::wall_secs() as u32;
+    let sec = crate::drivers::hotpath::wall_secs() as u32;
     let mut renamed_inode = old_inode;
     renamed_inode.i_ctime = sec;
     renamed_inode.i_mtime = sec;

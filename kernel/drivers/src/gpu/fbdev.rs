@@ -48,12 +48,12 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
         };
         // current() is this kthread's own safe handle.
         let my_pid = current.pid();
-        let target = rux::drivers::timer::get_jiffies() + interval_jiffies;
+        let target = rux::drivers::hotpath::timer::get_jiffies() + interval_jiffies;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
 
         if timer_id != 0 {
             current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            if rux::drivers::timer::get_jiffies() >= target {
+            if rux::drivers::hotpath::timer::get_jiffies() >= target {
                 current.set_state(TaskState::new(TaskState::RUNNING));
                 crate::sched::hotpath::dequeue_task(current);
                 crate::timer::del_timer(timer_id);

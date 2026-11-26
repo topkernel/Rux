@@ -639,7 +639,7 @@ pub struct Journal {
     /// Filesystem block device handle (for bio I/O during commit).
     /// None until ext4 installs it at journal load (mount order: load
     /// precedes any commit/recovery I/O).
-    pub j_bio_device: Option<&'static crate::drivers::blkdev::GenDisk>,
+    pub j_bio_device: Option<&'static crate::drivers::types::GenDisk>,
     /// Journal device name
     pub j_devname: [u8; 64],
     /// Device which holds the client fs

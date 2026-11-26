@@ -55,7 +55,7 @@ pub struct Icmpv6Hdr {
 
 /// Our device MAC (fallback default matches ethernet.rs convention)
 fn our_mac() -> [u8; 6] {
-    crate::drivers::net::virtio_net::get_device()
+    crate::drivers::hotpath::virtio_net_get_device()
         .map(|d| d.get_mac())
         .unwrap_or([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])
 }

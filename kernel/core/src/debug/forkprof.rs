@@ -204,7 +204,7 @@ pub fn report_trace() {
         return;
     }
     #[cfg(feature = "x86_64")]
-    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+    let hz = crate::drivers::hotpath::intc::apic::TSC_FREQ.load(Ordering::Acquire);
     #[cfg(not(feature = "x86_64"))]
     let hz = 0;
     let per_us = if hz > 1_000_000 { hz / 1_000_000 } else { 1 };
@@ -322,7 +322,7 @@ pub fn report() {
         return;
     }
     #[cfg(feature = "x86_64")]
-    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+    let hz = crate::drivers::hotpath::intc::apic::TSC_FREQ.load(Ordering::Acquire);
     #[cfg(not(feature = "x86_64"))]
     let hz = 0; // cycle-domain report only on the other ports
     let per_us = if hz > 1_000_000 { hz / 1_000_000 } else { 1 };
