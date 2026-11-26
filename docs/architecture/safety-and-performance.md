@@ -1471,9 +1471,15 @@ Mechanics and evidence, all in the lane worktree `run/`:
   ledger; unsafe-verification-exemptions.tsv row drivers/hotpath.rs
   24->0);
 - suites on the final tree: riscv64 912/912 (verdict green, rc=0),
-  x86_64 914/914 (verdict green, rc=0); x86 pbench
-  `PBENCH DONE rc=0`, medians within band of the gate-p3sched baseline
-  (worst delta reported to the coordinator).
+  x86_64 914/914 (verdict green, rc=0); x86 pbench release build
+  `PBENCH DONE rc=0` — every probe median shared with the
+  gate-p3sched baseline is inside the ±20% Tier-2 band, worst delta
+  p5e_child_spin +11.4% (all other common rows +0.0%..+8.8%;
+  p3b_fault_anon/p3c_fault_file exactly flat). The probe set itself
+  moved between the two runs (the pbench tool gained p4_fork_exit,
+  p5c_stream_write, p6_getdents, p7_sleep1ms and dropped p3b_fault_cow,
+  p5a_pipe, p5f_stream_dwait) — those rows have no same-rig baseline
+  pair; the numbers accrue for the next gate.
 
 
 - Every merged round that lands a safety property, a perf number, or a
