@@ -8,6 +8,7 @@
 pub mod file_arc;
 pub mod r#unsafe;
 pub mod buffer;
+pub mod types;
 // pub mod ethernet; — MOVED to the net service crate (rung 2)
 // pub mod arp; — MOVED to the net service crate (rung 2)
 // pub mod icmp; — MOVED to the net service crate (rung 2)
