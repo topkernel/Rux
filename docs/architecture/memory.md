@@ -37,10 +37,10 @@ The narrative below dates from 2026-10-12; these mechanisms landed
 after and are the current shape (all mirrored in the code with
 R-numbered comments):
 
-- **Per-CPU pagesets** (`mm/pcp.rs`, INV-PCP-1..3): order-0
+- **Per-CPU pagesets** (`mm/hotpath.rs` pcp section, INV-PCP-1..3): order-0
   alloc/free served from per-CPU caches — zero zone-lock acquisitions
   on the fast path; zone free-page counters include cached frames.
-- **Per-mm PTE locks on all architectures** (`mm_struct.rs`): the
+- **Per-mm PTE locks on all architectures** (`mm/types.rs`, methods in the hotpath.rs mm_struct section): the
   global-epoch-shared + per-mm-spin split mode, previously x86_64-only,
   is now uniform; riscv64/aarch64 leaf-PTE writers no longer serialize
   system-wide.
@@ -99,23 +99,23 @@ R-numbered comments):
 
 | Module | File | Function |
 |--------|------|----------|
-| **Top-level** | mm/mod.rs | Re-exports, constants |
-| **Address Types** | mm/page.rs | VirtAddr, PhysAddr (independent) |
-| **Page Descriptors** | mm/page_desc.rs | Per-page metadata (struct Page) |
-| **Page Allocation** | mm/page_alloc.rs | Buddy allocator, alloc_pages/free_pages |
-| **Zone Allocator** | mm/zone.rs | Zone management, embedded buddy |
-| **NUMA pglist** | mm/pglist.rs | NUMA node management |
-| **Memblock** | mm/memblock.rs | Early boot memory allocator |
-| **Memory Layout** | mm/layout.rs | Physical memory region layout |
-| **vmemmap** | mm/vmemmap.rs | Virtual page descriptor mapping |
-| **VMA** | mm/vma.rs | Virtual Memory Area management |
-| **MmStruct** | mm/mm_struct.rs | Process address space descriptor |
-| **PageMap** | mm/pagemap.rs | Perm, MapError, PageTableType |
-| **Slab** | mm/slab.rs | Small object allocator |
-| **Buddy (standalone)** | mm/buddy_allocator.rs | Standalone buddy for kernel heap |
-| **PCP** | mm/pcp.rs | Per-CPU page cache |
-| **MemInfo** | mm/meminfo.rs | /proc/meminfo |
-| **RMAP** | mm/rmap.rs | Reverse mapping |
+| **Top-level** | mm/mod.rs | Module root; types.rs / hotpath.rs / unsafe.rs hold the content |
+| **Address Types** | mm/hotpath.rs (page section) | VirtAddr, PhysAddr (independent) |
+| **Page Descriptors** | mm/hotpath.rs (page_desc section) | Per-page metadata (struct Page) |
+| **Page Allocation** | mm/hotpath.rs (page_alloc section) | Buddy allocator, alloc_pages/free_pages |
+| **Zone Allocator** | mm/hotpath.rs (zone section) | Zone management, embedded buddy |
+| **NUMA pglist** | mm/hotpath.rs (pglist section) | NUMA node management |
+| **Memblock** | mm/hotpath.rs (memblock section) | Early boot memory allocator |
+| **Memory Layout** | mm/hotpath.rs (layout section) | Physical memory region layout |
+| **vmemmap** | mm/hotpath.rs (vmemmap section) | Virtual page descriptor mapping |
+| **VMA** | mm/hotpath.rs (vma section) | Virtual Memory Area management |
+| **MmStruct** | mm/types.rs (mm_struct section of hotpath.rs) | Process address space descriptor |
+| **PageMap** | mm/hotpath.rs (pagemap section) | Perm, MapError, PageTableType |
+| **Slab** | mm/hotpath.rs (slab section) | Small object allocator |
+| **Buddy (standalone)** | mm/hotpath.rs (buddy_allocator section) | Standalone buddy for kernel heap |
+| **PCP** | mm/hotpath.rs (pcp section) | Per-CPU page cache |
+| **MemInfo** | mm/hotpath.rs (meminfo section) | /proc/meminfo |
+| **RMAP** | mm/hotpath.rs (rmap section) | Reverse mapping |
 | **HugePage** | mm/hugepage.rs | Huge page support |
 | **Arch MMU** | arch/riscv64/mm/mod.rs | Arch-specific module hub |
 | **Memory Layout** | arch/riscv64/mm/memory_layout.rs | Sv39 constants, address types |
@@ -369,7 +369,7 @@ arch::riscv64::mm::pt_ops_set_late();     // Fixmap -> Late
 
 ## Page Descriptors (vmemmap)
 
-**File**: `kernel/src/mm/page_desc.rs`, `kernel/src/mm/vmemmap.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (page_desc and vmemmap sections)
 
 ### Design
 
@@ -459,7 +459,7 @@ pub fn phys_valid(phys: usize) -> bool;
 
 ## Physical Page Allocation
 
-**File**: `kernel/src/mm/page_alloc.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (page_alloc section)
 
 ### Allocation Hierarchy
 
@@ -508,7 +508,7 @@ pub fn __get_free_page(gfp_flags: u32) -> usize;
 
 ## Zone Allocator
 
-**File**: `kernel/src/mm/zone.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (zone section)
 
 ### Linux Zone Model
 
@@ -578,7 +578,7 @@ Creates ZoneNormal from memblock free ranges, adds all free pages to buddy alloc
 
 ## Per-CPU Pages (PCP)
 
-**File**: `kernel/src/mm/pcp.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (pcp section)
 
 Per-CPU page cache to reduce global allocator lock contention.
 
@@ -638,7 +638,7 @@ pub struct PerCpuPages {
 
 ### Slab Allocator
 
-**File**: `kernel/src/mm/slab.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (slab section)
 
 Small object allocator for kernel data structures.
 
@@ -664,7 +664,7 @@ pub fn kzalloc(size: usize) -> *mut u8;
 
 ### Buddy Allocator (Standalone)
 
-**File**: `kernel/src/mm/buddy_allocator.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (buddy_allocator section)
 
 Used for kernel heap before zone allocator is available. Manages a contiguous region starting at `HEAP_START`.
 
@@ -758,7 +758,7 @@ impl PageTableEntry {
 
 ### MmStruct
 
-**File**: `kernel/src/mm/mm_struct.rs`
+**File**: `kernel/core/src/mm/types.rs` (methods in the hotpath.rs mm_struct section)
 
 Process address space descriptor, corresponding to Linux `mm_struct`.
 
@@ -821,7 +821,7 @@ impl MmStruct {
 
 ### VMA (Virtual Memory Area)
 
-**File**: `kernel/src/mm/vma.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (vma section)
 
 ```rust
 pub struct Vma {
@@ -1085,7 +1085,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
 ## Memory Statistics
 
-**File**: `kernel/src/mm/meminfo.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (meminfo section)
 
 Provides `/proc/meminfo`-compatible memory information.
 
@@ -1112,7 +1112,7 @@ pub struct MemoryInfo {
 
 ## Memblock Allocator
 
-**File**: `kernel/src/mm/memblock.rs`
+**File**: `kernel/core/src/mm/hotpath.rs` (memblock section)
 
 Early boot memory allocator used before the zone/buddy system is ready.
 

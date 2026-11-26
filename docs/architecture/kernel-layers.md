@@ -72,7 +72,7 @@ life in the safest bucket and must be explicitly promoted).
 | `process/**` | task lifecycle, exec, ptrace, coredump, namespaces |
 | `security/**` | capability/LSM logic |
 | `signal.rs`, `errno.rs`, `panic_policy.rs`, `print.rs` | logic files |
-| `sync/{futex,condvar,semaphore}.rs`, `sync/mod.rs` | futex's uaccess + raw futex-word access splits into `arch::uaccess` framework entry; queue logic stays safe |
+| `sync/hotpath.rs` (futex/semaphore sections), `kernel/sync/src/condvar.rs` | futex's uaccess + raw futex-word access splits into `arch::uaccess` framework entry; queue logic stays safe |
 | `drivers/` (all except virtio/intc/timer/pci) | device logic above the DMA core: gpu/drm/input/blkdev/net drivers/loop_dev/ashmem/watchdog/rtc |
 
 ### Diagnostics

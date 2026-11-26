@@ -13,21 +13,21 @@ Level 0 (outermost): IRQ disable (irq_save / save_and_disable_irq)
   |
   +-- Level 1: preempt_disable (preempt_count_add(PREEMPT_OFFSET))
         |
-        +-- Level 2a: GRQ lock (kernel/src/sched/sched.rs: GlobalRunQueue.lock)
+        +-- Level 2a: GRQ lock (kernel/core/src/sched/hotpath.rs sched section: GlobalRunQueue.lock)
         |     |
-        |     +-- Level 3a: per-zone lock (kernel/src/mm/zone.rs)
+        |     +-- Level 3a: per-zone lock (kernel/core/src/mm/hotpath.rs zone section)
         |     |
-        |     +-- Level 3b: futex hash bucket lock (kernel/src/sync/futex.rs: HASH_HEADS[i])
+        |     +-- Level 3b: futex hash bucket lock (kernel/core/src/sync/hotpath.rs futex section: HASH_HEADS[i])
         |           |
-        |           +-- Level 4: waiter slot lock (kernel/src/sync/futex.rs: WAITER_POOL[i])
+        |           +-- Level 4: waiter slot lock (kernel/core/src/sync/hotpath.rs futex section: WAITER_POOL[i])
         |
-        +-- Level 2b: process tree lock (kernel/src/process/task.rs)
+        +-- Level 2b: process tree lock (kernel/core/src/process/hotpath.rs task section)
         |
         +-- Level 2c: inode lock (kernel/src/fs/)
         |
         +-- Level 2d: dentry cache lock (kernel/src/fs/)
         |
-        +-- Level 2e: binder WORLD lock (kernel/src/ipc/binder.rs: WORLD)
+        +-- Level 2e: binder WORLD lock (kernel/core/src/ipc/hotpath.rs binder section: WORLD)
               |
               +-- (no nested acquisition) — WORLD is a leaf-most
                   global lock: while it is held, do NOT take the
@@ -39,7 +39,7 @@ Level 0 (outermost): IRQ disable (irq_save / save_and_disable_irq)
 
 ### binder WORLD (Level 2e)
 
-`WORLD` (`kernel/src/ipc/binder.rs`) is the single global spinlock that
+`WORLD` (`kernel/core/src/ipc/hotpath.rs`, binder section) is the single global spinlock that
 serializes every binder state transition: the proc/node tables, the
 transaction queues, the thread states, and the allocation bookkeeping.
 It is acquired by `world_lock()` (which also disables interrupts) and
@@ -60,7 +60,7 @@ binder state.
 
 ## Sleeping mutexes (outside the spinlock hierarchy)
 
-`SleepMutex` (kernel/src/sync/mutex.rs) is the coarse-lock primitive
+`SleepMutex` (kernel/core/src/sync/types.rs, methods in the hotpath.rs mutex section) is the coarse-lock primitive
 for locks that may be held across blocking I/O (reference rule 0: such
 a lock is a mutex, never a spinlock). It does not disable preemption
 while held, so it sits OUTSIDE the preempt/spinlock hierarchy above:
@@ -71,7 +71,7 @@ its waiters park on a wait queue. Its only spinlock is the internal
 Instances and their sanctioned nesting (outer → inner):
 
 ```
-VFS_MUTATION_LOCK (fs/vfs.rs) -> EXT4_BIG_LOCK (fs/ext4/mod.rs) -> I/O
+VFS_MUTATION_LOCK (fs/hotpath.rs vfs section) -> EXT4_BIG_LOCK (rux-ext4 crate, kernel/ext4/src/ext4/) -> I/O
 ```
 
 Rules (INV-LOCK-8):
@@ -99,7 +99,7 @@ Rules (INV-LOCK-8):
 irq_save -> preempt_disable -> spinlock::lock -> ... -> unlock -> preempt_enable -> irq_restore
 ```
 
-Source: `kernel/src/sync/spinlock.rs` `lock_irqsave()` (line 192) and `Drop` (line 329).
+Source: `kernel/core/src/sync/hotpath.rs` (spinlock section), `lock_irqsave()` and its guard `Drop`.
 
 ### Path 2: GRQ lock (scheduler)
 
@@ -107,7 +107,7 @@ Source: `kernel/src/sync/spinlock.rs` `lock_irqsave()` (line 192) and `Drop` (li
 irq_save -> preempt_disable -> grq.lock -> enqueue/dequeue -> grq.unlock -> preempt_enable -> irq_restore
 ```
 
-Source: `kernel/src/sched/sched.rs` `lock_irqsave()` (line 85) and `GrqGuard::Drop` (line 181).
+Source: `kernel/core/src/sched/hotpath.rs` (sched section), `lock_irqsave()` and `GrqGuard::Drop`.
 
 ### Path 3: Futex wait
 
@@ -119,7 +119,7 @@ irq_save -> preempt_disable -> bucket_lock -> waiter_slot_lock -> ...
   -> schedule() [GRQ lock acquired independently]
 ```
 
-Source: `kernel/src/sync/futex.rs` `futex_wait()` (line 253).
+Source: `kernel/core/src/sync/hotpath.rs` (futex section), `futex_wait()`.
 
 ### Path 4: Futex wake (CRITICAL)
 
@@ -133,7 +133,7 @@ irq_save -> preempt_disable -> bucket_lock
   -> unlock_bucket -> preempt_enable -> irq_restore
 ```
 
-Source: `kernel/src/sync/futex.rs` `futex_wake()` (line 317).
+Source: `kernel/core/src/sync/hotpath.rs` (futex section), `futex_wake()`.
 
 **INV-LOCK-5**: GRQ may nest inside futex bucket lock, but never the reverse.
 
@@ -148,12 +148,12 @@ __schedule():
   -> irq_restore
 ```
 
-Source: `kernel/src/sched/sched.rs` `__schedule()` (line 556).
+Source: `kernel/core/src/sched/hotpath.rs` (sched section), `__schedule()`.
 
 ### Path 6: virtio-net device locks
 
 ```
-VirtIONetDevice lock order (drivers/net/virtio_net.rs):
+VirtIONetDevice lock order (kernel/core/src/drivers/hotpath.rs, net::virtio_net section):
 
     {rx_queue | tx_queue} -> stats          (poll/xmit statistics update)
     rx_queue -> rx_last_used                (poll RX cursor)
@@ -179,12 +179,12 @@ block-scoped to the two counter updates.
 | INV-LOCK-4 | No lock acquisition cycles (deadlock-free) | Hierarchy documented here, verified by SPIN |
 | INV-LOCK-5 | GRQ nests inside bucket lock, never reverse | futex_wake path, verified by SPIN |
 | INV-LOCK-6 | stats nests inside virtio-net queue locks, never reverse | virtio_net poll/xmit (drivers/net) |
-| INV-LOCK-7 | leaf-PTE exclusion: vma_manager -> PTE section (global epoch + per-mm pte_lock) -> page_desc; global-epoch WRITE sections never nest inside ANY PTE section; per-mm PTE sections of the same mm never nest | mm/mm_struct.rs PteLock, arch mm_ops PTE_MODIFY_LOCK |
-| INV-LOCK-8 | SleepMutex (sleeping mutex): never taken with a spinlock held or from IRQ context; nests only VFS_MUTATION_LOCK -> EXT4_BIG_LOCK; spin-family locks never sleep | kernel/src/sync/mutex.rs; see "Sleeping mutexes" above |
+| INV-LOCK-7 | leaf-PTE exclusion: vma_manager -> PTE section (global epoch + per-mm pte_lock) -> page_desc; global-epoch WRITE sections never nest inside ANY PTE section; per-mm PTE sections of the same mm never nest | mm/types.rs PteLock (impl in the hotpath.rs mm_struct section), arch mm_ops PTE_MODIFY_LOCK |
+| INV-LOCK-8 | SleepMutex (sleeping mutex): never taken with a spinlock held or from IRQ context; nests only VFS_MUTATION_LOCK -> EXT4_BIG_LOCK; spin-family locks never sleep | kernel/core/src/sync/types.rs; see "Sleeping mutexes" above |
 
 ## Typed lock keys (the hierarchy as types, 2026-10)
 
-`kernel/src/sync/lockkey.rs` gives the ordering classes of the table
+`kernel/core/src/sync/hotpath.rs` (lockkey section) gives the ordering classes of the table
 above a TYPE surface: each class is a zero-sized key
 (`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`) and a
 permitted nesting is an explicit `impl CanNestInside<Outer> for Inner`.
@@ -258,10 +258,10 @@ Rules (INV-LOCK-7):
 2. **Global mode (sites without a reachable mm — all arches)**:
    `PTE_MODIFY_LOCK` (GlobalPteLock) held exclusive. Split mode went
    live on ALL architectures with the 2026-10-31 perf review
-   (`PteLock::lock` in mm/mm_struct.rs, adopted by `pte_lock_for` on
+   (`PteLock::lock` in mm/hotpath.rs, mm_struct section, adopted by `pte_lock_for` on
    riscv64/x86_64/aarch64 alike) — per-mm PTE writers of different mms
    now run concurrently on every arch. The remaining direct global
-   users are: ipc/binder.rs + ipc/sysv_shm.rs installs (IPC line's
+   users are: ipc/hotpath.rs (binder section) + the rux-ipc crate's sysv_shm installs (IPC line's
    files — excluded against per-mm readers by the epoch, no code
    change needed there), `map_user_region`/kernel-root maps
    (exec/fresh-table/device cold paths), and the unpublished-tree
@@ -327,7 +327,7 @@ Run: `make spin`
 
 ### PI futex locks (2026-11-05, INV-LOCK-PI-1)
 
-The PI futex engine (kernel/src/sync/futex_pi.rs) adds one lock class:
+The PI futex engine (kernel/core/src/sync/hotpath.rs, futex_pi section) adds one lock class:
 the per-hash PI bucket (PI_BUCKET_HEADS). Fixed order:
 
   plain futex hash bucket -> PI bucket -> PI pool slot

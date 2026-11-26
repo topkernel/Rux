@@ -165,8 +165,8 @@ access is safe code.**
 
 The catalogue lives in `kernel/src/safety/` (`ptr.rs`, `dma.rs`,
 `mmio.rs`, `call.rs`), plus two earlier typed families:
-`arch/uaccess_safe.rs` (user memory) and `process/task_ref.rs` (task
-handles). Each primitive documents its invariants as numbered
+`arch/uaccess_safe.rs` (user memory) and `process/types.rs` (task
+handles; their impl lives in the hotpath.rs task_ref section). Each primitive documents its invariants as numbered
 INV- contracts, and each unsafe block inside it is the single audited
 edge for one invariant:
 
