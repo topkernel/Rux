@@ -1394,7 +1394,26 @@ def cmd_pair(args):
     if hard:
         print("unrecorded unpaired symbols: %d (add a reviewed row to "
               "docs/development/pass3-pair-exceptions.txt or fix the move)" % len(hard))
-    return 1 if hard or size_diff else 0
+    # same-name, size-differs: a wrap FORWARDER keeps its name but the
+    # inlined #[inline(always)] wrapper body recompiles with slightly
+    # different debug instruction selection (a few bytes). Classify each
+    # against the same recorded patterns — an unrecorded one still fails.
+    sd = sorted((k for k in b if k in c and c[k][1] != b[k][1]))
+    sd_rec, sd_hard = [], []
+    if sd:
+        for k, n in zip(sd, demangle(sd, b, args.base)):
+            nn = normalize(n, True)
+            (sd_rec if any(p.search(nn) for p in pats) else sd_hard).append((nn, b[k][1], c[k][1]))
+    if sd_rec:
+        print("recorded size-differs (matched --allow-unpaired): %d" % len(sd_rec))
+        for nn, x, y in sd_rec[:args.show]:
+            print("RECORDED-SIZE-DIFF %s\n     base %d -> current %d" % (nn[:160], x, y))
+    if sd_hard:
+        print("unrecorded same-name size-differs: %d (add a reviewed row to "
+              "docs/development/pass3-pair-exceptions.txt or fix the move)" % len(sd_hard))
+        for nn, x, y in sd_hard[:args.show]:
+            print("SIZE-DIFF %s\n     base %d -> current %d" % (nn[:160], x, y))
+    return 1 if hard or sd_hard else 0
 
 
 def lines_of(text):

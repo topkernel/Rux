@@ -93,7 +93,12 @@ from unsafe_census import (  # noqa: E402
     ROOT, mask_comments_and_strings, match_brace, find_body_brace, scan_file)
 
 UNSAFE_RE = re.compile(r"\bunsafe\b")
-FN_SPAN = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
+# the whole fn DECLARATION head (visibility / unsafe / extern prefixes
+# included) — fn_span_from must accept an unsafe-fn region's keyword, which
+# sits between the decl start and the body brace
+FN_SPAN = re.compile(
+    r"\b(?:pub(?:\([^)]*\))? )?(?:unsafe\s+)?(?:extern\s+\"[^\"]+\"\s+)?fn\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)")
 FN_DECL = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))? )?(?:unsafe\s+)?(?:extern\s+\"C\"\s+)?fn\s+")
 SPEC_DIR = ROOT / "scripts" / "refactor" / "pass3"
@@ -157,7 +162,12 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and masked[j:j + 5] in ("impl ", "fn ", "trai", "exter"):
+        elif j < len(masked) and (masked[j:j + 5] in ("impl ", "trait", "exter")
+                                  or masked[j:j + 3] == "fn "):
+            # item keyword shapes: `unsafe impl X`, `unsafe fn f(..)`,
+            # `unsafe trait T`, `unsafe extern "C" {` — prefix-matched, the
+            # body brace found from the keyword on (the sched pilot only
+            # exercised the `impl ` arm; mm's unsafe-fn regions need `fn `)
             brace = find_body_brace(masked, j)
             if brace >= 0:
                 hits.append((m.start(), match_brace(masked, brace) + 1))
@@ -169,14 +179,16 @@ def region_char_span(text, masked, reg, kind):
 
 def fn_span_from(text, masked, inner_char):
     """Line span (first, last inclusive) of the innermost fn containing
-    inner_char, doc comment and attributes included."""
+    inner_char, doc comment and attributes included. `inner_char` may sit
+    INSIDE the fn body (a block region) or inside its DECLARATION (an
+    unsafe-fn region — the `unsafe` keyword precedes the body brace)."""
     best = None
     for m in FN_SPAN.finditer(masked):
         brace = find_body_brace(masked, m.start())
-        if brace < 0 or brace >= inner_char:
+        if brace < 0:
             continue
         end = match_brace(masked, brace)
-        if end < inner_char:
+        if not (m.start() <= inner_char <= end):
             continue
         if best is None or m.start() > best[0]:
             best = (m.start(), end)
@@ -347,8 +359,17 @@ def apply_spec(spec, dry):
                   f"{m.get('section')} ({m.get('inv')})")
         return 0
 
-    # call-site rewrites + general source edits (each must hit exactly once)
-    for e in file_edits + list(spec.get("source_edits", [])):
+    # call-site rewrites + general source edits (each must hit exactly once).
+    # Edits targeting the target unsafe.rs ITSELF (path fixes inside the
+    # moved bodies) run AFTER the section insert below: the moved text is
+    # only in unsafe.rs once apply has appended it (mm's moved fns keep
+    # verbatim bodies that name the source module's items).
+    unsafe_rs_rel = str(unsafe_rs.relative_to(ROOT))
+    late_edits = [e for e in spec.get("source_edits", [])
+                  if e["file"] == unsafe_rs_rel]
+    early_edits = file_edits + [e for e in spec.get("source_edits", [])
+                                if e["file"] != unsafe_rs_rel]
+    for e in early_edits:
         p = ROOT / e["file"]
         t = p.read_text()
         n = t.count(e["find"])
@@ -370,6 +391,17 @@ def apply_spec(spec, dry):
         for it in items:
             rs += it + "\n"
     unsafe_rs.write_text(rs)
+
+    # late edits: post-insert fixes inside unsafe.rs itself (each must hit
+    # exactly once in the appended text)
+    for e in late_edits:
+        p = ROOT / e["file"]
+        t = p.read_text()
+        n = t.count(e["find"])
+        if n != 1:
+            raise SystemExit(f"pass3: source edit hits {n} times (want 1) in "
+                             f"{e['file']}: {e['find'][:70]!r} ({e.get('why')})")
+        p.write_text(t.replace(e["find"], e["replace"]))
 
     for rel in spec.get("forbid", []):
         p = ROOT / rel
@@ -557,8 +589,13 @@ def verify(sub, base_rev, manifest_path):
         for l in m.get("fn_lines", []):
             claimed_added[l.rstrip()] += 1
     for e in man["file_edits"]:
-        claimed_removed[e["find"].rstrip()] += 1
-        claimed_added[e["replace"].rstrip()] += 1
+        # find/replace are exact-substring texts and may span several lines
+        # (an insertion in place); the audit's currency is single lines, so
+        # split both sides (mm's path-stability re-exports do this)
+        for l in e["find"].split("\n"):
+            claimed_removed[l.rstrip()] += 1
+        for l in e["replace"].split("\n"):
+            claimed_added[l.rstrip()] += 1
     for l in man["imports_rs"]:
         claimed_added[l.rstrip()] += 1
     claimed_added["#![forbid(unsafe_code)]"] += len(man["forbid"])
@@ -671,6 +708,12 @@ def selftest():
                  "kind": "unsafe-impl", "ordinal": 0, "base_id": "x4", "inv": "INV-X-2",
                  "section": "proofs", "inv_note": "INV-X-2: the fixture Send proof."},
             ],
+            "source_edits": [
+                {"file": f"{src}/unsafe.rs",
+                 "find": "pub(crate) fn reader(p: *const u32) -> u32",
+                 "replace": "/// INV-X-1: moved-body path fix (late edit probe).\npub(crate) fn reader(p: *const u32) -> u32",
+                 "why": "selftest: source edits on unsafe.rs itself run after the insert"},
+            ],
         }
         apply_spec(spec, dry=False)
         hp = (tmp / src / "hotpath.rs").read_text()
@@ -685,6 +728,7 @@ def selftest():
             "call sites rewritten": "r#unsafe::reader(p);" in hp and
                                     "r#unsafe::read_once(p);" in hp,
             "wrapper body verbatim": "unsafe { core::ptr::read_volatile(p) }" in rs,
+            "late unsafe.rs source edit applied": "late edit probe" in rs,
         }
         bad = [k for k, v in checks.items() if not v]
         for k, v in checks.items():
