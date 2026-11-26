@@ -23,6 +23,10 @@
 //! sibling module `hotpath`: the sync directory is the smallest
 //! visibility boundary Rust offers for that split.
 
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this file must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize};
