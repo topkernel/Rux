@@ -22,6 +22,8 @@
 //! lives in the sibling module `hotpath`: the process directory is the
 //! smallest visibility boundary Rust offers for that split.
 
+#![forbid(unsafe_code)]
+
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
