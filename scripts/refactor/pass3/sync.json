@@ -1,0 +1,1042 @@
+{
+ "sub": "sync",
+ "target": "kernel/core/src/sync",
+ "imports_rs": [
+  "use super::hotpath::{",
+  "    GP_CONSEC_FAIL, GP_DUMPED, RCU_CBS, RCU_QS_GEN, RCU_WAITERS,",
+  "    REENTRY_EVENTS, all_online_cpus_reported, cpu_quiescent,",
+  "    shared_grace_done,",
+  "};",
+  "use super::types::{",
+  "    CpuLocal, CpuLocalRef, KeyedSpinlock, OptimisticProbe, PiWaiter,",
+  "    RawSpinlock, Row, RcuHead, RwSemaphore, RwSpinlock,",
+  "    RwSpinlockBhReadGuard, RwSpinlockBhWriteGuard,",
+  "    RwSpinlockIrqReadGuard, RwSpinlockIrqWriteGuard, RwSpinlockReadGuard,",
+  "    RwSpinlockWriteGuard, Rwsem, RwsemReadGuard, RwsemWriteGuard,",
+  "    SeqLock, SeqLockWriteGuard, SleepMutex, SleepMutexGuard, Spinlock,",
+  "    SpinlockBhGuard, SpinlockGuard, SpinlockIrqGuard, Waiter,",
+  "};",
+  "use crate::list::ListHead;",
+  "use crate::config::MAX_CPUS;",
+  "use core::marker::PhantomData;",
+  "use core::sync::atomic::Ordering;"
+ ],
+ "forbid": [
+  "kernel/core/src/sync/hotpath.rs",
+  "kernel/core/src/sync/types.rs"
+ ],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "static REENTRY_EVENTS: AtomicUsize = AtomicUsize::new(0);",
+   "replace": "pub(crate) static REENTRY_EVENTS: AtomicUsize = AtomicUsize::new(0);",
+   "why": "with/with_preempt (unsafe.rs) count re-entry refusals"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "static mut RCU_CBS: [ListHead; MAX_CPUS] = {",
+   "replace": "pub(crate) static mut RCU_CBS: [ListHead; MAX_CPUS] = {",
+   "why": "rcu_link_tail/rcu_splice_cbs/rcu_run_cbs/rcu_cbs_row_init (unsafe.rs) reach the callback rows"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "static RCU_WAITERS: AtomicU32 = AtomicU32::new(0);",
+   "replace": "pub(crate) static RCU_WAITERS: AtomicU32 = AtomicU32::new(0);",
+   "why": "wait_qs_sleepy (unsafe.rs) announces/drops the waiter count"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "static GP_CONSEC_FAIL: AtomicU32 = AtomicU32::new(0);",
+   "replace": "pub(crate) static GP_CONSEC_FAIL: AtomicU32 = AtomicU32::new(0);",
+   "why": "wait_qs_sleepy (unsafe.rs) resets the fail counter"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "static GP_DUMPED: AtomicBool = AtomicBool::new(false);",
+   "replace": "pub(crate) static GP_DUMPED: AtomicBool = AtomicBool::new(false);",
+   "why": "wait_qs_sleepy (unsafe.rs) arms the one-shot dump latch"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "static RCU_QS_GEN: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];",
+   "replace": "pub(crate) static RCU_QS_GEN: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];",
+   "why": "wait_qs_sleepy (unsafe.rs) reads the per-cpu QS generations"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "fn shared_grace_done() {",
+   "replace": "pub(crate) fn shared_grace_done() {",
+   "why": "wait_qs_sleepy (unsafe.rs) marks the shared-grace completion"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "fn cpu_quiescent(i: usize, gen: u32) -> bool {",
+   "replace": "pub(crate) fn cpu_quiescent(i: usize, gen: u32) -> bool {",
+   "why": "wait_qs_sleepy (unsafe.rs) loops on the QS predicate"
+  },
+  {
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "find": "fn all_online_cpus_reported(gen: u32) -> bool {",
+   "replace": "pub(crate) fn all_online_cpus_reported(gen: u32) -> bool {",
+   "why": "wait_qs_sleepy (unsafe.rs) checks the round"
+  }
+ ],
+ "moves": [
+  {
+   "op": "move-item",
+   "inv": "INV-SCE-2",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SCE-2: the Waiter task raw pointer rides the sched task_shared read view; all other access is serialized by the per-slot lock.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl Send for Waiter",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "c51a134133e9"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SCE-2",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SCE-2: the Waiter task raw pointer rides the sched task_shared read view; all other access is serialized by the per-slot lock.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl Sync for Waiter",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "e14092022968"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SENDSYNC-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SENDSYNC-1: slots are only touched under their per-slot spinlock \u2014 the raw-lock Sync proof.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl Send for PiWaiter",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "fdb1c45f1396"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SENDSYNC-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SENDSYNC-1: slots are only touched under their per-slot spinlock \u2014 the raw-lock Sync proof.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl Sync for PiWaiter",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "b7a5e97a2c04"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for Spinlock<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "fcf71ead0f5a"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Sync for Spinlock<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "26575ba9ed9b"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "2a86e44467c5"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for SpinlockIrqGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "f34a544e66e4"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for SpinlockBhGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "98ab728be5ed"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for RwSpinlock<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "3a36e7d455c9"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SPIN-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SPIN-1: guard-gated access: &mut T exists only behind a live guard, the lock mediates every access (the impl's SAFETY note above).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send + Sync> Sync for RwSpinlock<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "e5e250247b8f"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWLOCK-1: the rwlock family discipline: reader counts and the writer word pair acquire/release; guards ride the lock's own exclusivity.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Sync> Send for RwSpinlockReadGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "33ffc1ef00b0"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWLOCK-1: the rwlock family discipline: reader counts and the writer word pair acquire/release; guards ride the lock's own exclusivity.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for RwSpinlockWriteGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "6852f571917c"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWLOCK-1: the rwlock family discipline: reader counts and the writer word pair acquire/release; guards ride the lock's own exclusivity.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Sync> Send for RwSpinlockIrqReadGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "d96ae750b71a"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWLOCK-1: the rwlock family discipline: reader counts and the writer word pair acquire/release; guards ride the lock's own exclusivity.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for RwSpinlockIrqWriteGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "db3d3e886994"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWLOCK-1: the rwlock family discipline: reader counts and the writer word pair acquire/release; guards ride the lock's own exclusivity.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Sync> Send for RwSpinlockBhReadGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "92bc8da88bd6"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWLOCK-1: the rwlock family discipline: reader counts and the writer word pair acquire/release; guards ride the lock's own exclusivity.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for RwSpinlockBhWriteGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "ed361615617c"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWSEM-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWSEM-1: the rwsem discipline: guard existence proves the counted read or exclusive write phase.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl Send for RwSemaphore",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "1e56c0297a2d"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWSEM-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWSEM-1: the rwsem discipline: guard existence proves the counted read or exclusive write phase.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl Sync for RwSemaphore",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "98be574a740e"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWSEM-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWSEM-1: the rwsem discipline: guard existence proves the counted read or exclusive write phase.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for Rwsem<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "c5185307af0c"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWSEM-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWSEM-1: the rwsem discipline: guard existence proves the counted read or exclusive write phase.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send + Sync> Sync for Rwsem<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "cc9b83eddc13"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWSEM-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWSEM-1: the rwsem discipline: guard existence proves the counted read or exclusive write phase.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Sync> Send for RwsemReadGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "c50cd9060322"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-RWSEM-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-RWSEM-1: the rwsem discipline: guard existence proves the counted read or exclusive write phase.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: ?Sized + Send> Send for RwsemWriteGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "72ee9b0fd7c5"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SEQLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SEQLOCK-1: writers serialize on the sequence counter; readers snapshot under the even phase (T: Copy).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: Copy + Send> Send for SeqLock<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "b780608c6b70"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SEQLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SEQLOCK-1: writers serialize on the sequence counter; readers snapshot under the even phase (T: Copy).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: Copy + Send> Sync for SeqLock<T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "5bb88bbbb463"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-SEQLOCK-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-SEQLOCK-1: writers serialize on the sequence counter; readers snapshot under the even phase (T: Copy).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T: Copy + Send> Send for SeqLockWriteGuard<'_, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "f20bf214d6cd"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-PERCPU-1",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-PERCPU-1: rows are cpu-private by construction of with/with_preempt (bounds + re-entry tripwire).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<T, const N: usize> Sync for CpuLocal<T, N>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "b50b54df0abe"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-LOCK-6",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-LOCK-6: the atomic protocol of the inner RawSpinlock is the synchronization; the key carries no data.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<K: NestKey> Sync for KeyedRawSpinlock<K>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "6ad72e3b8977"
+  },
+  {
+   "op": "move-item",
+   "inv": "INV-LOCK-6",
+   "section": "auto-trait proofs (Send / Sync)",
+   "inv_note": "INV-LOCK-6: the atomic protocol of the inner RawSpinlock is the synchronization; the key carries no data.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "unsafe impl<K: NestKey, T: Send> Sync for KeyedSpinlock<K, T>",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "8b0eb434180c"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5786a00e1720"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "45f9e92c75a6"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "8103bfeda72b"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "88146ceb1fa4"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "8561456db746"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 5,
+   "base_id": "c643e81f84b7"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 6,
+   "base_id": "c9e7d28112e7"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 7,
+   "base_id": "40edb763fa64"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 8,
+   "base_id": "04bb3d8a9103"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 9,
+   "base_id": "378c1039d4a4"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 10,
+   "base_id": "373e3bd5edb7"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_shared(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref",
+   "kind": "block",
+   "ordinal": 11,
+   "base_id": "bab001c10b1c"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "de83d563339d"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "4fa2a8703449"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 2,
+   "base_id": "636dfc2c1b7d"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 3,
+   "base_id": "dea3ad90da97"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 4,
+   "base_id": "587ec217794b"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 5,
+   "base_id": "b3d3ff97fa27"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 6,
+   "base_id": "fda757abf57f"
+  },
+  {
+   "op": "inline-call",
+   "call": "crate::sync::r#unsafe::guard_exclusive(&self.lock.data)",
+   "inv": "INV-SY-4",
+   "section": "guard deref edges (INV-SY-4)",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deref_mut",
+   "kind": "block",
+   "ordinal": 7,
+   "base_id": "4927a83001d1"
+  },
+  {
+   "op": "move-fn",
+   "vis": "pub(crate)",
+   "inv": "INV-LOCK-6",
+   "section": "sleep-mutex owner checks (INV-LOCK-6)",
+   "inv_note": "INV-LOCK-6: read-only state() probe of the pinned owner task (the R77 stall tripwire); the pin keeps the Task alive across the read.",
+   "callmap": [
+    {
+     "find": "                    && (stranded_free || locked_owner_alive_wait(&owner))",
+     "replace": "                    && (stranded_free || crate::sync::r#unsafe::locked_owner_alive_wait(&owner))"
+    }
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "locked_owner_alive_wait",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a63bfb1399dd"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "SleepMutex",
+   "vis": "pub(crate)",
+   "inv": "INV-LOCK-6",
+   "section": "sleep-mutex owner checks (INV-LOCK-6)",
+   "inv_note": "INV-LOCK-6: one locked fair-try section plus the pinned owner's ti_on_cpu read; the pin keeps the Task alive across the read.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "optimistic_probe",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2cadc50595a5"
+  },
+  {
+   "op": "move-fn",
+   "vis": "pub(crate)",
+   "inv": "INV-SPIN-1",
+   "section": "arch asm reads (caller return address)",
+   "inv_note": "INV-SPIN-1: pure register/frame reads (nomem, nostack) for the deadlock call-site stamp; no memory access.",
+   "callmap": [
+    {
+     "find": "        let caller_ra = caller_return_address();",
+     "replace": "        let caller_ra = crate::sync::r#unsafe::caller_return_address();"
+    },
+    {
+     "find": "            self.record_owner(caller_return_address());",
+     "replace": "            self.record_owner(crate::sync::r#unsafe::caller_return_address());"
+    }
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "caller_return_address",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0f3c563fd222"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "RawSpinlock",
+   "vis": "pub(crate)",
+   "inv": "INV-SPIN-1",
+   "section": "spinlock deadlock diagnostics (INV-SPIN-1)",
+   "inv_note": "INV-SPIN-1: cold diagnostic reads of a lock the reporter SPINS ON (locked_word/owner/current-task); every deref is bounded by the live-word protocol.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "deadlock_warn",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9bc19f892bc9"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "RawSpinlock",
+   "vis": "pub(crate)",
+   "inv": "INV-SPIN-1",
+   "section": "spinlock deadlock diagnostics (INV-SPIN-1)",
+   "inv_note": "INV-SPIN-1: lockless diagnostic putchar (deadlock dumps run with locks wedged).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "puthex",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2f97bd7a7255"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "RawSpinlock",
+   "vis": "pub(crate)",
+   "inv": "INV-SPIN-1",
+   "section": "spinlock deadlock diagnostics (INV-SPIN-1)",
+   "inv_note": "INV-SPIN-1: lockless diagnostic putchar (deadlock dumps run with locks wedged).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "putdec",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ef57c087d6d0"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "RawSpinlock",
+   "inv": "INV-SPIN-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-SPIN-1: reset releases the word without the debug ownership check; caller must provably own the lock's state.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "reset",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "f532063d9fb0"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T> Spinlock<T>",
+   "inv": "INV-SPIN-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-SPIN-1: shared view without locking; caller must prove no concurrent mutable access (write-once boot data).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "get_ref",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "f72d9e7a4991"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T> Spinlock<T>",
+   "inv": "INV-SPIN-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-SPIN-1: mutable view without locking; caller must hold exclusive access.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "get_mut_unchecked",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "bd6f5b05fd7e"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T> Spinlock<T>",
+   "inv": "INV-SPIN-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-SPIN-1: consumes the lock; caller must prove no other reference to lock or data.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "into_inner",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "aada99d51f73"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T> RwSpinlock<T>",
+   "inv": "INV-RWLOCK-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-RWLOCK-1: consumes the lock; caller must prove no other reference to lock or data.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "into_inner",
+   "kind": "unsafe-fn",
+   "ordinal": 1,
+   "base_id": "4823a8841fc4"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T: Copy> SeqLock<T>",
+   "inv": "INV-SEQLOCK-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-SEQLOCK-1: the caller's disabled preemption is the read-window contract (read_inner checks the sequence).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "read_preempt_disabled",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "907690427b63"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T: Copy> SeqLock<T>",
+   "vis": "pub(crate)",
+   "inv": "INV-SEQLOCK-1",
+   "section": "unsafe accessor fns (unsafe fn relocations)",
+   "inv_note": "INV-SEQLOCK-1: the volatile snapshot under the even-sequence validation (preemption disabled by the callers read()/read_preempt_disabled).",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "read_inner",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e5c67fdd6ddd"
+  },
+  {
+   "op": "move-fn",
+   "vis": "pub(crate)",
+   "inv": "INV-RCU-1",
+   "section": "rcu grace-period wait (INV-RCU-1)",
+   "inv_note": "INV-RCU-1: the sleepy wait's own-task derefs (state transitions, pid reads, stack scan) run on the waiter's own current pointer; the diagnostic reads are bounded volatile reads.",
+   "callmap": [
+    {
+     "find": "    wait_qs_sleepy(gen, max_ms, site) // the bounded-sleepy form",
+     "replace": "    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the bounded-sleepy form"
+    },
+    {
+     "find": "    wait_qs_sleepy(gen, max_ms, site) // the bounded-pollfirst form",
+     "replace": "    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the bounded-pollfirst form"
+    },
+    {
+     "find": "    wait_qs_sleepy(gen, max_ms, site) // the forced-sleepy form",
+     "replace": "    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the forced-sleepy form"
+    },
+    {
+     "find": "    wait_qs_sleepy(gen, max_ms, site) // the forced-polled form",
+     "replace": "    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the forced-polled form"
+    }
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "wait_qs_sleepy",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e5eeba83683a"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T, const N: usize> CpuLocal<T, N>",
+   "inv": "INV-PERCPU-1",
+   "section": "per-CPU bank windows (INV-PERCPU-1)",
+   "inv_note": "INV-PERCPU-1: the D-7 window \u2014 bounds-checked cpu id, IF=0 exclusivity, in_use re-entry tripwire; the row is handed out only through the guard.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "with",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a0c67d270d5f"
+  },
+  {
+   "op": "move-fn",
+   "impl_owner": "<T, const N: usize> CpuLocal<T, N>",
+   "inv": "INV-PERCPU-1",
+   "section": "per-CPU bank windows (INV-PERCPU-1)",
+   "inv_note": "INV-PERCPU-1: the preempt-flavored window \u2014 task-context check, preempt-off exclusivity, IRQ-context access routed away by the callers.",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "with_preempt",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5628b3f6bb63"
+  },
+  {
+   "op": "wrap",
+   "inline": true,
+   "name": "wake_task_pid",
+   "params": "wtask: *mut crate::process::types::Task",
+   "ret": "u32",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "crate::sync::r#unsafe::wake_task_pid(wtask)",
+   "inv": "INV-LOCK-6",
+   "section": "sleep-mutex handoff edges (INV-LOCK-6)",
+   "doc": [
+    "The woken handoff waiter's pid read (collected by pass 3):",
+    "one deref of the wake queue's task pointer."
+   ],
+   "contract": [
+    "`wtask` is the *mut Task just handed out by",
+    "wake_up_one_hiprio (still owned by the waiter entry);",
+    "the pid read is the handoff's own field read (INV-LOCK-6)."
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "release",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "4a9679f7d16a"
+  },
+  {
+   "op": "wrap",
+   "name": "rcu_link_tail",
+   "params": "cpu: usize, head: &mut RcuHead",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "    crate::sync::r#unsafe::rcu_link_tail(cpu, head);",
+   "inv": "INV-RCU-1",
+   "section": "rcu callback edges (INV-RCU-1)",
+   "doc": [
+    "Queue `head` on cpu's callback list (collected by pass 3):",
+    "the intrusive add_tail under the cb_list lock."
+   ],
+   "contract": [
+    "the cb_list lock is held for `cpu` (call_rcu's",
+    "lock_cb_list/unlock_cb_list bracket); head.list was",
+    "initialized via init() (the RcuHead protocol)."
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "call_rcu",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "528d1fa32d73"
+  },
+  {
+   "op": "wrap",
+   "name": "rcu_splice_cbs",
+   "params": "cpu: usize, batch: &mut ListHead",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sync::r#unsafe::rcu_splice_cbs(cpu, &mut batch);",
+   "body_edits": [
+    {
+     "find": "prev = &mut batch;",
+     "replace": "prev = &mut *batch;"
+    },
+    {
+     "find": "next = &mut batch;",
+     "replace": "next = &mut *batch;"
+    }
+   ],
+   "inv": "INV-RCU-1",
+   "section": "rcu callback edges (INV-RCU-1)",
+   "doc": [
+    "Detach cpu's callback list into `batch` (collected by pass 3)."
+   ],
+   "contract": [
+    "the cb_list lock is held for `cpu` (the softirq handler's",
+    "bracket); RCU_CBS[cpu] is exclusively ours and was",
+    "initialized in init()."
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "rcu_softirq_handler",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "39034810c476"
+  },
+  {
+   "op": "wrap",
+   "name": "rcu_run_cbs",
+   "params": "batch: &mut ListHead",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "    crate::sync::r#unsafe::rcu_run_cbs(&mut batch);",
+   "body_edits": [
+    {
+     "find": "let sentinel = &mut batch as *mut ListHead;",
+     "replace": "let sentinel = &mut *batch as *mut ListHead;"
+    }
+   ],
+   "inv": "INV-RCU-1",
+   "section": "rcu callback edges (INV-RCU-1)",
+   "doc": [
+    "Invoke the detached callbacks (collected by pass 3)."
+   ],
+   "contract": [
+    "`batch` was detached by rcu_splice_cbs: the list is",
+    "exclusively owned, each RcuHead registered via call_rcu",
+    "with a valid func pointer, alive until the callback runs."
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "rcu_softirq_handler",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "bd87764ae24a"
+  },
+  {
+   "op": "wrap",
+   "name": "rcu_cbs_row_init",
+   "params": "i: usize",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sync::r#unsafe::rcu_cbs_row_init(i);",
+   "inv": "INV-RCU-1",
+   "section": "rcu callback edges (INV-RCU-1)",
+   "doc": [
+    "Boot-time init of cpu i's callback row (collected by pass 3)."
+   ],
+   "contract": [
+    "runs once during boot before any CPU uses RCU \u2014 no",
+    "concurrent access to RCU_CBS[i] (INV-RCU-1)."
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "init",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "66213f6ae149"
+  },
+  {
+   "op": "wrap",
+   "name": "cpu_local_row_release",
+   "params": "in_use: *mut bool",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "        crate::sync::r#unsafe::cpu_local_row_release(self.in_use);",
+   "body_edits": [
+    {
+     "find": "*self.in_use = false",
+     "replace": "*in_use = false"
+    }
+   ],
+   "inv": "INV-PERCPU-1",
+   "section": "per-CPU bank windows (INV-PERCPU-1)",
+   "doc": [
+    "Release a per-CPU row's in_use latch (CpuLocalRef::drop,",
+    "collected by pass 3): the raw store is the only writer."
+   ],
+   "contract": [
+    "same-cpu exclusivity still holds at drop (IF=0 or",
+    "preempt-off window intact until the restore below the",
+    "call); the guard owns `in_use` exclusively (INV-PERCPU-1)."
+   ],
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "a03d2b77268e"
+  },
+  {
+   "call": "crate::sync::r#unsafe::wake_task_pid(wtask)",
+   "inv": "INV-LOCK-6",
+   "section": "sleep-mutex handoff edges (INV-LOCK-6)",
+   "op": "inline-call",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "release_if_owner",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "58092e607ef0"
+  },
+  {
+   "call": "crate::sync::r#unsafe::keyed_guard_unlock(self.lock)",
+   "inv": "INV-LOCK-6",
+   "section": "guard deref edges (INV-SY-4)",
+   "op": "inline-call",
+   "file": "kernel/core/src/sync/hotpath.rs",
+   "owner": "drop",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "c8407c6e0087"
+  }
+ ]
+}

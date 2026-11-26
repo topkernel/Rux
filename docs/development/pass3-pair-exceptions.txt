@@ -673,3 +673,28 @@ core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
 #   methods and the moved free fns + for_each_file closures.
 # fs collection closures: same collection-drift class (p3fs2 gate 2026-11-27).
 ^rux::fs::\{closure\}$
+# --- the pass-3 sync collection (p23-p3sync lane, 2026-11-26) ---
+^<rux::sync::(SpinlockGuard|SpinlockIrqGuard|SpinlockBhGuard|RwSpinlockReadGuard|RwSpinlockWriteGuard|RwSpinlockIrqReadGuard|RwSpinlockBhReadGuard|RwSpinlockBhWriteGuard|RwsemReadGuard|RwsemWriteGuard|SeqLockWriteGuard|RwSpinlockIrqWriteGuard)<.* as core\[[0-9a-f]+\]::ops::deref::Deref(Mut)?>::deref(_mut)?$
+^<rux::sync::CpuLocalRef<.* as core\[[0-9a-f]+\]::ops::drop::Drop>::drop$
+^<rux::sync::SleepMutex>::(release|release_if_owner)$
+^rux::sync::(call_rcu|rcu_softirq_handler|init)$
+#   the sync guard deref/deref_mut/drop monomorphizations, the SleepMutex
+#   handoff pair and the RCU wrap sites: each had an inline unsafe block
+#   become an always-inlined unsafe.rs contract fn (guard_shared /
+#   guard_exclusive / keyed_guard_unlock / wake_task_pid /
+#   cpu_local_row_release / rcu_* ). Same operation, verbatim body,
+#   wrapper inlined back at every call site; the residual is debug-build
+#   instruction-selection drift only (release equality is pinned by the
+#   pbench gate). Measured worst deltas, x86 debug (base -> current bytes):
+#     RwSpinlockReadGuard<bool>::deref 29->33, SleepMutex::release
+#     437->455, call_rcu 147->155, init 204->206,
+#     rcu_softirq_handler 418->386. Every other sync symbol pairs 1:1
+#     at equal size (after module-path normalization) on all three arches.
+^(<rux::syscall::FdSet>::(clear|is_set|new|set|zero)|rux::syscall::seam_register_default)$
+#   base-only symbols (sizes base->[]): fully inlined at their call sites
+#   since the Nov-25 baseline — the same LTO inline-jitter class as
+#   IrqDomain::new; the sync lane's pair run surfaced them (stale base),
+#   no sync touch involved. first seen: p23-p3sync lane, 2026-11-26.
+^rux::interrupt::domain::(generic_handle_domain_irq|get_default_domain|irq_create_mapping|irq_domain_create_linear)$
+#   same class on x86: base-only, inlined away since the baseline.
+#   first seen: p23-p3sync lane pair, 2026-11-26.

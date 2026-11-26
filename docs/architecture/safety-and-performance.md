@@ -582,6 +582,8 @@ line per id; the contract lives in the owning module.
 - **INV-SREF-1** — StaticRef machine-lifetime storage (kernel/src/safety/ptr.rs)
 - **INV-SY-1** — sync framework edges (kernel/core/src/sync/unsafe.rs, L1)
 - **INV-SY-3** — sync framework edges (kernel/core/src/sync/unsafe.rs, L1)
+- **INV-SY-4** — sync framework edges: guard-held data dereference (kernel/core/src/sync/unsafe.rs, guard_shared/guard_exclusive)
+- **INV-SY-5** — sync framework edges: keyed-guard release (kernel/core/src/sync/unsafe.rs, keyed_guard_unlock)
 - **INV-UACCESS-1** — UserPtr family (arch/uaccess_safe.rs)
 - **INV-WINDOW-1** — KernelStackWindow stack reads (kernel/src/safety/frame.rs)
 
@@ -1557,6 +1559,89 @@ coordinator): unsafe-fn region location (two bugs), multi-line inline
 block splice, gitignored-build-artifact exclusion from the verify
 multiset, and rewrite_vis stripping the existing visibility instead of
 stacking (`pub pub fn`).
+## 5.x addendum: the pass-3 unsafe collection, sync (2026-11-26, p23-p3sync lane)
+
+Seed-core pass 3 (seed-core-design.md §2c.5): the sync subsystem — the
+lock-primitive foundation every other subsystem spins on — collected.
+Before: 95 inline unsafe regions in `sync/hotpath.rs` (14,077 lines;
+the largest subsystem bank), 11 in `unsafe.rs`. After: `hotpath.rs`
+holds ZERO unsafe regions and zero `unsafe` keywords under
+`#![forbid(unsafe_code)]` (`types.rs` too) — audited by
+`scripts/core_unsafe_gate.py --strict --dir kernel/core/src/sync`
+(rc=0) — and `unsafe.rs` carries 87 regions, ALL 87 annotated, zero
+GAP (the 11 pre-existing INV-SY rows carried; every collected region
+re-banked with an artifact).
+
+Region dispositions (73 directives in scripts/refactor/pass3/sync.json,
+spec coverage 95/95):
+- move-item (29): every Send/Sync proof of the guard family — verbatim
+  whole-item relocations, zero runtime surface;
+- move-fn (16): the six `unsafe fn` accessors (reset, get_ref,
+  get_mut_unchecked, two into_inner, read_preempt_disabled) plus
+  read_inner, caller_return_address (the per-lock acquire asm read),
+  deadlock_warn/puthex/putdec (cold diagnostics), locked_owner_alive_wait,
+  optimistic_probe, release-path-adjacent free fns, wait_qs_sleepy, and
+  with/with_preempt — the D-7 per-CPU windows, moved whole so the two
+  hottest fn entries in the kernel (small_alloc's 46M+/boot windows)
+  keep byte-identical call graphs (no new call, not even an inlined one);
+- wrap (6): rcu_link_tail, rcu_splice_cbs, rcu_run_cbs, rcu_cbs_row_init
+  (self-contained RCU guarded ops, slow paths), wake_task_pid (the
+  SleepMutex handoff pid read, shared by release and release_if_owner
+  via inline-call) and cpu_local_row_release (CpuLocalRef::drop's
+  in_use store) — all #[inline(always)];
+- inline-call (22): the 20 guard Deref/DerefMut derefs plus the two
+  shared-edge call sites, ending in the hand-written INV-SY-4
+  (guard_shared/guard_exclusive) and INV-SY-5 (keyed_guard_unlock)
+  contract fns from unsafe.rs — a per-block decision: trait-impl
+  methods cannot relocate (move-fn is structurally impossible for a
+  Deref impl), so the edge is named once in unsafe.rs and every call
+  site carries zero extra code in release (the wrapper is
+  always-inlined; pbench below pins release equality).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 73 directives (1040 cut lines relocated); the
+  manifest-closed verbatim audit (`pass3.py verify --base HEAD`)
+  shows the aggregate line multiset changed only by the claimed
+  mechanical lines (51 removed / 120 added: `unsafe {` braces,
+  wrapper signatures, call-site rewrites) — zero unclaimed edits;
+- warning count unchanged-or-lower (2222 -> 2218 raw warning lines,
+  riscv64 debug build; no new warning class);
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code (moved-item pairing for 82 of 86 annotated movable regions;
+  15 hand decision rows, each citing the pre-move artifact row — the
+  six non-generic one-line impls whose cross-file pairing missed, and
+  the nine wrapper blocks whose pre-move blocks the collection
+  replaced; final bank: sync/unsafe.rs 87/87 annotated, 0 GAP);
+- the hot-path print ratchet improved (un-annotated sites 8 -> 6 in
+  sync/hotpath.rs; the 61 annotated futex print sites all moved
+  verbatim with their annotations — behavior unchanged);
+- compiled-kernel identity: pair vs the pass-2 baseline ELFs (all
+  merged subsystems normalized) pairs 1:1 at equal size with 473/478/474
+  recorded exceptions per arch (rv/x86/a64) — the guard
+  deref/deref_mut/drop monomorphizations whose inline block became an
+  always-inlined contract fn (debug instruction selection shifts a few
+  bytes: RwSpinlockReadGuard<bool>::deref 29->33, SleepMutex::release
+  437->455, call_rcu 147->155, init 204->206,
+  rcu_softirq_handler 418->386), the five pre-existing
+  SeqLock<HugePageStats> zero-reference monomorphizations, the four
+  p3sched drift symbols, and 11 stale-base inline-jitter vanishings
+  (FdSet methods + interrupt::domain fns, no sync touch) — recorded in
+  docs/development/pass3-pair-exceptions.txt; release-codegen equality
+  is pinned by the pbench gate below;
+- pbench (x86_64 release, PBENCH DONE rc=0, two runs): every median
+  within band of the gate-debug9 baseline. Run 1 flagged two probes
+  whose history is quantization noise, not code: p3c_fault_file
+  0.070 vs baseline 0.060 (+16.7%) and p5e_child_spin 274.0 vs 250.9
+  (+9.2%) — both reproduce at baseline in run 2 (0.060, +0.0%;
+  251.8, +0.3%), and the ten prior gate logs show the same probes
+  swinging the full band (p3c 0.060-0.080 = one 10 ns TSC quantum;
+  p5e 250.9-274.1) with zero sync changes. Run 2 worst delta
+  +4.6% (p5b_dgram_recv_peek); improvements p5a_pipe -10.5%,
+  p6_unlink -6.9%, p1_null -3.2%. The always-inlined guard deref
+  wrappers keep release codegen identical, as designed;
+- pass-3 tool fixes (separate commit, reported to the coordinator):
+  generic `unsafe impl<K: ..>` regions were unlocatable by apply, and
+  an `unsafe fn`'s own signature keyword found no enclosing fn span.
 
 ## 6. Process (how this grows)
 ## 5.x addendum: the pass-3 unsafe collection, drivers (2026-11-26, p23-p3drivers lane)
