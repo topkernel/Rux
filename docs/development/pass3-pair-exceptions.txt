@@ -731,3 +731,11 @@ rux::debug::(hotpath::)?scribble::(audit_frames|verify_gs)$
 #   every other process symbol pairs 1:1 at equal size on all three arches;
 #   the moved TaskBorrow::from_raw pairs 1:1 at equal size under module-path
 #   normalization (its home moved to process::r#unsafe, body verbatim).
+
+# --- pass3final nine-subsystem gate (2026-11-27): the process collection's
+# drift, in both name forms (base without / current with the types::
+# segment); loose search patterns, same drift class as recorded above.
+rux::process::(types::)?TaskBorrow as .*deref::Deref(Mut)?>::deref(_mut)?$
+rux::process::(types::)?TaskRef as .*deref::Deref(Mut)?>::deref(_mut)?$
+rux::process::(hotpath::)?(types::)?current_pgid::\{closure#\d+\}$
+rux::process::(hotpath::)?(types::)?find_task_by_pid$
