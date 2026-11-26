@@ -30,7 +30,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::file::{File, FileFlags, FileOps};
-use crate::buffer::{alloc_skb, kfree_skb, SkBuff};
+use rux::net::{hotpath::alloc_skb, hotpath::kfree_skb, types::SkBuff};
 use crate::socket::{SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::types::WaitQueueHead;
 use crate::sync::types::Spinlock;
@@ -321,7 +321,7 @@ pub fn packet_sendto(sock: &Arc<RawSocket>, buf: &[u8], dest_mac: [u8; 6], wire_
         return Err(-5);
     }
     let src_mac = crate::ethernet::eth_dev_mac();
-    let proto = crate::buffer::EthProtocol::from_u16(wire_proto)
+    let proto = rux::net::types::EthProtocol::from_u16(wire_proto)
         .ok_or(-22)?; // EINVAL — only known ethertypes on the wire
     if crate::ethernet::eth_push_header(&mut skb, dest_mac, src_mac, proto).is_err() {
         kfree_skb(skb);

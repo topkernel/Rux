@@ -149,7 +149,7 @@ impl SockAddrIn {
         if data.len() < 16 {
             return None;
         }
-        crate::buffer::hdr_view::<SockAddrIn>(data)
+        rux::net::hotpath::hdr_view::<SockAddrIn>(data)
     }
 
     /// Get port number (host byte order)
@@ -186,7 +186,7 @@ impl SockAddrIn6 {
         if data.len() < SOCKADDR_IN6_LEN {
             return None;
         }
-        crate::buffer::hdr_view::<SockAddrIn6>(data)
+        rux::net::hotpath::hdr_view::<SockAddrIn6>(data)
     }
 
     /// Port (host byte order)

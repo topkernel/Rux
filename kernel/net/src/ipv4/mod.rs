@@ -9,7 +9,7 @@ pub mod route;
 pub mod checksum;
 mod defrag;
 
-use crate::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::ethernet::ETH_ALEN;
 
 /// W3: IPv4 identification counter for transmitted (fragmented) packets.
@@ -73,7 +73,7 @@ impl IpHdr {
     /// INH-BUF-3 on the shared header-view edge — no invented
     /// lifetimes; round-5 also fixed the old `&'static Self` lie).
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        crate::buffer::hdr_view::<IpHdr>(data)
+        rux::net::hotpath::hdr_view::<IpHdr>(data)
     }
 
     /// Calculate checksum
@@ -204,7 +204,7 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     // cannot express that, which is the point).
     let ip_hdr: IpHdr = {
         let data = skb.data_all();
-        *crate::buffer::hdr_view::<IpHdr>(data).ok_or(())?
+        *rux::net::hotpath::hdr_view::<IpHdr>(data).ok_or(())?
     };
 
     // net:pkt_drop (r13 hunt): every silent early-return below is a

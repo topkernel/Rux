@@ -215,7 +215,7 @@ pub fn ip_defrag(
             let mut hdr = e.hdr;
             let data = e.data;
             // The shared header-write edge over the exactly-sized buffer.
-            let Some(h) = crate::buffer::hdr_view_mut::<IpHdr>(&mut hdr[..]) else { return };
+            let Some(h) = rux::net::hotpath::hdr_view_mut::<IpHdr>(&mut hdr[..]) else { return };
             h.tot_len = total.to_be();
             h.frag_off = 0;
             h.check = 0;
@@ -234,7 +234,7 @@ pub fn ip_defrag(
 
 /// Rebuild a full-datagram skb and run the normal IP dispatch.
 fn dispatch_reassembled(hdr: [u8; IPHDR_LEN], payload: &[u8], src_ip: u32, dest_ip: u32) {
-    let mut skb = match crate::buffer::alloc_skb((IPHDR_LEN + payload.len()) as u32) {
+    let mut skb = match rux::net::hotpath::alloc_skb((IPHDR_LEN + payload.len()) as u32) {
         Some(s) => s,
         None => return, // drop — peer retransmits and we retry
     };

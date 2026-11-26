@@ -13,7 +13,7 @@ use super::{
     is_local_addr, is_unspecified, multicast_mac, neigh_update, solicited_node_multicast,
     transport_checksum6, Ipv6Addr, IPV6_ADDR_ALL_NODES, IPV6_ADDR_ALL_ROUTERS, IPV6_HDR_LEN,
 };
-use crate::buffer::alloc_skb;
+use rux::net::hotpath::alloc_skb;
 
 /// ICMPv6 header length
 pub const ICMPV6_HDR_LEN: usize = 4;
@@ -99,13 +99,13 @@ fn icmpv6_send(
 }
 
 /// Receive an ICMPv6 packet (base IPv6 header already pulled).
-pub fn icmpv6_rcv(skb: &crate::buffer::SkBuff, src: &Ipv6Addr, dst: &Ipv6Addr) {
+pub fn icmpv6_rcv(skb: &rux::net::types::SkBuff, src: &Ipv6Addr, dst: &Ipv6Addr) {
     if (skb.len as usize) < ICMPV6_HDR_LEN {
         return;
     }
     // Length checked above; the clamped safe view + shared header edge.
     let seg = skb.data_all();
-    let Some(hdr) = crate::buffer::hdr_view::<Icmpv6Hdr>(seg) else { return };
+    let Some(hdr) = rux::net::hotpath::hdr_view::<Icmpv6Hdr>(seg) else { return };
 
     // Checksum is mandatory in ICMPv6 — a mismatched message is dropped.
     if transport_checksum6(src, dst, super::next_header::ICMPV6, seg) != 0 {

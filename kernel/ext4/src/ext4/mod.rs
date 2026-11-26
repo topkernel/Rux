@@ -136,7 +136,7 @@ fn superblock_on_disk(disk: &[u8]) -> &superblock::Ext4SuperBlockOnDisk {
     );
     // The shared header-view edge (INH-BUF-3 shape): view covers at
     // least the struct; #[repr(C)] integer fields, unaligned-safe loads.
-    crate::net::buffer::hdr_view::<superblock::Ext4SuperBlockOnDisk>(view).unwrap_or_else(|| unreachable!())
+    crate::net::hotpath::hdr_view::<superblock::Ext4SuperBlockOnDisk>(view).unwrap_or_else(|| unreachable!())
 }
 
 pub struct Ext4FileSystem {

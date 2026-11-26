@@ -2,15 +2,140 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Network Buffer (SkBuff)
+//! The net subsystem's code (seed-core-design §2c.3): everything of the
+//! subsystem that is neither `unsafe.rs` nor `types.rs`, in one file.
+//!
+//! Sections follow the order of the old module declarations; each banner
+//! names the topic file it was (file_arc was file_arc.rs) and the file's
+//! module doc follows it as the section's header comment. What lived
+//! directly in mod.rs — the three socket-file Arc edges — is the first
+//! section. Inside a section the items keep their original order and
+//! text. Type definitions are in `types.rs`, the audited unsafe edges in
+//! `unsafe.rs`.
+//!
+//! None of the old files carried a per-file `#![forbid(unsafe_code)]`
+//! inner attribute, so none was dropped; the scattered unsafe of the
+//! sections is collected in pass 3.
+//!
+//! The file's NAME overstates until the shrink stage has run: it holds
+//! all of the subsystem's code under the hot-path name, not a verified
+//! set of hot-path functions (§2c.3, user decision 2026-11-25).
+//!
+//! Two renames were forced by the merge: the mod.rs root items `file_arc`
+//! and `take_file_arc` collide with the live twins of the same names in
+//! file_arc.rs (the ones the net service crate re-exports at its root),
+//! so the dead mod.rs copies take their file name as prefix
+//! (`mod_file_arc`, `mod_take_file_arc`); `reclaim_file_arc` had no twin
+//! and keeps its name. No caller changes: the mod.rs trio has none (each
+//! is a never-used `pub(crate)` fn, dead-code warned at base).
+
+use super::types::{EthProtocol, IpProtocol, PacketType, SkBuff};
+use core::sync::atomic::AtomicU64;
+
+use crate::fs::file::File;
+
+// ═══════════════ net root ═════════════════════════════════════════
+// (was mod.rs: its module declarations and its re-export of buffer's
+//  items are gone — every path names types or hotpath now; the file's
+//  module doc and its api note follow as this section's header comment)
+// Network Subsystem
+
+// The network hook table (NetHooks) is crate::api::net.
+
+// ==================== Socket-file Arc edges (round-5) ====================
+
+/// Recover a strong `Arc<T>` from a socket File's private_data slot —
+/// the ONE audited Arc-recovery edge for the net family (INV-NETARC-1).
+///
+/// INV-NETARC-1 (provenance + liveness): the File's private_data holds
+/// an `Arc::into_raw` pointer installed by the socket's own file-ops
+/// installer, and the caller has ALREADY identity-checked the file
+/// against that ops table (`*file.ops.get()` equality — the per-family
+/// `*_socket_from_fd` checks). The File's lifetime keeps the Arc alive
+/// (close() is the only drop path); increment-before-clone keeps the
+/// returned Arc independent of the slot.
+pub(crate) fn mod_file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
+    let ptr = file.private_data_ptr()? as *const T;
+    // SAFETY: INV-NETARC-1 — the pointer is a live Arc::into_raw value
+    // of this type (ops identity checked by the caller); the increment
+    // balances the from_raw construction below.
+    unsafe {
+        alloc::sync::Arc::increment_strong_count(ptr);
+        Some(alloc::sync::Arc::from_raw(ptr))
+    }
+}
+/// Take the Arc OUT of a closing socket File's private_data slot and
+/// HAND IT BACK (the close paths that must USE the socket before the
+/// drop — flush held data, protocol close; INV-NETARC-1 + the caller's
+/// ops identity check). The cell is emptied first, making a second
+/// reclaim impossible.
+pub(crate) fn reclaim_file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
+    let ptr = file.private_data_ptr()? as *const T;
+    file.clear_private_data();
+    // SAFETY: INV-NETARC-1 — reconstructing consumes the slot's single
+    // reference; the emptied cell makes this exactly-once.
+    unsafe { Some(alloc::sync::Arc::from_raw(ptr)) }
+}
+/// Take the Arc OUT of a closing socket File's private_data slot and
+/// drop it (the close path — INV-NETARC-1 + the caller's ops identity
+/// check; the slot is cleared under the file's own close serialization).
+pub(crate) fn mod_take_file_arc<T>(file: &crate::fs::file::File) -> Option<()> {
+    let ptr = file.private_data_ptr()? as *const T;
+    // SAFETY: INV-NETARC-1 — reconstructing the stored Arc consumes the
+    // slot's single reference (close is the last user of the file).
+    unsafe {
+        drop(alloc::sync::Arc::from_raw(ptr));
+    }
+    file.clear_private_data();
+    Some(())
+}
+
+// ═══════════════ file_arc ═════════════════════════════════════════
+// (was file_arc.rs)
+// The net stack's file→Arc identity helpers (framework side; crate-flip
+// rung 2): the raw adoption edge lives framework-side because the crate
+// is forbid-enforced. The type claim is the caller's ops-identity check.
+
+/// Adopt the File's private-data Arc (INV-FS-FILEPRIV pattern: the
+/// caller checked the ops-table identity first — the type proof).
+pub fn file_arc<T>(file: &File) -> Option<alloc::sync::Arc<T>> {
+    // SAFETY: the caller's ops identity check proves the type; the Arc
+    // was leaked by into_raw at creation and the File holds a ref.
+    unsafe {
+        let p = (*file.private_data.get())?;
+        if p.is_null() { return None; }
+        let arc = alloc::sync::Arc::from_raw(p as *const T);
+        // clone then forget to keep the File's reference alive
+        let cloned = alloc::sync::Arc::clone(&arc);
+        core::mem::forget(arc);
+        Some(cloned)
+    }
+}
+
+/// Take the Arc (consuming the File's reference — the close-path twin).
+pub fn take_file_arc<T>(file: &File) -> Option<alloc::sync::Arc<T>> {
+    // SAFETY: same identity contract; the take empties the cell (the
+    // close-path's exactly-once reclaim).
+    unsafe {
+        let p = (*file.private_data.get()).take()?;
+        Some(alloc::sync::Arc::from_raw(p as *const T))
+    }
+}
+
+// ═══════════════ buffer ═════════════════════════════════════════
+// (was buffer.rs)
+// Network Buffer (SkBuff)
 
 // (INV-SKB-1: the sk_buff family — heads are allocator-owned blocks
 // with headroom-tracked data pointers (alloc/reserve/put maintain the
 // span invariants); data_slice_at rows are bounds-checked against the
 // len tail; Send/Sync carried by the head's single-owner discipline.)
-use core::sync::atomic::AtomicU64;
 
-pub use super::types::{EthProtocol, IpProtocol, PacketType, SkBuff};
+// (INV-SKB-1: the sk_buff family — heads are allocator-owned blocks
+// with headroom-tracked data pointers (alloc/reserve/put maintain the
+// span invariants); data_slice_at rows are bounds-checked against the
+// len tail; Send/Sync carried by the head's single-owner discipline.)
+
 
 impl EthProtocol {
     /// Convert from u16

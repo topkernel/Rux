@@ -16,7 +16,7 @@
 
 pub mod icmpv6;
 
-use crate::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::sync::types::Spinlock;
 use crate::drivers::timer::HZ;
 

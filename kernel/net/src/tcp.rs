@@ -4,7 +4,7 @@
 //!
 //! TCP Protocol
 
-use crate::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::ipv4::{route, checksum};
 use core::sync::atomic::{AtomicU32, Ordering};
 pub use crate::config::TCP_SOCKET_TABLE_SIZE;
@@ -744,7 +744,7 @@ impl TcpTxBatch {
         for d in self.descs.drain(..) {
             tcp_trace_out(&d);
             let data = &self.arena[d.off..d.off + d.len];
-            let mut skb = match crate::buffer::alloc_skb(1500) {
+            let mut skb = match rux::net::hotpath::alloc_skb(1500) {
                 Some(s) => s,
                 None => continue, // R35: allocation failure outside the lock — drop, no panic
             };

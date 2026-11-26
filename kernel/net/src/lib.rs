@@ -41,10 +41,10 @@ pub mod arp;
 // arithmetic, slice construction — 22 unsafe constructs) stays
 // FRAMEWORK-side (the unsafe.rs pattern); the crate consumes it
 // via the re-export below.
-pub use rux::net::buffer;
-pub use rux::net::file_arc::file_arc;
-pub use rux::net::file_arc::take_file_arc as reclaim_file_arc;
-pub use rux::net::file_arc::take_file_arc;
+pub use rux::net::{types, hotpath};
+pub use rux::net::hotpath::file_arc;
+pub use rux::net::hotpath::take_file_arc as reclaim_file_arc;
+pub use rux::net::hotpath::take_file_arc;
 pub use rux::net::r#unsafe;
 pub mod ethernet;
 pub mod icmp;

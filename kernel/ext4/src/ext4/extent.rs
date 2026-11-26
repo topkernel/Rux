@@ -1423,7 +1423,7 @@ pub fn iblock_extent_mut(i_block: &mut [u32; 15], index: usize) -> Option<&mut E
     }
     // Bounds checked above; the u32-array's alignment covers
     // Ext4Extent's (the shared header-view edge).
-    crate::net::buffer::hdr_view_mut::<Ext4Extent>(
+    crate::net::hotpath::hdr_view_mut::<Ext4Extent>(
         crate::safety::bytes::bytes_of_mut(i_block)[off..].as_mut(),
     )
 }

@@ -5,7 +5,7 @@
 //! ICMP Protocol (RFC 792)
 
 #![forbid(unsafe_code)]
-use crate::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::ipv4::checksum::ip_checksum;
 
 /// ICMP header length (minimum)
@@ -51,7 +51,7 @@ impl IcmpHdr {
         if data.len() < ICMP_HDR_LEN {
             return None;
         }
-        crate::buffer::hdr_view::<IcmpHdr>(data)
+        rux::net::hotpath::hdr_view::<IcmpHdr>(data)
     }
 
     /// Calculate ICMP checksum over header + data
@@ -132,7 +132,7 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
                 // The payload starts with original IP header + 8 bytes
                 // of transport header (length checked above — the
                 // shared header-view edge, INH-BUF-3).
-                let Some(orig_ip_hdr) = crate::buffer::hdr_view::<crate::ipv4::IpHdr>(payload) else { return Ok(()) };
+                let Some(orig_ip_hdr) = rux::net::hotpath::hdr_view::<crate::ipv4::IpHdr>(payload) else { return Ok(()) };
                 let orig_src_ip = u32::from_be(orig_ip_hdr.saddr);
                 let orig_dst_ip = u32::from_be(orig_ip_hdr.daddr);
                 let orig_proto = orig_ip_hdr.protocol;
@@ -181,7 +181,7 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
 
 /// Send ICMP echo reply in response to echo request
 fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
-    let mut skb = match crate::buffer::alloc_skb(1500) {
+    let mut skb = match rux::net::hotpath::alloc_skb(1500) {
         Some(s) => s,
         None => return,
     };
@@ -240,7 +240,7 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
 
     hdr.checksum = IcmpHdr::compute_checksum(hdr_bytes, orig_data);
 
-    let mut skb = match crate::buffer::alloc_skb(1500) {
+    let mut skb = match rux::net::hotpath::alloc_skb(1500) {
         Some(s) => s,
         None => return,
     };
@@ -257,7 +257,7 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
     // Extract source IP from original IP header to use as destination
     if data.len() >= crate::ipv4::IPHDR_LEN {
         // Length checked above; the shared header-view edge.
-        let Some(orig_ip_hdr) = crate::buffer::hdr_view::<crate::ipv4::IpHdr>(&data[..crate::ipv4::IPHDR_LEN]) else { return };
+        let Some(orig_ip_hdr) = rux::net::hotpath::hdr_view::<crate::ipv4::IpHdr>(&data[..crate::ipv4::IPHDR_LEN]) else { return };
         let orig_src_ip = u32::from_be(orig_ip_hdr.saddr);
         let _ = crate::ipv4::ipv4_send(skb, orig_src_ip, 1);
     }
@@ -284,7 +284,7 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
     // Synthetic IP header of the quoted datagram (hdr_view_mut owns the
     // typed write into the exactly-sized byte array).
     let mut quoted_ip = [0u8; crate::ipv4::IPHDR_LEN];
-    if let Some(h) = crate::buffer::hdr_view_mut::<crate::ipv4::IpHdr>(&mut quoted_ip[..]) {
+    if let Some(h) = rux::net::hotpath::hdr_view_mut::<crate::ipv4::IpHdr>(&mut quoted_ip[..]) {
         h.version_ihl = 0x45;
         h.tot_len = ((crate::ipv4::IPHDR_LEN + 8) as u16).to_be();
         h.ttl = crate::ipv4::IP_DEFAULT_TTL;
@@ -331,7 +331,7 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
     }
     hdr.checksum = !total as u16;
 
-    let mut skb = match crate::buffer::alloc_skb(128) {
+    let mut skb = match rux::net::hotpath::alloc_skb(128) {
         Some(s) => s,
         None => return,
     };

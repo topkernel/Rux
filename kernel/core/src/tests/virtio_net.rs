@@ -13,7 +13,7 @@
 
 use alloc::format;
 use crate::drivers::net::virtio_net;
-use crate::net::buffer::SkBuff;
+use crate::net::types::SkBuff;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_virtio_net() {

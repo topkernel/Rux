@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 use crate::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
-use rux::net::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::sync::types::SeqLock;
 use crate::sync::types::Spinlock;
 

@@ -5,7 +5,7 @@
 //! ARP Protocol
 
 #![forbid(unsafe_code)]
-use crate::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;
 use crate::drivers::timer::get_jiffies;
@@ -101,7 +101,7 @@ impl ArpPacket {
             return None;
         }
 
-        crate::buffer::hdr_view::<ArpPacket>(data)
+        rux::net::hotpath::hdr_view::<ArpPacket>(data)
     }
 
     /// Check if this is an ARP request
@@ -429,7 +429,7 @@ fn arp_flush_pending(ip: u32, mac: [u8; ETH_ALEN]) {
             &mut skb,
             mac,
             src_mac,
-            crate::buffer::EthProtocol::ETH_P_IP,
+            rux::net::types::EthProtocol::ETH_P_IP,
         )
         .is_err()
         {
@@ -665,7 +665,7 @@ fn send_arp_reply(
     target_mac: [u8; ETH_ALEN],
     target_ip: u32,
 ) -> Result<(), ()> {
-    let mut skb = crate::buffer::alloc_skb(128).ok_or(())?;
+    let mut skb = rux::net::hotpath::alloc_skb(128).ok_or(())?;
 
     arp_build_reply(&mut skb, sender_mac, sender_ip.to_be(), target_mac, target_ip.to_be())?;
 
@@ -673,7 +673,7 @@ fn send_arp_reply(
         &mut skb,
         target_mac,
         sender_mac,
-        crate::buffer::EthProtocol::ETH_P_ARP,
+        rux::net::types::EthProtocol::ETH_P_ARP,
     )?;
 
     transmit_arp_packet(skb);
@@ -692,7 +692,7 @@ pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
     let sender_mac = get_local_mac();
     let sender_ip = get_local_ip();
 
-    let mut skb = crate::buffer::alloc_skb(128).ok_or(())?;
+    let mut skb = rux::net::hotpath::alloc_skb(128).ok_or(())?;
 
     arp_build_request(&mut skb, sender_mac, sender_ip.to_be(), target_ip.to_be())?;
 
@@ -701,7 +701,7 @@ pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
         &mut skb,
         broadcast_mac,
         sender_mac,
-        crate::buffer::EthProtocol::ETH_P_ARP,
+        rux::net::types::EthProtocol::ETH_P_ARP,
     )?;
 
     transmit_arp_packet(skb);

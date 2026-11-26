@@ -4,7 +4,7 @@
 //!
 //! IPv4 Routing Table
 
-use crate::buffer::SkBuff;
+use rux::net::types::SkBuff;
 use crate::config::ROUTE_TABLE_SIZE;
 
 /// Routing table entry
