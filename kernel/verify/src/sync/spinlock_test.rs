@@ -16,6 +16,11 @@ pub struct RawSpinlock {
     locked: AtomicU32,
 }
 
+// The kernel's owner-in-word protocol (grq-source-fix): the word holds
+// cpu+1, zero means free; holder_cpu/held_by read it, and the terminal
+// path force-releases with ownership provable from one load.
+const MAX_CPUS: usize = 8;
+
 impl RawSpinlock {
     #[inline]
     pub const fn new() -> Self {
@@ -39,6 +44,30 @@ impl RawSpinlock {
             self.record_owner(caller_return_address());
         }
         ok
+    }
+
+    /// Terminal-path force release (grq-source-fix): the caller proves
+    /// ownership from the lock word itself (held_by(cpu)); no
+    /// preempt_count_sub — the terminal path resets the whole count.
+    pub fn force_unlock_terminal(&self) {
+        self.clear_owner();
+        self.locked.store(0, Ordering::Release);
+    }
+
+    pub fn locked_word(&self) -> u32 {
+        self.locked.load(Ordering::Relaxed)
+    }
+
+    pub fn holder_cpu(&self) -> Option<usize> {
+        let w = self.locked.load(Ordering::Relaxed);
+        if w == 0 || w > MAX_CPUS as u32 {
+            return None;
+        }
+        Some((w - 1) as usize)
+    }
+
+    pub fn held_by(&self, cpu: usize) -> bool {
+        self.locked.load(Ordering::Relaxed) == (cpu as u32).wrapping_add(1)
     }
 
     #[inline]

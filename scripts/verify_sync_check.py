@@ -230,6 +230,14 @@ MAPPINGS = [
         "type": "RawSpinlock",
         "compare": ["try_lock", "unlock", "is_locked"],
         "skip": ["lock", "new"],  # lock has deadlock warn stripped by design
+        "transforms": [
+            # RT-plan R1 preempt accounting + the audited-edge caller path:
+            # the mirror carries local hooks of the same names
+            (r'crate::interrupt::preempt::preempt_count_add', 'preempt_count_add'),
+            (r'crate::interrupt::preempt::preempt_count_sub', 'preempt_count_sub'),
+            (r'crate::interrupt::preempt::PREEMPT_OFFSET', 'PREEMPT_OFFSET'),
+            (r'crate::sync::r#unsafe::caller_return_address', 'caller_return_address'),
+        ],
     },
     {
         # S-1 model-checking pilot: the extracted SleepMutex handoff
