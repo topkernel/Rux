@@ -1,0 +1,152 @@
+# docs/development/core-unsafe-allowance.txt — the pass-3
+# allowance list (see scripts/core_unsafe_gate.py). One path +
+# reason per line; a subsystem's lane deletes its rows when it
+# collects. Seeded from the pass-3 baseline tree state.
+kernel/core/src/arch/aarch64/boot.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/context.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/cpu.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 14 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/ipi.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 8 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/asid.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/exception.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 8 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/fixmap.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/memory_layout.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/mm_ops.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 9 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/mmu_init.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 16 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/page_fault.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/mm/pagetable.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/process.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/smp.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 13 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/thread.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/trap.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/aarch64/uaccess.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 24 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/boot.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/context.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 14 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/cpu.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/ipi.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 14 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/asid.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/exception.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 19 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/fixmap.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/memory_layout.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/mm_ops.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 21 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/mmu_init.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 48 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/page_fault.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mm/pagetable.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/mod.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/process.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/smp.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 8 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/thread.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 22 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/trap.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 51 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/uaccess.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/riscv64/vext.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 8 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/uaccess_safe.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 18 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/boot.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 21 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/context.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 18 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/cpu.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 42 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/ipi.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mm/asid.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 10 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mm/exception.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mm/memory_layout.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mm/mm_ops.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mm/mmu_init.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 22 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mm/page_fault.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mod.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/mpk.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 10 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/process.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/smp.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/thread.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 16 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/trap.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 65 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/arch/x86_64/uaccess.rs	pre-collection state at baseline f8e6eb94d (arch asm/register/CSR floor): 19 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/boot_edges.rs	pre-collection state at baseline f8e6eb94d: 11 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/cmdline.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/console.rs	pre-collection state at baseline f8e6eb94d: 8 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/cov.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/backtrace.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/hung_task.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/leakorigin.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 17 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/ledger.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/memwatch.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/mmforensics.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/mod.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/oops.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/pathstash.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/pstore.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/scribble.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 31 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/slowtask.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/taskdump.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/debug/wildwatch.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 10 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/ashmem.rs	pre-collection state at baseline f8e6eb94d: 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/blkdev/mod.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/drm/mod.rs	pre-collection state at baseline f8e6eb94d: 9 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/gpu/framebuffer.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/gpu/mod.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/gpu/virtio_gpu.rs	pre-collection state at baseline f8e6eb94d: 10 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/input/evdev.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/input/mod.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/input/virtio_input.rs	pre-collection state at baseline f8e6eb94d: 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/intc/apic.rs	pre-collection state at baseline f8e6eb94d: 14 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/intc/clint.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/intc/gicv3.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/loop_dev.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/net/space.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/net/virtio_net.rs	pre-collection state at baseline f8e6eb94d: 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/rtc.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/timer/aarch64.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/timer/riscv64.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/timer/x86_64.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/virtio/mod.rs	pre-collection state at baseline f8e6eb94d: 24 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/drivers/virtio/queue.rs	pre-collection state at baseline f8e6eb94d: 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/fs/hotpath.rs	pre-collection state at baseline f8e6eb94d: 258 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/init.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/initrd.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/interrupt/irqdesc.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/interrupt/softirq.rs	pre-collection state at baseline f8e6eb94d: 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/interrupt/tasklet.rs	pre-collection state at baseline f8e6eb94d: 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/io_uring/mod.rs	pre-collection state at baseline f8e6eb94d: 13 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/ipc/hotpath.rs	pre-collection state at baseline f8e6eb94d: 42 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/lib.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/list.rs	pre-collection state at baseline f8e6eb94d: 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/mm/hotpath.rs	pre-collection state at baseline f8e6eb94d: 53 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/module/mod.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/net/hotpath.rs	pre-collection state at baseline f8e6eb94d: 29 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/perf/mod.rs	pre-collection state at baseline f8e6eb94d: 40 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/printk.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/process/hotpath.rs	pre-collection state at baseline f8e6eb94d: 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/bytes.rs	pre-collection state at baseline f8e6eb94d: 11 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/call.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/dma.rs	pre-collection state at baseline f8e6eb94d: 11 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/frame.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/mmio.rs	pre-collection state at baseline f8e6eb94d: 8 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/ptr.rs	pre-collection state at baseline f8e6eb94d: 13 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/ring.rs	pre-collection state at baseline f8e6eb94d: 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/safety/slot.rs	pre-collection state at baseline f8e6eb94d: 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/sbi.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/security/cap_lsm.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/security/lsm.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/security/mod.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/signal.rs	pre-collection state at baseline f8e6eb94d: 13 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/signal_unsafe.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/sync/hotpath.rs	pre-collection state at baseline f8e6eb94d: 95 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/fdtable.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/framebuffer.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/listhead.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/loop_flags.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/mod.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/net_pins.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/network.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/preemptive_scheduler.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/process_tree.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/reparent_safety.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 5 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/safety_primitives.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/scheduler.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/small_alloc.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 9 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/syscall_file.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/syscall_io.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/syscall_memory.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/syscall_process.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/syscall_time.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 9 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/virtio_net.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/tests/wait4.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 3 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/timer.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/timer/nohz.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/timer/wheel.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
+kernel/core/src/trace/mod.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
