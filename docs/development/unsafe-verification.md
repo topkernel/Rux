@@ -31,14 +31,14 @@ FILE` owns one), and the gate fails on a drop that
 - with artifact (non-GAP): **1898** (95.1%)
 - GAP: **98**
 - by kind: block=1764, unsafe-extern=6, unsafe-fn=97, unsafe-impl=129
-- by category (regions carry 0..n tags): ptr-ops=478, asm=267, volatile=148, raw-construct=31, addr-arith=26, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
+- by category (regions carry 0..n tags): ptr-ops=477, asm=267, volatile=148, raw-construct=31, addr-arith=26, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1784**
-- recovered from reference versions: **114** (same-file 47, edited-site 1, file-move 0, moved-item 66)
-- references consulted: HEAD, MERGE_HEAD, 1354d238f
-- annotated regions, baseline -> this bank: **2430 -> 1898**
+- artifacts kept by id: **1873**
+- recovered from reference versions: **0**
+- references consulted: 1ae2a43c2
+- annotated regions, baseline -> this bank: **1898 -> 1898**
 
 ## Per-subsystem
 
@@ -1614,123 +1614,118 @@ FILE` owns one), and the gate fails on a drop that
 
 ## sched
 
-### kernel/core/src/sched/hotpath.rs (17)
+### kernel/core/src/sched/unsafe.rs (108)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 3140 | task | block | - | INV:INV-SCE-2 | `d0e3ad9d40cd` |
-| 3171 | <module> | unsafe-impl | - | INV:INV-RD-CLAIM | `f5f80fc5288f` |
-| 5620 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `f87e25390061` |
-| 6084 | grq_current_fp | block | asm | INV:INV-SCE-3 | `c79b33f13d4f` |
-| 6089 | grq_current_fp | block | asm | INV:INV-SCE-3 | `c2e2172c221f` |
-| 6094 | grq_current_fp | block | asm | INV:INV-SCE-3 | `3e0709ca40ff` |
-| 7401 | clear_trap_scratch | block | asm | INV:INV-SCE-10 | `2ba80962d86a` |
-| 7434 | init | block | - | INV:INV-SCE-4 | `d11d0bc6c937` |
-| 7589 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `4be52eaa7455` |
-| 7599 | alloc_task_slot | block | ptr-ops | INV:INV-TL-1 | `ec8d090e5f5c` |
-| 7606 | alloc_task_slot | block | - | INV:INV-TL-1 | `018d0a73c2ef` |
-| 8018 | free_task_slot | block | - | INV:INV-TL-2 | `233ea92ad9fc` |
-| 8031 | free_task_slot | block | volatile,ptr-ops | GAP | `4cc09ac957f5` |
-| 10931 | scheduler_tick | block | volatile,ptr-ops | INV:INV-SCE-1 | `e5e9604b1a44` |
-| 12547 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `a3b9f6d66557` |
-| 12554 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `38e77e20c54f` |
-| 12561 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `9013c4d1ac95` |
-
-### kernel/core/src/sched/unsafe.rs (91)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 53 | idle_task_ptr | block | - | INV:INV-SCE-4 | `32b7c5cbc3b4` |
-| 62 | idle_task_storage_base | block | - | INV:INV-SCE-4 | `e60b37709add` |
-| 92 | task_mut | block | - | INV:INV-SCE-1 | `e0cbddd56e69` |
-| 108 | task_shared | block | - | INV:INV-SCE-2 | `768bf35e4c65` |
-| 151 | grq_stage | block | - | INV:INV-SCE-3 | `3eedb1acca63` |
-| 169 | grq_ref | block | - | INV:INV-SCE-3 | `6d0ab7beb473` |
-| 182 | grq_mut | block | - | INV:INV-SCE-3 | `a3a931e7357e` |
-| 194 | task_poison_pair_volatile | block | volatile,ptr-ops | INV:INV-TL-2 | `e95764a7967e` |
-| 215 | task_pid_volatile | block | volatile,ptr-ops | INV:INV-SCE-2 | `1897c09b729c` |
-| 232 | task_ownership_qword | block | volatile,ptr-ops | INV:INV-SCE-2 | `527333002c93` |
-| 253 | current_trap_ip | block | - | INV:INV-SCE-11 | `b2157372db54` |
-| 270 | current_task_mut | block | - | INV:INV-SCE-11 | `6a422c10ec97` |
-| 293 | arch_context_switch | block | - | INV:INV-SCE-5 | `0df4c46ba34b` |
-| 303 | task_borrow | block | - | INV:INV-SCE-2 | `3f582c0cba5b` |
-| 318 | cgroup_node_ref | block | - | INV:INV-SCE-8 | `b70b3b1a9973` |
-| 333 | pt_regs_at_top | block | ptr-ops | INV:INV-SCE-9 | `a84179e6f556` |
-| 350 | list_next | block | - | INV:INV-SCE-7 | `7f4e26bd3fc3` |
-| 359 | task_of_rt_list | block | ptr-ops | INV:INV-SCE-7 | `61cdb27f9505` |
-| 368 | rt_list_add | block | - | INV:INV-SCE-7 | `520092129602` |
-| 376 | rt_list_add_tail | block | - | INV:INV-SCE-7 | `f54c8d4fe1f3` |
-| 384 | rt_list_del | block | - | INV:INV-SCE-7 | `8124dcd909ea` |
-| 394 | rt_list_linked | block | ptr-ops | INV:INV-SCE-7 | `65f82e8a8ef7` |
-| 493 | linked_at | block | - | INV:INV-SCE-6 | `694f66163ab5` |
-| 504 | detach_at | block | - | INV:INV-SCE-6 | `ccaf18d9863a` |
-| 537 | rb_nil | block | - | INV:INV-SCE-6 | `9b99ea531eb5` |
-| 547 | node_of_task | block | ptr-ops | INV:INV-SCE-6 | `fbdd9a87f386` |
-| 555 | task_of_node | block | ptr-ops | INV:INV-SCE-6 | `e369c3714add` |
-| 564 | node_key | block | ptr-ops | INV:INV-SCE-6 | `be1a810bd955` |
-| 565 | node_key | block | - | INV:INV-SCE-6 | `50356c866f11` |
-| 616 | subtree_min | block | - | INV:INV-SCE-6 | `2f412a1fe807` |
-| 631 | next | block | - | INV:INV-SCE-6 | `c1c34e12fb42` |
-| 633 | next | block | - | INV:INV-SCE-6 | `f09bc34e7157` |
-| 636 | next | block | - | INV:INV-SCE-6 | `fdad9b29ccc9` |
-| 637 | next | block | - | INV:INV-SCE-6 | `146dc044f9de` |
-| 639 | next | block | - | INV:INV-SCE-6 | `f2df938dfe21` |
-| 651 | rotate_left | block | - | INV:INV-SCE-6 | `97663e56716e` |
-| 652 | rotate_left | block | - | INV:INV-SCE-6 | `e1fda550f66a` |
-| 653 | rotate_left | block | - | INV:INV-SCE-6 | `bb95114cd292` |
-| 654 | rotate_left | block | - | INV:INV-SCE-6 | `bd5e4fe599ab` |
-| 656 | rotate_left | block | - | INV:INV-SCE-6 | `e128b9333661` |
-| 657 | rotate_left | block | - | INV:INV-SCE-6 | `2bba9426fc20` |
-| 660 | rotate_left | block | - | INV:INV-SCE-6 | `6b308954ed29` |
-| 661 | rotate_left | block | - | INV:INV-SCE-6 | `697e6838bfe9` |
-| 663 | rotate_left | block | - | INV:INV-SCE-6 | `7b1eace2af71` |
-| 665 | rotate_left | block | - | INV:INV-SCE-6 | `6942d86ab289` |
-| 666 | rotate_left | block | - | INV:INV-SCE-6 | `daafc6d92b84` |
-| 672 | rotate_right | block | - | INV:INV-SCE-6 | `12ebbe263c74` |
-| 673 | rotate_right | block | - | INV:INV-SCE-6 | `be847fb9be38` |
-| 674 | rotate_right | block | - | INV:INV-SCE-6 | `1cd4808464dd` |
-| 675 | rotate_right | block | - | INV:INV-SCE-6 | `5acfd649be58` |
-| 677 | rotate_right | block | - | INV:INV-SCE-6 | `52180ff1adea` |
-| 678 | rotate_right | block | - | INV:INV-SCE-6 | `8aadd6d65be3` |
-| 681 | rotate_right | block | - | INV:INV-SCE-6 | `54f0d58648a5` |
-| 682 | rotate_right | block | - | INV:INV-SCE-6 | `d9f8c6357914` |
-| 684 | rotate_right | block | - | INV:INV-SCE-6 | `f51b365b6ece` |
-| 686 | rotate_right | block | - | INV:INV-SCE-6 | `5c2b42e5b27b` |
-| 687 | rotate_right | block | - | INV:INV-SCE-6 | `7e8c7ed5104c` |
-| 700 | insert | block | - | INV:INV-SCE-6 | `84f874092151` |
-| 707 | insert | block | - | INV:INV-SCE-6 | `0633ccf73118` |
-| 708 | insert | block | - | INV:INV-SCE-6 | `eeee5bac2da9` |
-| 710 | insert | block | - | INV:INV-SCE-6 | `9725b83fadf6` |
-| 720 | insert | block | - | INV:INV-SCE-6 | `566ca1b98b61` |
-| 721 | insert | block | - | INV:INV-SCE-6 | `4e3f356e6be1` |
-| 723 | insert | block | - | INV:INV-SCE-6 | `435b28fa5be8` |
-| 726 | insert | block | - | INV:INV-SCE-6 | `c6b32b0661a7` |
-| 727 | insert | block | - | INV:INV-SCE-6 | `e1924fd7dcad` |
-| 728 | insert | block | - | INV:INV-SCE-6 | `b5e36d29e41c` |
-| 730 | insert | block | - | INV:INV-SCE-6 | `740a292f8a8d` |
-| 732 | insert | block | - | INV:INV-SCE-6 | `4dea4a9e8721` |
-| 733 | insert | block | - | INV:INV-SCE-6 | `4f472e47acea` |
-| 745 | insert_fixup | block | - | INV:INV-SCE-6 | `196cec56f286` |
-| 793 | erase | block | - | INV:INV-SCE-6 | `51a38950871f` |
-| 796 | erase | block | - | INV:INV-SCE-6 | `84beefb4bbf1` |
-| 811 | erase | block | - | INV:INV-SCE-1 | `e9cef0ebdda4` |
-| 921 | kid | block | - | INV:INV-SCE-1 | `e4711c2e71f9` |
-| 928 | erase_fixup | block | - | INV:INV-SCE-1 | `a2b13b46940f` |
-| 1098 | bh | block | - | GAP | `101a5acd10fb` |
-| 1103 | bh | block | - | GAP | `53f9cd8d3f66` |
-| 1121 | debug_black_height | block | - | GAP | `efde6d1d4857` |
-| 1135 | grq_ptr_shared | block | - | INV:INV-SCE-3 | `397ffd151e2d` |
-| 1143 | grq_ptr_mut | block | ptr-ops | INV:INV-SCE-3 | `5efa030b04fc` |
-| 1163 | per_cpu_shared | block | - | INV:INV-SCE-10 | `24408285af00` |
-| 1173 | per_cpu_mut | block | - | INV:INV-SCE-10 | `c8ee81d524b2` |
-| 1190 | secondary_idle_publish | block | - | INV:INV-SCE-4 | `3c7ba3cdf4cf` |
-| 1197 | secondary_idle_table_base | block | - | INV:INV-SCE-4 | `716cc69baac7` |
-| 1203 | secondary_idle_task | block | - | INV:INV-SCE-4 | `454df1c16a83` |
-| 1230 | <module> | unsafe-impl | - | GAP | `1e1b6cf41dc4` |
-| 1232 | <module> | unsafe-impl | - | GAP | `664bbf5753e9` |
-| 1250 | evring_slot_mut | block | - | INV:INV-SCHED-EVRING-1 | `d1096a2a47c2` |
-| 1265 | evring_slot_ref | block | - | INV:INV-SCHED-EVRING-1 | `5ec0131706a1` |
-| 1283 | <module> | unsafe-impl | - | GAP | `794fb5e978ec` |
+| 58 | idle_task_ptr | block | - | INV:INV-SCE-4 | `eb64d7757ab1` |
+| 67 | idle_task_storage_base | block | - | INV:INV-SCE-4 | `3ba7ae83a6e1` |
+| 97 | task_mut | block | - | INV:INV-SCE-1 | `7521e792f13a` |
+| 113 | task_shared | block | - | INV:INV-SCE-2 | `bc335719b669` |
+| 156 | grq_stage | block | - | INV:INV-SCE-3 | `e879a7636656` |
+| 174 | grq_ref | block | - | INV:INV-SCE-3 | `7b9ed722bbf2` |
+| 187 | grq_mut | block | - | INV:INV-SCE-3 | `82f5c9c4cbe8` |
+| 199 | task_poison_pair_volatile | block | volatile,ptr-ops | INV:INV-TL-2 | `0323c9cc63d7` |
+| 220 | task_pid_volatile | block | volatile,ptr-ops | INV:INV-SCE-2 | `8eacc2353ab7` |
+| 237 | task_ownership_qword | block | volatile,ptr-ops | INV:INV-SCE-2 | `4b610dbcb996` |
+| 258 | current_trap_ip | block | - | INV:INV-SCE-11 | `5b65c9ff4360` |
+| 275 | current_task_mut | block | - | INV:INV-SCE-11 | `753e5cfa2b0a` |
+| 298 | arch_context_switch | block | - | INV:INV-SCE-5 | `db46397f3585` |
+| 308 | task_borrow | block | - | INV:INV-SCE-2 | `9b1e30f4e954` |
+| 323 | cgroup_node_ref | block | - | INV:INV-SCE-8 | `ae0d4aaf0224` |
+| 338 | pt_regs_at_top | block | ptr-ops | INV:INV-SCE-9 | `209ff77ac2b0` |
+| 355 | list_next | block | - | INV:INV-SCE-7 | `9573fb125a8e` |
+| 364 | task_of_rt_list | block | ptr-ops | INV:INV-SCE-7 | `d0fe06128885` |
+| 373 | rt_list_add | block | - | INV:INV-SCE-7 | `bdbbb5f017f6` |
+| 381 | rt_list_add_tail | block | - | INV:INV-SCE-7 | `90efce4e9421` |
+| 389 | rt_list_del | block | - | INV:INV-SCE-7 | `6b8c70d505ab` |
+| 399 | rt_list_linked | block | ptr-ops | INV:INV-SCE-7 | `7b27370dc26c` |
+| 498 | linked_at | block | - | INV:INV-SCE-6 | `02886471c71f` |
+| 509 | detach_at | block | - | INV:INV-SCE-6 | `a61ecece3259` |
+| 542 | rb_nil | block | - | INV:INV-SCE-6 | `2775ccfb8b09` |
+| 552 | node_of_task | block | ptr-ops | INV:INV-SCE-6 | `302e686d5517` |
+| 560 | task_of_node | block | ptr-ops | INV:INV-SCE-6 | `9f4a6a03133b` |
+| 569 | node_key | block | ptr-ops | INV:INV-SCE-6 | `08cb7e970ce6` |
+| 570 | node_key | block | - | INV:INV-SCE-6 | `62f35adffdc5` |
+| 621 | subtree_min | block | - | INV:INV-SCE-6 | `c3139df84f83` |
+| 636 | next | block | - | INV:INV-SCE-6 | `c7e5d5577369` |
+| 638 | next | block | - | INV:INV-SCE-6 | `636013015c3c` |
+| 641 | next | block | - | INV:INV-SCE-6 | `7fa6f6907ab4` |
+| 642 | next | block | - | INV:INV-SCE-6 | `21a66a0445d0` |
+| 644 | next | block | - | INV:INV-SCE-6 | `b23a3678749f` |
+| 656 | rotate_left | block | - | INV:INV-SCE-6 | `dd86b1d89c24` |
+| 657 | rotate_left | block | - | INV:INV-SCE-6 | `2b45e02ffbf7` |
+| 658 | rotate_left | block | - | INV:INV-SCE-6 | `c4524a302ea2` |
+| 659 | rotate_left | block | - | INV:INV-SCE-6 | `972b215a0150` |
+| 661 | rotate_left | block | - | INV:INV-SCE-6 | `8dd75a7c7233` |
+| 662 | rotate_left | block | - | INV:INV-SCE-6 | `f21d394ad465` |
+| 665 | rotate_left | block | - | INV:INV-SCE-6 | `f05a19895019` |
+| 666 | rotate_left | block | - | INV:INV-SCE-6 | `a9176927f2b8` |
+| 668 | rotate_left | block | - | INV:INV-SCE-6 | `6f15756ca1c1` |
+| 670 | rotate_left | block | - | INV:INV-SCE-6 | `d249c0acca91` |
+| 671 | rotate_left | block | - | INV:INV-SCE-6 | `d60b511b9993` |
+| 677 | rotate_right | block | - | INV:INV-SCE-6 | `9ac10a612f86` |
+| 678 | rotate_right | block | - | INV:INV-SCE-6 | `952fba50d690` |
+| 679 | rotate_right | block | - | INV:INV-SCE-6 | `84e7007d64d2` |
+| 680 | rotate_right | block | - | INV:INV-SCE-6 | `b83edc8adcf6` |
+| 682 | rotate_right | block | - | INV:INV-SCE-6 | `37da8b32cfc0` |
+| 683 | rotate_right | block | - | INV:INV-SCE-6 | `5459a068b286` |
+| 686 | rotate_right | block | - | INV:INV-SCE-6 | `5f15742c8bea` |
+| 687 | rotate_right | block | - | INV:INV-SCE-6 | `da3abfd80d46` |
+| 689 | rotate_right | block | - | INV:INV-SCE-6 | `b70c53e62350` |
+| 691 | rotate_right | block | - | INV:INV-SCE-6 | `e483e30db43b` |
+| 692 | rotate_right | block | - | INV:INV-SCE-6 | `8ba9e1c466f2` |
+| 705 | insert | block | - | INV:INV-SCE-6 | `0100e3df35b3` |
+| 712 | insert | block | - | INV:INV-SCE-6 | `fdc27faa9b3e` |
+| 713 | insert | block | - | INV:INV-SCE-6 | `488673c08c10` |
+| 715 | insert | block | - | INV:INV-SCE-6 | `af75c29622c8` |
+| 725 | insert | block | - | INV:INV-SCE-6 | `6945f353e682` |
+| 726 | insert | block | - | INV:INV-SCE-6 | `3c7ca97ef218` |
+| 728 | insert | block | - | INV:INV-SCE-6 | `c2460981378b` |
+| 731 | insert | block | - | INV:INV-SCE-6 | `083adfd7824b` |
+| 732 | insert | block | - | INV:INV-SCE-6 | `bce6ee36521f` |
+| 733 | insert | block | - | INV:INV-SCE-6 | `58336856b347` |
+| 735 | insert | block | - | INV:INV-SCE-6 | `5d247d5c970e` |
+| 737 | insert | block | - | INV:INV-SCE-6 | `8e5952ae1c66` |
+| 738 | insert | block | - | INV:INV-SCE-6 | `2ced36d0cc96` |
+| 750 | insert_fixup | block | - | INV:INV-SCE-6 | `cb37c78a78b6` |
+| 798 | erase | block | - | INV:INV-SCE-6 | `89d50f8922fa` |
+| 801 | erase | block | - | INV:INV-SCE-6 | `9d63a0e95380` |
+| 816 | erase | block | - | INV:INV-SCE-1 | `28bb04464ea4` |
+| 926 | kid | block | - | INV:INV-SCE-1 | `d973a103e8b3` |
+| 933 | erase_fixup | block | - | INV:INV-SCE-1 | `63fa62aa7bb3` |
+| 1103 | bh | block | - | GAP | `f52b13f9dcff` |
+| 1108 | bh | block | - | GAP | `27c9d88b6dd0` |
+| 1126 | debug_black_height | block | - | GAP | `6b36d665cf56` |
+| 1140 | grq_ptr_shared | block | - | INV:INV-SCE-3 | `0efd7f0c28ac` |
+| 1148 | grq_ptr_mut | block | ptr-ops | INV:INV-SCE-3 | `63f3fc19633b` |
+| 1168 | per_cpu_shared | block | - | INV:INV-SCE-10 | `e5f75261e043` |
+| 1178 | per_cpu_mut | block | - | INV:INV-SCE-10 | `781c20b1a8b5` |
+| 1195 | secondary_idle_publish | block | - | INV:INV-SCE-4 | `b3f1354ad15f` |
+| 1202 | secondary_idle_table_base | block | - | INV:INV-SCE-4 | `9ae794e76662` |
+| 1208 | secondary_idle_task | block | - | INV:INV-SCE-4 | `d0feca515efe` |
+| 1235 | <module> | unsafe-impl | - | GAP | `11e4a2a4fd10` |
+| 1237 | <module> | unsafe-impl | - | GAP | `f65bfd6a5801` |
+| 1255 | evring_slot_mut | block | - | INV:INV-SCHED-EVRING-1 | `7316a5337a3a` |
+| 1270 | evring_slot_ref | block | - | INV:INV-SCHED-EVRING-1 | `dcb15eda35c0` |
+| 1288 | <module> | unsafe-impl | - | GAP | `f3c8e0c3db0e` |
+| 1318 | grq_current_fp | block | asm | INV:INV-SCE-3 | `7583e9596977` |
+| 1323 | grq_current_fp | block | asm | INV:INV-SCE-3 | `398cd019efbc` |
+| 1328 | grq_current_fp | block | asm | INV:INV-SCE-3 | `feeec0e6dffa` |
+| 1348 | clear_trap_scratch | block | asm | INV:INV-SCE-10 | `95cac94ce532` |
+| 1365 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `ad7a147eaa83` |
+| 1373 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `c26d36fa4f57` |
+| 1381 | idle_guard_sp | block | asm | INV:INV-SCE-1 | `9a0eb3b04908` |
+| 1400 | tick_stack_canary | block | volatile,ptr-ops | INV:INV-SCE-1 | `04bdfebcb729` |
+| 1496 | task_slot_alloc | block | - | INV:INV-TL-1 | `73d538ca7ad5` |
+| 1508 | task_slot_dealloc_raw | block | ptr-ops | INV:INV-TL-1 | `406c7c940374` |
+| 1523 | task_slot_init | block | - | INV:INV-TL-1 | `7574b8aaa76f` |
+| 1561 | task_drop_in_place | block | - | INV:INV-TL-2 | `86ba1fdb84be` |
+| 1580 | task_slot_poison_and_free | block | volatile,ptr-ops | GAP | `17bd76e7cca3` |
+| 1635 | init_idle_cpu | block | - | INV:INV-SCE-4 | `3f2329bda596` |
+| 1678 | task | block | - | INV:INV-SCE-2 | `2c5f1b4fe93b` |
+| 1687 | <module> | unsafe-impl | - | INV:INV-RD-CLAIM | `36738ea5b984` |
+| 1689 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `bccbcacf7b7e` |
 
 ## sync
 
@@ -1852,113 +1847,108 @@ FILE` owns one), and the gate fails on a drop that
 
 ## mm
 
-### kernel/core/src/mm/hotpath.rs (53)
+### kernel/core/src/mm/unsafe.rs (98)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 431 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `586696748e5f` |
-| 432 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `3af418f13cc9` |
-| 445 | get | block | - | INV:INV-HEAP-3 | `5b19aebbfe74` |
-| 452 | get_mut | block | - | INV:INV-HEAP-3 | `c416c63235e4` |
-| 458 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `5c23bc0f43bc` |
-| 459 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `d0995e1356b2` |
-| 491 | buddy_block_span | block | - | INV:INV-HEAP-3 | `0018ba8f559f` |
-| 643 | fill_interior_order | block | ptr-ops | INV:INV-HEAP-3 | `0fa9a9283674` |
-| 973 | <module> | unsafe-impl | ptr-ops | INV:INV-HEAP-3 | `7f718da0ff86` |
-| 974 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `49df818ac8db` |
-| 1059 | alloc | block | - | INV:INV-SMALLALLOC-1 | `35e009867cc9` |
-| 1081 | <module> | unsafe-fn | ptr-ops | INV:INV-SMALLALLOC-1 | `30c38811366f` |
-| 1091 | realloc | block | - | INV:INV-SMALLALLOC-1 | `7dc950709af7` |
-| 1112 | <module> | unsafe-fn | - | INV:INV-SMALLALLOC-1 | `d245a6b5a2c2` |
-| 1152 | trace_kmalloc_at | block | - | INV:INV-SMALLALLOC-1 | `ae6eba0d3f52` |
-| 1177 | trace_kfree_at | block | - | INV:INV-SMALLALLOC-1 | `e153af0eeea6` |
-| 1491 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `04f3a0651646` |
-| 1492 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `de7526da0893` |
-| 1521 | meta_audit_inner | block | - | INV:INV-HEAP-3 | `12614798d07a` |
-| 1818 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `92d80f4692e2` |
-| 1845 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `c17937b8814a` |
-| 1846 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `2447450b039a` |
-| 1875 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `25a8c38c4524` |
-| 3249 | <module> | unsafe-fn | ptr-ops,addr-arith | INV:INV-PAGEDESC-1 | `627b27996720` |
-| 3413 | mark_non_ram_pages | block | - | INV:INV-PAGEDESC-1 | `547754e7d9bf` |
-| 3460 | init_mem_map | block | - | INV:INV-PAGEDESC-1 | `17823f35ac79` |
-| 3482 | init_mem_map | block | - | INV:INV-PAGEDESC-1 | `25d95ec87f2a` |
-| 3630 | page_desc_stats | block | - | INV:INV-PAGEDESC-1 | `9fe4f03e906a` |
-| 3667 | <module> | unsafe-fn | addr-arith | INV:INV-PAGEDESC-1 | `62c02ecdaaf2` |
-| 3676 | <module> | unsafe-fn | static-mut,addr-arith | INV:INV-PAGEDESC-1 | `99909fbc6609` |
-| 3699 | page_desc | block | - | INV:INV-PAGEDESC-1 | `1c2c430ba0cc` |
-| 8755 | node_data | block | - | INV:INV-MM-12 | `91c3706a5bcf` |
-| 8768 | node_data_mut | block | - | INV:INV-MM-12 | `39b81b86ecd1` |
-| 8784 | <module> | unsafe-fn | static-mut | INV:INV-MM-12 | `5ae198771960` |
-| 12640 | <module> | unsafe-fn | ptr-ops | INV:INV-VDSO-DATA-1 | `d1d5b814c5c8` |
-| 12641 | vdso_seq | block | ptr-ops | INV:INV-VDSO-DATA-1 | `822adfe2c4ea` |
-| 12656 | vdso_data_tick | block | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `fc44f4e5a366` |
-| 12757 | <module> | unsafe-fn | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `3439b1921ca3` |
-| 12758 | rd | block | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `be2f18688849` |
-| 12765 | <module> | unsafe-fn | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `7c5b3c4e5adb` |
-| 12766 | wr | block | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `59095d3d6d47` |
-| 12784 | read_tsc_ordered | block | asm | INV:INV-VDSO-DATA-1 | `436ad2f1e584` |
-| 12820 | <module> | unsafe-fn | - | INV:INV-VDSO-DATA-1 | `315e75da46e5` |
-| 12821 | seq_try_begin | block | - | INV:INV-VDSO-DATA-1 | `4efb95044c4d` |
-| 12832 | <module> | unsafe-fn | - | INV:INV-VDSO-DATA-1 | `5a39879fc5a9` |
-| 12833 | seq_end | block | - | INV:INV-VDSO-DATA-1 | `992bc6371a38` |
-| 12841 | publish_tsc_anchor | block | - | INV:INV-VDSO-DATA-1 | `d5623831ef74` |
-| 12863 | tsc_anchor_step_forward | block | - | INV:INV-VDSO-DATA-1 | `2817b21e455a` |
-| 12880 | tsc_anchor_step_back | block | - | INV:INV-VDSO-DATA-1 | `9c86a24dd444` |
-| 12898 | tsc_anchor_peek | block | - | INV:INV-VDSO-DATA-1 | `882827d75840` |
-| 12939 | tsc_track_now_nominal | block | - | INV:INV-VDSO-DATA-1 | `183ed3ae0924` |
-| 12981 | vdso_data_tick | block | - | INV:INV-VDSO-DATA-1 | `a6bd6d2b7614` |
-| 14018 | vdso_init | block | - | INV:INV-VDSO-DATA-1 | `1382fea7e30e` |
-
-### kernel/core/src/mm/unsafe.rs (45)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 40 | first_node_mut | block | - | INV:INV-MM-1 | `ba9137ff7b39` |
-| 61 | page_of | block | - | INV:INV-MM-2 | `10ee10bbade0` |
-| 74 | page_ref_of | block | - | INV:INV-MM-2 | `ac1a9c0c1c58` |
-| 92 | memblock_ref | block | - | INV:INV-MM-3 | `9eb0ce80bfb2` |
-| 101 | memblock_mut | block | - | INV:INV-MM-2 | `b243282047e3` |
-| 111 | walk_fp_chain | block | - | INV:INV-MM-2 | `90e3e56fb91e` |
-| 127 | slab_read_freelist_link | block | ptr-ops | INV:INV-MM-4 | `53817e10ad17` |
-| 135 | slab_write_freelist_link | block | ptr-ops | INV:INV-MM-4 | `309659b58aba` |
-| 144 | slab_header_mut | block | ptr-ops | INV:INV-MM-4 | `23785f7619a2` |
-| 152 | slab_header_cache_idx | block | ptr-ops | INV:INV-MM-4 | `f77eef877f75` |
-| 161 | slab_pages_init | block | - | INV:INV-MM-4 | `8c9fff251b87` |
-| 171 | slab_pages | block | - | INV:INV-MM-4 | `af1eb5c7adf6` |
-| 179 | slab_zero | block | ptr-ops | INV:INV-MM-4 | `f053bea0b3cb` |
-| 187 | <module> | unsafe-impl | - | INV:INV-MM-4 | `320bc76fb8ee` |
-| 191 | <module> | unsafe-impl | - | INV:INV-MM-5 | `2539aa3dd552` |
-| 203 | <module> | unsafe-impl | - | INV:INV-MM-5 | `96429ee7123d` |
-| 215 | pcp_row_exclusive | block | - | INV:INV-MM-5 | `9d368fc86304` |
-| 216 | pcp_row_exclusive | block | - | INV:INV-MM-5 | `c17bf23fcaa0` |
-| 224 | pcp_row_count_peek | block | - | INV:INV-MM-5 | `6ba52044e942` |
-| 225 | pcp_row_count_peek | block | - | INV:INV-MM-5 | `2101ca588f24` |
-| 234 | pcp_row_ref_peek | block | - | INV:INV-MM-5 | `5aa7ee4dd429` |
-| 235 | pcp_row_ref_peek | block | - | INV:INV-MM-5 | `cf2425eeca0d` |
-| 246 | copy_kva | block | ptr-ops | INV:INV-MM-6 | `2514ab4aa82f` |
-| 255 | copy_kva_from | block | ptr-ops | INV:INV-MM-6 | `38f62907e30c` |
-| 269 | page_slice_mut | block | ptr-ops,addr-arith | INV:INV-MM-7 | `badac82c44f7` |
-| 276 | page_slice | block | raw-construct,ptr-ops,addr-arith | INV:INV-MM-7 | `a83b41640b1c` |
-| 291 | defer_pool_mut | block | - | INV:INV-MM-8 | `109e5f1c2be0` |
-| 321 | vmemmap_stats_read | block | - | INV:INV-MM-9 | `6ac65bdec8d6` |
-| 330 | vmemmap_stats_write | block | - | INV:INV-MM-9 | `511834e94c4d` |
-| 340 | vmemmap_zero_region | block | ptr-ops | INV:INV-MM-9 | `6f60a404cae8` |
-| 365 | switch_address_space | block | - | INV:INV-MM-10 | `ed4e586a26e2` |
-| 380 | <module> | unsafe-impl | - | INV:INV-MM-10 | `0cadeefd05cf` |
-| 381 | <module> | unsafe-impl | - | INV:INV-MM-2 | `bff889ffaa5e` |
-| 390 | compact_copy_page | block | - | INV:INV-MM-2 | `2765005268a2` |
-| 403 | kernel_layout_write | block | - | INV:INV-MM-11 | `11ee338bb5f2` |
-| 411 | kernel_layout_ref | block | - | INV:INV-MM-11 | `2d54086af395` |
-| 426 | node_data_init | block | - | INV:INV-MM-12 | `3b52dcea6ce9` |
-| 431 | <module> | unsafe-impl | - | INV:INV-MM-12 | `722e52d733c4` |
-| 432 | <module> | unsafe-impl | - | INV:INV-MM-2 | `8bec1de169df` |
-| 443 | x86_caller_return_address | block | asm | INV:INV-MM-2 | `83a3a07674b9` |
-| 461 | sa_hdr_mut | block | ptr-ops | INV:INV-MM-13 | `bbf5bc90e6f8` |
-| 471 | sa_hdr_ref | block | ptr-ops | INV:INV-MM-13 | `e52348e4d47e` |
-| 479 | sa_read_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `c44c757fe4b1` |
-| 487 | sa_write_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `75826a4f0f26` |
-| 494 | sa_read_u64 | block | volatile,ptr-ops | INV:INV-MM-13 | `c38a578072c8` |
+| 46 | first_node_mut | block | - | INV:INV-MM-1 | `4631978bf336` |
+| 67 | page_of | block | - | INV:INV-MM-2 | `2afdd8c37eae` |
+| 80 | page_ref_of | block | - | INV:INV-MM-2 | `d1ad16eb6918` |
+| 98 | memblock_ref | block | - | INV:INV-MM-3 | `ef248d36b672` |
+| 107 | memblock_mut | block | - | INV:INV-MM-2 | `3fe221ca5057` |
+| 117 | walk_fp_chain | block | - | INV:INV-MM-2 | `1fa76de13b01` |
+| 133 | slab_read_freelist_link | block | ptr-ops | INV:INV-MM-4 | `afef99629390` |
+| 141 | slab_write_freelist_link | block | ptr-ops | INV:INV-MM-4 | `77d6fd2f05f0` |
+| 150 | slab_header_mut | block | ptr-ops | INV:INV-MM-4 | `68a5fb3d9b06` |
+| 158 | slab_header_cache_idx | block | ptr-ops | INV:INV-MM-4 | `bd58df50a55b` |
+| 167 | slab_pages_init | block | - | INV:INV-MM-4 | `8560e08b4f15` |
+| 177 | slab_pages | block | - | INV:INV-MM-4 | `e3d5f80a87f1` |
+| 185 | slab_zero | block | ptr-ops | INV:INV-MM-4 | `89e5139aac84` |
+| 193 | <module> | unsafe-impl | - | INV:INV-MM-4 | `b1f756d03ca1` |
+| 197 | <module> | unsafe-impl | - | INV:INV-MM-5 | `30992fbc5e7a` |
+| 209 | <module> | unsafe-impl | - | INV:INV-MM-5 | `756a2a57e0e8` |
+| 221 | pcp_row_exclusive | block | - | INV:INV-MM-5 | `505be8a83289` |
+| 222 | pcp_row_exclusive | block | - | INV:INV-MM-5 | `c41c4c103d1f` |
+| 230 | pcp_row_count_peek | block | - | INV:INV-MM-5 | `3ce941841f85` |
+| 231 | pcp_row_count_peek | block | - | INV:INV-MM-5 | `3b7a5f34a464` |
+| 240 | pcp_row_ref_peek | block | - | INV:INV-MM-5 | `c58e41d50237` |
+| 241 | pcp_row_ref_peek | block | - | INV:INV-MM-5 | `ea840e5acb9d` |
+| 252 | copy_kva | block | ptr-ops | INV:INV-MM-6 | `7c09ebde0227` |
+| 261 | copy_kva_from | block | ptr-ops | INV:INV-MM-6 | `4769998cc8c4` |
+| 275 | page_slice_mut | block | ptr-ops,addr-arith | INV:INV-MM-7 | `fd31cc282bb7` |
+| 282 | page_slice | block | raw-construct,ptr-ops,addr-arith | INV:INV-MM-7 | `3d6dce4eb169` |
+| 297 | defer_pool_mut | block | - | INV:INV-MM-8 | `eece999e0b79` |
+| 327 | vmemmap_stats_read | block | - | INV:INV-MM-9 | `857952b6d3dc` |
+| 336 | vmemmap_stats_write | block | - | INV:INV-MM-9 | `d4e6f832c620` |
+| 346 | vmemmap_zero_region | block | ptr-ops | INV:INV-MM-9 | `83417e7929bf` |
+| 371 | switch_address_space | block | - | INV:INV-MM-10 | `d55d9cacea52` |
+| 386 | <module> | unsafe-impl | - | INV:INV-MM-10 | `07b107538492` |
+| 387 | <module> | unsafe-impl | - | INV:INV-MM-2 | `187c313fa223` |
+| 396 | compact_copy_page | block | - | INV:INV-MM-2 | `f92b498bf9a4` |
+| 409 | kernel_layout_write | block | - | INV:INV-MM-11 | `80f9ade3d537` |
+| 417 | kernel_layout_ref | block | - | INV:INV-MM-11 | `08e7240d899b` |
+| 432 | node_data_init | block | - | INV:INV-MM-12 | `c6370e408097` |
+| 437 | <module> | unsafe-impl | - | INV:INV-MM-12 | `63b0e15dc450` |
+| 438 | <module> | unsafe-impl | - | INV:INV-MM-2 | `88a3ce39f6e7` |
+| 449 | x86_caller_return_address | block | asm | INV:INV-MM-2 | `2ea596e19dec` |
+| 467 | sa_hdr_mut | block | ptr-ops | INV:INV-MM-13 | `6e4b19acbf63` |
+| 477 | sa_hdr_ref | block | ptr-ops | INV:INV-MM-13 | `da9478391cee` |
+| 485 | sa_read_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `ab3f2ef3609c` |
+| 493 | sa_write_u16 | block | volatile,ptr-ops | INV:INV-MM-13 | `16f09d26d2a2` |
+| 500 | sa_read_u64 | block | volatile,ptr-ops | INV:INV-MM-13 | `5c768e90618f` |
+| 524 | <module> | unsafe-fn | ptr-ops | INV:INV-VDSO-DATA-1 | `b22c171894d9` |
+| 525 | vdso_seq | block | ptr-ops | INV:INV-VDSO-DATA-1 | `c053724e7f81` |
+| 540 | vdso_data_tick | block | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `4c8ff160658c` |
+| 554 | <module> | unsafe-fn | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `31bc9d6875a2` |
+| 555 | rd | block | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `a2d62886a768` |
+| 564 | <module> | unsafe-fn | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `3d0fe96d310a` |
+| 565 | wr | block | volatile,ptr-ops | INV:INV-VDSO-DATA-1 | `06032d5cf154` |
+| 584 | read_tsc_ordered | block | asm | INV:INV-VDSO-DATA-1 | `94900561c5f7` |
+| 600 | <module> | unsafe-fn | - | INV:INV-VDSO-DATA-1 | `0f014d3d07e1` |
+| 601 | seq_try_begin | block | - | INV:INV-VDSO-DATA-1 | `e6b7b372f76f` |
+| 614 | <module> | unsafe-fn | - | INV:INV-VDSO-DATA-1 | `1879e4bde4c6` |
+| 615 | seq_end | block | - | INV:INV-VDSO-DATA-1 | `2a6d96beb633` |
+| 624 | publish_tsc_anchor | block | - | INV:INV-VDSO-DATA-1 | `ff8bfccd49f9` |
+| 647 | tsc_anchor_step_forward | block | - | INV:INV-VDSO-DATA-1 | `c8ce4d22c8a2` |
+| 665 | tsc_anchor_step_back | block | - | INV:INV-VDSO-DATA-1 | `7aaf0200b876` |
+| 680 | tsc_anchor_peek | block | - | INV:INV-VDSO-DATA-1 | `2acc713e2210` |
+| 722 | tsc_track_now_nominal | block | - | INV:INV-VDSO-DATA-1 | `0d78e2ee711d` |
+| 763 | vdso_data_tick | block | - | INV:INV-VDSO-DATA-1 | `c4bf07df755e` |
+| 812 | vdso_init | block | - | INV:INV-VDSO-DATA-1 | `daafc0663ea6` |
+| 830 | node_data_ref | block | - | INV:INV-MM-12 | `139dbf852a23` |
+| 842 | node_data_ref_mut | block | - | INV:INV-MM-12 | `98bc102796a1` |
+| 854 | <module> | unsafe-fn | static-mut | INV:INV-MM-12 | `420828bafc35` |
+| 870 | <module> | unsafe-fn | ptr-ops,addr-arith | INV:INV-PAGEDESC-1 | `826853a944a7` |
+| 919 | mark_non_ram_pages | block | - | INV:INV-PAGEDESC-1 | `e82cb2d8bd49` |
+| 963 | init_mem_map | block | - | INV:INV-PAGEDESC-1 | `7d7280382590` |
+| 985 | init_mem_map | block | - | INV:INV-PAGEDESC-1 | `b6e6cc263586` |
+| 1025 | page_desc_stats | block | - | INV:INV-PAGEDESC-1 | `29404ba3f24f` |
+| 1062 | <module> | unsafe-fn | addr-arith | INV:INV-PAGEDESC-1 | `03a104a5fa29` |
+| 1071 | <module> | unsafe-fn | static-mut,addr-arith | INV:INV-PAGEDESC-1 | `a6689c487a68` |
+| 1085 | page_desc_ref | block | - | INV:INV-PAGEDESC-1 | `4fca945b2129` |
+| 1095 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `698557a49ae8` |
+| 1097 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `7dabee906fd9` |
+| 1104 | get | block | - | INV:INV-HEAP-3 | `daf547fc9063` |
+| 1113 | get_mut | block | - | INV:INV-HEAP-3 | `5b6aac872bce` |
+| 1119 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `85cc8699e0c2` |
+| 1121 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `ba1094b88b34` |
+| 1148 | buddy_block_span | block | - | INV:INV-HEAP-3 | `3d99f57b5c3b` |
+| 1180 | fill_interior_order | block | ptr-ops | INV:INV-HEAP-3 | `0c1a301f5148` |
+| 1193 | <module> | unsafe-impl | ptr-ops | INV:INV-HEAP-3 | `acf53e74fb71` |
+| 1194 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `a19820da2076` |
+| 1279 | alloc | block | - | INV:INV-SMALLALLOC-1 | `af9b94119bae` |
+| 1301 | <module> | unsafe-fn | ptr-ops | INV:INV-SMALLALLOC-1 | `dc9f8c6556cc` |
+| 1311 | realloc | block | - | INV:INV-SMALLALLOC-1 | `8b5788a3224e` |
+| 1332 | <module> | unsafe-fn | - | INV:INV-SMALLALLOC-1 | `154bd70b94c9` |
+| 1372 | trace_kmalloc_at | block | - | INV:INV-SMALLALLOC-1 | `1ecf31119e30` |
+| 1397 | trace_kfree_at | block | - | INV:INV-SMALLALLOC-1 | `7a33e992b3bf` |
+| 1404 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `16e72ad66e92` |
+| 1406 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `a06933f5fa48` |
+| 1416 | meta_audit_scratch | block | - | INV:INV-HEAP-3 | `4313955ce223` |
+| 1424 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `22edb33f3961` |
+| 1451 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `f101093c41a7` |
+| 1452 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `798ca43f466f` |
+| 1481 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `6fa421738f93` |
 
 ## process
 

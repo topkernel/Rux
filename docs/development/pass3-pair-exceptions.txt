@@ -39,3 +39,36 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 #           init 668->704, scheduler_tick 15940->15780
 #   every other sched symbol pairs 1:1 at equal size on all three arches
 #   (after module-path, moved-nested-fn and closure normalization).
+
+# --- p23-p3mm (mm pass-3 collection) recorded size-differs ---
+#   the four mm wrap forwarders whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (node_data_ref / node_data_ref_mut
+#   / page_desc_ref / meta_audit_scratch). Same operation, verbatim body,
+#   wrapper inlined back at every call site; the residual is debug-build
+#   instruction-selection drift only. Measured (base -> current bytes, same
+#   rig, debug profile):
+#     rv:   node_data 90->92, node_data_mut 90->92,
+#           page_desc 58->60 (+ its second instantiation 58->60)
+#   every other mm symbol pairs 1:1 at equal size; unpaired 0.
+#   (normalized names after the pair tool's module-path strip: the two
+#   page_desc generic instantiations normalize to the bare `rux::mm` —
+#   they are distinguishable only inside the size-diff bucket, which is
+#   exactly what the patterns below classify)
+^rux::mm::node_data_mut$
+^rux::mm::node_data$
+^rux::mm$
+
+# --- p23-p3mm: the ten cfg(x86_64) vDSO/TSC edges moved out of
+# --- mod x86_track into mm/unsafe.rs (pass 3 relocation itself: same
+# --- verbatim bodies, new home module; each pairs 1:1 missing<->extra).
+# --- `x86_track::` names keep resolving through the in-module re-export,
+# --- so both normalized spellings below are the same ten functions.
+^rux::mm::(x86_track::)?(publish_tsc_anchor|rd|read_tsc_ordered|seq_end|seq_try_begin|tsc_anchor_peek|tsc_anchor_step_back|tsc_anchor_step_forward|tsc_track_now_nominal|wr)$
+
+# --- p23-p3mm aarch64-only drift of the same two classes: vdso_init's
+# --- moved body now calls build_code_page()/vdso_data_tick() across the
+# --- module boundary (100->148), and meta_audit_inner's scratch take is
+# --- the always-inlined meta_audit_scratch contract fn (2752->2672). Same
+# --- verbatim operation; debug instruction-selection/call-placement drift.
+^rux::mm::vdso_init$
+^rux::mm::meta_audit_inner$
