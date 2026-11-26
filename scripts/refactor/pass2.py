@@ -78,6 +78,11 @@ import tempfile
 SEG = r"(?:r#[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)"
 SEG_RE = re.compile(SEG)
 FINAL = ("types", "hotpath", "r#unsafe", "unsafe")
+# an item a file declares: at column 0 (the root of a crate), or at any depth
+ITEM_DECL = re.compile(r'^(?:pub(?:\([^)]*\))? )?(?:unsafe\s+)?(?:extern\s+"C"\s+)?(?:mod|fn|const|static|type|struct|enum|trait|union|macro_rules!)\s+((?:r#)?[A-Za-z_]\w*)', re.M)
+is_core_flag = [False]                # the file rewrite_text is working on is in the core
+at_root_flag = [False]                # … and is the root file of its crate
+ITEM_ANY = re.compile(r'^\s*(?:pub(?:\([^)]*\))? )?(?:unsafe\s+)?(?:extern\s+"C"\s+)?(?:mod|fn|const|static|type|struct|enum|trait|union)\s+((?:r#)?[A-Za-z_]\w*)', re.M)
 # a path that starts at a root: crate::, rux::, self::, super:: (super::super:: ...)
 HEAD = r"(?<![A-Za-z0-9_:])((?:super::)+|self::|crate::|rux::)"
 PATH_RE = re.compile(HEAD + "(" + SEG + "(?:::" + SEG + ")*)")
@@ -216,6 +221,94 @@ class Rewriter:
         self.keep = set(keep or ())
         self.root_items = set(root_items or ())
         self.exports = exports or {}          # old module path -> the names it exported
+        self.mods_top = set(modules)          # set by build_rewriter: the first segments of the old modules
+        self.has_unsafe = False               # … the subsystem has an unsafe.rs
+        self.crate = None                     # … the root of the crate the file being rewritten is in
+        self.roots = {}                       # … the roots of every service crate
+
+    def from_root(self, cr, segs):
+        """`segs`: the segments after a service crate's name. The subsystem-relative
+        path when the path reaches the subsystem through that crate's root: a
+        module the root re-exports from the subsystem by name, or — after the
+        merge, what such a name was — or the root of a crate it re-exports in
+        turn. None otherwise."""
+        if cr is None:
+            return None
+        d, hops = ("crate", cr.name), 0
+        while d is not None and d[0] == "crate" and hops < 3 and len(segs) > hops:
+            hops += 1
+            other = self.roots.get(d[1])
+            d = other.lookup(segs[hops - 1], self.mods_top) if other else None
+        if d is not None and d[0] == "core":
+            return list(d[1]) + segs[hops:]
+        return None
+
+    def via_path(self, segs):
+        """`segs`: the segments after `crate::` in a service crate. The subsystem-relative
+        path when the first name is another crate that the crate's root re-exports
+        (`pub use ::fs;`) and the path reaches the subsystem through that crate's
+        root; None otherwise."""
+        if self.crate is None:
+            return None
+        d = self.crate.expl.get(segs[0])
+        if d is None or d[0] != "crate":
+            # not a re-export of another crate: the crate's own name, or the
+            # subsystem itself under its name (which the caller handles)
+            return None
+        # the subsystem's own crate carries the subsystem's name: `crate::process` in a
+        # crate whose root says `pub use ::process;` is that crate, not the core's module
+        return self.from_root(self.roots.get(d[1]), segs[1:])
+
+    def crate_name_path(self, segs, outright=True):
+        """`segs`: the segments after a service crate's own name, written as
+        `::process::task::x` or bare `process::task::x` in a file of another
+        crate. The subsystem-relative path when it reaches the subsystem
+        through that crate's root; None otherwise. A leading `::` names the
+        crate whatever else is in scope; a bare name is the crate only where
+        the file's own crate root does not put that name in scope."""
+        if is_core_flag[0] or len(segs) < 2 or segs[0] not in self.roots:
+            return None
+        if self.crate is not None and (segs[0] == self.crate.name or (not outright and at_root_flag[0] and segs[0] in self.crate.expl)):
+            return None
+        return self.from_root(self.roots[segs[0]], segs[1:])
+
+    def root_tail(self, segs, root_binds):
+        """`segs`: the segments after `crate::` in a service crate. The subsystem-relative
+        path when the first name is one the crate's root makes visible from the
+        subsystem (re-exported by name, brought in by a glob, or reached through
+        the root of another crate the root re-exports); None otherwise."""
+        if segs[0] in root_binds:
+            return list(root_binds[segs[0]]) + segs[1:]
+        return self.via_path(segs)
+
+    def through(self, tail):
+        """written from the core's name, when the path goes through an old module;
+        a path that stops at a root item of the subsystem keeps resolving through
+        the crate's root and is left alone"""
+        if tail is None or tail[0] not in self.mods_top:
+            return None
+        new = self.map_tail(tail)
+        return None if new is None else "rux::" + self.sub + "::" + "::".join(new)
+
+    def declared(self, code):
+        """every name a file binds itself: items it declares at any depth, and the
+        names its `use` statements import. A name the crate's root brings in by a
+        glob is shadowed where the file declares it."""
+        names = set(norm(x) for x in ITEM_ANY.findall(code))
+        for m in USE_RE.finditer(code):
+            stmt = m.group(0)
+            i = USE_HEAD.match(stmt).end()
+            while i < len(stmt) and stmt[i] in " \t\r\n":
+                i += 1
+            while stmt.startswith("::", i):
+                i += 2
+            try:
+                node, _ = self.parse_item(stmt, i, [], [], False, {})
+            except (AttributeError, IndexError):
+                continue
+            for nd in self.leaves(node):
+                names.add(nd.alias or norm(nd.own[-1]))
+        return names
 
     def map_tail(self, tail, in_use=False):
         """`tail`: the segments after the subsystem's own segment. The new
@@ -262,17 +355,23 @@ class Rewriter:
         `modpath`: the file's module path in its crate. `is_core`: the file is
         in the core. `crate_alias`: the file is in a service crate whose root
         re-exports the subsystem itself. `root_binds`: {a module name the
-        crate's root re-exported: its old module path} — reached from every
-        file of the crate, as `crate::name::x` or bare. `at_root`: this file
-        is the crate's root, where those re-exports are written."""
+        crate's root makes visible from the subsystem: its old module path} —
+        reached from every file of the crate as `crate::name::x`, as
+        `super::name::x` from a child module, or bare, unless the file declares
+        a name of its own. `at_root`: this file is the crate's root. A path of
+        a service crate may also reach the subsystem through the root of
+        ANOTHER crate the root re-exports (`pub use ::fs;`): via_path."""
         kind = scan(text)
         code = mask(text, kind)
         rows = inline_rows(code)
         line_at = [0] + [m.end() for m in re.finditer("\n", text)]
-        edits, globs, in_string, use_ranges, unread_uses = [], [], [], [], []
+        edits, globs, in_string, use_ranges, unread_uses, notes = [], [], [], [], [], []
+        is_core_flag[0] = is_core
+        at_root_flag[0] = at_root
         binds = {}                                  # a name THIS file imports -> what it denotes now
         root_binds = root_binds or {}
         head_text = "crate::" if is_core else "rux::"
+        hot_imports = []                            # statements through which the file imports an old module by name
 
         def in_use(pos):
             return any(a <= pos < b for a, b in use_ranges)
@@ -292,6 +391,22 @@ class Rewriter:
             edits += [(m.start() + a, m.start() + b, r) for a, b, r in local]
             globs += wglobs
             unread_uses += unread
+            if any(v[0] == "hotpath" and v[1] for v in new_binds.values()):
+                hot_imports.append((m.start(), m.end(), m.group(0), top))
+        # two old modules imported by name now both read `use …::hotpath;`: with one
+        # such import at the file's top level every other one is a duplicate
+        tops = [h for h in hot_imports if h[3]]
+        if tops:
+            for a, b, stmt, _ in hot_imports:
+                if (a, b) == (tops[0][0], tops[0][1]):
+                    continue
+                if "{" not in stmt and " as " not in stmt:
+                    edits.append((a, b + 1 if b < len(text) and text[b] == "\n" else b, ""))
+                    notes.append("a second `use …::hotpath;` of this file removed: " + stmt.strip())
+                else:
+                    unread_uses.append(stmt.strip() + "   (this file imports hotpath twice: delete one)")
+        elif len(hot_imports) > 1:
+            unread_uses.append(hot_imports[1][2].strip() + "   (imported inside a block, and so is another `use …::hotpath;` in this file: read them)")
         # the core's root file declares the module itself, so it names it bare
         if is_core and modpath == ["crate"]:
             binds.setdefault(self.sub, (self.sub, []))
@@ -302,18 +417,15 @@ class Rewriter:
                 in_string.append(m.group(0))
                 return m.group(0)
             head, segs = m.group(1), [norm(x) for x in m.group(2).split("::")]
-            if head == "crate::" and not is_core and segs[0] in root_binds:
-                # a module the crate's root re-exported by name: nothing at the root
-                # denotes it any more, so it is written from the core's name
-                new = self.map_tail(list(root_binds[segs[0]]) + segs[1:])
-                return m.group(0) if new is None else "rux::" + self.sub + "::" + "::".join(new)
+            if head == "crate::" and not is_core:
+                new = self.through(self.root_tail(segs, root_binds))
+                if new is not None:
+                    return new
             if head in ("crate::", "rux::"):
                 if segs[:1] != [self.sub] or (head == "crate::" and not (is_core or crate_alias)):
                     return m.group(0)
                 prefix, tail = segs[:1], segs[1:]
             else:
-                if not is_core:
-                    return m.group(0)
                 cur = list(modpath) + inline_names(m.start())
                 if head == "self::":
                     base = cur
@@ -322,6 +434,14 @@ class Rewriter:
                     if k >= len(cur):
                         return m.group(0)
                     base = cur[:len(cur) - k]
+                if not is_core:
+                    # a service crate: only a path that starts at the crate's root
+                    # can leave the crate, and only for a name the root makes
+                    # visible from the subsystem
+                    if base != ["crate"]:
+                        return m.group(0)
+                    new = self.through(self.root_tail(segs, root_binds))
+                    return m.group(0) if new is None else new
                 if base == ["crate"] and segs[:1] == [self.sub]:
                     prefix, tail = segs[:1], segs[1:]
                 elif base == ["crate", self.sub]:
@@ -334,7 +454,7 @@ class Rewriter:
         def via(m):
             """a path written through a name in scope: one this file imported
             (the subsystem's module, or an old module) or one the crate's root
-            re-exported"""
+            makes visible"""
             if kind[m.start()] == 2:
                 in_string.append(m.group(0))
                 return m.group(0)
@@ -352,14 +472,31 @@ class Rewriter:
             new = self.map_tail(list(root_binds[name]) + segs)
             return m.group(0) if new is None else "rux::" + self.sub + "::" + "::".join(new)
 
-        names = sorted(set(binds) | set(root_binds), key=len, reverse=True)
-        rxs = [PATH_RE]
+        def named(m):
+            """another service crate named outright, reaching the subsystem through its root"""
+            if kind[m.start()] == 2:
+                in_string.append(m.group(0))
+                return m.group(0)
+            new = self.through(self.crate_name_path([norm(m.group(1))] + [norm(x) for x in m.group(2).split("::")], m.group(0).startswith("::")))
+            return m.group(0) if new is None else new
+
+        # a name the root brings in by a glob is shadowed where the file declares it
+        shadowed = self.declared(code) if root_binds and not is_core else set()
+        names = sorted(set(binds) | (set(root_binds) - shadowed), key=len, reverse=True)
+        rxs = [(PATH_RE, replace)]
         if names:
-            rxs.append(re.compile(r"(?<![A-Za-z0-9_:])(" + "|".join(re.escape(n) for n in names) + r")::(" + SEG + "(?:::" + SEG + ")*)"))
-        for rx in rxs:
+            rxs.append((re.compile(r"(?<![A-Za-z0-9_:])(" + "|".join(re.escape(n) for n in names) + r")::(" + SEG + "(?:::" + SEG + ")*)"), via))
+        if not is_core and self.roots:
+            # another service crate named outright: `::process::task::x`, or bare
+            crates = sorted((set(self.roots) - set(binds) - shadowed), key=len, reverse=True)
+            if crates:
+                lead = re.compile(r"(?<![A-Za-z0-9_:])::(" + "|".join(re.escape(c) for c in crates) + r")::((?:" + SEG + r"::)*" + SEG + r")")
+                bare = re.compile(r"(?<![A-Za-z0-9_:])(" + "|".join(re.escape(c) for c in crates) + r")::((?:" + SEG + r"::)*" + SEG + r")")
+                rxs += [(lead, named), (bare, lambda m: m.group(0) if text[max(0, m.start() - 2):m.start()] == "::" else named(m))]
+        for rx, fn in rxs:
             for m in rx.finditer(text):
                 if not in_use(m.start()):
-                    edits.append((m.start(), m.end(), replace(m) if rx is PATH_RE else via(m)))
+                    edits.append((m.start(), m.end(), fn(m)))
 
         out, pos, count = [], 0, 0
         for a, b, r in sorted(edits):
@@ -371,8 +508,8 @@ class Rewriter:
             out.append(r)
             pos = b
         out.append(text[pos:])
-        return "".join(out), {"replacements": count, "in_string": in_string,
-                              "globs": globs, "aliases": sorted(binds), "unread": unread_uses}
+        return "".join(out), {"replacements": count, "in_string": in_string, "globs": globs,
+                              "aliases": sorted(binds), "unread": unread_uses, "notes": notes}
 
     # ------------------------------------------------------- one use tree
     def rewrite_use(self, stmt, cur, is_core, crate_alias=False, root_binds=None, at_top_of_crate=False):
@@ -387,12 +524,16 @@ class Rewriter:
         i = head.end()
         while i < len(s) and s[i] in " \t\r\n":
             i += 1
-        while s.startswith("::", i):             # `use ::crate::..`: a leading colon is not a segment
+        outright = False
+        while s.startswith("::", i):             # `use ::crate::..`: a leading colon names the crate outright
+            outright = True
             i += 2
         try:
-            node, _ = self.parse_item(s, i, [], cur if is_core else [], is_core or crate_alias, root_binds)
+            node, _ = self.parse_item(s, i, [], cur, is_core or crate_alias, root_binds, False, outright)
         except (AttributeError, IndexError):      # not a tree this parser reads: leave it, say so
             return [], {}, [], [stmt.strip()]
+        self.process(node)
+        self.lift(node)
         self.process(node)
         if self.stray(node, True):
             return [], {}, [], [stmt.strip()]
@@ -404,13 +545,13 @@ class Rewriter:
             part after a `self::`/`super::` head is rewritten, `rux::` is not
             turned into `crate::`, and a name reached through the crate's root
             is written from the core's name"""
+            if nd.via_root:
+                return ["rux", self.sub] + own_new[2:]
             h = 0
             while h < len(nd.own) and norm(nd.own[h]) in ("self", "super"):
                 h += 1
             if h:
                 return nd.own[:h] + own_new[len(nd.base):]
-            if nd.via_root:
-                return ["rux", self.sub] + own_new[2:]
             if nd.own and own_new and nd.base == ["crate"]:
                 return [nd.own[0]] + own_new[1:]
             return own_new
@@ -426,7 +567,12 @@ class Rewriter:
             base = "::".join(own_new[:-2])              # own_new ends with hotpath, *
             lead = base + "::" if base else ""
             if tail == ["*"]:
-                return lead + "{hotpath::*, types::*}"
+                # the glob re-exported the subsystem's whole root: its modules that stay
+                # (unsafe.rs, a directory kept under hotpath) stay exported beside the two
+                parts = (["r#unsafe"] if self.has_unsafe else [])
+                if self.inline:
+                    parts.append("hotpath::{" + ", ".join(sorted(self.inline)) + "}")
+                return lead + "{" + ", ".join(parts + ["hotpath::*", "types::*"]) + "}"
             module = tail[:-1]
             names = self.exports.get("::".join(module))
             if names is None:
@@ -452,10 +598,18 @@ class Rewriter:
             lines.append(indent + "}")
             return "\n".join(lines)
 
+        reexported = []
+
         def leaf(nd, own_new):
             """(start, end, text) of a leaf; text None when it does not change"""
             a, b = nd.span
             old = "::".join(norm(x) for x in nd.own)
+            if pub and not root_pub and self.is_module_leaf(nd) and nd.own != ["self"] and not nd.dual and nd.ntail is not None:
+                # `pub use <old module>;` inside a module keeps that module's name for the
+                # paths that go through it; its items are in two places now, and no one
+                # statement gives them all: left as written, and reported
+                reexported.append(stmt.strip())
+                return a, b, None
             if "*" in nd.own:
                 new = expand(nd, own_new)
                 if new is None:                         # no export list: the glob stays a glob
@@ -574,7 +728,7 @@ class Rewriter:
                 settle(entries)
 
         emit(node, [], True)
-        return edits, binds, globs, []
+        return edits, binds, globs, [r + "   (a module re-exported under its old name inside a module: rewrite it and the paths through it by hand)" for r in reexported]
 
     def bind(self, nd, binds):
         """what a leaf makes visible under its name in the file that holds it"""
@@ -592,9 +746,18 @@ class Rewriter:
             elif norm(nd.full[-1]) not in self.root_items:
                 binds[norm(nd.full[-1])] = ("hotpath", nd.full[2:])
 
+    def lift(self, nd):
+        """a group every child of which reaches the subsystem through another
+        crate's root (`use crate::fs::{vfs::a, inode::b}`) is written from the
+        core's name as a whole (`use rux::fs::{a, b}`)"""
+        for k in nd.kids or []:
+            self.lift(k)
+        if nd.kids and all(k.via_root for k in nd.kids):
+            nd.via_root, nd.base, nd.full = True, ["crate"], ["crate", self.sub]
+
     def stray(self, nd, parent_ok):
-        """a name reached through the crate's root inside a group that is not
-        reached that way: the statement cannot be edited in place"""
+        """a name reached through a crate's root inside a group that is not
+        reached that way as a whole: the statement cannot be edited in place"""
         if nd.via_root and not parent_ok:
             return True
         return any(self.stray(k, nd.via_root) for k in nd.kids or [])
@@ -606,8 +769,11 @@ class Rewriter:
             for k in node.kids:
                 yield from self.leaves(k)
 
-    def parse_item(self, s, i, prefix, cur, is_core, root_binds=None):
-        """one item of a use tree at s[i:]: a path, then a group or an alias"""
+    def parse_item(self, s, i, prefix, cur, is_core, root_binds=None, core_head=False, outright=False):
+        """one item of a use tree at s[i:]: a path, then a group or an alias.
+        `core_head`: the group the item is in starts at the core's name.
+        `outright`: the statement starts with `::`, which names a crate whatever
+        else is in scope"""
         root_binds = root_binds or {}
         nd = Node()
         start = i
@@ -630,7 +796,7 @@ class Rewriter:
             own.append(m.group())
             i = m.end()
         nd.own, nd.span = own, (start, i - (3 if group else 0))   # the span stops before `::{`
-        nd.base, nd.full, nd.via_root = self.absolute(prefix, own, cur, is_core, root_binds)
+        nd.base, nd.full, nd.via_root = self.absolute(prefix, own, cur, is_core, root_binds, core_head, outright)
         if group:
             nd.kids = []
             while True:
@@ -639,7 +805,7 @@ class Rewriter:
                 if i >= len(s) or s[i] == "}":
                     i += 1
                     break
-                kid, i = self.parse_item(s, i, nd.full, cur, is_core, root_binds)
+                kid, i = self.parse_item(s, i, nd.full, cur, is_core, root_binds, nd.own[0] == "rux")
                 nd.kids.append(kid)
                 while i < len(s) and s[i] in " \t\r\n":
                     i += 1
@@ -653,23 +819,24 @@ class Rewriter:
                 i = ma.end()
         return nd, i
 
-    def absolute(self, prefix, own, cur, is_core, root_binds):
-        """the absolute path of an item: (the module a relative head starts
-        from, the full path, reached through the crate's root). (None, None,
-        False) for a path that does not start at a root — a name that is in
-        scope, which this tool cannot follow. In a service crate `crate::` is
-        the crate itself; only `rux::` reaches the core — and a module name
-        the crate's root re-exported from the core's subsystem."""
+    def absolute(self, prefix, own, cur, is_core, root_binds, core_head=False, outright=False):
+        """the absolute path of an item: (the module a relative head starts from,
+        the full path, reached through a crate's root). (None, None, False) for
+        a path that does not start at a root — a name that is in scope, which
+        this tool cannot follow. In a service crate `crate::` is the crate
+        itself; it reaches the core's subsystem only through a name the crate's
+        root makes visible from it — re-exported by name, brought in by a glob,
+        or reached through the root of another crate the root re-exports. The
+        same for `self::`/`super::` heads that start at the crate's root, and
+        for another service crate named outright (`::process::task::x`)."""
         o = [norm(x) for x in own]
-        via = False
         if o[0] == "rux" or (o[0] == "crate" and is_core):
-            base, full = ["crate"], ["crate"] + o[1:]
-        elif o[0] == "crate" and len(o) >= 2 and o[1] in root_binds:
-            base, full, via = ["crate"], ["crate", self.sub] + list(root_binds[o[1]]) + o[2:], True
-        elif prefix:
-            base, full = list(prefix), (list(prefix) if o == ["self"] else list(prefix) + o)
-            if not is_core and len(full) >= 2 and full[0] == "crate" and full[1] in root_binds:
-                base, full, via = ["crate"], ["crate", self.sub] + list(root_binds[full[1]]) + full[2:], True
+            return ["crate"], ["crate"] + o[1:], False
+        if core_head:
+            return ["crate"], (list(prefix) if o == ["self"] else list(prefix) + o), False
+        if o[0] == "crate" or prefix:
+            base, full = ["crate"], (["crate"] + o[1:]) if o[0] == "crate" else (
+                list(prefix) if o == ["self"] else list(prefix) + o)
         elif o[0] == "self":
             base, full = list(cur), list(cur) + o[1:]
         elif o[0] == "super":
@@ -680,8 +847,21 @@ class Rewriter:
                 return None, None, False
             base, full = cur[:len(cur) - k], cur[:len(cur) - k] + o[k:]
         else:
+            # a service crate named outright (`use ::process::task::x;`)
+            tail = self.crate_name_path(o, outright) if not is_core and not prefix else None
+            if tail is not None and tail[0] in self.mods_top:
+                return ["crate"], ["crate", self.sub] + tail, True
             return None, None, False
-        return base, full, via
+        if not is_core:
+            # a group that already reached the subsystem: its items are under it
+            if prefix is not None and len(prefix) >= 2 and prefix[1] == self.sub:
+                return list(prefix), full, False
+            if len(full) >= 2 and full[0] == "crate":
+                tail = self.root_tail(full[1:], root_binds)
+                if tail is not None and tail[0] in self.mods_top:
+                    return ["crate"], ["crate", self.sub] + tail, True
+            return None, None, False         # the crate's own path: nothing of the subsystem in it
+        return base, full, False
 
     def process(self, node):
         """Bottom-up. Sets `ntail` (the item's path after the subsystem
@@ -729,7 +909,8 @@ ITEM_DEF = re.compile(r"^(?:pub(?:\([a-z]+\))? )?(?:struct|enum|union|type|const
 MOD_PUB = re.compile(r"^pub(?:\([a-z]+\))? mod +((?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*;", re.M)
 EXPORT_DEF = re.compile(r"^pub(?:\(crate\))? (?:struct|enum|union|type|const|static|fn|trait|mod) +([A-Za-z_]\w*)", re.M)
 EXPORT_TYPE = re.compile(r"^\s*pub(?:\(crate\))? (?:struct|enum|union|type|trait)\s+([A-Za-z_]\w*)", re.M)
-EXPORT_USE = re.compile(r"^pub(?:\(crate\))? use ([^;]+);", re.M | re.S)
+EXPORT_USE = re.compile(r"^pub(?:\(crate\))? use ([^;]+);", re.S)
+EXPORT_USE_START = re.compile(r"\s*pub(?:\(crate\))? use\b")
 MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod +([A-Za-z_][A-Za-z0-9_]*)\s*;", re.M)
 REEXPORT = re.compile(r"^\s*pub(?:\([a-z]+\))? use ([A-Za-z_][A-Za-z0-9_]*)::([^;]+);", re.M | re.S)
 TOPIC_FILES = ("mod.rs", "unsafe.rs", "types.rs", "hotpath.rs")
@@ -780,14 +961,22 @@ def module_exports_of(code, module, mods, done):
     a method inside an `impl` block is not) and the names its `pub use` lines
     re-export (`pub use child::*;` takes the child's list, `done`)."""
     names, stack = [], []                    # stack: the kind of each block that is open
-    for line in code.split("\n"):
+    lines = code.split("\n")
+    n = 0
+    while n < len(lines):
+        line = lines[n]
         in_mod = "mod" in stack
         in_macro = bool(stack) and stack[-1] == "macro" and not in_mod
         m = re.match(r"^\s*pub(?:\(crate\))? (?:struct|enum|union|type|const|static|fn|trait|mod)\s+([A-Za-z_]\w*)", line)
         if m and (not stack or in_macro):
             names.append(m.group(1))
-        elif not stack:
-            u = EXPORT_USE.match(line.rstrip())
+        elif not stack and EXPORT_USE_START.match(line):
+            # a re-export at module level; it may run over several lines
+            stmt = line
+            while ";" not in stmt and n < len(lines) - 1:
+                n += 1
+                stmt += "\n" + lines[n]
+            u = EXPORT_USE.match(stmt.strip())
             if u:
                 body = u.group(1).strip()
                 if body.endswith("::*"):
@@ -797,12 +986,15 @@ def module_exports_of(code, module, mods, done):
                     for part in inner.split(","):
                         if part.strip() and part.strip() not in ("self", "*"):
                             names.append(imported(part))
-        opens = line.count("{") - line.count("}")
+            opens = stmt.count("{") - stmt.count("}")
+        else:
+            opens = line.count("{") - line.count("}")
         if opens > 0:
             head = BLOCK.match(line)
             stack += ["mod" if head and head.group(1) else ("macro" if head and head.group(2) else "other")] * opens
         elif opens < 0:
             stack = stack[:len(stack) + opens] if len(stack) >= -opens else []
+        n += 1
     return list(dict.fromkeys(names))
 
 
@@ -875,8 +1067,12 @@ def types_of(root, sub):
 
 def build_rewriter(root, sub, spec=None):
     sp = load_spec(root, sub, spec)
-    return Rewriter(sub, sp["modules"], types_of(root, sub), sp.get("renames", {}), sp.get("keep", []),
-                    sp.get("root_items", []), sp.get("inline", []), sp.get("exports", {}))
+    rw = Rewriter(sub, sp["modules"], types_of(root, sub), sp.get("renames", {}), sp.get("keep", []),
+                  sp.get("root_items", []), sp.get("inline", []), sp.get("exports", {}))
+    kept = set(sp.get("keep", [])) | set(sp.get("inline", []))
+    rw.mods_top = {m.split("::")[0] for m in sp["modules"]} - kept
+    rw.has_unsafe = os.path.exists(os.path.join(root, "kernel", "core", "src", sub, "unsafe.rs"))
+    return rw
 
 
 def each_file(root):
@@ -889,87 +1085,124 @@ def each_file(root):
 
 def file_role(root, path):
     """(is_core, module path in its crate)"""
-    core_src = os.path.join(root, "kernel", "core", "src")
-    if path.startswith(core_src + os.sep):
-        parts = os.path.relpath(path, core_src).split(os.sep)
-        if parts[-1] in ("mod.rs", "lib.rs", "main.rs"):
-            parts = parts[:-1]
-        else:
-            parts = parts[:-1] + [norm(parts[-1][:-3])]
-        return True, ["crate"] + parts
-    return False, []
+    parts = os.path.relpath(path, os.path.join(root, "kernel")).split(os.sep)
+    if parts[-1] in ("mod.rs", "lib.rs", "main.rs"):
+        parts = parts[:-1]
+    else:
+        parts = parts[:-1] + [norm(parts[-1][:-3])]
+    if parts[0] == "core" and parts[1] == "src":
+        return True, ["crate"] + parts[2:]
+    return False, ["crate"] + parts[2:]
 
 
-_crates = {}
+class CrateRoot:
+    """what the root file of a service crate makes visible, by name: an item it
+    declares or imports explicitly, the core's subsystem (the whole of it, one of
+    its modules, or — through a glob — its whole root), or another crate it
+    re-exports (`pub use ::fs;`). Read from the file as it is on disk."""
 
-
-def crate_info(root, rw, sub, crate_dir):
-    """what the root file of a service crate makes visible: (does it re-export
-    the subsystem itself, {a module name it re-exported: its old module path}).
-    Read from the file as it is before the rewrite; cached per crate."""
-    if crate_dir in _crates:
-        return _crates[crate_dir]
-    alias, binds = False, {}
-    for name in ("lib.rs", "main.rs"):
-        p = os.path.join(crate_dir, "src", name)
-        if not os.path.exists(p):
-            continue
-        text = open(p, errors="replace").read()
-        code = mask(text, scan(text))
-        for m in USE_RE.finditer(code):
-            stmt = m.group(0)
-            if code[m.start()] in " \t":        # indented: inside an inline module or a function
+    def __init__(self, root, rw, name):
+        self.name, self.expl = name, {}       # name -> ("own",) | ("core", tail) | ("crate", other)
+        self.from_sub = False                 # the root imports something from the core's subsystem
+        self.glob_sub = False                 # … by a glob over it
+        self.final_sub = False                # … a module of it that the merge leaves (types, hotpath, unsafe.rs)
+        for fname in ("lib.rs", "main.rs"):
+            p = os.path.join(root, "kernel", name, "src", fname)
+            if not os.path.exists(p):
                 continue
-            if not re.match(r"^[ \t]*pub(?:\(crate\))? use\b", stmt):
-                continue
-            i = USE_HEAD.match(stmt).end()
-            while i < len(stmt) and stmt[i] in " \t\r\n":
-                i += 1
-            while stmt.startswith("::", i):
-                i += 2
-            try:
-                node, _ = rw.parse_item(stmt, i, [], [], False, {})
-            except (AttributeError, IndexError):
-                continue
-            for nd in rw.leaves(node):
-                if nd.full is None or nd.full[:2] != ["crate", sub]:
+            text = open(p, errors="replace").read()
+            code = mask(text, scan(text))
+            for n in ITEM_DECL.findall(code):     # items the root declares
+                self.expl.setdefault(norm(n), ("own",))
+            for m in USE_RE.finditer(code):
+                stmt = m.group(0)
+                if code[m.start()] in " \t":      # indented: inside an inline module or a function
                     continue
-                tail = nd.full[2:]
-                if not tail:
-                    alias = True
-                elif tail == ["*"]:                 # a glob over the whole subsystem: its module names are in scope
-                    for mod in rw.modules:
-                        binds.setdefault(mod.split("::")[0], [mod.split("::")[0]])
-                    for mod in rw.inline:
-                        binds.setdefault(mod, [mod])
-                elif tail[-1] != "*" and "::".join(tail) in rw.modules:
-                    binds.setdefault(nd.alias or norm(nd.own[-1]), list(tail))
-    _crates[crate_dir] = (alias, binds)
-    return _crates[crate_dir]
+                i = USE_HEAD.match(stmt).end()
+                while i < len(stmt) and stmt[i] in " \t\r\n":
+                    i += 1
+                while stmt.startswith("::", i):
+                    i += 2
+                try:
+                    node, _ = rw.parse_item(stmt, i, [], [], False, {})
+                except (AttributeError, IndexError):
+                    continue
+                for nd in rw.leaves(node):
+                    bound = nd.alias or norm(nd.own[-1])
+                    other = nd.own[0] if nd.full is None and nd.own[-1] in (nd.own[0], "self") and "*" not in nd.own else None
+                    if other and os.path.isdir(os.path.join(root, "kernel", other, "src")):
+                        self.expl[bound] = ("crate", other)     # another crate, re-exported under its own name
+                    elif nd.full is not None and nd.full[:2] == ["crate", rw.sub]:
+                        self.from_sub = True
+                        if "*" in nd.own:                       # a glob's names are implicit: see lookup
+                            self.glob_sub = True
+                            self.expl.setdefault(bound, ("own",))
+                        else:
+                            self.expl[bound] = ("core", list(nd.full[2:]))
+                            if len(nd.full) > 2 and nd.full[2] in FINAL:
+                                self.final_sub = True
+                    else:
+                        self.expl[bound] = ("own",)
+
+    def lookup(self, name, mods_top):
+        """what `name` at this root denotes, for a file of ANOTHER crate that
+        reaches it as `crate::<this crate>::name`. A name the root does not
+        declare or import explicitly was there before the merge only through
+        the root's glob over the subsystem, so it is the subsystem's old module
+        of that name."""
+        if name in self.expl:
+            return self.expl[name]
+        # a name the root does not declare or import explicitly was there before
+        # the merge only through a glob over the subsystem — or, once such a
+        # re-export is rewritten, it is an old module of a root that now
+        # re-exports types and hotpath in its place
+        if (self.glob_sub or self.final_sub) and name in mods_top:
+            return ("core", [name])
+        return None
+
+
+def own_view(cr, rw):
+    """for the files of the crate itself: does its root re-export the subsystem,
+    and {an old module name the root makes visible by an explicit re-export:
+    its old module path}"""
+    alias = cr.expl.get(rw.sub) == ("core", [])
+    binds = {n: list(d[1]) for n, d in cr.expl.items()
+             if d[0] == "core" and d[1] and "::".join(d[1]) in rw.modules}
+    return alias, binds
+
+
+def glob_binds(cr, rw):
+    """the old module names a glob over the subsystem brought into the crate's
+    root: those the root neither declares nor imports under that name"""
+    if not cr.glob_sub:
+        return {}
+    return {m: [m] for m in sorted(rw.mods_top | set(rw.inline)) if m not in cr.expl}
 
 
 def rewrite_tree(root, rw, sub, dry, verbose=True):
-    _crates.clear()
-    total, files, strings, globs, unread = 0, 0, [], [], []
-    paths = list(each_file(root))
-    # every crate's root is read before any file is changed
-    for path in paths:
-        parts = os.path.relpath(path, os.path.join(root, "kernel")).split(os.sep)
-        if len(parts) >= 3 and parts[0] != "core":
-            crate_info(root, rw, sub, os.path.join(root, "kernel", parts[0]))
-    for path in paths:
+    rw.roots = {}
+    for d in sorted(os.listdir(os.path.join(root, "kernel"))):
+        if d != "core" and os.path.isdir(os.path.join(root, "kernel", d, "src")):
+            rw.roots[d] = CrateRoot(root, rw, d)
+    total, files, strings, globs, unread, notes = 0, 0, [], [], [], []
+    for path in each_file(root):
         try:
             text = open(path, errors="replace").read()
         except OSError:
             continue
         is_core, modpath = file_role(root, path)
         parts = os.path.relpath(path, os.path.join(root, "kernel")).split(os.sep)
-        if is_core or len(parts) < 3:
-            args, extra = (text, modpath, is_core), []
+        cr = rw.roots.get(parts[0]) if not is_core else None
+        rw.crate = cr
+        if is_core or cr is None:
+            args, extra, reaches = (text, modpath, is_core), [], False
         else:
-            alias, binds = _crates.get(os.path.join(root, "kernel", parts[0]), (False, {}))
+            alias, binds = own_view(cr, rw)
+            for n, t in glob_binds(cr, rw).items():
+                binds.setdefault(n, t)
             args, extra = (text, modpath, False, alias, binds, parts[-1] in ("lib.rs", "main.rs")), list(binds)
-        if (sub + "::") not in text and not any(n + "::" in text for n in extra):
+            reaches = any(d[0] == "crate" for d in cr.expl.values())
+        if (sub + "::") not in text and not any(n + "::" in text for n in extra) and not reaches:
             continue
         new, st = rw.rewrite_text(*args)
         rel = os.path.relpath(path, root)
@@ -983,10 +1216,12 @@ def rewrite_tree(root, rw, sub, dry, verbose=True):
         strings += [(rel, x) for x in st["in_string"]]
         globs += [(rel, g) for g in st["globs"]]
         unread += [(rel, u) for u in st["unread"]]
+        notes += [(rel, x) for x in st["notes"]]
     print("%s %d files, %d replacements" % ("would change" if dry else "changed", files, total))
     for title, items in (("references inside string literals, not rewritten — read each one", strings),
                          ("globs left as they are (over hotpath: they now span the whole file; read each one)", globs),
-                         ("use statements the parser could not read or edit in place (rewrite these by hand)", unread)):
+                         ("use statements the parser could not read or edit in place (rewrite these by hand)", unread),
+                         ("duplicate imports of hotpath the tool removed (read them)", notes)):
         if items:
             print("%s: %d" % (title, len(items)))
             for rel, x in items[:40]:
@@ -1389,9 +1624,21 @@ def cmd_selftest(args):
         if got != want:
             bad += 1
             print("FAIL inline\n   in  : %r\n   got : %r\n   want: %r" % (text, got, want))
+    # two old modules imported by name in one file: the second `use …::hotpath;` is a duplicate
+    for text, want in [
+        ("use crate::mm::vma;\nuse crate::mm::page_alloc;\npub fn f() {\n    vma::vma_len();\n    page_alloc::alloc_pages(1);\n}\n",
+         "use crate::mm::hotpath;\npub fn f() {\n    hotpath::vma_len();\n    hotpath::alloc_pages(1);\n}\n"),
+        ("pub fn f() {\n    use crate::mm::vma;\n    use crate::mm::page_alloc;\n    vma::vma_len();\n}\n",
+         "pub fn f() {\n    use crate::mm::hotpath;\n    use crate::mm::hotpath;\n    hotpath::vma_len();\n}\n"),
+    ]:
+        got, st = rw.rewrite_text(text, ["crate", "fs", "vfs"], True)
+        if got != want:
+            bad += 1
+            print("FAIL duplicate hotpath import\n   in  : %r\n   got : %r\n   want: %r" % (text, got, want))
     # a crate whose root re-exports old modules by name
     proc = Rewriter("process", ["task", "task_flags", "task_ref", "exit", "ns", "exec_ring", "ptrace_core"],
                     {"Task", "TaskFlags"}, root_items={"current"})
+    proc.mods_top = {"task", "task_flags", "task_ref", "exit", "ns", "exec_ring", "ptrace_core"}
     binds = {"task": ["task"], "ns": ["ns"]}
     for text, want, kw in [
         ("let t = crate::task::Task::new();", "let t = rux::process::types::Task::new();", {}),
@@ -1448,8 +1695,8 @@ def integration():
             "pub fn g(p: &Page) -> usize {\n    p.pfn\n}\n")
         put("kernel/core/src/lib.rs", "pub mod fs;\npub mod mm;\n\nuse crate::mm::page_desc;\n\n"
             "pub fn k(pfn: usize) -> Option<usize> {\n    page_desc(pfn)\n}\n")
-        # the crate named for the subsystem re-exports it at its root
-        put("kernel/mm/src/lib.rs", "pub use rux::{mm, fs};\n\npub fn h(pfn: usize) -> Option<usize> {\n    crate::mm::page_desc::page_desc(pfn)\n}\n")
+        # the crate named for the subsystem re-exports it at its root, and one old module by name
+        put("kernel/mm/src/lib.rs", "pub use rux::{mm, fs};\npub use rux::mm::page_desc;\n\npub fn h(pfn: usize) -> Option<usize> {\n    crate::mm::page_desc::page_desc(pfn)\n}\n")
         put("kernel/mm/src/other.rs", "use crate::mm::page_desc::pfn_to_page;\n\npub fn j(pfn: usize) -> usize {\n    pfn_to_page(pfn)\n}\n")
         # a crate whose root re-exports old modules by name
         put("kernel/ipc/src/lib.rs", "pub use rux::mm::page_desc;\n")
@@ -1463,6 +1710,18 @@ def integration():
             "pub fn t(p: usize) -> Option<usize> {\n    page_desc(p)\n}\n")
         # a crate whose root holds a glob over one old module
         put("kernel/fsx/src/lib.rs", "pub use rux::mm::page_desc::*;\n")
+        # a crate that reaches the subsystem through ANOTHER crate's root (`pub use ::net;`):
+        # its root glob exported the old module, and the crate's own module of another name shadows the glob
+        put("kernel/netx/src/lib.rs", "pub use ::net;\n")
+        put("kernel/netx/src/a.rs", "pub fn a(p: usize) -> usize {\n    crate::net::page_desc::pfn_to_page(p)\n}\n\n"
+            "pub fn c(p: usize) -> Option<usize> {\n    crate::net::page_desc(p)\n}\n\n"
+            "use crate::net::page_desc;\npub fn d(p: usize) -> usize {\n    page_desc::pfn_to_page(p)\n}\n")
+        put("kernel/netx/src/b.rs", "use crate::net::page_desc::pfn_to_page;\n\npub fn e(p: usize) -> usize {\n    pfn_to_page(p)\n}\n")
+        # the subsystem's own crate, named outright: `::mm::x` and bare `mm::x`
+        put("kernel/fsx/src/a.rs", "pub fn f(p: usize) -> usize {\n    ::mm::page_desc::pfn_to_page(p)\n}\n\n"
+            "pub fn g(p: usize) -> usize {\n    mm::page_desc::pfn_to_page(p)\n}\n")
+        # a name the root brings in by a glob, used under a `super::` head from a child module
+        put("kernel/net/src/sub/mod.rs", "pub fn h(p: usize) -> usize {\n    super::page_desc::pfn_to_page(p)\n}\n")
         # a crate that does not reach the subsystem: crate::mm there is not the core's
         put("kernel/io_uring/src/lib.rs", "pub use rux::fs;\n")
         put("kernel/io_uring/src/local.rs", "pub fn i(pfn: usize) -> usize {\n    match pfn {\n        crate::mm::page_desc::pfn_to_page(p) => p,\n        _ => 0,\n    }\n}\n")
@@ -1492,19 +1751,30 @@ def integration():
                                          "pub fn g(p: &Page) -> usize {\n    p.pfn\n}\n",
             "kernel/core/src/lib.rs": "pub mod fs;\npub mod mm;\n\nuse crate::mm::hotpath::{self, page_desc};\n\n"
                                      "pub fn k(pfn: usize) -> Option<usize> {\n    page_desc(pfn)\n}\n",
-            "kernel/mm/src/lib.rs": "pub use rux::{mm, fs};\n\npub fn h(pfn: usize) -> Option<usize> {\n    crate::mm::hotpath::page_desc(pfn)\n}\n",
+            "kernel/mm/src/lib.rs": "pub use rux::{mm, fs};\npub use rux::mm::hotpath::{self, page_desc};\n\npub fn h(pfn: usize) -> Option<usize> {\n    crate::mm::hotpath::page_desc(pfn)\n}\n",
             "kernel/mm/src/other.rs": "use crate::mm::hotpath::pfn_to_page;\n\npub fn j(pfn: usize) -> usize {\n    pfn_to_page(pfn)\n}\n",
-            # page_desc was both a module and a function at the root: the name keeps both meanings
+            # page_desc was both a module and a function at the root: the name keeps both meanings,
+            # so a file that imports it keeps using it as a module
             "kernel/ipc/src/lib.rs": "pub use rux::mm::hotpath::{self, page_desc};\n",
             "kernel/ipc/src/x.rs": "pub fn k(p: usize) -> Option<usize> {\n    rux::mm::hotpath::page_desc(p)\n}\n\n"
-                                   "use rux::mm::hotpath::{self, page_desc};\npub fn m(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n\n"
-                                   "pub fn q(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n",
-            "kernel/net/src/lib.rs": "pub use rux::mm::{hotpath::*, types::*};\n",
+                                   "use rux::mm::hotpath::{self, page_desc};\npub fn m(p: usize) -> usize {\n    page_desc::pfn_to_page(p)\n}\n\n"
+                                   "pub fn q(p: usize) -> usize {\n    page_desc::pfn_to_page(p)\n}\n",
+            # a glob over the whole root: what stayed a module stays exported beside the two
+            "kernel/net/src/lib.rs": "pub use rux::mm::{r#unsafe, hotpath::*, types::*};\n",
             "kernel/net/src/y.rs": "pub fn r(p: usize) -> Option<usize> {\n    rux::mm::hotpath::page_desc(p)\n}\n\n"
                                    "pub fn s(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n\n"
                                    "pub fn t(p: usize) -> Option<usize> {\n    page_desc(p)\n}\n",
             "kernel/fsx/src/lib.rs": "pub use rux::mm::{hotpath::{page_desc, pfn_to_page}, types::Page};\n",
             "kernel/io_uring/src/local.rs": "pub fn i(pfn: usize) -> usize {\n    match pfn {\n        crate::mm::page_desc::pfn_to_page(p) => p,\n        _ => 0,\n    }\n}\n",
+            "kernel/netx/src/a.rs": "pub fn a(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n\n"
+                                   # page_desc is also an old module's name: written from the core (a root
+                                   # item of a name no module had would still come through the rewritten glob)
+                                   "pub fn c(p: usize) -> Option<usize> {\n    rux::mm::hotpath::page_desc(p)\n}\n\n"
+                                   "use rux::mm::hotpath::{self, page_desc};\npub fn d(p: usize) -> usize {\n    page_desc::pfn_to_page(p)\n}\n",
+            "kernel/netx/src/b.rs": "use rux::mm::hotpath::pfn_to_page;\n\npub fn e(p: usize) -> usize {\n    pfn_to_page(p)\n}\n",
+            "kernel/fsx/src/a.rs": "pub fn f(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n\n"
+                                   "pub fn g(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n",
+            "kernel/net/src/sub/mod.rs": "pub fn h(p: usize) -> usize {\n    rux::mm::hotpath::pfn_to_page(p)\n}\n",
         }
         for rel, w in want.items():
             got = get(rel)
