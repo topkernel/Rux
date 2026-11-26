@@ -9278,10 +9278,7 @@ impl SleepMutex {
             };
             if rtq > 0 {
                 if let Some(wtask) = self.wait.wake_up_one_hiprio() {
-                    let wpid = unsafe {
-                        (*(wtask as *mut crate::process::types::Task)).pid()
-                            as u32
-                    };
+                    let wpid = unsafe { (*(wtask as *mut crate::process::types::Task)).pid() as u32 };
                     self::rt_release_handoff(
                         self as *const _ as usize,
                         wpid,
@@ -9360,10 +9357,7 @@ impl SleepMutex {
                 };
                 if rtq > 0 {
                     if let Some(wtask) = self.wait.wake_up_one_hiprio() {
-                        let wpid = unsafe {
-                            (*(wtask as *mut crate::process::types::Task))
-                                .pid() as u32
-                        };
+                        let wpid = unsafe { (*(wtask as *mut crate::process::types::Task)).pid() as u32 };
                         self::rt_release_handoff(
                             self as *const _ as usize,
                             wpid,
