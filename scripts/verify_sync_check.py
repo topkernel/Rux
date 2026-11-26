@@ -1139,7 +1139,7 @@ MAPPINGS = [
     {
         "name": "ipc/ipc_id",
         "verify": "kernel/verify/src/ipc/ipc_id_test.rs",
-        "kernel": "kernel/core/src/ipc/util.rs",
+        "kernel": "kernel/core/src/ipc/hotpath.rs",
         "type": None,  # free functions
         # ipc_update_mode / owner_bits / group_bits / other_bits were
         # removed from the kernel's ipc/util.rs (mode bits now handled

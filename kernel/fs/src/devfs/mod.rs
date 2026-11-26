@@ -615,13 +615,13 @@ fn devtmpfs_populate() {
     // and /dev/vndbinder each carry their own context (own context-manager
     // node); misc char nodes with per-open process contexts; ioctls/mmap
     // dispatch on the BINDER_OPS file identity (evdev/loop pattern).
-    let _ = registry::register_char_device(crate::ipc::binder::DEV_BINDER, &crate::ipc::binder::BINDER_OPS);
-    let _ = registry::register_char_device(crate::ipc::binder::DEV_HWBINDER, &crate::ipc::binder::BINDER_OPS);
-    let _ = registry::register_char_device(crate::ipc::binder::DEV_VNDBINDER, &crate::ipc::binder::BINDER_OPS);
+    let _ = registry::register_char_device(crate::ipc::hotpath::DEV_BINDER, &crate::ipc::hotpath::BINDER_OPS);
+    let _ = registry::register_char_device(crate::ipc::hotpath::DEV_HWBINDER, &crate::ipc::hotpath::BINDER_OPS);
+    let _ = registry::register_char_device(crate::ipc::hotpath::DEV_VNDBINDER, &crate::ipc::hotpath::BINDER_OPS);
     for (name, devno) in [
-        ("binder", crate::ipc::binder::DEV_BINDER),
-        ("hwbinder", crate::ipc::binder::DEV_HWBINDER),
-        ("vndbinder", crate::ipc::binder::DEV_VNDBINDER),
+        ("binder", crate::ipc::hotpath::DEV_BINDER),
+        ("hwbinder", crate::ipc::hotpath::DEV_HWBINDER),
+        ("vndbinder", crate::ipc::hotpath::DEV_VNDBINDER),
     ] {
         children.insert(
             String::from(name),
@@ -1433,9 +1433,9 @@ fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
         return 0;
     }
-    if let Some(ctx) = crate::ipc::binder::devno_ctx(&entry.devno) {
+    if let Some(ctx) = crate::ipc::hotpath::devno_ctx(&entry.devno) {
         // Allocate the per-open binder process context (device-scoped).
-        return crate::ipc::binder::binder_open(file, ctx);
+        return crate::ipc::hotpath::binder_open(file, ctx);
     }
     if entry.devno == crate::drivers::ashmem::DEV_ASHMEM {
         // Fresh anonymous shared-memory area per open file description

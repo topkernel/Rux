@@ -42,30 +42,28 @@ pub mod posix_mq;
 pub mod keys;
 pub mod access_token;
 // the binder COLD DIAGNOSTIC halves (cold-four lane; the txn
-// mechanism stays framework-side in rux::ipc::binder — the rung's
+// mechanism stays framework-side in rux::ipc::hotpath — the rung's
 // shelving verdict stands).
 pub mod binder_diag;
 
 // The old framework mod.rs's `pub use util::*` — the IPC constants
 // (IPC_NOWAIT, SHM_REMAP, ...) re-exported at the ipc root so the
 // service files' `super::X` paths resolve (the historical shape).
-pub use rux::ipc::util::*;
+pub use rux::ipc::hotpath::*;
 
 // binder, sysv_sem and util stay FRAMEWORK-side (the rung's
 // verdicts — see the shelving records); re-exported so
 // `crate::ipc::X` paths keep resolving (syscall's dispatch
 // rows, devfs, futex, the debug audits, the sibling service files'
 // `super::util` uses).
-pub use rux::ipc::binder;
-pub use rux::ipc::sysv_sem;
-pub use rux::ipc::util;
+pub use rux::ipc::{types, hotpath};
 // the seam zones the service files consume (the hook table's
 // KeyQuota type; the audited page-refcount edges).
 // the one audited-edge zone of the subsystem (page refcounts and the
 // binder diagnostic edges, joined in rux::ipc::unsafe).
 pub use rux::ipc::r#unsafe;
 // the type substrate that stayed with Task's sem_undo field.
-pub use rux::ipc::SemUndoEntry;
+pub use rux::ipc::types::SemUndoEntry;
 
 // the guest-test module that followed the files (the framework's
 // tests/mod.rs rows are gated with the move note).
@@ -99,7 +97,7 @@ pub fn register_all() {
         set_shm_ctlni: sysv_shm::set_shm_ctlni,
         shm_ctlall: sysv_shm::shm_ctlall,
         set_shm_ctlall: sysv_shm::set_shm_ctlall,
-        ipc_ids_max: util::ipc_ids_max,
+        ipc_ids_max: hotpath::ipc_ids_max,
         queues_max: posix_mq::queues_max,
         set_queues_max: posix_mq::set_queues_max,
         key_quota: keys::key_quota,

@@ -674,7 +674,7 @@ fn uart_rx_debug_magic(c: u8) {
             DUMP_MAGIC_POS.store(0, Ordering::Relaxed);
             crate::drivers::virtio::vw_report("dump");
             crate::debug::taskdump::dump_all_tasks("uart-magic");
-            crate::ipc::binder::binder_dfx_dump();
+            crate::ipc::hotpath::binder_dfx_dump();
         }
     }
 

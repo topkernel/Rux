@@ -4,7 +4,8 @@
 //!
 //! Kani proof harnesses for IPC ID encoding/decoding and permission bitfield.
 //!
-//! Types copied from: kernel/core/src/ipc/util.rs
+//! Types and functions copied from: kernel/core/src/ipc/hotpath.rs (was
+//! util.rs before the seed-core pass 2 file split)
 
 #![cfg(kani)]
 

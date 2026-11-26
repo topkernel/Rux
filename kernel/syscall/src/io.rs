@@ -1458,7 +1458,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
+            if let Some(ret) = rux::ipc::hotpath::binder_file_ioctl(&file, request, arg) {
                 return ret;
             }
             // perf-event ioctls (PERF_EVENT_IOC_ENABLE/DISABLE/… on

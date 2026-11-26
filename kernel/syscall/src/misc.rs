@@ -984,7 +984,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                                     b's'
                                 } else if is(&crate::fs::inotify::INOTIFY_OPS) {
                                     b'i'
-                                } else if is(&crate::ipc::binder::BINDER_OPS) {
+                                } else if is(&rux::ipc::hotpath::BINDER_OPS) {
                                     b'b'
                                 } else if is(&TIMERFD_OPS) {
                                     b't'
@@ -1221,10 +1221,10 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     // without this arm any poll()/epoll_wait() over a binder fd fell back
     // to the 10 ms re-check slice — latency plus a full fd-set rescan per
     // slice per waiter.
-    if is(&crate::ipc::binder::BINDER_OPS) {
+    if is(&rux::ipc::hotpath::BINDER_OPS) {
         return Some((
-            crate::ipc::binder::binder_poll_wait,
-            crate::ipc::binder::binder_poll_unwait,
+            rux::ipc::hotpath::binder_poll_wait,
+            rux::ipc::hotpath::binder_poll_unwait,
         ));
     }
     if is(&crate::drivers::input::evdev::EVDEV_OPS) {

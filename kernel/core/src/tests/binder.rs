@@ -12,12 +12,12 @@
 
 use crate::fs::dev_t::{DevNo, MISC_MAJOR};
 use alloc::vec::Vec;
-use crate::ipc::binder::{
-    devno_ctx, ev_name, BufBlock, BinderAlloc, BinderCtx, DEV_BINDER, DEV_HWBINDER,
-    DEV_VNDBINDER, EV_BWR, EV_DEAD_REPLY, EV_ERR_RECV, EV_PARK, EV_REAP, EV_REKICK,
-    EV_REPLY_GONE, EV_REPLY_POP, EV_REPLY_PUSHED, EV_REPLY_RECV, EV_TC_RECV,
-    EV_TXN_PQUEUED, EV_TXN_PARKED_ASYNC, EV_TXN_RECV, EV_TXN_RECV_END, EV_TXN_SENT,
-    EV_TXN_TQUEUED, EV_WAKE_RET,
+use crate::ipc::{
+    hotpath::devno_ctx, hotpath::ev_name, types::BufBlock, types::BinderAlloc, types::BinderCtx, hotpath::DEV_BINDER, hotpath::DEV_HWBINDER,
+    hotpath::DEV_VNDBINDER, hotpath::EV_BWR, hotpath::EV_DEAD_REPLY, hotpath::EV_ERR_RECV, hotpath::EV_PARK, hotpath::EV_REAP, hotpath::EV_REKICK,
+    hotpath::EV_REPLY_GONE, hotpath::EV_REPLY_POP, hotpath::EV_REPLY_PUSHED, hotpath::EV_REPLY_RECV, hotpath::EV_TC_RECV,
+    hotpath::EV_TXN_PQUEUED, hotpath::EV_TXN_PARKED_ASYNC, hotpath::EV_TXN_RECV, hotpath::EV_TXN_RECV_END, hotpath::EV_TXN_SENT,
+    hotpath::EV_TXN_TQUEUED, hotpath::EV_WAKE_RET,
 };
 
 /// The alloc-recycle lives, ported verbatim from the former in-module

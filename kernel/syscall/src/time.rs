@@ -2121,7 +2121,7 @@ pub fn sys_mq_timedreceive_time64(args: SyscallArgs) -> i64 {
 
 /// sys_semtimedop_time64 - 64-bit semtimedop (NR 420)
 pub fn sys_semtimedop_time64(args: SyscallArgs) -> i64 {
-    crate::ipc::sysv_sem::sys_semtimedop(args)
+    rux::ipc::hotpath::sys_semtimedop(args)
 }
 
 /// sys_rt_sigtimedwait_time64 - 64-bit rt_sigtimedwait (NR 421)

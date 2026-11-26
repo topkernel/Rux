@@ -30,20 +30,20 @@
 // the object model + world machinery from the framework's binder
 // module, the audited walker edges, and the framework roots.
 #[allow(unused_imports)]
-use crate::binder::{
-    BinderProc, BinderThread, BinderTxn, Work, World, WorldGuard, TxnBlock,
-    BHIST, LOOPER_REGISTERED, LOOPER_ENTERED, LOOPER_EXITED,
-    TF_ONE_WAY, TF_ACCEPT_FDS, BINDER_WRITE_READ,
-    EV_BWR, EV_REKICK,
-    TXN_OWING_SPID, TXN_OWING_STID, TXN_OWING_TXN, TXN_OWING_IX,
-    AMS46_NODE_ID, AMS46_TPID, AMS46_T0, AMS46_SENDER, AMS46_READER,
-    AMS46_RIP_N, AMS46_TXNS, AMS46_ENQ_N,
-    APP_CHILD_PIDS,
-    ams46_on, ams46_node_id, ams46_txns_contains, ams46_txns_push,
-    is_inst, is_acct, txnhunt_on, pool_census_on,
-    binder_sareg_samgr_pid, pm, world_lock, world_lock_try,
-    hist_snapshot, hist_line_of, sweep_silent_txns,
-    wake_thread, wake_proc_one,
+use rux::ipc::{
+    types::BinderProc, types::BinderThread, types::BinderTxn, types::Work, types::World, types::WorldGuard, types::TxnBlock,
+    types::BHIST, hotpath::LOOPER_REGISTERED, hotpath::LOOPER_ENTERED, hotpath::LOOPER_EXITED,
+    hotpath::TF_ONE_WAY, hotpath::TF_ACCEPT_FDS, hotpath::BINDER_WRITE_READ,
+    hotpath::EV_BWR, hotpath::EV_REKICK,
+    hotpath::TXN_OWING_SPID, hotpath::TXN_OWING_STID, hotpath::TXN_OWING_TXN, hotpath::TXN_OWING_IX,
+    hotpath::AMS46_NODE_ID, hotpath::AMS46_TPID, hotpath::AMS46_T0, hotpath::AMS46_SENDER, hotpath::AMS46_READER,
+    hotpath::AMS46_RIP_N, hotpath::AMS46_TXNS, hotpath::AMS46_ENQ_N,
+    hotpath::APP_CHILD_PIDS,
+    hotpath::ams46_on, hotpath::ams46_node_id, hotpath::ams46_txns_contains, hotpath::ams46_txns_push,
+    hotpath::is_inst, hotpath::is_acct, hotpath::txnhunt_on, hotpath::pool_census_on,
+    hotpath::binder_sareg_samgr_pid, hotpath::pm, hotpath::world_lock, hotpath::world_lock_try,
+    hotpath::hist_snapshot, hotpath::hist_line_of, hotpath::sweep_silent_txns,
+    hotpath::wake_thread, hotpath::wake_proc_one,
 };
 #[allow(unused_imports)]
 use crate::r#unsafe::{
@@ -2402,7 +2402,7 @@ pub fn bwr_park_audit() {
         // sc57: the registered samgr pid's rows never consume the
         // print budget — on a wedged boot the pandemic's peripheral
         // parks crowd out exactly the rows the chain walk needs.
-        let samgr_row = s.pid == crate::binder::binder_sareg_samgr_pid();
+        let samgr_row = s.pid == rux::ipc::hotpath::binder_sareg_samgr_pid();
         if printed >= 24 && !samgr_row && !is_owner {
             continue;
         }
@@ -2498,7 +2498,7 @@ pub fn bwr_park_audit() {
                         // rows only: the member table is the samgr
                         // singleton's (hdf_devmgr's binary coincidentally
                         // shares the RX-segment shape).
-                        if s.pid as u32 == crate::binder::binder_sareg_samgr_pid() {
+                        if s.pid as u32 == rux::ipc::hotpath::binder_sareg_samgr_pid() {
                             crate::sync::futex::OH67_M2.compare_exchange(
                                 0,
                                 h.wrapping_sub(0x10),
@@ -2578,8 +2578,8 @@ pub fn bwr_park_audit() {
                 MS_N.store(0, core::sync::atomic::Ordering::Relaxed);
                 MS_S.store(0, core::sync::atomic::Ordering::Relaxed);
             }
-            let samgr_row = s.pid as u32 == crate::binder::binder_sareg_samgr_pid()
-                && crate::binder::binder_sareg_samgr_pid() != 0;
+            let samgr_row = s.pid as u32 == rux::ipc::hotpath::binder_sareg_samgr_pid()
+                && rux::ipc::hotpath::binder_sareg_samgr_pid() != 0;
             let eligible = park == "FUTEX"
                 && !task_raw.is_null()
                 && (!s.stack.is_empty() || samgr_row);
@@ -2603,7 +2603,7 @@ pub fn bwr_park_audit() {
                             .load(core::sync::atomic::Ordering::Relaxed);
                         if w2 != 0
                             && s.pid as u32
-                                == crate::binder::binder_sareg_samgr_pid()
+                                == rux::ipc::hotpath::binder_sareg_samgr_pid()
                         {
                             if crate::sync::futex::FUXWATCH2_ADDR
                                 .compare_exchange(
@@ -4058,7 +4058,7 @@ pub fn stall_report() {
 /// syscall's clone path; the APP_CHILD_PIDS static stays
 /// framework-side with the txn-path reader.
 pub fn register_app_child_pid(pid: u32) {
-    use crate::binder::APP_CHILD_PIDS;
+    use rux::ipc::hotpath::APP_CHILD_PIDS;
     for slot in APP_CHILD_PIDS.iter() {
         let s = slot.load(core::sync::atomic::Ordering::Relaxed);
         if s == pid {
