@@ -669,6 +669,38 @@ function sits in either way. The existing topic files of a subsystem
 (`sched/reapdrain.rs`, `cgroup.rs`, `class.rs`) become sections of its
 `hotpath.rs`.
 
+**One exception (2026-11-26).** A directory whose child modules are
+chosen by `#[cfg]` on the module declaration stays one inline module of
+the subsystem's `hotpath.rs`, under its banner, with its children and
+their attributes inside as they were. `drivers/timer/` and
+`drivers/intc/` are the case: `timer/riscv64.rs`, `timer/x86_64.rs` and
+`timer/aarch64.rs` define the same function names (`read_time`,
+`set_timer`, `timer_interrupt_handler`) and are selected by
+`#[cfg(feature = "..")] pub mod ..;`. A flat file would need the
+attribute on every item, which is not a file move. The test for any
+other directory is the same: an attribute on a `mod x;` line that picks
+between files keeps the directory whole.
+
+**References after the merge.** One tool, `scripts/refactor/pass2.py`,
+writes every reference from a small spec per subsystem (the old modules,
+the names reachable at the subsystem's root, the renames the single
+file forced), so the rewrite is the same however many hands run it.
+How a service crate reaches the subsystem decides what is written in
+it:
+
+| the crate's root | a reference in it | written as |
+|---|---|---|
+| re-exports the subsystem (`pub use rux::{.., mm, ..}`) | `crate::mm::page::X` | `crate::mm::hotpath::X` — the head is kept |
+| re-exports old modules by name (`pub use rux::process::{task, ..}`) | `crate::task::X`, bare `task::X` | `rux::process::types::X` or `rux::process::hotpath::X` — in full, since nothing at the root denotes the module any more; the statement becomes a re-export of `types` and `hotpath` |
+| holds a glob over the subsystem (`pub use rux::fs::*`) | bare `vfs::X`, `super::vfs::X` | in full; the glob becomes one over `hotpath` and one over `types`, beside what stayed a module |
+| re-exports another crate (`pub use ::fs;`), or a path names the subsystem's crate outright | `crate::fs::vfs::X`, `::process::task::X`, bare `process::task::X` | in full, through that crate's root |
+| none of these | `crate::X` | left alone: the crate's own |
+
+A name the root brought in by a glob is the subsystem's only where no
+explicit item of that name is in scope (a module the crate declares at
+its root, a module of the file's own directory); where it is shadowed,
+it is left as written.
+
 **What `hotpath.rs` contains at first, and why that is not final.**
 Pass 2 puts into `hotpath.rs` everything of the subsystem that is
 neither `unsafe.rs` nor `types.rs`. At that point the file is the
@@ -889,7 +921,10 @@ source file.
    `types.rs`** (file moves only: the type definitions to `types.rs`,
    every other file of the subsystem to `hotpath.rs` as a section;
    `unsafe.rs` exists after pass 1). No function is judged hot or
-   cold in this pass. Per subsystem, its own lane.
+   cold in this pass. Per subsystem, its own lane. IN PROGRESS
+   2026-11-26: the lanes run in parallel, and the path rewrite is one
+   shared tool (§2c.3, "References after the merge"), so that the
+   rewrite of an earlier lane can be replayed when a later one merges.
 3. **Collect the scattered unsafe** (§2c.5), per subsystem, its own
    lane, with the gate assertion added as soon as the first subsystem
    is clean.
@@ -899,11 +934,12 @@ unchanged apart from symbol names. Pass 3 changes the code and takes
 the full gate chain per subsystem.
 
 After pass 3 the structure is complete and the shrink stage begins
-(§2c.3): per `hotpath.rs`, function by function, from the call graph
-rooted at the trap, switch, fault, timer, completion and lock entries,
-with `syscost` samples as the check. Its result is the real hot-path
-line count per subsystem, and the core-size goal (§1a.4) is restated
-against it.
+(§2c.3), by the user's order of 2026-11-26 without a further go-ahead:
+one subsystem at a time, its safe code out to its crate, measured
+against the baseline recorded before the move, the functions a
+regression points at brought back. Its result is the real hot-path
+line count per subsystem, and the target (§1a.4) is measured against
+it.
 
 ## 3. The end-state topology
 
