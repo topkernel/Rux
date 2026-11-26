@@ -17,7 +17,10 @@ use rux::sync::types::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 
-use crate::util::*;
+use rux::ipc::hotpath::*;
+// the types the old util glob carried (a glob over hotpath does not
+// span types.rs): the definitions moved there in pass 2 step 1.
+use rux::ipc::types::{IpcIds, IpcPermUapi, IPC_IDS_MAX, KernIpcPerm};
 
 // Compile-time verification: IpcPermUapi mode field offset must be 20 bytes
 const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
@@ -199,7 +202,7 @@ pub fn set_shm_ctlmax(v: u64) {
 /// the file never promises more than the kernel has (the historical
 /// sysctl-side clamp, moved with the static it governs).
 pub fn set_shm_ctlni(v: u64) {
-    let capped = v.min(crate::util::IPC_IDS_MAX as u64);
+    let capped = v.min(rux::ipc::types::IPC_IDS_MAX as u64);
     SHM_CTLNI.store(capped, Ordering::Release);
 }
 pub fn set_shm_ctlall(v: u64) {
@@ -223,7 +226,7 @@ fn shm_total_pages() -> u64 {
 /// Live (non-deleted, slot-occupying) segment count — the SHMMNI budget,
 /// counted in the CALLER'S IPC namespace (reference: ns->ids in_use).
 fn shm_live_ids() -> u64 {
-    let ns = crate::util::caller_ipc_ns_inum();
+    let ns = rux::ipc::hotpath::caller_ipc_ns_inum();
     let slots = SHM_IDS.slots.lock();
     slots
         .iter()
@@ -609,7 +612,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
                     ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
                     ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
-                    result_id = crate::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
+                    result_id = rux::ipc::hotpath::ipc_build_id(raw_idx, entry.inner.perm.seq);
                 } else {
                     return -(errno::EINVAL as i64);
                 }
@@ -693,7 +696,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
                     ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
                     ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
-                    result_id = crate::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
+                    result_id = rux::ipc::hotpath::ipc_build_id(raw_idx, entry.inner.perm.seq);
                 } else {
                     return -(errno::EINVAL as i64);
                 }
@@ -716,7 +719,7 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
         out,
         "       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime       rss       swap"
     );
-    let ns = crate::util::caller_ipc_ns_inum();
+    let ns = rux::ipc::hotpath::caller_ipc_ns_inum();
     let slots = SHM_IDS.slots.lock();
     for (i, slot) in slots.iter().enumerate() {
         if let Some(ref entry) = slot {
@@ -793,11 +796,11 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     // RMID + fresh shmget could swap the entry between the two critical
     // sections, and the seq is not revalidated downstream).
     let segsz;
-    let idx = crate::util::ipc_id_to_index(shmid);
+    let idx = rux::ipc::hotpath::ipc_id_to_index(shmid);
     {
-        let ns = crate::util::caller_ipc_ns_inum();
-        let expected_seq = crate::util::ipc_id_seq(shmid);
-        if idx >= crate::util::IPC_IDS_MAX {
+        let ns = rux::ipc::hotpath::caller_ipc_ns_inum();
+        let expected_seq = rux::ipc::hotpath::ipc_id_seq(shmid);
+        if idx >= rux::ipc::types::IPC_IDS_MAX {
             return -(errno::EINVAL as i64);
         }
         let slots = SHM_IDS.slots.lock();
@@ -808,7 +811,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                 // foreign-namespace id): stale id, reference EINVAL.
                 return -(errno::EINVAL as i64);
             }
-            if !crate::util::ipc_check_permissions(perm, desired) {
+            if !rux::ipc::hotpath::ipc_check_permissions(perm, desired) {
                 return -(errno::EACCES as i64);
             }
             if entry.deleted {
@@ -872,7 +875,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     } else {
         // Reference do_shmat: SHM_REMAP is meaningless without a caller
         // address — EINVAL, never a kernel-picked placement.
-        if shmflg & rux::ipc::SHM_REMAP != 0 {
+        if shmflg & rux::ipc::hotpath::SHM_REMAP != 0 {
             return -(errno::EINVAL as i64);
         }
         // Linux do_shmat: the kernel-chosen address comes from
@@ -898,7 +901,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     // error could surface). With SHM_REMAP the overlapping portions are
     // unmapped first (Linux do_shmat behaviour); without it, any overlap
     // is EINVAL. Checked BEFORE a single PTE is written.
-    let shm_remap = (shmflg & rux::ipc::SHM_REMAP) != 0;
+    let shm_remap = (shmflg & rux::ipc::hotpath::SHM_REMAP) != 0;
     loop {
         let overlap: Option<(usize, usize)> = {
             let vma_mgr = addr_space.vma_read();

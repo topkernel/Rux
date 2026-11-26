@@ -1482,7 +1482,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 core::sync::atomic::AtomicU32::new(0);
             let arm = crate::sync::hotpath::HEAPMAP_ARM.load(core::sync::atomic::Ordering::Relaxed);
             if arm != 0 {
-                let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
+                let samgr = crate::ipc::hotpath::binder_sareg_samgr_pid();
                 if samgr != 0 {
                     let out = crate::api::sync::ffrt_mutex_heap_map(samgr, arm);
                     if !out.is_empty() {

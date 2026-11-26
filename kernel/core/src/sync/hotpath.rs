@@ -1533,7 +1533,7 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     // old=0 counter write) corrupted the latch and the OH68 owner
     // decode with it.
     if old_word == 0 && (!which2 || {
-        let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
+        let samgr = crate::ipc::hotpath::binder_sareg_samgr_pid();
         samgr == 0 || wtgid == samgr
     }) {
         FUXWATCH_OWNER_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
@@ -3217,7 +3217,7 @@ pub fn futex_stuck_census() {
         // auto-arm lost the slot race against the chain-walk's
         // LOCK-HEAD arm; kept as a const-gated block for reference.
         const CENSUS_STACK_WORD_ARM: bool = false;
-        let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
+        let samgr_pid = crate::ipc::hotpath::binder_sareg_samgr_pid();
         if CENSUS_STACK_WORD_ARM && samgr_pid != 0 && FUXWATCH2_ADDR.load(Relaxed) == 0 {
             for g in groups.iter() {
                 if g.tgid == samgr_pid && g.rep_comm[..7] == *b"OS_FFRT" {
@@ -3384,7 +3384,7 @@ pub fn futex_stuck_census() {
     let gn = GRAPH_N.fetch_add(1, Relaxed);
     if gn % 6 == 5 {
         use core::fmt::Write as _;
-        let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
+        let samgr_pid = crate::ipc::hotpath::binder_sareg_samgr_pid();
 
         // ---- FUX-MAPS (48th session): dump the samgr process's
         // executable file-backed VMAs ONCE (first graph burst). The
@@ -5836,7 +5836,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         cmd,
         FUTEX_WAKE | FUTEX_WAKE_BITSET | FUTEX_WAKE_OP | FUTEX_REQUEUE | FUTEX_CMP_REQUEUE
     ) {
-        let sp = crate::ipc::binder::binder_sareg_samgr_pid();
+        let sp = crate::ipc::hotpath::binder_sareg_samgr_pid();
         if sp != 0 {
             let mine = crate::sched::hotpath::current()
                 .map(|t| crate::sched::r#unsafe::task_shared(t).tgid() == sp)
@@ -6261,7 +6261,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                 "raw-socket".into()
                                             } else if core::ptr::eq(
                                                 p,
-                                                &crate::ipc::binder::BINDER_OPS,
+                                                &crate::ipc::hotpath::BINDER_OPS,
                                             ) {
                                                 "binder".into()
                                             } else if crate::api::fs::is_pipe_ops(ops) {

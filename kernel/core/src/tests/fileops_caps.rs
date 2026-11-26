@@ -382,7 +382,7 @@ pub fn test_fileops_caps() {
     );
     check(
         "access_token caps",
-        &crate::ipc::access_token::ACCESS_TOKEN_OPS,
+        &crate::ipc::hotpath::access_token::ACCESS_TOKEN_OPS,
         Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
     check(
@@ -402,7 +402,7 @@ pub fn test_fileops_caps() {
     );
     check(
         "binder caps",
-        &crate::ipc::binder::BINDER_OPS,
+        &crate::ipc::hotpath::BINDER_OPS,
         Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 

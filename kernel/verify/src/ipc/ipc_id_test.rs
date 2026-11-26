@@ -3,7 +3,8 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for IPC ID encoding/decoding and permission bitfield math.
-//! Copied from: kernel/core/src/ipc/util.rs
+//! Copied from: kernel/core/src/ipc/hotpath.rs (was util.rs before the
+//! seed-core pass 2 file split)
 
 use proptest::prelude::*;
 

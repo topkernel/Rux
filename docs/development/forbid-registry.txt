@@ -36,7 +36,6 @@ kernel/core/src/interrupt/domain.rs
 kernel/core/src/interrupt/irqchip.rs
 kernel/core/src/interrupt/irqthread.rs
 kernel/core/src/interrupt/ksoftirqd.rs
-kernel/core/src/ipc/util.rs
 kernel/core/src/panic_policy.rs
 kernel/core/src/print.rs
 kernel/core/src/security/capability.rs
@@ -129,6 +128,7 @@ kernel/fs/src/procfs/vmstat.rs
 kernel/fs/src/selinuxfs.rs
 kernel/fs/src/xattr.rs
 kernel/ipc/src/access_token.rs
+kernel/core/src/ipc/types.rs
 kernel/mm/src/hugepage.rs
 kernel/mm/src/compact.rs
 kernel/mm/src/kswapd.rs

@@ -6350,7 +6350,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             // deaths the 113rd could not see. Snapshot read is
             // lock-free (see binder::txn_owing_of).
             let (owing_n, owing_txn, owing_stid) =
-                crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
+                crate::ipc::hotpath::txn_owing_of(my_tgid, dying_pid);
             let hit = (owner_tid != 0 && dying_pid == owner_tid)
                 || (park_tgid != 0 && my_tgid == park_tgid)
                 || (!is_leader && frozen)
@@ -6566,7 +6566,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                         None => 0u64,
                     };
                     let (owing_n, owing_txn, owing_stid) =
-                        crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
+                        crate::ipc::hotpath::txn_owing_of(my_tgid, dying_pid);
                     // wrl-class lane: owing_txn without owing_stid conflates
                     // the thread's OWN debt with the tgid-wide fallback —
                     // txn_owing_of returns the first txn owed by ANY thread
@@ -6623,7 +6623,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         if !is_leader
             && crate::trace::EVENT_TXNHANG.armed()
             && tgid != 0
-            && tgid == crate::ipc::binder::binder_sareg_samgr_pid()
+            && tgid == crate::ipc::hotpath::binder_sareg_samgr_pid()
             && THEXIT_N.fetch_add(1, Relaxed) < 64
         {
             let comm = core::str::from_utf8(cur.comm())
@@ -6947,7 +6947,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // the process's clients stall (b92: samgr proc todo depth 13,
         // hdf_devhost waiters parked 162s). Cleanly-exiting IPC threads
         // also route through the same reaper via the ioctl.
-        crate::ipc::binder::binder_task_died(
+        crate::ipc::hotpath::binder_task_died(
             current_pid,
             cur.tgid(),
             cur.ns_pid_local(),
@@ -7149,7 +7149,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
 
         // ===== Reverse SEM_UNDO adjustments =====
-        crate::ipc::sysv_sem::sem_undo_exit(cur);
+        crate::ipc::hotpath::sem_undo_exit(cur);
 
         // ===== Orphan reparenting (review PROC-P03) =====
         // Children of a dying task must be re-attached (a surviving

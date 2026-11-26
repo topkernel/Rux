@@ -2,56 +2,183 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+//! The ipc subsystem's code (seed-core-design §2c.3): everything of the
+//! subsystem that is neither `unsafe.rs` nor `types.rs`, in one file.
+//!
+//! Sections follow the order of the old module declarations; each banner
+//! names the topic file it was (`binder` was binder.rs) and the file's
+//! module doc follows it as the section header comment. Inside a section
+//! the items keep their original order. Type definitions are in `types.rs`,
+//! the audited unsafe edges in `unsafe.rs`; the unsafe that is still
+//! scattered over the binder section is collected in pass 3.
+//! binder's `rtt_census` stays the inline module it was (a definition
+//! local to an inline module does not move to types.rs).
+//!
+//! sysv_sem.rs and util.rs each carried
+//! `#![forbid(unsafe_code)]` and hold no unsafe. The attribute is not
+//! repeated here: this file also holds the sections that still contain
+//! unsafe. It comes back in pass 3, when the scattered unsafe is collected
+//! into `unsafe.rs`.
+//!
+//! The file's NAME overstates until the shrink stage has run: it holds all
+//! of the subsystem's code under the hot-path name, not a verified set of
+//! hot-path functions (§2c.3, user decision 2026-11-25).
 
-//! Android/OpenHarmony binder IPC driver — Spike S1 minimal implementation
-//!
-//! OpenHarmony port plan §7 Spike S1: enough of the Linux binder UAPI
-//! (include/uapi/linux/android/binder.h, stable public ABI; semantics
-//! mirrored from the OH kernel_linux tree's drivers/android/binder.c) to
-//! run a real BC_TRANSACTION/BC_REPLY closed loop between two processes
-//! over /dev/binder, including the node/ref handshake and the mmap'd
-//! buffer zone with separate sync/async space.
-//!
-//! Implemented subset:
-//! * misc char device /dev/binder (major 10, minor 0xB0)
-//! * mmap buffer zone (silently truncated to 4 MiB like Linux binder_mmap);
-//!   sync buffers first-fit from the low end, async (TF_ONE_WAY) buffers
-//!   from the top half against a free_async_space budget
-//! * BINDER_VERSION (protocol 8), BINDER_SET_MAX_THREADS,
-//!   BINDER_SET_CONTEXT_MGR, BINDER_THREAD_EXIT, BINDER_WRITE_READ
-//! * BC_*: TRANSACTION/REPLY (also _SG with 0 extra buffers), FREE_BUFFER,
-//!   INCREFS/ACQUIRE/RELEASE/DECREFS, INCREFS_DONE/ACQUIRE_DONE,
-//!   ENTER/EXIT/REGISTER_LOOPER, DEAD_BINDER_DONE (accepted, ignored)
-//! * BR_*: ERROR, TRANSACTION, REPLY, DEAD_REPLY, TRANSACTION_COMPLETE,
-//!   INCREFS/ACQUIRE/RELEASE/DECREFS, NOOP (leading, like
-//!   binder_thread_read), SPAWN_LOOPER, FAILED_REPLY
-//! * flat_binder_object translation for BINDER_TYPE_{WEAK_}BINDER and
-//!   _HANDLE across processes; the BR_INCREFS/BR_ACQUIRE ->
-//!   BC_INCREFS_DONE/BC_ACQUIRE_DONE node handshake works
-//! * deferred BR_TRANSACTION_COMPLETE for sync transactions (the sender's
-//!   read keeps sleeping until the reply carries it out — one wakeup)
-//!
-//! Deliberate S1 gaps (documented in the spike report):
-//! * one device context (/dev/binder); hwbinder/vndbinder need their OWN
-//!   contexts when added — the context-manager node must not be shared
-//! * BINDER_TYPE_FD/FDA/PTR rejected with BR_FAILED_REPLY (no cross-process
-//!   fd installation)
-//! * a second TF_ONE_WAY transaction to a node whose async slot is busy
-//!   fails with BR_FAILED_REPLY instead of parking on node->async_todo
-//! * no death notifications, no priority inheritance, no freeze,
-//!   no oneway-spam detection, no /dev/binderfs, no sender-info exts
-//! * one wait queue per process (Linux uses per-thread queues; conforming
-//!   userspace cannot observe the difference)
-//!
-//! Locking: the single WORLD spinlock guards every binder object; no
-//! user-memory copies and no sleeping happen under it (BC payloads are
-//! copied in before locking, BR payloads are staged into a kernel Vec
-//! under the lock and copied out after release). Rux process exit tears
-//! down the mm before fds, so the region's last page reference is dropped
-//! by binder_close — the io_uring ring lifetime model.
+use super::types::{
+    BHIST,
+    BinderAlloc,
+    BinderBufferObject,
+    BinderCtx,
+    BinderEv,
+    BinderFdArrayObject,
+    BinderNode,
+    BinderProc,
+    BinderRef,
+    BinderThread,
+    BinderTransactionData,
+    BinderTxn,
+    BinderWriteRead,
+    BufBlock,
+    DeathPhase,
+    DeferredWakes,
+    FlatBinderObject,
+    IPC_IDS_MAX,
+    IpcIds,
+    IpcObjectEntry,
+    IpcPermUapi,
+    KernIpcPerm,
+    NodeState,
+    ParentWindow,
+    PinnedTask,
+    ProcInner,
+    RefDeath,
+    SemArray,
+    SemBuf,
+    SemEntry,
+    SemInfoUapi,
+    SemidDsUapi,
+    ThreadState,
+    TxnBlock,
+    Work,
+    World,
+    WorldGuard,
+    WorldSecRow,
+};
+
 
 use alloc::collections::VecDeque;
-use crate::ipc::r#unsafe::{probe_leaf, probe_u32, probe_u64, entry_frame};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+
+use crate::sched;
+use crate::arch::uaccess::access_ok;
+use crate::errno::constants::{EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, ESRCH};
+use crate::fs::{types::DevNo, hotpath::MISC_MAJOR};
+use crate::ipc::r#unsafe::{entry_frame, probe_leaf, probe_u32, probe_u64};
+use crate::process::types::WaitQueueHead;
+use crate::sync::types::Spinlock;
+use crate::syscall::errno;
+
+
+// ═══════════════ ipc root ═════════════════════════════════════════
+// (was mod.rs: the module's doc. Its one re-export of ipc's own
+// modules — `pub use util::*;` — is gone: every path names hotpath
+// or types now.)
+// Inter-Process Communication (IPC) — the FRAMEWORK zone after the
+// ipc crate flip.
+//
+// What remains here (and why):
+// - `binder` — the binder driver STAYS framework-side (the rung's
+//   verdict: 46 unsafe blocks + 10 unsafe impls in 7 clusters — the
+//   TxnBlock block-view windows (INV-BINDER-BLOCKVIEW), the
+//   file->Arc adoption, the UnsafeCell interiors, the Send/Sync
+//   markers on raw-pointer object types, and the trap-regs/page-table
+//   diagnostic walkers are mechanism-floor material; flipping it
+//   needs a binder_substrate extraction campaign of its own).
+// - `sysv_sem` — SHELVED framework-side with evidence (the rung's
+//   second verdict): with the file compiled in the ipc crate,
+//   the sysv_sem_block guest test's cross-task handoff deadlocks —
+//   the helper kthread is enqueued (linked=1, on_rq=1, vruntime=0)
+//   but never scheduled, while the boot task's park loop cycles
+//   register→schedule→instant-return forever. Identical source
+//   in-tree (seam state) passes 809/809 with the same breadcrumbs;
+//   fork-point base passes 801/801. The delta is the crate packaging
+//   alone; root cause not run down in this rung (taskdump evidence
+//   in the lane log). The file keeps its zero-unsafe conversions.
+// - `util` — the shared ipc substrate (IpcIds registry, perms, the
+//   SemUndoEntry type of Task's sem_undo field). Consumed by BOTH
+//   the framework sysv_sem and the crate's service files — the crate
+//   re-exports it (the binder pattern).
+// - `ipc_hooks` — the 24-row seam table (every lib consumer of the
+//   movable policy resolves through it; ipc::register_all fills
+//   it from the composition bin).
+// - `edges` — the audited page-refcount zone (INV-IPC-PAGEOP-1).
+//
+// The movable policy (sysv_msg, sysv_shm, posix_mq, keys,
+// access_token) lives in kernel/ipc under
+// #![forbid(unsafe_code)] — the sole copy.
+
+// The seam tables (IpcHooks, BinderDiagHooks) are crate::api::ipc.
+
+// Re-export IPC constants for use by dispatch and other modules
+
+// pub mod sysv_msg; — MOVED to the ipc service crate (this rung)
+// pub mod sysv_shm; — MOVED to the ipc service crate (this rung)
+// pub mod posix_mq; — MOVED to the ipc service crate (this rung)
+// pub mod keys; — MOVED to the ipc service crate (this rung)
+// pub mod access_token; — MOVED to the ipc service crate (this rung)
+
+
+// ═══════════════ binder ═════════════════════════════════════════
+// (was binder.rs)
+// Android/OpenHarmony binder IPC driver — Spike S1 minimal implementation
+//
+// OpenHarmony port plan §7 Spike S1: enough of the Linux binder UAPI
+// (include/uapi/linux/android/binder.h, stable public ABI; semantics
+// mirrored from the OH kernel_linux tree's drivers/android/binder.c) to
+// run a real BC_TRANSACTION/BC_REPLY closed loop between two processes
+// over /dev/binder, including the node/ref handshake and the mmap'd
+// buffer zone with separate sync/async space.
+//
+// Implemented subset:
+// * misc char device /dev/binder (major 10, minor 0xB0)
+// * mmap buffer zone (silently truncated to 4 MiB like Linux binder_mmap);
+//   sync buffers first-fit from the low end, async (TF_ONE_WAY) buffers
+//   from the top half against a free_async_space budget
+// * BINDER_VERSION (protocol 8), BINDER_SET_MAX_THREADS,
+//   BINDER_SET_CONTEXT_MGR, BINDER_THREAD_EXIT, BINDER_WRITE_READ
+// * BC_*: TRANSACTION/REPLY (also _SG with 0 extra buffers), FREE_BUFFER,
+//   INCREFS/ACQUIRE/RELEASE/DECREFS, INCREFS_DONE/ACQUIRE_DONE,
+//   ENTER/EXIT/REGISTER_LOOPER, DEAD_BINDER_DONE (accepted, ignored)
+// * BR_*: ERROR, TRANSACTION, REPLY, DEAD_REPLY, TRANSACTION_COMPLETE,
+//   INCREFS/ACQUIRE/RELEASE/DECREFS, NOOP (leading, like
+//   binder_thread_read), SPAWN_LOOPER, FAILED_REPLY
+// * flat_binder_object translation for BINDER_TYPE_{WEAK_}BINDER and
+//   _HANDLE across processes; the BR_INCREFS/BR_ACQUIRE ->
+//   BC_INCREFS_DONE/BC_ACQUIRE_DONE node handshake works
+// * deferred BR_TRANSACTION_COMPLETE for sync transactions (the sender's
+//   read keeps sleeping until the reply carries it out — one wakeup)
+//
+// Deliberate S1 gaps (documented in the spike report):
+// * one device context (/dev/binder); hwbinder/vndbinder need their OWN
+//   contexts when added — the context-manager node must not be shared
+// * BINDER_TYPE_FD/FDA/PTR rejected with BR_FAILED_REPLY (no cross-process
+//   fd installation)
+// * a second TF_ONE_WAY transaction to a node whose async slot is busy
+//   fails with BR_FAILED_REPLY instead of parking on node->async_todo
+// * no death notifications, no priority inheritance, no freeze,
+//   no oneway-spam detection, no /dev/binderfs, no sender-info exts
+// * one wait queue per process (Linux uses per-thread queues; conforming
+//   userspace cannot observe the difference)
+//
+// Locking: the single WORLD spinlock guards every binder object; no
+// user-memory copies and no sleeping happen under it (BC payloads are
+// copied in before locking, BR payloads are staged into a kernel Vec
+// under the lock and copied out after release). Rux process exit tears
+// down the mm before fds, so the region's last page reference is dropped
+// by binder_close — the io_uring ring lifetime model.
 
 // PUBLISHED DIAGNOSTIC SURFACE (cold-four lane): the items marked `pub`
 // that the MOVED cold diagnostics consume (ipc's binder_diag.rs)
@@ -66,13 +193,7 @@ use crate::ipc::r#unsafe::{probe_leaf, probe_u32, probe_u64, entry_frame};
 // unsafe.rs. The full object-model restructure the shelving
 // record names (Send/Sync redesign) is still a lane of its own — this
 // is the cold-half carve around it.
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 
-use crate::errno::constants::{EBADF, EBUSY, EFAULT, EAGAIN, EINTR, EINVAL, ESRCH};
-use crate::fs::{types::DevNo, hotpath::MISC_MAJOR};
-use crate::process::types::WaitQueueHead;
-use crate::sync::types::Spinlock;
 
 // ============================================================================
 // UAPI (include/uapi/linux/android/binder.h; LP64/riscv64 _IOC encoding)
@@ -212,79 +333,19 @@ pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 /// dropped every SECCTX delivery (b45/b59 wedges).
 pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 2, 72);
 
-/// struct binder_transaction_data (LP64)
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct BinderTransactionData {
-    pub target_handle: u32,
-    pub _target_pad: u32,
-    pub cookie: u64,
-    pub code: u32,
-    pub flags: u32,
-    pub sender_pid: i32,
-    pub sender_euid: u32,
-    pub data_size: u64,
-    pub offsets_size: u64,
-    pub data_buffer: u64,
-    pub data_offsets: u64,
-}
+
 const _: () = assert!(core::mem::size_of::<BinderTransactionData>() == 64);
 
-/// struct binder_write_read (LP64). Copy: plain u64 UAPI record — the
-/// uaccess capsule round-trips it (copy_in_t/copy_out_t).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct BinderWriteRead {
-    pub write_size: u64,
-    pub write_consumed: u64,
-    pub write_buffer: u64,
-    pub read_size: u64,
-    pub read_consumed: u64,
-    pub read_buffer: u64,
-}
+
 const _: () = assert!(core::mem::size_of::<BinderWriteRead>() == 48);
 
-/// struct flat_binder_object (24 bytes on LP64)
-#[repr(C)]
-pub struct FlatBinderObject {
-    pub hdr_type: u32,
-    pub flags: u32,
-    pub handle: u32,
-    pub _handle_pad: u32,
-    pub cookie: u64,
-}
+
 const _: () = assert!(core::mem::size_of::<FlatBinderObject>() == 24);
 
-/// struct binder_buffer_object (40 bytes on LP64): BINDER_TYPE_PTR —
-/// points at additional data outside the parcel that the driver copies
-/// into the target's sg (extra) area and rewrites to a target address.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BinderBufferObject {
-    hdr_type: u32,
-    flags: u32,
-    buffer: u64,
-    length: u64,
-    /// index into the offsets array of the parent BINDER_TYPE_PTR object
-    parent: u64,
-    /// offset in the parent buffer where this buffer's address is written
-    parent_offset: u64,
-}
+
 const _: () = assert!(core::mem::size_of::<BinderBufferObject>() == 40);
 
-/// struct binder_fd_array_object (32 bytes on LP64): BINDER_TYPE_FDA —
-/// an array of u32 fds living inside the parent buffer object.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BinderFdArrayObject {
-    hdr_type: u32,
-    flags: u32,
-    num_fds: u64,
-    /// index into the offsets array of the parent BINDER_TYPE_PTR object
-    parent: u64,
-    /// offset of the fd array within the parent's buffer
-    parent_offset: u64,
-}
+
 const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
 
 /// Security-context string copied into the transaction's sg area when the
@@ -333,16 +394,6 @@ pub const DEV_BINDER: DevNo = DevNo::new(MISC_MAJOR, BINDER_MINOR);
 pub const DEV_HWBINDER: DevNo = DevNo::new(MISC_MAJOR, HWBINDER_MINOR);
 pub const DEV_VNDBINDER: DevNo = DevNo::new(MISC_MAJOR, VNDBINDER_MINOR);
 
-/// Which device context an open belongs to. /dev/binder, /dev/hwbinder
-/// and /dev/vndbinder each carry their OWN context-manager node (Linux
-/// binder_device.context); handle-0 resolves within the opener's context
-/// only. Ref tables are per-open, so handles cannot leak across contexts.
-#[derive(Clone, Copy, PartialEq)]
-pub enum BinderCtx {
-    Binder = 0,
-    HwBinder = 1,
-    VndBinder = 2,
-}
 
 pub fn devno_ctx(dev: &DevNo) -> Option<BinderCtx> {
     if *dev == DEV_BINDER {
@@ -363,59 +414,6 @@ fn align8(v: usize) -> usize {
     (v + 7) & !7
 }
 
-/// INV-BINDER-BLOCKVIEW (unsafe-slim r3c): the ONE audited raw window over
-/// an in-flight transaction block, replacing the ~20 scattered volatile
-/// derefs the payload copy + flat-object walk used to carry. A TxnBlock is
-/// built after `BinderAlloc::new_buf` returns the block offset and lives
-/// for the duration of THIS transaction's fixup phase.
-///
-/// Layout contract (same arithmetic `BinderAlloc::block_need` reserved):
-/// the allocation is `alloc_len` bytes at `base` (page-aligned buddy
-/// block; `base` never escapes this type except through the audited
-/// `extra_copy_in`/`block_window` bodies that feed uaccess), and this
-/// txn's block is
-///   [data (data_size)][offsets (align8(offsets_size))][extra (align8(extra_size))]
-/// starting at `block_off` (8-aligned: new_buf carves sums of align8'd
-/// needs from 0). Every accessor checks BOTH the sub-layout bound AND the
-/// absolute allocation bound — a slip in either contract fails the
-/// transaction instead of writing out of the buffer (the sender controls
-/// the offsets array, so the bounds are hostile-input territory; see the
-/// wrap-proof checks the pre-conversion audit added).
-///
-/// Reads/writes stay volatile exactly as before the conversion (the
-/// buffer is concurrently observable through the target's user mapping).
-/// Misaligned object offsets were UB-shaped volatile reads before; now
-/// they are a clean None -> BR_FAILED_REPLY.
-pub struct TxnBlock {
-    /// Kernel-side base of the whole binder buffer allocation
-    /// (BinderAlloc::kvirt). Never handed out except by the audited
-    /// bodies below.
-    base: *mut u8,
-    /// Size of the whole allocation (npages * PAGE_SIZE).
-    alloc_len: usize,
-    /// This txn's block start within the allocation (8-aligned).
-    block_off: usize,
-    /// Parcel payload size (the [data] sub-area, unaligned tail is fine —
-    /// only align8() sizes are reserved).
-    data_size: usize,
-    /// Offsets-array size in bytes (8-aligned by the caller marshalling).
-    offsets_size: usize,
-    /// Extra/sg area payload size (sg buffers + optional secctx string).
-    extra_size: usize,
-    /// Target-user base of the whole allocation (BinderAlloc::user_base);
-    /// the user-side addresses the sender's PTR objects carry map back
-    /// against block_user_base() = user_base + block_off.
-    user_base: u64,
-    /// Precomputed layout end (block_off + align8 of the three sub-areas)
-    /// — span_ok runs on every accessor call, so the bound is computed
-    /// once at construction, not per access.
-    layout_end: usize,
-    /// Precomputed extra-area base (block-relative).
-    extra_base: usize,
-    /// Precomputed offsets-array base (block-relative) — the offsets
-    /// array sits right after the data sub-area.
-    offsets_base: usize,
-}
 
 impl TxnBlock {
     fn new(
@@ -643,15 +641,6 @@ impl TxnBlock {
     }
 }
 
-/// Bound window over a resolved parent BINDER_TYPE_PTR sg copy (see
-/// TxnBlock::parent_window). Carries offsets, not pointers — every
-/// access re-checks against `len`.
-struct ParentWindow<'a> {
-    block: &'a TxnBlock,
-    /// Absolute offset of the parent buffer start within the allocation.
-    abs: usize,
-    len: usize,
-}
 
 /// INV-BINDER-STAGE-POD (unsafe-slim r3c): bytewise view of a `Copy`
 /// repr(C) struct for staging into the read buffer (BinderTransactionData
@@ -705,46 +694,6 @@ impl ParentWindow<'_> {
 // Core state — everything behind UnsafeCell is mutated ONLY under WORLD.
 // ============================================================================
 
-pub struct NodeState {
-    internal_strong_refs: i32,
-    local_strong_refs: i32,
-    local_weak_refs: i32,
-    has_strong_ref: bool,
-    has_weak_ref: bool,
-    pending_strong_ref: bool,
-    pending_weak_ref: bool,
-    /// TF_ONE_WAY serialization: one async transaction in flight per node
-    /// (Linux node->has_async_transaction); extra oneways park on
-    /// node->async_todo until the in-flight buffer is freed.
-    pub has_async_transaction: bool,
-    /// Oneway transactions waiting for the node's async slot (Linux
-    /// node->async_todo). Their buffers are already allocated and fixed
-    /// up; delivery is just deferred.
-    pub async_todo: VecDeque<Arc<BinderTxn>>,
-}
-
-pub struct BinderNode {
-    pub id: u64,
-    ptr: u64,
-    cookie: u64,
-    proc_id: u64,
-    /// sc157: tgid of the task that REGISTERED the node. When it differs
-    /// from the owner proc's pid, the node belongs to a forked child
-    /// sharing the parent's binder_proc — deliveries to such nodes must
-    /// be visible to the APPTXN tracer (the AMS→child ScheduleStartAbility
-    /// hop rides exactly this shape).
-    pub reg_tgid: u32,
-    /// flat_binder_object.flags at registration (accept_fds and
-    /// txn_security_ctx bits).
-    flags: u32,
-    /// sc161: the registering task group exited while the OWNER proc
-    /// lives on (forked appspawn children share the daemon's proc). Set
-    /// by binder_on_tgid_exit; makes node_is_dead true and fail-fasts
-    /// new transactions through stale refs (BR_DEAD_REPLY), mirroring
-    /// what proc teardown does for whole-process death.
-    dead: core::sync::atomic::AtomicBool,
-    st: core::cell::UnsafeCell<NodeState>,
-}
 
 impl BinderNode {
     const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64, reg_tgid: u32, flags: u32) -> Self {
@@ -789,82 +738,6 @@ impl NodeState {
     }
 }
 
-struct BinderRef {
-    desc: u32,
-    node: Arc<BinderNode>,
-    strong: i32,
-    weak: i32,
-    /// Death-notification request on this handle (Linux ref->death).
-    death: Option<RefDeath>,
-}
-
-/// Death-notification request state (Linux struct binder_ref_death +
-/// its work-item states).
-struct RefDeath {
-    cookie: u64,
-    /// Armed: requested, node still alive. Queued: Work::DeadBinder sits
-    /// on the proc todo (node dead, BR not yet read). Delivered:
-    /// BR_DEAD_BINDER was read, awaiting BC_DEAD_BINDER_DONE.
-    phase: DeathPhase,
-    /// BC_CLEAR_DEATH_NOTIFICATION arrived while the notification was
-    /// queued or delivered: after BC_DEAD_BINDER_DONE, deliver
-    /// BR_CLEAR_DEATH_NOTIFICATION_DONE and drop the request (Linux
-    /// BINDER_WORK_DEAD_BINDER_AND_CLEAR).
-    clear_pending: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum DeathPhase {
-    Armed,
-    Queued,
-    Delivered,
-}
-
-pub(crate) struct BufBlock {
-    pub(crate) off: usize,
-    pub(crate) len: usize,
-    pub(crate) free: bool,
-    pub(crate) async_block: bool,
-    pub(crate) allow_user_free: bool,
-    pub(crate) data_size: usize,
-    pub(crate) offsets_size: usize,
-    /// Per-allocation id (the reference's buffer->debug_id): assigned
-    /// by new_buf when a block is carved, 0 while free. Carried by the
-    /// binder_transaction_alloc_buf / buffer_release trace events.
-    pub(crate) buf_id: u64,
-    /// sg (extra) area size: BINDER_TYPE_PTR payload copies (layout:
-    /// [data][offsets][extra], each u64-aligned).
-    pub(crate) extra_size: usize,
-    /// Oneway (async) buffers keep their transaction alive so the node's
-    /// async slot is released when the receiver frees the buffer (Linux
-    /// buffer->transaction). Sync buffers rely on the reply path instead.
-    pub(crate) txn: Option<Arc<BinderTxn>>,
-    /// sc243 (leg-17): the sync txn this buffer carried has been
-    /// REPLIED — the request data is protocol-dead and only the
-    /// receiver's contractual BC_FREE_BUFFER remains. The OHOS
-    /// cc54-family services never issue that BC_FREE, so their allocs
-    /// filled with delivered-but-unfreed blocks (sc243 census: 329K
-    /// live BinderTxn arcs, every one pinned by such a block; at the
-    /// launcher floor this is ~210MB of the 831MB heap). On alloc
-    /// pressure these blocks are reclaimed (see alloc_new_buf).
-    pub(crate) reply_done: bool,
-}
-
-pub(crate) struct BinderAlloc {
-    pub(crate) kvirt: *mut u8,
-    pub(crate) phys: usize,
-    pub(crate) npages: usize,
-    pub(crate) order: usize,
-    pub(crate) user_base: u64,
-    pub(crate) blocks: Vec<BufBlock>,
-    pub(crate) free_async_space: usize,
-    /// sc243 (leg-17): jiffies of the last stale-async sweep (see
-    /// sweep_stale_async) — rate-limits the O(blocks) scan to one per
-    /// second per allocator.
-    pub(crate) last_sweep_j: u32,
-    /// Monotone buffer-id source (see BufBlock::buf_id).
-    pub(crate) next_buf_id: u64,
-}
 
 impl BinderAlloc {
     fn block_need(data_size: usize, offsets_size: usize, extra_size: usize) -> usize {
@@ -1036,23 +909,6 @@ impl BinderAlloc {
             }
         }
     }
-}
-
-pub enum Work {
-    TransactionComplete,
-    Transaction(Arc<BinderTxn>),
-    /// (cmd, param): BR_ERROR carries an s32 payload, the *_REPLY
-    /// variants carry none.
-    ReturnError(u32, i32),
-    /// BINDER_WORK_NODE: ref-state change; the read side derives
-    /// BR_INCREFS/ACQUIRE/RELEASE/DECREFS from the counters (like Linux).
-    Node(Arc<BinderNode>),
-    /// BINDER_WORK_DEAD_BINDER(_AND_CLEAR): (ref desc, cookie). The node
-    /// died; deliver BR_DEAD_BINDER.
-    DeadBinder { desc: u32, cookie: u64 },
-    /// BINDER_WORK_CLEAR_DEATH_NOTIFICATION: deliver
-    /// BR_CLEAR_DEATH_NOTIFICATION_DONE (cookie).
-    ClearDeathDone { cookie: u64 },
 }
 
 
@@ -1896,74 +1752,6 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     }
 }
 
-pub struct BinderTxn {
-    pub id: u64,
-    pub from_proc: Option<Arc<BinderProc>>,
-    pub from_tid: Option<u32>,
-    pub to_proc: Arc<BinderProc>,
-    /// Set when the transaction is delivered (BR_TRANSACTION): the
-    /// receiving thread, which will later issue BC_REPLY. Atomic with
-    /// 0 = None (unsafe-slim r3: real binder tids are >= 1, so the
-    /// sentinel cannot collide; Relaxed is enough — the value is a
-    /// plain word, no pointer, no ordering contract).
-    to_tid: core::sync::atomic::AtomicU32,
-    pub target_node: Option<Arc<BinderNode>>,
-    /// Set while this txn holds the node's async slot (TF_ONE_WAY).
-    /// Interior-mutable: a parked oneway claims the slot only when the
-    /// in-flight buffer is freed and it graduates to the proc todo.
-    holds_async_slot: core::sync::atomic::AtomicBool,
-    pub code: u32,
-    pub flags: u32,
-    sender_pid: i32,
-    sender_euid: u32,
-    data_size: usize,
-    offsets_size: usize,
-    buffer_off: usize,
-    /// Target-user address of the NUL-terminated secctx string in the sg
-    /// area (0: the target node did not request a security context).
-    security_ctx: u64,
-    /// sc208 (launcher leg 13, C-line cross-finding: SAMgr SendRequest
-    /// ~30 s per call once the clock was fixed): lifecycle stamps for the
-    /// SLOW-TXN probe. enq_j = jiffies at BC_TRANSACTION queue time;
-    /// pick_j = jiffies at BR_TRANSACTION delivery (server pickup), 0
-    /// until then. The reply pop computes queue-vs-exec and prints the
-    /// split for any sync txn over 5 s — where the 30 s goes (server not
-    /// picking up vs handler running long) names the next chain link.
-    pub enq_j: u32,
-    /// (unsafe-slim r3) all five census cells below are Relaxed atomics:
-    /// every prior UnsafeCell variant trusted "single mutator under
-    /// WORLD"; the enqueue-wake latch (binder_transaction) writes two of
-    /// them AFTER the WORLD release, which was a bare single-writer
-    /// assumption. Atomics carry the same cost (one plain word store on
-    /// both targets) and drop the trust.
-    pick_j: core::sync::atomic::AtomicU32,
-    /// 23rd PICK-LATE evidence: eligible proc-work readers on the target
-    /// at proc-todo enqueue time (the wake_proc_one predicate count).
-    /// 0 = nobody to wake — every reader busy in its own handler (a
-    /// capacity signal, not a lost wake). Written under WORLD at
-    /// enqueue, read in the PICK-LATE probe under WORLD.
-    enq_elig: core::sync::atomic::AtomicU8,
-    /// 105th RTT census (rux:bindertrace (retired debug=bindertrace)), ns-domain twins of the
-    /// jiffies stamps: enq_ns = constructor time (request: enqueue;
-    /// reply: submit), pick_ns = server BR_TRANSACTION staging time, 0
-    /// until then. Jiffies (10 ms) cannot resolve the 4-5 ms fast-path
-    /// RTT class the 103rd measured vs the reference's ~1 ms. Written
-    /// once on the txn lifecycle path under WORLD, read at the census
-    /// accumulation points under WORLD.
-    enq_ns: u64,
-    pick_ns: core::sync::atomic::AtomicU64,
-    /// 105th wake-dispatch census: latched right after this txn's sync
-    /// wake — bits 0-3 = sched::WAKE_DISP code (1 idle-claim+IPI, 2 no-
-    /// idle sync, 3 no-idle async), bits 4-11 = idle mask at wake entry,
-    /// bits 12-19 = min(grq nr_running, 255). Read by the QPICK print.
-    /// Latched once at the enqueue-wake point (outside WORLD, single
-    /// enqueuing thread — atomic anyway), read at pickup under WORLD.
-    enq_disp: core::sync::atomic::AtomicU32,
-    /// 105th: the wake-issued stamp (0 until the enqueue's wake loops
-    /// ran) — q splits into sender-build (enq_ns->wake_ns) and
-    /// server-wait (wake_ns->pick_ns). Same contract as enq_disp.
-    wake_ns: core::sync::atomic::AtomicU64,
-}
 
 impl BinderTxn {
     /// INV-BINDER-HELD (unsafe-slim r3): the WORLD-held proof rides the
@@ -2038,22 +1826,6 @@ impl BinderTxn {
     }
 }
 
-/// Per-thread transition history (sc74 wedge forensics): the observed death
-/// loop ends in a state — server thread parked in the blocking read owing a
-/// reply, own todo empty, no nested txn anywhere in the world — that no
-/// single-threaded execution of this driver plus OH libipc can produce. The
-/// ring records the last BHIST state transitions under WORLD so the next
-/// stall dump names the exact step that never happened (or shows a
-/// transition sequence only corruption can produce).
-#[derive(Clone, Copy)]
-pub struct BinderEv {
-    pub j: u32,
-    pub ev: u8,
-    pub a: u32,
-    pub b: u32,
-}
-
-pub const BHIST: usize = 24;
 
 pub const EV_TXN_SENT: u8 = 1;
 pub const EV_TXN_TQUEUED: u8 = 2;
@@ -2098,130 +1870,6 @@ pub fn ev_name(ev: u8) -> &'static str {
     }
 }
 
-pub struct ThreadState {
-    pub looper: u32,
-    pub todo: VecDeque<Work>,
-    /// process_todo: a deferred TRANSACTION_COMPLETE on the todo does NOT
-    /// set this — the thread keeps sleeping until real work arrives.
-    process_todo: bool,
-    /// True while blocked in binder_thread_read waiting for proc work
-    /// (Linux waiting_threads list, drives BR_SPAWN_LOOPER).
-    pub waiting_for_proc_work: bool,
-    /// Reference looper_need_return: force the thread's next read to
-    /// return to userspace (binder_flush / fd close / deferred fd
-    /// completion all set it; the BWR read loop breaks on it).
-    looper_need_return: bool,
-    /// Park sequence stamp (65th session, reference-order parity):
-    /// value of NEXT_PARK_SEQ when this thread last joined the
-    /// waiting-for-proc-work set. The reference registers a parking
-    /// reader with `list_add` at the HEAD of proc->waiting_threads and
-    /// binder_select_thread_ilocked pops the head — i.e. the MOST
-    /// RECENTLY parked looper is selected for delivery (LIFO, sticky to
-    /// the thread that just finished and re-parked). We have no list;
-    /// a monotonic stamp under WORLD reproduces the exact order (max
-    /// stamp = head). 0 = not parked.
-    park_seq: u64,
-    pub txn_stack: Vec<Arc<BinderTxn>>,
-    /// 75th OH parity (CONFIG_BINDER_SENDER_INFO): thread->tokens.
-    /// sender_tokenid source — the SENDER's tgid of the transaction this
-    /// thread last staged to userspace (BR_TRANSACTION or BR_REPLY),
-    /// stamped for EVERY delivered txn exactly like the reference's
-    /// `thread->tokens.sender_tokenid = t->sender_tokenid`
-    /// (linux-6.6 binder.c:4829). The GET_SENDER_INFO ioctl resolves
-    /// the native access token through it. txn_stack cannot serve:
-    /// oneways are never stacked (no BC_REPLY will come).
-    sender_token_pid: u32,
-    /// 75th OH parity: thread->sender_pid_nr — task_tgid_nr of the
-    /// sender, but ONLY when t->from was set (sync txns; the reference
-    /// zeroes it for oneway/reply, binder.c:4737-4745).
-    sender_pid_nr: u32,
-    /// Single-slot error dedup (94th session, hp92w4 storm root cause).
-    /// Upstream binder.c 6.6 stages thread errors in TWO fixed single
-    /// work slots (thread->return_error for write-path failures,
-    /// thread->reply_error for async/death failures): a second error
-    /// staged while one is unconsumed is DROPPED ("Unexpected reply
-    /// error" — binder_send_failed_reply). Our todo-queue model had no
-    /// such guard: a proc death that failed the SAME pending sync txn
-    /// through two cleanup walks delivered TWO BR_DEAD_REPLY to one
-    /// thread (hp92w4 rings: three threads consumed ERR_RECV(29189)
-    /// twice at j4330); OH libipc's completion bookkeeping then desynced
-    /// into 2-command sync BWRs and the SYNCSEND-GUARD storm aborted
-    /// foundation. `err_staged` = a ReturnError work is queued and
-    /// unconsumed; `err_is_write` = it came from the write path (gates
-    /// the write loop, upstream's `thread->return_error.cmd == BR_OK`
-    /// loop condition).
-    err_staged: bool,
-    err_is_write: bool,
-    /// Transition ring (sc74 forensics); written under WORLD only.
-    pub hist: [BinderEv; BHIST],
-    pub hcur: usize,
-    /// Live BWR ioctl shadow (r41v6): (write_size, write_consumed,
-    /// read_size, first pending write cmd) of the binder_write_read this
-    /// thread is currently executing — recorded at ioctl entry, consumed
-    /// updated after the write leg, cleared on every exit. The
-    /// bwr_park_audit reads THIS, never user memory: the audit runs on
-    /// the timer heartbeat (interrupt context of an arbitrary task), so
-    /// dereferencing the audited thread's user bwr pointer through the
-    /// interrupted task's page tables produced the r41v4/r41v5 false-H2
-    /// rows (same-VA zero pages decoded as w=0/0 rsz=0 "write-only
-    /// parked"; unrelated mappings as garbage w= words).
-    pub live_bwr: Option<(u64, u64, u64, u32)>,
-}
-
-pub struct BinderThread {
-    pub tid: u32,
-    /// Owning task's TGID (sc161 child-tgid routing): several appspawn
-    /// children share ONE binder proc (the daemon's inherited fd), so the
-    /// proc's thread list mixes daemon-tgid and child-tgid threads. The
-    /// tgid decides which threads may consume a transaction aimed at a
-    /// child-registered node (reg_tgid) — without it the daemon's OS_IPC
-    /// reader threads steal the AMS→child deliveries.
-    tgid: u32,
-    /// Per-thread wait queue (Linux thread->wait): replies and tcomplete
-    /// wake the exact thread; proc work wakes one selected waiter.
-    pub wait: WaitQueueHead,
-    st: core::cell::UnsafeCell<ThreadState>,
-    /// Jiffies when this thread entered the blocking binder read wait (0
-    /// while not waiting) — read atomically by the khungtaskd binder-stall
-    /// scan without taking WORLD.
-    pub read_wait_since: core::sync::atomic::AtomicU64,
-    /// 105th QPICK census: nominal-clock stamp at the LAST return of the
-    /// blocking read wait (0 before the first park). Splits a slow
-    /// enqueue->pickup into wake->wait-return (scheduler) and
-    /// wait-return->staging (the read path itself — WORLD acquire and
-    /// drain). Relaxed atomic; diagnostic only.
-    read_wake_ns: core::sync::atomic::AtomicU64,
-    /// One stall report per wait episode (avoids per-scan spam).
-    pub stall_reported: core::sync::atomic::AtomicBool,
-    /// One REKICK hist record per wait episode (the re-kick itself still
-    /// runs every scan; only the ring entry is gated so the forensics
-    /// history is not flooded by heal noise).
-    pub rekicked: core::sync::atomic::AtomicBool,
-    /// Kicks issued in the current wait episode — >= 2 means the thread is
-    /// still parked in the SAME read wait one scan after a kick. That is
-    /// usually the benign idle-reader re-park (the kick ran it; no work was
-    /// readable, so the wait_event loop slept again — see wrl_last_exec_ns
-    /// for the discriminator), NOT by itself a wake→run leak; the scheduler
-    /// view is dumped then (WAKE-RUN-LEAK line) with the exec-delta shape.
-    pub rekick_count: core::sync::atomic::AtomicU32,
-    /// sc252/sc253 attribution (leg 19): outcome counters for this
-    /// thread's OWN wait-queue kicks, read by the WAKE-RUN-LEAK dump —
-    /// wok>=1 with the task still parked means the wake linked the task
-    /// and the PICK side never ran it; wno-only means every kick was
-    /// silently refused (the R82 DL-ENQ-DEFERRED / R80-phantom families).
-    pub kick_wake_ok: core::sync::atomic::AtomicU32,
-    pub kick_wake_refused: core::sync::atomic::AtomicU32,
-    /// wrl-class lane: exec_ns the WAKE-RUN-LEAK print last sampled for
-    /// this thread (per wait episode, reset with the kick counters). The
-    /// census row's exec delta between scans separates the dominant
-    /// benign shape — an idle reader whose kick RAN it (it re-checked
-    /// thread_has_work, found none, re-parked inside the same wait_event
-    /// epoch; exec advances a few µs per kick) — from the true leak
-    /// shape (kicks transition the queue entry, exec never advances: the
-    /// task never runs). On the lr-series boots ALL rows were re-parks;
-    /// without the delta each row reads as "kicked, never ran".
-    pub wrl_last_exec_ns: core::sync::atomic::AtomicU64,
-}
 
 impl BinderThread {
     fn new(tid: u32, tgid: u32) -> Self {
@@ -2272,29 +1920,6 @@ impl BinderThread {
     }
 }
 
-pub struct ProcInner {
-    alloc: Option<BinderAlloc>,
-    pub nodes: Vec<Arc<BinderNode>>,
-    refs: Vec<BinderRef>,
-    /// Next handle descriptor to hand out. Starts at 1: desc 0 is
-    /// reserved for the context manager in every process (Linux
-    /// binder_get_ref_for_node starts normal refs at 1).
-    next_desc: u32,
-    pub threads: Vec<Arc<BinderThread>>,
-    pub todo: VecDeque<Work>,
-    pub max_threads: i32,
-    pub requested_threads: i32,
-    pub requested_threads_started: i32,
-    is_dead: bool,
-}
-
-pub struct BinderProc {
-    pub id: u64,
-    pub pid: u32,
-    ctx: BinderCtx,
-    wait: WaitQueueHead,
-    inner: core::cell::UnsafeCell<ProcInner>,
-}
 
 impl BinderProc {
     fn new(id: u64, pid: u32, ctx: BinderCtx) -> Self {
@@ -2348,12 +1973,6 @@ impl Drop for BinderAlloc {
     }
 }
 
-pub struct World {
-    next_id: u64,
-    pub procs: Vec<Arc<BinderProc>>,
-    /// Context-manager node per device context (index by BinderCtx).
-    mgr_node: [Option<Arc<BinderNode>>; 3],
-}
 
 static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
 static NEXT_PROC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -2413,7 +2032,7 @@ fn wait_for_context_manager(ctx: BinderCtx) {
         }
         // Park on MANAGER_WAIT with a timer backstop so a missing
         // set_context_mgr wake cannot strand the caller for the full
-        // budget (khungtaskd discipline). sched::current() is the safe
+        // budget (khungtaskd discipline). sched::hotpath::current() is the safe
         // accessor; the raw twin feeds only the wait-queue API.
         let cur_ref = match crate::sched::hotpath::current() {
             Some(t) => t,
@@ -2431,7 +2050,7 @@ fn wait_for_context_manager(ctx: BinderCtx) {
             }
             // A racing wake may have enqueued us while we are still
             // executing — take ourselves back off (NEW-C2). cur_ref is
-            // this task's own &mut (sched::current contract).
+            // this task's own &mut (sched::hotpath::current contract).
             cur_ref.set_state(crate::process::types::TaskState::new(
                 crate::process::types::TaskState::RUNNING,
             ));
@@ -2463,21 +2082,6 @@ unsafe impl Sync for BinderTxn {}
 unsafe impl Send for BinderProc {}
 unsafe impl Sync for BinderProc {}
 
-/// RT-R4 (WORLD per-caller attribution): world_lock's sections all
-/// charge to ONE REST_SITES row (binder.rs:2092) — the 6–8 ms max could
-/// not be attributed to a caller. This wrapper records each section's
-/// span against the CALLER's Location (world_lock is #[track_caller]),
-/// and the syscost dump prints the top rows.
-pub struct WorldGuard<'a> {
-    inner: crate::sync::types::SpinlockIrqGuard<'a, Option<World>>,
-    t0: u64,
-    loc: &'static core::panic::Location<'static>,
-    /// LAST FIELD ON PURPOSE: fields drop in declaration order, so this
-    /// drops AFTER `inner` has released WORLD — the deferred wakes run
-    /// with the lock GONE (the reference's wake_q discipline; see
-    /// DeferredWakes).
-    deferred: DeferredWakes,
-}
 
 /// Direct-thread wakes requested while WORLD is held (the reference's
 /// wake_q shape). fh4 conviction (oh-launch round 4): do_exit's file
@@ -2494,9 +2098,6 @@ pub struct WorldGuard<'a> {
 /// guard's own field drop — no releaser can forget it.
 static DEFERRED_THREAD_WAKES: Spinlock<Vec<Arc<BinderThread>>> = Spinlock::new(Vec::new());
 
-/// Guard-carried drain list (see WorldGuard.deferred). Drop wakes every
-/// carried thread — runs strictly after WORLD is released.
-struct DeferredWakes(Vec<Arc<BinderThread>>);
 
 impl Drop for DeferredWakes {
     fn drop(&mut self) {
@@ -2593,11 +2194,6 @@ impl Drop for WorldGuard<'_> {
 
 const WORLD_SEC_N: usize = 24;
 
-struct WorldSecRow {
-    loc: core::sync::atomic::AtomicU64,
-    n: core::sync::atomic::AtomicU64,
-    max: core::sync::atomic::AtomicU64,
-}
 
 static WORLD_SEC: [WorldSecRow; WORLD_SEC_N] =
     [const { WorldSecRow { loc: core::sync::atomic::AtomicU64::new(0), n: core::sync::atomic::AtomicU64::new(0), max: core::sync::atomic::AtomicU64::new(0) } }; WORLD_SEC_N];
@@ -8935,16 +8531,7 @@ fn release_block(proc: &Arc<BinderProc>, off: usize) {
     }
 }
 
-/// binder_translate_fd: install a sender fd into the TARGET process's fd
-/// table (fget in the sender, get_unused_fd + fd_install on the target
-/// opener task). Runs in the sender's ioctl context and NEVER under WORLD
-/// INV-BINDER-PINTASK (unsafe-slim r3c): RAII twin of procfs's PinnedTask
-/// guard for the fd-translate paths — pid_hash_lookup_pinned takes a
-/// task_refcnt the guard releases on scope end (Drop), so no early-return
-/// path can leak the pin or use the task after release.
-struct PinnedTask {
-    ptr: *mut crate::process::types::Task,
-}
+
 impl PinnedTask {
     fn lookup(pid: u32) -> Option<PinnedTask> {
         let p = crate::process::hotpath::pid_hash_lookup_pinned(pid);
@@ -10435,3 +10022,1914 @@ pub fn binder_dfx_dump() {
 // next allocation — sweep_stale_async treats txn==None && reply_done as
 // "reclaim NOW (no grace)", so a stale marker handed the block to a third
 // transaction while the second was still being processed.
+
+
+// ═══════════════ sysv_sem ═════════════════════════════════════════
+// (was sysv_sem.rs)
+// System V Semaphores
+//
+// Implements semget, semctl, semop, semtimedop following the Linux kernel design.
+
+/// Maximum semaphore value (Linux SEMVMX).
+const SEMVMX: i32 = 32767;
+
+/// Sentinel returned by try_apply_semops when the operation set must block.
+/// Deliberately outside the errno range so it can never be confused with a
+/// real error (previously -EINVAL/-22 was used and the caller treated it as
+/// a user-visible error — see review IPC-C1).
+const SEMOP_NEED_BLOCK: i32 = -512;
+/// Maximum semaphore adjustment value for SEM_UNDO (Linux SEMAEM).
+const SEMAEM: i32 = 16384;
+
+// Compile-time verification: IpcPermUapi mode field offset must be 20 bytes
+const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
+
+// ============================================================================
+// UAPI Structures
+// ============================================================================
+
+
+impl SemidDsUapi {
+    /// All-zero struct — the base the IPC_STAT / IPC_SET / SEM_STAT
+    /// paths fill in.
+    fn zeroed() -> Self {
+        Self {
+            sem_perm: IpcPermUapi::default(),
+            sem_otime: 0,
+            #[cfg(feature = "x86_64")]
+            __sem_otime_high: 0,
+            sem_ctime: 0,
+            #[cfg(feature = "x86_64")]
+            __sem_ctime_high: 0,
+            sem_nsems: 0,
+            __unused3: 0,
+            __unused4: 0,
+        }
+    }
+}
+
+// Layout contracts, checked at compile time: the offsets x86_64 and
+// asm-generic userspace actually read.
+#[cfg(feature = "x86_64")]
+const _: () = assert!(core::mem::size_of::<SemidDsUapi>() == 104);
+#[cfg(feature = "x86_64")]
+const _: () = assert!(core::mem::offset_of!(SemidDsUapi, sem_nsems) == 80);
+#[cfg(not(feature = "x86_64"))]
+const _: () = assert!(core::mem::size_of::<SemidDsUapi>() == 88);
+#[cfg(not(feature = "x86_64"))]
+const _: () = assert!(core::mem::offset_of!(SemidDsUapi, sem_nsems) == 64);
+
+
+// ============================================================================
+// Kernel Structures
+// ============================================================================
+
+
+impl IpcObject for SemArray {
+    fn get_perm(&self) -> &KernIpcPerm {
+        &self.perm
+    }
+    fn get_perm_mut(&mut self) -> &mut KernIpcPerm {
+        &mut self.perm
+    }
+}
+
+impl SemArray {
+    fn new(nsems: usize, key: i32, mode: u16) -> Self {
+        let mut sems = alloc::vec::Vec::with_capacity(nsems);
+        for _ in 0..nsems {
+            sems.push(SemEntry {
+                value: AtomicI32::new(0),
+                ncnt: AtomicUsize::new(0),
+                zcnt: AtomicUsize::new(0),
+                pid: AtomicU32::new(0),
+            });
+        }
+        Self {
+            perm: KernIpcPerm::new(key, mode),
+            sems: Spinlock::new(Some(sems)),
+            sem_otime: AtomicI64::new(0),
+            sem_ctime: AtomicI64::new(ipc_current_time()),
+            sem_padid: AtomicU32::new(0),
+            lock: Spinlock::new(()),
+            wq: crate::process::types::WaitQueueHead::new(),
+        }
+    }
+
+    /// Get the number of semaphores in this set.
+    fn nsems(&self) -> usize {
+        self.sems.lock().as_ref().map(|v| v.len()).unwrap_or(0)
+    }
+}
+
+/// Get current process PID.
+fn get_current_pid() -> u32 {
+    crate::sched::hotpath::current().map(|t| t.pid() as u32).unwrap_or(0)
+}
+
+// ============================================================================
+// Global semaphore registry
+// ============================================================================
+
+static SEM_IDS: IpcIds<SemArray> = IpcIds::new();
+
+// ============================================================================
+// Syscall Implementations
+// ============================================================================
+
+/// sys_semget — Create or find a semaphore set (NR 190)
+pub fn sys_semget(args: [u64; 6]) -> i64 {
+    let key = args[0] as i32;
+    let nsems = args[1] as usize;
+    let semflg = args[2] as i32;
+
+    // Existing-set path (ipcget_public): IPC_EXCL → EEXIST takes precedence
+    // over the nsems comparison, and a found key ignores nsems except the
+    // "larger than the set" check. nsems == 0 on an existing key is valid —
+    // semget(key, 0, 0) is the standard "just give me the id" idiom; the old
+    // blanket EINVAL for nsems == 0 broke it (the EINVAL only applies when a
+    // NEW set would be created, newary()'s !nsems check).
+    if key != 0 {
+        if let Some(existing_idx) = SEM_IDS.find_by_key(key) {
+            if semflg & IPC_EXCL != 0 {
+                return -(errno::EEXIST as i64);
+            }
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[existing_idx] {
+                let existing_nsems = entry.inner.nsems();
+                if nsems > existing_nsems {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+        } else if semflg & IPC_CREAT == 0 {
+            // Bare lookup on a nonexistent key: ENOENT (the old nsems EINVAL
+            // preempted this answer).
+            return -(errno::ENOENT as i64);
+        }
+    }
+
+    // New-set path (newary): nsems must be 1..=SEMMSL.
+    if nsems == 0 || nsems > 256 {
+        return -(errno::EINVAL as i64);
+    }
+
+    match SEM_IDS.alloc(SemArray::new(nsems, key, (semflg & 0o777) as u16), key, semflg) {
+        Ok((id, _)) => id as i64,
+        Err(e) => e as i64,
+    }
+}
+
+/// sys_semctl — Semaphore control operations (NR 191)
+pub fn sys_semctl(args: [u64; 6]) -> i64 {
+    let semid = args[0] as i32;
+    let semnum = args[1] as i32;
+    let cmd = args[2] as i32;
+    let arg = args[3];
+
+    // Index-addressed / id-ignoring commands (IPC_INFO, SEM_STAT,
+    // SEM_STAT_ANY, SEM_INFO) bypass the id→slot lookup — see msgctl.
+    match cmd {
+        3 | 18 | 19 | 20 => {}
+        _ => {
+            let _ = match SEM_IDS.find(semid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+        }
+    }
+
+    match cmd {
+        IPC_RMID => {
+            let idx = match SEM_IDS.find(semid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            // Owner check (review IPC P2): Linux allows RMID when euid
+            // matches uid OR cuid, or with CAP_SYS_ADMIN (the old code
+            // missed the uid path and checked the wrong capability).
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            // Wake all blocked processes before destroying
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.wq.wake_up_all();
+                }
+            }
+            let _ = SEM_IDS.remove(semid);
+            SEM_IDS.free_slot(semid);
+            0
+        }
+        IPC_STAT => {
+            // R32 (NEW-4): Linux requires S_IRUGO for IPC_STAT — the old
+            // path used the initial perm-free find() and leaked the set's
+            // metadata (perm/uid/gid/ctime) to any caller.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let buf_ptr = arg as *mut SemidDsUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let mut ds = SemidDsUapi::zeroed();
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    ds.sem_perm = entry.inner.perm.to_uapi();
+                    ds.sem_otime = entry.inner.sem_otime.load(Ordering::Relaxed);
+                    ds.sem_ctime = entry.inner.sem_ctime.load(Ordering::Relaxed);
+                    ds.sem_nsems = entry.inner.nsems() as u64;
+                }
+            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
+            0
+        }
+        IPC_SET => {
+            let buf_ptr = arg as *const u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let idx2 = match SEM_IDS.find(semid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            // Owner check (review IPC P2: IPC_SET 无属主检查——任何有写权限者可夺
+            // 所有权): euid must be uid or cuid, or CAP_SYS_ADMIN.
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            // Copy the whole struct from user memory through the
+            // exception-table path (review IPC M: uaccess 裸访改 copy_from_user).
+            let mut ds = SemidDsUapi::zeroed();
+            if crate::arch::uaccess_safe::copy_in_t(&mut ds, buf_ptr as usize) != 0 {
+                return -(errno::EFAULT as i64);
+            }
+            let mut slots = SEM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx2] {
+                entry.inner.perm.update_from_set(ds.sem_perm.uid, ds.sem_perm.gid, ds.sem_perm.mode);
+                entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
+            }
+            0
+        }
+        GETVAL => {
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
+            // Permission check: requires read permission
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx2] {
+                let snum = semnum as usize;
+                if snum >= entry.inner.nsems() {
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_main; EFBIG belongs to semop's sops check —
+                    // the old EFBIG here was a mis-cite).
+                    return -(errno::EINVAL as i64);
+                }
+                if let Some(ref sems) = *entry.inner.sems.lock() {
+                    return sems[snum].value.load(Ordering::Relaxed) as i64;
+                }
+            }
+            -(errno::EINVAL as i64)
+        }
+        SETVAL => {
+            // Reference order (semctl_setval): val range first (ERANGE),
+            // then id (EINVAL), then sem_num range (EINVAL), then write
+            // permission (S_IWUGO — not rw: a write-only mode must pass).
+            let val = arg as i32;
+            if val < 0 || val > SEMVMX {
+                return -(errno::ERANGE as i64);
+            }
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o2) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let mut slots = SEM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx2] {
+                let snum = semnum as usize;
+                if snum >= entry.inner.nsems() {
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_setval; EFBIG is semop-only).
+                    return -(errno::EINVAL as i64);
+                }
+                let prev;
+                if let Some(ref mut sems) = *entry.inner.sems.lock() {
+                    prev = sems[snum].value.swap(val, Ordering::Relaxed);
+                    // SETVAL records the caller as the last operator of
+                    // this semaphore (semctl GETPID; Linux do_semctl SETVAL
+                    // sets sem->pid).
+                    sems[snum].pid.store(get_current_pid(), Ordering::Relaxed);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+                entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
+                // Wake waiters whose predicate may now hold (review IPC P2:
+                // SETVAL 后不唤醒——"用 semctl 释放信号灯"惯用法挂死):
+                // a transition to 0 releases Z-waiters; any increase from a
+                // value below 1 releases P-waiters. wake_up_all is a safe
+                // superset — every woken waiter re-checks its predicate.
+                let _ = prev;
+                entry.inner.wq.wake_up_all();
+            }
+            0
+        }
+        GETALL => {
+            // R32 (NEW-4): Linux requires S_IRUGO for GETALL — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            // union semun.array points at an unsigned short[] — the
+            // element size AND stride are 2 bytes (Linux GETALL writes
+            // ushort values; the old 4-byte writes corrupted every other
+            // entry of the caller's array, LTP semop01/semctl01).
+            let array_ptr = arg as *mut u16;
+            if array_ptr.is_null() {
+                return -(errno::EFAULT as i64);
+            }
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx2] {
+                let nsems = entry.inner.nsems();
+                if !access_ok(array_ptr as usize, nsems * 2) {
+                    return -(errno::EFAULT as i64);
+                }
+                if let Some(ref sems) = *entry.inner.sems.lock() {
+                    for i in 0..nsems {
+                        let val = sems[i].value.load(Ordering::Relaxed);
+                        // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
+                        // put_user is the exception-table copy path (SUM=0 safe).
+                        if !crate::arch::uaccess_safe::write_user(array_ptr as usize + i * 2, val as u16) {
+                            // Unwritable user page (PROT_NONE bad_addr):
+                            // Linux fails the whole semctl with EFAULT
+                            // (LTP semctl03 raw-syscall variant).
+                            return -(errno::EFAULT as i64);
+                        }
+                    }
+                }
+            }
+            0
+        }
+        SETALL => {
+            // unsigned short[] ABI — see GETALL.
+            let array_ptr = arg as *const u16;
+            if array_ptr.is_null() {
+                return -(errno::EFAULT as i64);
+            }
+            // S_IWUGO: SETALL needs write permission only (reference
+            // semctl_main — the old rw demand wrongly failed write-only modes).
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o2) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let mut slots = SEM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx2] {
+                let nsems = entry.inner.nsems();
+                if !access_ok(array_ptr as usize, nsems * 2) {
+                    return -(errno::EFAULT as i64);
+                }
+                // Copy the whole array and validate EVERY element before
+                // storing any of them (reference SETALL: copy_from_user +
+                // full ERANGE scan, then apply). The old per-element
+                // apply-as-you-read left the set partially updated when a
+                // later element faulted or was out of range.
+                let mut vals = alloc::vec::Vec::<u16>::with_capacity(nsems);
+                for i in 0..nsems {
+                    // SAFETY: array_ptr was access_ok-validated for nsems*2
+                    // bytes above; get_user is the exception-table copy path
+                    // (SUM=0 safe). LTP semctl03 raw-syscall EFAULT variant.
+                    match crate::arch::uaccess_safe::read_user::<u16>(array_ptr as usize + i * 2) {
+                        Some(v) => vals.push(v),
+                        None => return -(errno::EFAULT as i64),
+                    }
+                }
+                for v in vals.iter() {
+                    if (*v as i32) > SEMVMX {
+                        return -(errno::ERANGE as i64);
+                    }
+                }
+                if let Some(ref mut sems) = *entry.inner.sems.lock() {
+                    for (i, v) in vals.iter().enumerate() {
+                        sems[i].value.store(*v as i32, Ordering::Relaxed);
+                        // SETALL records the caller as the last operator
+                        // of every semaphore (semctl GETPID).
+                        sems[i].pid.store(get_current_pid(), Ordering::Relaxed);
+                    }
+                }
+                entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
+                // Wake all waiters: SETALL may zero or raise semaphores —
+                // both directions can satisfy blocked P/Z operations
+                // (review IPC P2).
+                entry.inner.wq.wake_up_all();
+            }
+            0
+        }
+        GETPID => {
+            // R32 (NEW-4): Linux requires S_IRUGO for GETPID — was missing.
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx2] {
+                let snum = semnum as usize;
+                if snum >= entry.inner.nsems() {
+                    return -(errno::EINVAL as i64);
+                }
+                // PID of the last process that operated on THIS semaphore
+                // (Linux returns sems[semnum].pid; semctl07).
+                if let Some(ref sems) = *entry.inner.sems.lock() {
+                    return sems[snum].pid.load(Ordering::Relaxed) as i64;
+                }
+            }
+            return -(errno::EINVAL as i64);
+        }
+        GETNCNT => {
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
+            // R32 (NEW-4): Linux requires S_IRUGO for GETNCNT — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx2] {
+                let snum = semnum as usize;
+                if snum >= entry.inner.nsems() {
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_main).
+                    return -(errno::EINVAL as i64);
+                }
+                if let Some(ref sems) = *entry.inner.sems.lock() {
+                    return sems[snum].ncnt.load(Ordering::Relaxed) as i64;
+                }
+            }
+            -(errno::EINVAL as i64)
+        }
+        GETZCNT => {
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
+            // R32 (NEW-4): Linux requires S_IRUGO for GETZCNT — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx2] {
+                let snum = semnum as usize;
+                if snum >= entry.inner.nsems() {
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_main).
+                    return -(errno::EINVAL as i64);
+                }
+                if let Some(ref sems) = *entry.inner.sems.lock() {
+                    return sems[snum].zcnt.load(Ordering::Relaxed) as i64;
+                }
+            }
+            -(errno::EINVAL as i64)
+        }
+        IPC_INFO => {
+            // struct seminfo — 10 int fields = 40 bytes
+            let buf_ptr = arg as *mut SemInfoUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let info = SemInfoUapi {
+                semmap: 0,
+                semmni: 256,
+                semmns: 256 * 256,
+                semmnu: 0,
+                semmsl: 256,
+                semopm: 500,
+                semume: 0,
+                semusz: 0,
+                semvmx: 32767,
+                semaem: 16384,
+            };
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &info);
+            // Return: highest used slot index (ipc_get_maxidx), -1 when
+            // empty — LTP feeds it into SEM_STAT as a raw index.
+            sem_max_idx() as i64
+        }
+        18 => {
+            // SEM_STAT — IPC_STAT addressed by raw kernel index; returns the
+            // real semid on success (Linux uapi: SEM_STAT=18, SEM_INFO=19,
+            // SEM_STAT_ANY=20 — the old arm at 18 was mislabeled SEM_INFO).
+            let raw_idx = semid as usize;
+            let buf_ptr = arg as *mut SemidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = SemidDsUapi::zeroed();
+            let result_id: i32;
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SEM_STAT requires S_IRUGO like IPC_STAT (R32 NEW-4).
+                    if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
+                        return -(errno::EACCES as i64);
+                    }
+                    ds.sem_perm = entry.inner.perm.to_uapi();
+                    ds.sem_otime = entry.inner.sem_otime.load(Ordering::Relaxed);
+                    ds.sem_ctime = entry.inner.sem_ctime.load(Ordering::Relaxed);
+                    ds.sem_nsems = entry.inner.nsems() as u64;
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
+            result_id as i64
+        }
+        20 => {
+            // SEM_STAT_ANY — SEM_STAT without the permission check. The
+            // reference (semctl_stat) performs NO capability check either:
+            // STAT_ANY is meant to mirror the /proc/sysvipc visibility for
+            // checkpoint/restore ("only audit these calls and do not do
+            // traditional S_IRUGO permission checks"). The old CAP_SYS_ADMIN
+            // gate wrongly returned EPERM to unprivileged callers.
+            let raw_idx = semid as usize;
+            let buf_ptr = arg as *mut SemidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = SemidDsUapi::zeroed();
+            let result_id: i32;
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    ds.sem_perm = entry.inner.perm.to_uapi();
+                    ds.sem_otime = entry.inner.sem_otime.load(Ordering::Relaxed);
+                    ds.sem_ctime = entry.inner.sem_ctime.load(Ordering::Relaxed);
+                    ds.sem_nsems = entry.inner.nsems() as u64;
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &ds);
+            result_id as i64
+        }
+        19 => {
+            // SEM_INFO — like IPC_INFO but returns current usage
+            let buf_ptr = arg as *mut SemInfoUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            let mut total_sems: usize = 0;
+            {
+                let slots = SEM_IDS.slots.lock();
+                for entry in slots.iter() {
+                    if let Some(ref e) = entry {
+                        if !e.deleted {
+                            total_sems += e.inner.nsems();
+                        }
+                    }
+                }
+            }
+            let info = SemInfoUapi {
+                semmap: 0,
+                semmni: SEM_IDS.count_in_ns() as i32,
+                semmns: total_sems as i32,
+                semmnu: 0,
+                semmsl: 256,
+                semopm: 500,
+                semume: 0,
+                semusz: SEM_IDS.count_in_ns() as i32,
+                semvmx: 32767,
+                semaem: total_sems as i32,
+            };
+            // Typed copy through the safe uaccess capsule.
+            let _ = crate::arch::uaccess_safe::copy_out_t(buf_ptr as usize, &info);
+            // Return: highest used slot index, -1 when empty (see IPC_INFO).
+            sem_max_idx() as i64
+        }
+        _ => return -(errno::EINVAL as i64),
+    }
+}
+
+/// /proc/sysvipc/sem contents — one line per semaphore set (Linux ipc/util.c
+/// formatting). LTP's GET_USED_ARRAYS() counts lines.
+pub fn proc_show() -> alloc::vec::Vec<u8> {
+    use alloc::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = writeln!(
+        out,
+        "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime"
+    );
+    let ns = self::caller_ipc_ns_inum();
+    let slots = SEM_IDS.slots.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref entry) = slot {
+            if entry.deleted || entry.inner.get_perm().ns_inum != ns {
+                continue;
+            }
+            let set = &entry.inner;
+            let id = ipc_build_id(i, set.perm.seq);
+            let _ = writeln!(
+                out,
+                "{:10} {:10} {:6o} {:8} {:6} {:6} {:6} {:6} {:11} {:11}",
+                set.perm.key,
+                id,
+                set.perm.mode & 0o7777,
+                set.nsems(),
+                set.perm.uid,
+                set.perm.gid,
+                set.perm.cuid,
+                set.perm.cgid,
+                set.sem_otime.load(Ordering::Relaxed),
+                set.sem_ctime.load(Ordering::Relaxed),
+            );
+        }
+    }
+    out.into_bytes()
+}
+
+/// Highest allocated sem slot index, or -1 when empty (ipc_get_maxidx).
+fn sem_max_idx() -> i32 {
+    let slots = SEM_IDS.slots.lock();
+    for i in (0..IPC_IDS_MAX).rev() {
+        if slots[i].is_some() {
+            return i as i32;
+        }
+    }
+    -1
+}
+
+/// sys_semtimedop — Semaphore operations with timeout (NR 192)
+pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
+    // cctx probe (closegap lane): prelude / per-try / block-park sums.
+    let cc_t0 = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::SM_N);
+    let semid = args[0] as i32;
+    let sops_ptr = args[1] as *const SemBuf;
+    let nsops = args[2] as usize;
+    let timeout_ptr = args[3] as *const u8;
+
+    if nsops == 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if nsops > 500 {
+        // SEMOPM (semopm max) — Linux returns E2BIG (LTP semop02).
+        return -(errno::E2BIG as i64);
+    }
+    if sops_ptr.is_null() || !access_ok(sops_ptr as usize, nsops * core::mem::size_of::<SemBuf>()) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Compute deadline. A sub-jiffy timeout cannot be waited; when the ops
+    // cannot proceed immediately, Linux ipc/sem.c answers EAGAIN (not
+    // ETIMEDOUT) — LTP semop02 blocks ops behind a 10us timeout and
+    // expects EAGAIN.
+    let mut sub_jiffy_timeout = false;
+    let deadline = if !timeout_ptr.is_null() {
+        if !access_ok(timeout_ptr as usize, 16) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
+        // get_user is the exception-table copy path (SUM=0 safe). A failed
+        // read must be EFAULT — the old unwrap_or(0) turned an unmapped
+        // timeout page into {0,0} and later surfaced as ETIMEDOUT
+        // (LTP semop02 passes a bad timeout pointer and expects EFAULT).
+        let ts_sec = match crate::arch::uaccess_safe::read_user::<i64>(timeout_ptr as usize) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
+        let ts_nsec = match crate::arch::uaccess_safe::read_user::<i64>(timeout_ptr as usize + 8) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
+        if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
+            return -(errno::EINVAL as i64);
+        }
+        let timeout_jiffies = (ts_sec as u64) * crate::drivers::timer::HZ as u64
+            + (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000;
+        if timeout_jiffies == 0 {
+            sub_jiffy_timeout = true;
+            None
+        } else {
+            Some(crate::timer::get_jiffies() + timeout_jiffies)
+        }
+    } else {
+        None
+    };
+
+    // Copy sops from userspace through the exception-table path
+    // (review IPC M: uaccess 裸访改 copy_from_user).
+    // Allocation discipline (s2-a finding P3): nsops <= 500 and SemBuf
+    // is 6 bytes — a bounded stack array replaces the per-call heap Vec.
+    // closegap lane: op sets ≤ MAX_SOPS_FAST stage in a small array (the
+    // old [SemBuf; 500] staging memset 3 KB of stack on every semop —
+    // part of the 318 ns prelude, cctx probe 2026-11-02); larger sets
+    // take one heap Vec allocation.
+    const MAX_SOPS: usize = 500;
+    assert!(nsops <= MAX_SOPS);
+    let mut sops_small: [SemBuf; MAX_SOPS_FAST] =
+        [SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; MAX_SOPS_FAST];
+    // sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
+    // above; exactly nsops entries are written. The copy and the slice
+    // view are the two audited edges of the staging (dst is a
+    // pre-filled owned local; copy_in_t's failure path zero-fills, so
+    // the entries stay initialized).
+    let sops: &[SemBuf] = if nsops <= MAX_SOPS_FAST {
+        // The typed-slice safe copy (uaccess_safe::copy_in_t_slice —
+        // exception-table path, tail zero-filled on fault; dst is the
+        // owned pre-filled stack array of at least nsops entries).
+        if crate::arch::uaccess_safe::copy_in_t_slice(
+            &mut sops_small[..nsops],
+            sops_ptr as usize,
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        &sops_small[..nsops]
+    } else {
+        let mut big =
+            alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
+        if crate::arch::uaccess_safe::copy_in_t_slice(&mut big[..], sops_ptr as usize)
+            != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        big.leak()
+    };
+
+    // Permission: write when any op alters a value (sem_op != 0), otherwise
+    // read — reference __do_semtimedop does ipcperms(alter ? S_IWUGO :
+    // S_IRUGO); the old unconditional write demand wrongly failed an
+    // all-zero (wait-for-zero) operation on a read-only set.
+    let alter = sops.iter().any(|s| s.sem_op != 0);
+    // closegap: ONE slots-lock section resolves id→slot, sequence, perms
+    // AND the set's nsems (the old find_with_perms + nsems block took
+    // four lock pairs — find(), find_with_perms' own re-lock, the nsems
+    // block's slots lock, and nsems()' sems lock — three of which were
+    // redundant with each other).
+    let desired: u16 = if alter { 0o2 } else { 0o4 };
+    let idx = ipc_id_to_index(semid);
+    if idx >= super::types::IPC_IDS_MAX {
+        return -(errno::EINVAL as i64);
+    }
+    let nsems_in_set;
+    {
+        let slots = SEM_IDS.slots.lock();
+        let entry = match slots[idx] {
+            Some(ref e)
+                if !e.deleted && e.inner.perm.seq == self::ipc_id_seq(semid) => e,
+            _ => return -(errno::EINVAL as i64),
+        };
+        if !self::ipc_check_permissions(entry.inner.get_perm(), desired) {
+            return -(errno::EACCES as i64);
+        }
+        nsems_in_set = entry.inner.nsems();
+    }
+
+    for sop in sops.iter() {
+        if sop.sem_num as usize >= nsems_in_set {
+            // Linux ipc/sem.c: EFBIG when sem_num is out of range
+            // (LTP semop02 passes -1 and PSEMS+1 as sem_num).
+            return -(errno::EFBIG as i64);
+        }
+    }
+    crate::debug::cctx::add(&crate::debug::cctx::SM_PRE_NS, cc_t0);
+
+    semop_blocking_loop(idx, semid, &sops, deadline, sub_jiffy_timeout)
+}
+
+/// Kernel-context semop entry for the in-kernel blocking-contract test
+/// (tests/sysv_sem_block.rs): same validation as the syscall, sops
+/// built in the kernel (the unit-test boot task has no user mm to
+/// uaccess through). Exercises the exact production apply/block loop.
+pub(crate) fn semop_kernel(semid: i32, sops: &[SemBuf]) -> i64 {
+    if sops.is_empty() {
+        return -(errno::EINVAL as i64);
+    }
+    if sops.len() > 500 {
+        return -(errno::E2BIG as i64);
+    }
+    let alter = sops.iter().any(|s| s.sem_op != 0);
+    let idx = match SEM_IDS.find_with_perms(semid, if alter { 0o2 } else { 0o4 }) {
+        Ok(i) => i,
+        Err(e) => return e as i64,
+    };
+    let nsems_in_set;
+    {
+        let slots = SEM_IDS.slots.lock();
+        nsems_in_set = match slots[idx] {
+            Some(ref entry) => entry.inner.nsems(),
+            None => return -(errno::EINVAL as i64),
+        };
+    }
+    for sop in sops {
+        if sop.sem_num as usize >= nsems_in_set {
+            return -(errno::EFBIG as i64);
+        }
+    }
+    semop_blocking_loop(idx, semid, sops, None, false)
+}
+
+/// The semop apply/block core: try the atomic apply; when the op set
+/// cannot proceed and no op carries IPC_NOWAIT, block on the set's wait
+/// queue until it can (or a signal/deadline ends the wait). Contract:
+/// EAGAIN is returned ONLY for IPC_NOWAIT ops, a sub-jiffy timeout, or
+/// deadline expiry — never for a plain blocking op.
+///
+/// Split out of sys_semtimedop after its uaccess copy so the in-kernel
+/// blocking-contract test drives this exact loop (semop_kernel).
+fn semop_blocking_loop(
+    idx: usize,
+    semid: i32,
+    sops: &[SemBuf],
+    deadline: Option<u64>,
+    sub_jiffy_timeout: bool,
+) -> i64 {
+    'outer: loop {
+        let cc_t_try = crate::debug::cctx::now();
+        crate::debug::cctx::bump(&crate::debug::cctx::SM_TRY_N);
+        let result = try_apply_semops(idx, &sops, semid);
+        crate::debug::cctx::add(&crate::debug::cctx::SM_TRY_NS, cc_t_try);
+        match result {
+            Ok(()) => return 0,
+            Err(e) => {
+                // IPC_NOWAIT and the operation cannot proceed: EAGAIN goes
+                // straight back to userspace (Linux semantics).
+                if e == -errno::EAGAIN {
+                    return -(errno::EAGAIN as i64);
+                }
+                if e == SEMOP_NEED_BLOCK {
+                    if sub_jiffy_timeout {
+                        return -(errno::EAGAIN as i64);
+                    }
+                    // Blocking P/Z operation: sleep on the set's wait queue
+                    let blocking_idx = find_blocking_op(idx, &sops);
+                    match blocking_idx {
+                        // R40: "nothing blocks" means the set became
+                        // satisfiable (or was deleted) between the failed
+                        // try_apply and this scan — e.g. a concurrent post
+                        // landed in that window. The reference kernel
+                        // re-runs the atomic apply and either consumes the
+                        // post or blocks on the queue; it NEVER turns a
+                        // non-IPC_NOWAIT op into EAGAIN. The old immediate
+                        // EAGAIN killed lmbench lat_sem's writer (reader's
+                        // concurrent post raced the scan; the writer died,
+                        // the reader slept forever). Retry the loop: the
+                        // next try_apply succeeds, reports EIDRM for a
+                        // deleted slot, or re-enters this arm and blocks.
+                        None => continue 'outer,
+                        Some(_) => {
+                            // cctx: the park itself (registration →
+                            // schedule() return), opened here and closed
+                            // after the loop-bottom continue.
+                            let cc_t_blk = crate::debug::cctx::now();
+                            crate::debug::cctx::bump(&crate::debug::cctx::SM_BLK_N);
+                            // Check for signals
+                            if crate::signal::signal_pending() {
+                                return -(errno::EINTR as i64);
+                            }
+
+                            // Check timeout
+                            if let Some(dl) = deadline {
+                                if crate::timer::get_jiffies() >= dl {
+                                    // Timeout expiry is EAGAIN, matching the
+                                    // reference sleep loop (`if (timed_out)
+                                    // error = -EAGAIN;`) and man semop(2)
+                                    // ("EAGAIN ... or the time limit
+                                    // specified in timeout expired"). The
+                                    // old ETIMEDOUT was never a documented
+                                    // semtimedop outcome.
+                                    return -(errno::EAGAIN as i64);
+                                }
+                            }
+
+                            let current = match crate::sched::hotpath::current() {
+                                Some(t) => t,
+                                None => return -(errno::ESRCH as i64),
+                            };
+
+                            // Block on the semaphore set's wait queue.
+                            // Increment ncnt/zcnt for the blocking semaphore
+                            // so GETNCNT/GETZCNT return accurate counts.
+                            {
+                                let slots = SEM_IDS.slots.lock();
+                                if let Some(ref entry) = slots[idx] {
+                                    if entry.deleted {
+                                        return -(errno::EIDRM as i64);
+                                    }
+                                    // Increment waiter count for the blocking semaphore.
+                                    if let Some(ref sems) = *entry.inner.sems.lock() {
+                                        let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                        if block_sem < sems.len() {
+                                            if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                sems[block_sem].ncnt.fetch_add(1, Ordering::Relaxed);
+                                            } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                sems[block_sem].zcnt.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    // R39: register + set INTERRUPTIBLE
+                                    // atomically under the WQ's own lock
+                                    // (prepare_to_wait). The old add()+
+                                    // set_state pair ran under the
+                                    // SEM_IDS slots lock, but the WAKER
+                                    // (V / IPC_RMID) takes the WQ lock — a
+                                    // wake landing between the two calls
+                                    // consumed the one-shot token (entry
+                                    // marked woken) while Task::wake_up
+                                    // dropped it (target still RUNNING);
+                                    // the R7-B6 retry below covers a V's
+                                    // condition but NOT an RMID wake, so
+                                    // the sleeper blocked forever.
+                                    entry.inner.wq.prepare_to_wait(
+                                        current as *mut _,
+                                        false,
+                                        true,
+                                    );
+                                }
+                            }
+
+                            // R7-B6: re-check AFTER registering on the wait
+                            // queue. A V that completed between our failed
+                            // try_apply and the registration already ran
+                            // wake_up_all on an empty queue — that wakeup is
+                            // lost and we would sleep forever. With our
+                            // entry now registered, retrying either succeeds
+                            // (skip the sleep entirely) or any later V wakes
+                            // us through the queue.
+                            match try_apply_semops(idx, &sops, semid) {
+                                Ok(()) => {
+                                    // Undo the waiter registration and return.
+                                    {
+                                        let slots = SEM_IDS.slots.lock();
+                                        if let Some(ref entry) = slots[idx] {
+                                            if let Some(ref sems) = *entry.inner.sems.lock() {
+                                                let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                                if block_sem < sems.len() {
+                                                    if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                        sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                                    } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                        sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                                    }
+                                                }
+                                            }
+                                            entry.inner.wq.remove(current as *mut _);
+                                        }
+                                    }
+                                    // Registration block set INTERRUPTIBLE —
+                                    // nobody will wake us (we skip sleeping),
+                                    // so restore RUNNING explicitly.
+                                    (*current).set_state(
+                                        crate::process::types::TaskState::new(
+                                            crate::process::types::TaskState::RUNNING,
+                                        ),
+                                    );
+                                    crate::sched::hotpath::dequeue_task(&*current);
+                                    return 0;
+                                }
+                                Err(_) => { /* still blocked — sleep below */ }
+                            }
+
+                            // R22-1: a signal delivered while we were still
+                            // RUNNING generates no wakeup — recheck before
+                            // sleeping or the waiter is unkillable until an
+                            // unrelated V arrives.
+                            if crate::signal::signal_pending() {
+                                {
+                                    let slots = SEM_IDS.slots.lock();
+                                    if let Some(ref entry) = slots[idx] {
+                                        if let Some(ref sems) = *entry.inner.sems.lock() {
+                                            let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                            if block_sem < sems.len() {
+                                                if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                    sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                                } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                    sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                        entry.inner.wq.remove(current as *mut _);
+                                    }
+                                }
+                                (*current).set_state(crate::process::types::TaskState::new(crate::process::types::TaskState::RUNNING));
+                                crate::sched::hotpath::dequeue_task(&*current);
+                                return -(errno::EINTR as i64);
+                            }
+                            // Arm a wakeup timer for the deadline so a
+                            // never-satisfied semaphore still returns
+                            // ETIMEDOUT (nothing else would wake us).
+                            let timer_id = deadline
+                                .map(|dl| crate::timer::add_timer_wakeup(
+                                    dl, crate::sched::hotpath::get_current_pid(),
+                                ))
+                                .unwrap_or(0);
+                            // R32 (NEW-3 twin): timer pool exhausted — a
+                            // timed semop would sleep forever without the
+                            // deadline timer. Unregister and fail instead.
+                            if deadline.is_some() && timer_id == 0 {
+                                {
+                                    let slots = SEM_IDS.slots.lock();
+                                    if let Some(ref entry) = slots[idx] {
+                                        if let Some(ref sems) = *entry.inner.sems.lock() {
+                                            let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                            if block_sem < sems.len() {
+                                                if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                    sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                                } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                    sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                        entry.inner.wq.remove(current as *mut _);
+                                    }
+                                }
+                                (*current).set_state(
+                                    crate::process::types::TaskState::new(
+                                        crate::process::types::TaskState::RUNNING,
+                                    ),
+                                );
+                                crate::sched::hotpath::dequeue_task(&*current);
+                                return -(errno::ENOMEM as i64);
+                            }
+                            // Lost-park ring (rux:lostpark (retired debug=lostpark)): park-enter
+                            // snapshot — pid, preempt_count, state bits.
+                            if crate::debug::lostpark::armed() {
+                                crate::debug::lostpark::record(
+                                    1,
+                                    (*current).pid() as u64,
+                                    (*current).preempt_count() as u32 as u64,
+                                    (*current).state().bits() as u64,
+                                    crate::timer::get_jiffies(),
+                                );
+                            }
+                            crate::sched::hotpath::schedule();
+                            if crate::debug::lostpark::armed() {
+                                crate::debug::lostpark::record(
+                                    2,
+                                    (*current).pid() as u64,
+                                    (*current).preempt_count() as u32 as u64,
+                                    (*current).state().bits() as u64,
+                                    crate::timer::get_jiffies(),
+                                );
+                            }
+                            if timer_id != 0 {
+                                crate::timer::del_timer(timer_id);
+                            }
+
+                            // Decrement ncnt/zcnt after wakeup (we're no longer waiting).
+                            {
+                                let slots = SEM_IDS.slots.lock();
+                                if let Some(ref entry) = slots[idx] {
+                                    if let Some(ref sems) = *entry.inner.sems.lock() {
+                                        let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                        if block_sem < sems.len() {
+                                            if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                            } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    entry.inner.wq.remove(current as *mut _);
+                                }
+                            }
+                            crate::debug::cctx::add(&crate::debug::cctx::SM_BLK_NS, cc_t_blk);
+
+                            continue 'outer;
+                        }
+                    }
+                } else {
+                    return e as i64;
+                }
+            }
+        }
+    }
+}
+
+/// Try to apply all semop operations atomically.
+/// Returns Ok if all succeed, Err if any would block.
+/// Records SEM_UNDO adjustments in the current task's undo table.
+/// R9-11: true when the slot's seq no longer matches the caller's semid
+/// (the slot was RMID'd and re-created between capture and use).
+fn e_seq_mismatch(entry: &super::types::IpcObjectEntry<SemArray>, semid: i32) -> bool {
+    self::ipc_id_seq(semid) != entry.inner.perm.seq
+}
+
+/// Per-touched-semaphore scratch for the allocation-free apply path.
+/// Real op sets (LTP, lmbench, OH) touch at most a handful of distinct
+/// semaphores per semop; sets touching more than MAX_TRACKED fall back
+/// to the classic working-copy loop (correct, slower, never taken in
+/// practice — nsops ≤ 500 with 500 distinct sems).
+const MAX_TRACKED: usize = 8;
+
+/// Op sets at or below this size take the stack-scratch fast path (both
+/// here and in sys_semtimedop's sops staging — the old [SemBuf; 500]
+/// staging memset 3 KB of stack on every semop).
+const MAX_SOPS_FAST: usize = 8;
+
+fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> {
+    let slots = SEM_IDS.slots.lock();
+    let entry = match slots[idx] {
+        Some(ref e) if !e.deleted => e,
+        _ => return Err(-errno::EIDRM),
+    };
+    // R9-11: RMID frees the slot immediately; a fresh semget can reoccupy
+    // idx with a NEW seq before a woken waiter's next iteration. Without
+    // this check the waiter applied its ops to a stranger's set.
+    if e_seq_mismatch(entry, semid) {
+        return Err(-errno::EIDRM);
+    }
+
+    if let Some(ref sems) = *entry.inner.sems.lock() {
+        // Per-op accumulated values (Linux perform_atomic_semop semantics:
+        // each op sees the effect of the previous ones on the same
+        // semaphore). The scratch tracks (sem_num, pending value) for the
+        // distinct semaphores touched so far; a hit reads the pending
+        // value, a miss reads the raw value and registers the pair.
+        // Allocation-free for ≤ MAX_TRACKED distinct semaphores AND
+        // nsops ≤ MAX_SOPS_FAST (the old path heap-allocated a working
+        // Vec + an orig_vals Vec and zeroed a [i32; 500] stack array on
+        // EVERY semop — 728 ns/op measured, cctx probe, closegap lane
+        // 2026-11-02). Larger shapes take the classic working-copy loop.
+        let mut new_vals: [i32; MAX_SOPS_FAST] = [0; MAX_SOPS_FAST];
+        let mut sops_result: alloc::vec::Vec<i32>;
+        let new_slice: &mut [i32] = if sops.len() <= MAX_SOPS_FAST {
+            &mut new_vals[..sops.len()]
+        } else {
+            sops_result = alloc::vec![0; sops.len()];
+            &mut sops_result[..]
+        };
+
+        let fits_scratch = sops.len() <= MAX_SOPS_FAST;
+        if fits_scratch {
+            let mut tracked_nums: [u16; MAX_TRACKED] = [0; MAX_TRACKED];
+            let mut tracked_vals: [i32; MAX_TRACKED] = [0; MAX_TRACKED];
+            let mut tracked_n: usize = 0;
+            for (ni, sop) in sops.iter().enumerate() {
+                let snum = sop.sem_num;
+                let mut cur = None;
+                for t in 0..tracked_n {
+                    if tracked_nums[t] == snum {
+                        cur = Some(tracked_vals[t]);
+                        break;
+                    }
+                }
+                let cur = match cur {
+                    Some(v) => v,
+                    None => {
+                        let v = sems[snum as usize].value.load(Ordering::Relaxed);
+                        tracked_nums[tracked_n] = snum;
+                        tracked_vals[tracked_n] = v;
+                        tracked_n += 1;
+                        v
+                    }
+                };
+                let new_val = cur.wrapping_add(sop.sem_op as i32);
+                new_slice[ni] = new_val;
+                for t in 0..tracked_n {
+                    if tracked_nums[t] == snum {
+                        tracked_vals[t] = new_val;
+                        break;
+                    }
+                }
+            }
+        } else {
+            let mut work: alloc::vec::Vec<i32> = (0..sems.len())
+                .map(|i| sems[i].value.load(Ordering::Relaxed))
+                .collect();
+            for (ni, sop) in sops.iter().enumerate() {
+                let cur = work[sop.sem_num as usize];
+                let new_val = cur.wrapping_add(sop.sem_op as i32);
+                new_slice[ni] = new_val;
+                work[sop.sem_num as usize] = new_val;
+            }
+        }
+
+        // Second pass: verify all operations can succeed
+        for (i, &new_val) in new_slice.iter().enumerate() {
+            // Positive op must not exceed SEMVMX (per Linux perform_atomic_semop)
+            if sops[i].sem_op > 0 && new_val > SEMVMX {
+                return Err(-(errno::ERANGE as i32));
+            }
+            if sops[i].sem_op < 0 && new_val < 0 {
+                if sops[i].sem_flg & self::IPC_NOWAIT as u16 != 0 {
+                    return Err(-errno::EAGAIN);
+                }
+                return Err(SEMOP_NEED_BLOCK);
+            }
+            if sops[i].sem_op == 0 && new_val != 0 {
+                if sops[i].sem_flg & self::IPC_NOWAIT as u16 != 0 {
+                    return Err(-errno::EAGAIN);
+                }
+                return Err(SEMOP_NEED_BLOCK);
+            }
+        }
+
+        // Third pass: apply all atomically.
+        // Original values are needed ONLY for the SEM_UNDO rollback path
+        // below (an undo adjustment exceeding SEMAEM) — the common case
+        // (no SEM_UNDO flags, lmbench/LTP fast paths, OH semaphores)
+        // skips both the orig_vals Vec and the task undo-table lock pair.
+        let wants_undo = sops.iter().any(|s| s.sem_flg & self::SEM_UNDO != 0);
+        let mut orig_vals: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+        if wants_undo {
+            orig_vals.reserve_exact(sops.len());
+            for s in sops {
+                orig_vals.push(sems[s.sem_num as usize].value.load(Ordering::Relaxed));
+            }
+        }
+        let caller_pid = get_current_pid();
+        for (i, &new_val) in new_slice.iter().enumerate() {
+            sems[sops[i].sem_num as usize].value.store(new_val, Ordering::Relaxed);
+            // Each operated semaphore records the caller as its last
+            // operator (semctl GETPID; Linux perform_atomic_semop).
+            sems[sops[i].sem_num as usize].pid.store(caller_pid, Ordering::Relaxed);
+        }
+
+        // Record SEM_UNDO adjustments for current process
+        if wants_undo {
+            if let Some(task) = crate::sched::hotpath::current() {
+                let mut undo_table = task.sem_undo.lock();
+                for sop in sops {
+                    if sop.sem_flg & self::SEM_UNDO != 0 {
+                        // Dedup: accumulate into existing entry for same (semid, sem_num)
+                        let mut found = false;
+                        for entry in undo_table.iter_mut() {
+                            if entry.semid == semid && entry.sem_num == sop.sem_num {
+                                let new_adj = entry.adjustment.wrapping_add(sop.sem_op as i32);
+                                if new_adj.abs() > SEMAEM {
+                                    // Roll back: restore original semaphore values.
+                                    for (j, &orig) in orig_vals.iter().enumerate() {
+                                        sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
+                                    }
+                                    return Err(-(errno::ERANGE as i32));
+                                }
+                                entry.adjustment = new_adj;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            let adj = sop.sem_op as i32;
+                            if adj.abs() > SEMAEM {
+                                for (j, &orig) in orig_vals.iter().enumerate() {
+                                    sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
+                                }
+                                return Err(-(errno::ERANGE as i32));
+                            }
+                            undo_table.push(super::types::SemUndoEntry {
+                                semid,
+                                sem_num: sop.sem_num,
+                                adjustment: adj,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        entry.inner.sem_otime.store(ipc_current_time(), Ordering::Relaxed);
+        entry.inner.sem_padid.store(caller_pid, Ordering::Relaxed);
+
+        // Lost-park ring (rux:lostpark (retired debug=lostpark)): the value transition of a
+        // successful apply — a=sem0 value, b=sem1 value (2-sem probe
+        // sets; more/less record what exists).
+        if crate::debug::lostpark::armed() && sems.len() >= 1 {
+            let v0 = sems[0].value.load(Ordering::Relaxed) as u64;
+            let n0 = sems[0].ncnt.load(Ordering::Relaxed) as u64;
+            let v1 = if sems.len() >= 2 {
+                sems[1].value.load(Ordering::Relaxed) as u64
+            } else {
+                0
+            };
+            let n1 = if sems.len() >= 2 {
+                sems[1].ncnt.load(Ordering::Relaxed) as u64
+            } else {
+                0
+            };
+            crate::debug::lostpark::record(
+                3,
+                caller_pid as u64,
+                v0 | (n0 << 8),
+                v1 | (n1 << 8),
+                crate::timer::get_jiffies(),
+            );
+        }
+
+        // Wake up other processes waiting on this semaphore set
+        entry.inner.wq.wake_up_all();
+
+        return Ok(());
+    }
+    Err(-errno::EIDRM)
+}
+
+/// Find the index of the first operation that needs to block.
+///
+/// R40: mirrors try_apply_semops' ACCUMULATED working-copy semantics —
+/// each op sees the post-op value of the previous ops on the same
+/// semaphore (reference perform_atomic_semop). The old per-op re-read of
+/// the raw value disagreed with try_apply on sets like [{0,-1},{0,-1}]
+/// on value=1 (try_apply: the second -1 blocks against the working 0;
+/// scan: both -1s fit against the raw 1 → None), which fed the
+/// NEED_BLOCK handler a spurious "nothing blocks" even with NO
+/// concurrency, surfacing EAGAIN for a plain blocking op.
+fn find_blocking_op(idx: usize, sops: &[SemBuf]) -> Option<usize> {
+    let slots = SEM_IDS.slots.lock();
+    let entry = match slots[idx] {
+        Some(ref e) if !e.deleted => e,
+        // Deleted/mismatched slot: None sends the caller back around the
+        // loop, where try_apply_semops reports EIDRM (the reference
+        // outcome for a set removed while an op was in flight).
+        _ => return None,
+    };
+
+    if let Some(ref sems) = *entry.inner.sems.lock() {
+        let mut work: alloc::vec::Vec<i32> = (0..sems.len())
+            .map(|i| sems[i].value.load(Ordering::Relaxed))
+            .collect();
+        for (i, sop) in sops.iter().enumerate() {
+            let cur = work[sop.sem_num as usize];
+            let new_val = cur.wrapping_add(sop.sem_op as i32);
+            work[sop.sem_num as usize] = new_val;
+            if (sop.sem_op < 0 && new_val < 0) || (sop.sem_op == 0 && new_val != 0) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Reverse all SEM_UNDO adjustments for a process exiting.
+/// Called from do_exit() during process cleanup (through the IpcHooks
+/// exit row). The reference form replaces the historical raw task
+/// pointer — do_exit holds the task alive across the cleanup calls.
+pub fn sem_undo_exit(task: &crate::process::types::Task) {
+    // Take the undo table (replaces with empty Vec)
+    let entries: alloc::vec::Vec<super::types::SemUndoEntry>;
+    {
+        let mut undo_table = task.sem_undo.lock();
+        entries = core::mem::take(&mut *undo_table);
+    }
+
+    // Reverse each adjustment
+    for entry in entries {
+        let idx = match SEM_IDS.find(entry.semid) {
+            Some(i) => i,
+            None => continue, // Set already deleted, skip
+        };
+
+        let slots = SEM_IDS.slots.lock();
+        if let Some(ref e) = slots[idx] {
+            if !e.deleted {
+                if let Some(ref sems) = *e.inner.sems.lock() {
+                    let snum = entry.sem_num as usize;
+                    if snum < sems.len() {
+                        sems[snum].value.fetch_sub(entry.adjustment, Ordering::Relaxed);
+                    }
+                }
+                // Wake waiters since values changed
+                e.inner.wq.wake_up_all();
+            }
+        }
+    }
+}
+
+/// sys_semop — Semaphore operations (NR 193)
+/// Delegates to sys_semtimedop with NULL timeout.
+pub fn sys_semop(args: [u64; 6]) -> i64 {
+    // semop has NO timeout argument (NR 193): the 4th register the caller's
+    // libc wrapper left in place is garbage, not a timespec pointer. Pass a
+    // NULL timeout down explicitly — forwarding args verbatim made
+    // access_ok/get_user fail with EFAULT (or, pre-uaccess-hardening,
+    // silently read {0,0} and behave like a zero timeout), so blocked
+    // semop() calls never actually blocked (LTP semctl01 GETNCNT=0,
+    // semop04 churn).
+    let mut a = args;
+    a[3] = 0;
+    sys_semtimedop(a)
+}
+
+
+// ═══════════════ util ═════════════════════════════════════════
+// (was util.rs)
+// IPC core infrastructure
+//
+// Provides the central IPC object registry (ipc_ids), permission checking,
+// and ID encoding/decoding following the Linux kernel's design.
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+
+// ============================================================================
+// IPC Constants (matching Linux UAPI)
+// ============================================================================
+
+pub const IPC_CREAT: i32 = 0o1000;
+pub const IPC_EXCL: i32 = 0o2000;
+pub const IPC_NOWAIT: i32 = 0o4000;
+
+/// IPC_RMID: Remove identifier
+pub const IPC_RMID: i32 = 0;
+/// IPC_SET: Set options
+pub const IPC_SET: i32 = 1;
+/// IPC_STAT: Get options
+pub const IPC_STAT: i32 = 2;
+/// IPC_INFO: See ipc info
+pub const IPC_INFO: i32 = 3;
+
+// Semaphore control commands
+pub const GETPID: i32 = 11;
+pub const GETVAL: i32 = 12;
+pub const GETALL: i32 = 13;
+pub const GETNCNT: i32 = 14;
+pub const GETZCNT: i32 = 15;
+pub const SETVAL: i32 = 16;
+pub const SETALL: i32 = 17;
+
+// Semaphore operation flags
+pub const SEM_UNDO: u16 = 0x1000;
+
+// Message queue flags
+pub const MSG_NOERROR: i32 = 0o10000;
+pub const MSG_EXCEPT: i32 = 0o20000;
+pub const MSG_COPY: i32 = 0o40000;
+
+// Shared memory flags
+pub const SHM_RDONLY: i32 = 0o10000;
+pub const SHM_RND: i32 = 0o20000;
+pub const SHM_REMAP: i32 = 0o40000;
+pub const SHM_EXEC: i32 = 0o100000;
+
+// POSIX MQ open flags
+pub const O_CREAT_MQ: i32 = 0o100;
+pub const O_EXCL_MQ: i32 = 0o200;
+pub const O_NONBLOCK_MQ: i32 = 0o4000; // Linux O_NONBLOCK (was 0o400 = O_NOCTTY — never matched the userspace flag)
+pub const O_CLOEXEC_MQ: i32 = 0o2000000;
+
+
+// ============================================================================
+// UAPI Structures (ABI-compatible, #[repr(C)])
+// ============================================================================
+
+
+impl Default for IpcPermUapi {
+    fn default() -> Self {
+        Self {
+            key: 0, uid: 0, gid: 0, cuid: 0, cgid: 0,
+            mode: 0, seq: 0, __pad2: 0, __unused1: 0, __unused2: 0,
+        }
+    }
+}
+
+// ============================================================================
+// Kernel IPC Permission Structure
+// ============================================================================
+
+
+/// The caller's IPC namespace identity (inum). All SysV IPC lookups and
+/// enumerations are scoped to this (reference: the caller's ns->ids table).
+pub fn caller_ipc_ns_inum() -> u64 {
+    crate::process::hotpath::current_ipc_ns().inum
+}
+
+impl KernIpcPerm {
+    pub fn new(key: i32, mode: u16) -> Self {
+        let cred = sched::hotpath::current().map(|t| (t.cred().uid, t.cred().gid, t.cred().euid, t.cred().egid));
+        let (uid, gid, cuid, cgid) = cred.unwrap_or((0, 0, 0, 0));
+        Self {
+            key,
+            uid,
+            gid,
+            cuid,
+            cgid,
+            mode,
+            seq: 0,
+            ns_inum: caller_ipc_ns_inum(),
+        }
+    }
+
+    /// Convert to UAPI structure for copy_to_user
+    pub fn to_uapi(&self) -> IpcPermUapi {
+        IpcPermUapi {
+            key: self.key,
+            uid: self.uid,
+            gid: self.gid,
+            cuid: self.cuid,
+            cgid: self.cgid,
+            mode: self.mode as u32,
+            seq: self.seq as u16,
+            __pad2: 0,
+            __unused1: 0,
+            __unused2: 0,
+        }
+    }
+
+    /// Update uid/gid/mode from IPC_SET.
+    /// Matches Linux's `ipc_update_perm()`: updates uid, gid, and replaces
+    /// the lower 9 permission bits while preserving upper bits.
+    pub fn update_from_set(&mut self, new_uid: u32, new_gid: u32, new_mode: u32) {
+        self.uid = new_uid;
+        self.gid = new_gid;
+        self.mode = (self.mode & !0o777u16) | (new_mode as u16 & 0o777);
+    }
+
+    /// Set creator uid/gid (only allowed by root)
+    pub fn set_creator(&mut self, cuid: u32, cgid: u32) {
+        self.cuid = cuid;
+        self.cgid = cgid;
+    }
+}
+
+// ============================================================================
+// IPC ID Encoding / Decoding
+// ============================================================================
+
+/// Build IPC ID from slot index and sequence number.
+/// Linux format: (index << 16) | (seq & 0xFFFF)
+#[inline]
+pub fn ipc_build_id(index: usize, seq: u32) -> i32 {
+    (((index as u32) << 16) | (seq & 0xFFFF)) as i32
+}
+
+/// Extract slot index from IPC ID.
+#[inline]
+pub fn ipc_id_to_index(id: i32) -> usize {
+    ((id as u32) >> 16) as usize
+}
+
+/// Extract sequence number from IPC ID.
+#[inline]
+pub fn ipc_id_seq(id: i32) -> u32 {
+    (id as u32) & 0xFFFF
+}
+
+// ============================================================================
+// IpcIds — Central IPC Object Registry
+// ============================================================================
+
+
+impl<T> IpcIds<T> {
+    pub const fn new() -> Self {
+        Self {
+            slots: Spinlock::new([const { None }; IPC_IDS_MAX]),
+            next_seq: AtomicU32::new(1),
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Find an IPC object by key. Returns slot index or None.
+    /// Used for IPC_CREAT lookups. Scoped to the caller's IPC namespace
+    /// (reference: the key walk runs over the caller's ns->ids table).
+    pub fn find_by_key(&self, key: i32) -> Option<usize>
+    where T: IpcObject {
+        let ns = caller_ipc_ns_inum();
+        let slots = self.slots.lock();
+        for i in 0..IPC_IDS_MAX {
+            if let Some(ref entry) = slots[i] {
+                if !entry.deleted
+                    && entry.inner.get_perm().key == key
+                    && entry.inner.get_perm().ns_inum == ns
+                {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Allocate a new IPC object slot. Returns (ipc_id, slot_index) or error.
+    /// If key != IPC_PRIVATE and an object with that key exists IN THE
+    /// CALLER'S IPC NAMESPACE, returns its ID.
+    pub fn alloc(&self, mut obj: T, key: i32, flags: i32) -> Result<(i32, usize), i32>
+    where T: IpcObject {
+        // Hold the lock for the entire operation to prevent TOCTOU races
+        // where another thread deletes the slot between key lookup and reuse.
+        let mut slots = self.slots.lock();
+        let ns = caller_ipc_ns_inum();
+
+        // Check for existing key (unless IPC_PRIVATE)
+        if key != 0 {
+            for i in 0..IPC_IDS_MAX {
+                if let Some(ref entry) = slots[i] {
+                    if !entry.deleted
+                        && entry.inner.get_perm().key == key
+                        && entry.inner.get_perm().ns_inum == ns
+                    {
+                        if flags & IPC_EXCL != 0 {
+                            return Err(-17); // EEXIST
+                        }
+                        let perm = &entry.inner.get_perm();
+                        // The demanded class bits come from the caller's flag
+                        // bits exactly as ipcperms() derives them:
+                        // requested_mode = (flag >> 6) | (flag >> 3) | flag,
+                        // projected onto the low 3 bits. The old hardcoded 06
+                        // (read+write) wrongly failed a read-only lookup —
+                        // e.g. msgget(key, 0444) on a 0444 queue returned
+                        // EACCES instead of the id.
+                        let desired = ((flags >> 6) | (flags >> 3) | flags) & 0o7;
+                        if !ipc_check_permissions(perm, desired as u16) {
+                            return Err(-13); // EACCES
+                        }
+                        return Ok((ipc_build_id(i, perm.seq), i));
+                    }
+                }
+            }
+        }
+
+        // Creating a NEW object requires IPC_CREAT (Linux ipcget): a bare
+        // get on a nonexistent key is ENOENT — the old code created it
+        // unconditionally (LTP msgget02: msgget(random_key, 0) must fail,
+        // and the leaked queue then made the follow-up IPC_EXCL probe
+        // return EEXIST instead of ENOENT).
+        if key != 0 && flags & IPC_CREAT == 0 {
+            return Err(-2); // ENOENT
+        }
+
+        // Allocate a new slot
+        let mut free_idx = None;
+        for i in 0..IPC_IDS_MAX {
+            if slots[i].is_none() {
+                free_idx = Some(i);
+                break;
+            }
+        }
+
+        let idx = match free_idx {
+            Some(i) => i,
+            None => return Err(-28), // ENOSPC
+        };
+
+        // R40: keep the generation counter inside the 16 bits an IPC ID can
+        // carry. The ID format is (index << 16) | (seq & 0xFFFF) and every
+        // revalidation (find(), the R10-7 loop-top seq checks in
+        // msgsnd/msgrcv/semtimedop) compares the ID's 16-bit seq against
+        // perm.seq — the old full-u32 store meant that once next_seq passed
+        // 0xFFFF (65536 cumulative allocations; alloc+RMID cycles reach this
+        // in a stress loop), every NEWLY created object had an ID whose
+        // encoded seq (e.g. 0 for 65536) that never equaled its stored
+        // perm.seq: msgget/semget/shmget kept succeeding but msgsnd/msgrcv/
+        // semop/msgctl on the returned id all failed EINVAL forever after.
+        // Wrapping at 16 bits (like Linux's bounded seq) keeps id-vs-perm
+        // comparisons stable; a same-(slot,seq) collision needs another
+        // 65536 allocations on the SAME slot after its old object was
+        // removed — the R10-7 revalidation window, not a steady state.
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) & 0xFFFF;
+        let seq = if seq == 0 {
+            // seq 0 is reserved, skip to 1
+            self.next_seq.store(2, Ordering::Relaxed);
+            1
+        } else {
+            seq
+        };
+
+        obj.get_perm_mut().seq = seq;
+
+        slots[idx] = Some(alloc::boxed::Box::new(IpcObjectEntry {
+            inner: obj,
+            deleted: false,
+        }));
+
+        self.count.fetch_add(1, Ordering::Relaxed);
+        Ok((ipc_build_id(idx, seq), idx))
+    }
+
+    /// Look up an IPC object by its ID. Verifies the sequence number matches
+    /// and the object belongs to the caller's IPC namespace (an id that
+    /// leaked across namespaces was never valid in the caller's table —
+    /// reference returns EINVAL from such an id).
+    /// Returns None if not found or deleted.
+    pub fn find(&self, id: i32) -> Option<usize>
+    where T: IpcObject {
+        let idx = ipc_id_to_index(id);
+        let expected_seq = ipc_id_seq(id);
+
+        if idx >= IPC_IDS_MAX {
+            return None;
+        }
+
+        let ns = caller_ipc_ns_inum();
+        let slots = self.slots.lock();
+        if let Some(ref entry) = slots[idx] {
+            if !entry.deleted
+                && entry.inner.get_perm().seq == expected_seq
+                && entry.inner.get_perm().ns_inum == ns
+            {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    /// Look up an IPC object by its ID, including objects already marked
+    /// deleted. Used by teardown paths that must still reach a
+    /// marked-for-destruction object (e.g. SysV shm's last-detach free).
+    /// Scoped to the caller's namespace like find().
+    pub fn find_including_deleted(&self, id: i32) -> Option<usize>
+    where T: IpcObject {
+        let idx = ipc_id_to_index(id);
+        let expected_seq = ipc_id_seq(id);
+
+        if idx >= IPC_IDS_MAX {
+            return None;
+        }
+
+        let ns = caller_ipc_ns_inum();
+        let slots = self.slots.lock();
+        if let Some(ref entry) = slots[idx] {
+            if entry.inner.get_perm().seq == expected_seq
+                && entry.inner.get_perm().ns_inum == ns
+            {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    /// Look up an IPC object by ID and check read/write permissions.
+    pub fn find_with_perms(&self, id: i32, desired_mode: u16) -> Result<usize, i32>
+    where T: IpcObject {
+        let idx = self.find(id).ok_or(-22)?; // EINVAL
+
+        let slots = self.slots.lock();
+        if let Some(ref entry) = slots[idx] {
+            let perm = &entry.inner.get_perm();
+            if !ipc_check_permissions(perm, desired_mode) {
+                return Err(-13); // EACCES
+            }
+            return Ok(idx);
+        }
+        Err(-22) // EINVAL (shouldn't happen since find() succeeded)
+    }
+
+    /// Mark an IPC object as deleted. Wakes all waiters.
+    pub fn remove(&self, id: i32) -> bool {
+        let idx = ipc_id_to_index(id);
+        if idx >= IPC_IDS_MAX {
+            return false;
+        }
+
+        let mut slots = self.slots.lock();
+        if let Some(ref mut entry) = slots[idx] {
+            if !entry.deleted {
+                entry.deleted = true;
+                self.count.fetch_sub(1, Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove slot entirely (after all attaches are gone for shared memory).
+    pub fn free_slot(&self, id: i32) {
+        let idx = ipc_id_to_index(id);
+        if idx < IPC_IDS_MAX {
+            let mut slots = self.slots.lock();
+            slots[idx] = None;
+        }
+    }
+
+    /// Get current count of active objects
+    pub fn count(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Count live objects in the CALLER'S IPC namespace (the reference's
+    /// per-namespace ids->in_use: limit checks such as msgmni/semmni/
+    /// shmmni and the IPC_INFO pool fields are namespace-local).
+    pub fn count_in_ns(&self) -> usize
+    where T: IpcObject {
+        let ns = caller_ipc_ns_inum();
+        let slots = self.slots.lock();
+        slots
+            .iter()
+            .filter(|e| match e {
+                Some(entry) => !entry.deleted && entry.inner.get_perm().ns_inum == ns,
+                None => false,
+            })
+            .count()
+    }
+}
+
+// ============================================================================
+// Trait for IPC objects — provides access to kern_ipc_perm
+// ============================================================================
+
+/// Trait implemented by all IPC kernel objects to expose their permission structure.
+pub trait IpcObject {
+    fn get_perm(&self) -> &KernIpcPerm;
+    fn get_perm_mut(&mut self) -> &mut KernIpcPerm;
+}
+
+// ============================================================================
+// Permission Checking
+// ============================================================================
+
+/// Check if the current process has the desired permissions on an IPC object.
+/// Follows Linux's ipcperms() logic.
+pub fn ipc_check_permissions(perm: &KernIpcPerm, desired_mode: u16) -> bool {
+    let cred = match sched::hotpath::current() {
+        Some(t) => t.cred(),
+        None => return false,
+    };
+
+    // CAP_IPC_OWNER: bypasses all checks
+    if crate::security::has_capability(cred, crate::security::CAP_IPC_OWNER) {
+        return true;
+    }
+
+    let mode = perm.mode as u16;
+
+    // Owner check
+    if cred.euid == perm.uid || cred.euid == perm.cuid {
+        let owner_bits = (mode >> 6) & 0o7;
+        return (desired_mode & owner_bits) == desired_mode;
+    }
+
+    // Group check
+    if cred.egid == perm.gid || cred.egid == perm.cgid {
+        let group_bits = (mode >> 3) & 0o7;
+        return (desired_mode & group_bits) == desired_mode;
+    }
+
+    // Other check
+    let other_bits = mode & 0o7;
+    (desired_mode & other_bits) == desired_mode
+}
+
+/// Helper to get current jiffies-based time for IPC timestamps.
+/// Returns time in seconds since boot.
+pub fn ipc_current_time() -> i64 {
+    // IPC timestamps are CLOCK_REALTIME seconds — the SAME source
+    // sys_clock_gettime reports. The old jiffies/HZ variant returned
+    // seconds-since-boot (epoch-mismatched vs userspace clock_gettime,
+    // LTP msgctl01) and the jiffies+epoch hybrid still drifted seconds
+    // against the CLINT-based wall clock within one test (msgctl01 ctime
+    // 4s stale, msgrcv01 rtime 3s stale) — use wall_secs() so both
+    // clocks tick from the same counter.
+    crate::drivers::rtc::wall_secs() as i64
+}
+
+
+/// The registry bound the /proc/sys/kernel/shmmni clamp consults
+/// (IpcHooks row; the framework sysctl cannot name the service const).
+pub fn ipc_ids_max() -> u64 {
+    IPC_IDS_MAX as u64
+}

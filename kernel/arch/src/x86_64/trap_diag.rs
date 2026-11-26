@@ -295,7 +295,7 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     // one-liner that keeps the census and adds the one attribution that
     // matters: whether cr2 falls inside a live binder buffer mapping
     // (the range forked children lost with VmaFlags DONTFORK in sc157).
-    let binder_hit = crate::ipc::binder::binder_mmap_owner_of(fault_addr);
+    let binder_hit = crate::ipc::hotpath::binder_mmap_owner_of(fault_addr);
     {
         static SEGVD_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);

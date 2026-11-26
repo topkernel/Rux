@@ -8,7 +8,8 @@
 //! binder.rs is NOT behind this table — it stays in the framework tree
 //! (its block-view windows, Arc adoption and diagnostic walkers are
 //! floor-shaped; the rung's verdict), so every binder call site keeps
-//! its direct `crate::ipc::binder::*` path.
+//! its direct `crate::ipc::hotpath::*` path (binder has been a section
+//! of the hotpath file since pass 2, not a module).
 //!
 //! Row discipline: exit/exec/fork/sysctl/procfs/devfs/mm-vma rows are
 //! all COLD paths (process teardown, boot-time registration, sysctl

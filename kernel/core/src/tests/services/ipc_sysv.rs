@@ -4,8 +4,12 @@
 //!
 //! IPC core infrastructure tests
 
-use crate::util::*;
-use crate::sysv_sem::SemidDsUapi;
+// the moved core's final paths (seed-core pass 2): the old service-crate
+// root names util / sysv_sem are gone — types live in ipc::types, the
+// rest in ipc::hotpath (this file is compiled into the ipc crate through
+// a #[path] include, which is why the shared rewriter missed it).
+use rux::ipc::hotpath::*;
+use rux::ipc::types::{IpcPermUapi, KernIpcPerm, SemBuf, SemUndoEntry, SemidDsUapi};
 use crate::sysv_msg::MsqidDsUapi;
 use crate::sysv_shm::ShmidDsUapi;
 use crate::posix_mq::MqAttr;
@@ -233,7 +237,7 @@ fn test_ipc_uapi_struct_sizes() {
 }
 
 fn test_sem_buf_layout() {
-    use crate::sysv_sem::SemBuf;
+    use rux::ipc::types::SemBuf;
 
     // struct sembuf: sem_num (u16) + sem_op (i16) + sem_flg (u16) = 6 bytes, no padding
     test_assert_eq!(core::mem::size_of::<SemBuf>(), 6, "SemBuf size == 6");
@@ -254,7 +258,7 @@ fn test_msg_match_logic() {
 
     // Match function mirroring sysv_msg::find_msg_match logic
     fn match_msg(msgs: &[TestMsg], msgtyp: i64, msgflg: i32) -> Option<usize> {
-        use crate::util::MSG_EXCEPT;
+        use rux::ipc::hotpath::MSG_EXCEPT;
         if msgs.is_empty() { return None; }
         if msgtyp == 0 { return Some(0); }
         if msgtyp > 0 {

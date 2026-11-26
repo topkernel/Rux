@@ -34,7 +34,7 @@ pub fn dump() {
     // rt-r4: per-caller binder WORLD section maxima (all WORLD sections
     // share one REST_SITES row — this splits the 6-8 ms class by caller).
     {
-        let rep = crate::ipc::binder::world_section_report();
+        let rep = rux::ipc::hotpath::world_section_report();
         if !rep.is_empty() {
             crate::pr_warn!("SYSCOST t={}s{}", secs, rep);
         }

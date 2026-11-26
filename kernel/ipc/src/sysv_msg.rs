@@ -12,7 +12,10 @@ use rux::sync::types::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 
-use crate::util::*;
+use rux::ipc::hotpath::*;
+// the types the old util glob carried (a glob over hotpath does not
+// span types.rs): the definitions moved there in pass 2 step 1.
+use rux::ipc::types::{IpcIds, IpcPermUapi, IPC_IDS_MAX, KernIpcPerm};
 
 // Compile-time verification: IpcPermUapi mode field offset must be 20 bytes
 const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
@@ -165,7 +168,7 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
         out,
         "       key      msqid perms      uid      gid  cuid   cgid  stime  rtime  ctime       cbytes       qnum qbytes lspid lrpid"
     );
-    let ns = crate::util::caller_ipc_ns_inum();
+    let ns = rux::ipc::hotpath::caller_ipc_ns_inum();
     let slots = MSG_IDS.slots.lock();
     for (i, slot) in slots.iter().enumerate() {
         if let Some(ref entry) = slot {
@@ -203,7 +206,7 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
 /// straight into MSG_STAT (raw index), so the +1 the old code added made
 /// every subsequent MSG_STAT hit an empty slot (EINVAL).
 fn msg_max_idx() -> i32 {
-    let ns = crate::util::caller_ipc_ns_inum();
+    let ns = rux::ipc::hotpath::caller_ipc_ns_inum();
     let slots = MSG_IDS.slots.lock();
     for i in (0..IPC_IDS_MAX).rev() {
         if let Some(ref entry) = slots[i] {
@@ -506,7 +509,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     // Namespace scoping (reference: MSG_STAT indexes the
                     // caller's ns->ids table; a foreign-ns slot was never
                     // an id in this namespace).
-                    if entry.deleted || entry.inner.perm.ns_inum != crate::util::caller_ipc_ns_inum() {
+                    if entry.deleted || entry.inner.perm.ns_inum != rux::ipc::hotpath::caller_ipc_ns_inum() {
                         return -(errno::EINVAL as i64);
                     }
                     // MSG_STAT_ANY skips the permission check entirely.
@@ -561,7 +564,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     // Namespace scoping (reference: MSG_STAT indexes the
                     // caller's ns->ids table; a foreign-ns slot was never
                     // an id in this namespace).
-                    if entry.deleted || entry.inner.perm.ns_inum != crate::util::caller_ipc_ns_inum() {
+                    if entry.deleted || entry.inner.perm.ns_inum != rux::ipc::hotpath::caller_ipc_ns_inum() {
                         return -(errno::EINVAL as i64);
                     }
                     if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
@@ -653,7 +656,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 // post-registration recheck alone still trusted a stale
                 // idx after a wake from RMID+recreate.
                 if !entry.deleted
-                    && crate::util::ipc_id_seq(msqid) == entry.inner.get_perm().seq
+                    && rux::ipc::hotpath::ipc_id_seq(msqid) == entry.inner.get_perm().seq
                 {
                     let cbytes = entry.inner.cbytes.load(Ordering::Relaxed);
                     let qbytes = entry.inner.qbytes.load(Ordering::Relaxed);
@@ -725,7 +728,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 if let Some(ref entry) = slots[idx] {
                     // R9-11: seq revalidation — the slot may have been
                     // RMID'd and re-created since our id was captured.
-                    if !entry.deleted && crate::util::ipc_id_seq(msqid) == entry.inner.get_perm().seq {
+                    if !entry.deleted && rux::ipc::hotpath::ipc_id_seq(msqid) == entry.inner.get_perm().seq {
                         let cbytes = entry.inner.cbytes.load(Ordering::Relaxed);
                         let qbytes = entry.inner.qbytes.load(Ordering::Relaxed);
                         if cbytes + msgsz <= qbytes {
@@ -815,14 +818,14 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
     let nowait = (msgflg & IPC_NOWAIT) != 0;
     let msg_noerror = (msgflg & MSG_NOERROR) != 0;
 
-    let msg_copy = (msgflg & crate::util::MSG_COPY) != 0;
+    let msg_copy = (msgflg & rux::ipc::hotpath::MSG_COPY) != 0;
 
     // MSG_COPY (reference CHECKPOINT_RESTORE semantics): msgtyp is the ORDINAL
     // position in the queue (0-based), NOT a type filter. The reference
     // requires IPC_NOWAIT and rejects MSG_EXCEPT with EINVAL (copy mode never
     // blocks); negative ordinals are EINVAL (review IPC M: MSG_COPY 仅队首).
     if msg_copy {
-        if (msgflg & crate::util::MSG_EXCEPT) != 0 || (msgflg & IPC_NOWAIT) == 0 {
+        if (msgflg & rux::ipc::hotpath::MSG_EXCEPT) != 0 || (msgflg & IPC_NOWAIT) == 0 {
             return -(errno::EINVAL as i64);
         }
         if msgtyp < 0 {
@@ -839,7 +842,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     return -(errno::EIDRM as i64);
                 }
                 // R10-7: seq revalidation at the loop top (RMID+slot reuse).
-                if crate::util::ipc_id_seq(msqid) != entry.inner.get_perm().seq {
+                if rux::ipc::hotpath::ipc_id_seq(msqid) != entry.inner.get_perm().seq {
                     return -(errno::EIDRM as i64);
                 }
                 let mut messages = entry.inner.messages.lock();
@@ -959,7 +962,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
                     // R9-11: seq revalidation (see sys_msgsnd).
-                    if !entry.deleted && crate::util::ipc_id_seq(msqid) == entry.inner.get_perm().seq {
+                    if !entry.deleted && rux::ipc::hotpath::ipc_id_seq(msqid) == entry.inner.get_perm().seq {
                         let messages = entry.inner.messages.lock();
                         if find_msg_match(&messages, msgtyp, msgflg).is_some() {
                             retry_now = true;
@@ -1029,7 +1032,7 @@ fn find_msg_match(messages: &[Msg], msgtyp: i64, msgflg: i32) -> Option<usize> {
 
     if msgtyp > 0 {
         // Return first message with matching type (or non-matching if MSG_EXCEPT)
-        let except = (msgflg & crate::util::MSG_EXCEPT) != 0;
+        let except = (msgflg & rux::ipc::hotpath::MSG_EXCEPT) != 0;
         for (i, msg) in messages.iter().enumerate() {
             if except {
                 if msg.mtype != msgtyp {

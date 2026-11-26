@@ -719,8 +719,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
         if let Some(file) = rux::fs::hotpath::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
-                if core::ptr::eq(ops as *const _, &crate::ipc::binder::BINDER_OPS as *const _) {
-                    return match crate::ipc::binder::binder_mmap_handler(
+                if core::ptr::eq(ops as *const _, &rux::ipc::hotpath::BINDER_OPS as *const _) {
+                    return match rux::ipc::hotpath::binder_mmap_handler(
                         &file,
                         addr,
                         actual_length,

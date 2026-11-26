@@ -4,6 +4,8 @@
 # removing prints (never after adding one without a review).
 kernel/core/src/sync/hotpath.rs 8
 kernel/core/src/ipc/binder.rs 0
+kernel/core/src/sync/futex.rs 0
+kernel/core/src/ipc/hotpath.rs 0
 kernel/core/src/syscall/process.rs 29
 kernel/core/src/syscall/file.rs 0
 kernel/core/src/syscall/memory.rs 0

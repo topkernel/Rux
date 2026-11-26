@@ -342,7 +342,7 @@ pub fn ffrt_chain_walk(
                     // slot before this walk could arm the lock word —
                     // it no longer fires.
                     let samgr_pid =
-                        crate::ipc::binder::binder_sareg_samgr_pid();
+                        crate::ipc::hotpath::binder_sareg_samgr_pid();
                     if samgr_pid != 0 && tk.tgid() as u32 == samgr_pid {
                         let wl = nxt.wrapping_sub(0x8);
                         let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
@@ -3556,7 +3556,7 @@ fn kd_fd_type(file: &crate::fs::types::File) -> &'static str {
     if rux::api::net::is_inet_socket_ops(ops_ref) {
         return "inet-sock";
     }
-    if is(&crate::ipc::binder::BINDER_OPS) {
+    if is(&crate::ipc::hotpath::BINDER_OPS) {
         return "binder";
     }
     if rux::api::fs::is_inotify_ops(ops_ref) {

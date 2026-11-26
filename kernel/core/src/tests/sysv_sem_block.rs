@@ -19,7 +19,7 @@
 //! kernel: the unit-test boot task has no user mm to uaccess through).
 //! The poster runs in a kernel thread — the helper kthread has no user
 //! address space either, so semop_kernel is its only way to post.
-use crate::ipc::sysv_sem::{semop_kernel, sys_semctl, sys_semget, SemBuf};
+use crate::ipc::{hotpath::semop_kernel, hotpath::sys_semctl, hotpath::sys_semget, types::SemBuf};
 use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use super::{test_pass, test_fail, test_skip, test_group_start};
