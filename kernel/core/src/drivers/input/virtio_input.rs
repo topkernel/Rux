@@ -40,32 +40,13 @@ const STATUS_QUEUE: u16 = 1;
 // VirtIO Input configuration structures
 // ============================================================================
 
-/// VirtIO Input configuration registers
-#[repr(C)]
-struct VirtioInputConfig {
-    /// Configuration select register
-    select: u8,
-    /// Sub-select register
-    subsel: u8,
-    /// Data size
-    size: u8,
-    /// Reserved
-    reserved: [u8; 5],
-    /// Configuration data (union)
-    payload: [u8; 128],
-}
+// VirtioInputConfig — the definition moved to drivers/types.rs. This
+// file never referenced it (it names the device's config space through
+// the device's own fields), so there is no re-export.
 
-/// VirtIO Input event (8 bytes)
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
-pub struct VirtioInputEvent {
-    /// Event type
-    pub type_: u16,
-    /// Event code
-    pub code: u16,
-    /// Event value
-    pub value: i32,
-}
+// VirtioInputEvent — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtioInputEvent};
 
 // ============================================================================
 // Configuration selectors
@@ -90,25 +71,9 @@ const VIRTIO_INPUT_CFG_ABS_INFO: u8 = 0x12;
 // VirtIO Input device
 // ============================================================================
 
-/// VirtIO Input device
-pub struct VirtioInputDevice {
-    /// VirtIO PCI device
-    pci: VirtIOPCI,
-    /// Event queue
-    event_queue: Option<VirtQueue>,
-    /// Event buffer
-    event_buffer: *mut VirtioInputEvent,
-    /// Event buffer layout
-    event_buffer_layout: Option<Layout>,
-    /// Event buffer physical address
-    event_buffer_phys: u64,
-    /// Device name
-    name: [u8; 32],
-    /// Whether it is a pointer device (mouse/touchscreen)
-    is_pointer: bool,
-    /// Last processed used index
-    last_used: u16,
-}
+// VirtioInputDevice — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtioInputDevice};
 
 unsafe impl Send for VirtioInputDevice {}
 unsafe impl Sync for VirtioInputDevice {}
@@ -528,12 +493,11 @@ impl VirtioInputDevice {
     }
 }
 
-/// Used ring element
-#[repr(C)]
-struct UsedElem {
-    id: u32,
-    len: u32,
-}
+// UsedElem — the definition moved to drivers/types.rs and, because
+// virtio/queue.rs declares the same name for its own used-ring element
+// (the one every caller uses), it was renamed VirtioInputUsedElem there.
+// This file never used its local declaration (it names the virtio one by
+// its full path), so there is no re-export.
 
 impl Drop for VirtioInputDevice {
     fn drop(&mut self) {

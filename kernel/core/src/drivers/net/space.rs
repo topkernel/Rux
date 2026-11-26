@@ -7,101 +7,29 @@
 use crate::net::buffer::SkBuff;
 use crate::sync::types::Spinlock;
 
-/// Maximum device name length
-pub const IFNAMSIZ: usize = 16;
+// IFNAMSIZ — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{IFNAMSIZ};
 
-/// Maximum hardware address length
-pub const MAX_ADDR_LEN: usize = 32;
+// MAX_ADDR_LEN — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{MAX_ADDR_LEN};
 
-/// ARP hardware types
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)]
-pub enum ArpHrdType {
-    /// Loopback device
-    ARPHRD_LOOPBACK = 772,
-    /// Ethernet
-    ARPHRD_ETHER = 1,
-    /// None
-    ARPHRD_VOID = 0xFFFF,
-}
+// ArpHrdType — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{ArpHrdType};
 
-/// Network device operation interface
-#[repr(C)]
-pub struct NetDeviceOps {
-    /// Transmit packet
-    ///
-    /// # Parameters
-    /// - `skb`: Packet to transmit
-    ///
-    /// # Returns
-    /// 0 on success, negative error code on failure
-    pub xmit: fn(skb: SkBuff) -> i32,
+// NetDeviceOps — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{NetDeviceOps};
 
-    /// Device initialization (optional)
-    pub init: Option<fn() -> i32>,
+// DeviceStats — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{DeviceStats};
 
-    /// Device teardown (optional)
-    pub uninit: Option<fn() -> i32>,
-
-    /// Get statistics (optional)
-    pub get_stats: Option<fn() -> DeviceStats>,
-}
-
-/// Network device statistics
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DeviceStats {
-    /// Received packets
-    pub rx_packets: u64,
-    /// Transmitted packets
-    pub tx_packets: u64,
-    /// Received bytes
-    pub rx_bytes: u64,
-    /// Transmitted bytes
-    pub tx_bytes: u64,
-    /// Receive errors
-    pub rx_errors: u64,
-    /// Transmit errors
-    pub tx_errors: u64,
-    /// Receive dropped
-    pub rx_dropped: u64,
-    /// Transmit dropped
-    pub tx_dropped: u64,
-    /// Multicast received packets
-    pub multicast: u64,
-}
-
-/// Network device
-///
-/// # Notes
-/// - All network devices must implement this structure
-/// - Uses function pointers for polymorphic calls
-#[repr(C)]
-pub struct NetDevice {
-    /// Device name (e.g., "lo", "eth0")
-    pub name: [u8; IFNAMSIZ],
-    /// Device index
-    pub ifindex: u32,
-    /// MTU (maximum transmission unit)
-    pub mtu: u32,
-    /// Hardware type (ARPHRD_ETHER, ARPHRD_LOOPBACK, etc.)
-    pub type_: ArpHrdType,
-    /// Hardware address (MAC address)
-    pub addr: [u8; MAX_ADDR_LEN],
-    /// Hardware address length
-    pub addr_len: u8,
-    /// Device operation interface
-    pub netdev_ops: &'static NetDeviceOps,
-    /// Private data
-    pub priv_: *mut u8,
-    /// Statistics
-    pub stats: DeviceStats,
-    /// Device status
-    pub flags: u32,
-    /// Receive queue length
-    pub rx_queue_len: u32,
-}
+// NetDevice — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{NetDevice};
 
 unsafe impl Send for NetDevice {}
 // SAFETY (round-5): NetDevice's cross-thread state (stats, flags) is

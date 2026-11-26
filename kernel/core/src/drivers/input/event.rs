@@ -174,21 +174,9 @@ pub const KEY_REPEAT: i32 = 2;
 // Input event structure (input_event)
 // ============================================================================
 
-/// Raw input event (evdev compatible, 24 bytes)
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
-pub struct InputEvent {
-    /// Timestamp (seconds)
-    pub tv_sec: u64,
-    /// Timestamp (microseconds)
-    pub tv_usec: u64,
-    /// Event type (EV_KEY, EV_REL, EV_ABS)
-    pub type_: u16,
-    /// Event code (keycode/axis)
-    pub code: u16,
-    /// Event value (press/release/coordinate value)
-    pub value: i32,
-}
+// InputEvent — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{InputEvent};
 
 impl InputEvent {
     /// Create new input event
@@ -237,15 +225,6 @@ impl InputEvent {
 // High-level input event enum
 // ============================================================================
 
-/// Input event type (for internal use)
-#[derive(Debug, Clone, Copy)]
-pub enum InputEventKind {
-    /// Keyboard event
-    Key { code: u16, pressed: bool },
-    /// Relative motion event
-    RelativeMotion { dx: i32, dy: i32 },
-    /// Absolute position event
-    AbsolutePosition { x: i32, y: i32 },
-    /// Mouse wheel
-    Wheel { delta: i32 },
-}
+// InputEventKind — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{InputEventKind};

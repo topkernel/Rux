@@ -99,12 +99,9 @@ pub mod scancode {
 // PS/2 keyboard driver
 // ============================================================================
 
-/// PS/2 keyboard state
-pub struct PS2Keyboard {
-    shift_pressed: bool,
-    ctrl_pressed: bool,
-    alt_pressed: bool,
-}
+// PS2Keyboard — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{PS2Keyboard};
 
 impl PS2Keyboard {
     pub const fn new() -> Self {
@@ -200,16 +197,9 @@ pub mod mouse_flags {
     pub const Y_OVERFLOW: u8 = 0x80;
 }
 
-/// PS/2 mouse state
-pub struct PS2Mouse {
-    packet_index: u8,
-    packet: [u8; 3],
-    x: i32,
-    y: i32,
-    left_pressed: bool,
-    right_pressed: bool,
-    middle_pressed: bool,
-}
+// PS2Mouse — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{PS2Mouse};
 
 impl PS2Mouse {
     pub const fn new() -> Self {

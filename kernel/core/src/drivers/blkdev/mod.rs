@@ -16,92 +16,21 @@ use alloc::vec::Vec;
 use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// Per-disk C-style operations table (the drivers-family ABI, round-5:
-/// the pointers are SAFE — registration is the audited edge; a driver
-/// that registers an op asserts its implementation upholds the op's
-/// documented contract, and the block layer calls it as plain Rust).
-#[repr(C)]
-pub struct BlockDeviceOps {
-    /// Open block device
-    pub open: Option<fn() -> i32>,
-    /// Release block device
-    pub release: Option<fn() -> i32>,
-    /// Get geometry info
-    pub getgeo: Option<fn(&mut Geo) -> i32>,
-    /// Kick quietly-submitted chains on this disk (rung4 prep move 2):
-    /// transport-level doorbell for drivers that publish chains without
-    /// notifying (the PCI virtio-blk quiet-submit path). The block
-    /// layer's drain/recovery paths call [`kick_all_pending_disks`] —
-    /// walking the registry — instead of naming any driver. None = the
-    /// transport notifies inline (no-op kick).
-    pub kick: Option<fn(&GenDisk)>,
-}
+// BlockDeviceOps — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{BlockDeviceOps};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Geo {
-    /// Number of heads
-    pub heads: u8,
-    /// Number of sectors
-    pub sectors: u8,
-    /// Number of cylinders
-    pub cylinders: u16,
-    /// Start position
-    pub start: u32,
-}
+// Geo — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{Geo};
 
-/// One scatter-gather segment of a fused block request: a memory range
-/// (page-aligned or not — the driver maps it to phys) covering
-/// `len` whole 512-byte sectors of the request's CONTIGUOUS device range.
-/// The blk-merge.c bio-segment shape: physically-discontiguous memory,
-/// device-contiguous sectors.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct DmaSeg {
-    /// Buffer (DMA target for reads, DMA source for writes)
-    pub ptr: *mut u8,
-    /// Length in bytes (multiple of the sector size)
-    pub len: usize,
-}
+// DmaSeg — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{DmaSeg};
 
-pub struct GenDisk {
-    /// Device name
-    pub name: &'static str,
-    /// Major device number
-    pub major: u32,
-    /// First minor device number
-    pub first_minor: u32,
-    /// Number of minor device numbers
-    pub minors: u32,
-    /// Capacity (in 512-byte sectors)
-    pub capacity: AtomicU64,
-    /// Block size
-    pub block_size: u32,
-    /// Block device operations
-    pub ops: Option<&'static BlockDeviceOps>,
-    /// Private data (driver-owned; resolve with [`GenDisk::private`])
-    pub private_data: Option<*mut u8>,
-    /// Request handler function
-    pub request_fn: Option<fn(&mut Request)>,
-    /// Async read function (device-specific async submit without blocking).
-    /// Registration contract (INV-BLKDEV-2, the driver-registration edge):
-    /// the implementation receives the registered `&GenDisk` and must keep
-    /// `buf` a valid DMA target until the completion fires.
-    pub async_read_fn: Option<fn(&GenDisk, u64, &mut [u8], &crate::fs::io_completion::IoCompletion) -> i32>,
-    /// Async write function (device-specific async submit without blocking).
-    /// The DATA buffer is the DMA SOURCE: the registered implementation
-    /// asserts the caller keeps it valid and unmodified until the
-    /// completion fires (the write-batch contract, INV-BLKDEV-2).
-    pub async_write_fn: Option<fn(&GenDisk, u64, &[u8], &crate::fs::io_completion::IoCompletion) -> i32>,
-    /// Async scatter-gather read (one fused request over N segments whose
-    /// combined length covers a contiguous sector range starting at
-    /// `sector`). None on devices without SG support — callers fall back
-    /// to per-segment `async_read_fn` submissions.
-    pub async_read_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
-    /// Async scatter-gather write — the fused form of `async_write_fn`;
-    /// every segment is a DMA source under the same stability contract.
-    pub async_write_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
-}
+// GenDisk — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{GenDisk};
 
 unsafe impl Send for GenDisk {}
 unsafe impl Sync for GenDisk {}
@@ -210,41 +139,17 @@ impl GenDisk {
     }
 }
 
-pub struct Request {
-    /// Command type
-    pub cmd_type: ReqCmd,
-    /// Starting sector
-    pub sector: u64,
-    /// Data buffer
-    pub buffer: Vec<u8>,
-    /// Block device (typed handle; see INV-BLKDEV-1 on [`get_disk`])
-    pub device: &'static GenDisk,
-    /// Final device status (R8-M2): set by the driver before the request
-    /// returns. submit_request returns 0 whenever a request_fn is
-    /// registered, so a device-side error used to vanish and the caller
-    /// copied a ZERO buffer as success (cached as BH_Uptodate!).
-    /// (round-5: the never-registered `end_io` callback and the
-    /// never-set `completion` token were deleted — dead ABI surface.)
-    pub error: core::sync::atomic::AtomicI32,
-}
+// Request — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{Request};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ReqCmd {
-    /// Read
-    Read,
-    /// Write
-    Write,
-    /// Flush
-    Flush,
-}
+// ReqCmd — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{ReqCmd};
 
-struct BlockDeviceManager {
-    /// Block device list
-    disks: Spinlock<Vec<Option<Box<GenDisk>>>>,
-    /// Device number allocator
-    major_next: AtomicU32,
-}
+// BlockDeviceManager — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{BlockDeviceManager};
 
 /// Kick every registered disk whose transport may hold quietly-submitted
 /// chains (rung4 prep move 2): the block layer's drain/recovery paths

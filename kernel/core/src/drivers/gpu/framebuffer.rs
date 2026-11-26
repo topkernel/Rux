@@ -9,22 +9,9 @@
 
 use core::ptr::write_volatile;
 
-/// Framebuffer information
-#[derive(Clone, Copy)]
-pub struct FrameBufferInfo {
-    /// Framebuffer physical address
-    pub addr: u64,
-    /// Framebuffer size (bytes)
-    pub size: u32,
-    /// Width (pixels)
-    pub width: u32,
-    /// Height (pixels)
-    pub height: u32,
-    /// Bytes per row
-    pub stride: u32,
-    /// Format (xRGB = 1)
-    pub format: u32,
-}
+// FrameBufferInfo — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{FrameBufferInfo};
 
 /// Color constants (xRGB format)
 pub mod color {
@@ -41,15 +28,9 @@ pub mod color {
     pub const LIGHT_BLUE: u32 = 0xFF0000FF;
 }
 
-/// Framebuffer structure
-pub struct FrameBuffer {
-    /// Framebuffer information
-    info: FrameBufferInfo,
-    /// The mapped framebuffer window (round-5: the frame aperture as a
-    /// bounds-checked MmioRegion — INV-MMIO-1/2/3 cover every pixel
-    /// access; the old raw ptr + offset math is gone).
-    fb: crate::safety::mmio::MmioRegion,
-}
+// FrameBuffer — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{FrameBuffer};
 
 unsafe impl Send for FrameBuffer {}
 unsafe impl Sync for FrameBuffer {}

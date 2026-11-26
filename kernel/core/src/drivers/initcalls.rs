@@ -30,28 +30,13 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::types::Spinlock;
 
-/// Initcall levels, drained in this order (the reference's ladder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InitLevel {
-    /// Pure MMIO device scans that must precede PCI (virtio-mmio).
-    Early,
-    /// PCI device probes.
-    Device,
-    /// Network + late peripherals (input, gpu, drm, watchdog).
-    Late,
-}
+// InitLevel — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{InitLevel};
 
-/// One registered device probe. `probe` returns the number of devices
-/// it bound (0 = negative probe: no such device on this machine — a
-/// normal outcome, reported but never fatal).
-pub struct DeviceInit {
-    /// Stable name for the boot report (e.g. "virtio-blk-mmio").
-    pub name: &'static str,
-    pub level: InitLevel,
-    /// fn() -> bound-device count. Must be re-entrancy-safe to CALL once;
-    /// the table is drained exactly once per boot per level.
-    pub probe: fn() -> usize,
-}
+// DeviceInit — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{DeviceInit};
 
 const MAX_INITCALLS: usize = 32;
 

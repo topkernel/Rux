@@ -8,138 +8,33 @@
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-/// VirtIO descriptor (16-byte aligned)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Desc {
-    /// Address (64-bit)
-    pub addr: u64,
-    /// Length (32-bit)
-    pub len: u32,
-    /// Flags (16-bit)
-    pub flags: u16,
-    /// Next (16-bit)
-    pub next: u16,
-}
+// Desc — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{Desc};
 
-/// Available Ring (2-byte aligned)
-#[repr(C)]
-pub struct AvailRing {
-    /// Flags
-    pub flags: u16,
-    /// Driver writes next available descriptor index (volatile read/write)
-    pub idx: u16,
-    // Descriptor index array starts here
-    // Array followed by used_event_idx
-}
+// AvailRing — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{AvailRing};
 
-/// Used Ring element (4-byte aligned)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct UsedElem {
-    /// Descriptor index
-    pub id: u32,
-    /// Bytes written
-    pub len: u32,
-}
+// UsedElem — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{UsedElem};
 
-/// Used Ring (4-byte aligned)
-#[repr(C)]
-pub struct UsedRing {
-    /// Flags
-    pub flags: u16,
-    /// Device writes next available descriptor index (volatile read/write)
-    pub idx: u16,
-    // Element array starts here
-    // Array followed by avail_event_idx
-}
+// UsedRing — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{UsedRing};
 
-/// Width of the queue-notify register write for this transport.
-///
-/// R34: virtio-mmio rejects every register access whose size != 4 (QEMU:
-/// "wrong size access to register!" — the write is dropped), so MMIO
-/// queues MUST notify with a 32-bit write. virtio-pci's notify cap accepts
-/// sub-4-byte writes (Linux uses iowrite16 there), and the PCI block
-/// driver has always used 16-bit notifies, so it keeps W16.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotifyWidth {
-    /// 16-bit notify write (virtio-pci notify capability)
-    W16,
-    /// 32-bit notify write (virtio-mmio QueueNotify register)
-    W32,
-}
+// NotifyWidth — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{NotifyWidth};
 
-/// VirtIO virtual queue
-///
-/// Uses Modern VirtIO (v1.0+) layout
-///
-/// Unsafe-slim round 3: the ring memory is a `safety::dma::DmaBlock`
-/// (INV-DMA-1..3) carved once into the descriptor table, available
-/// ring, and used ring; all ring/index access goes through the
-/// block's bounds-checked volatile paths or the disjoint typed slots,
-/// so the per-access unsafe blocks this file used to carry are gone.
-/// The only remaining unsafe here is `notify()`'s arch fences and the
-/// register write (inherently asm/MMIO), plus the Send/Sync impls.
-pub struct VirtQueue {
-    /// Queue size
-    pub queue_size: u16,
-    /// Queue index (used for notifying device)
-    queue_index: u16,
-    /// Queue notification address
-    queue_notify: u64,
-    /// Notify register access width for this transport
-    notify_width: NotifyWidth,
-    /// Interrupt status address (VIRTIO_MMIO_INTERRUPT_STATUS - Read Only)
-    interrupt_status: u64,
-    /// Interrupt acknowledge address (VIRTIO_MMIO_INTERRUPT_ACK - Write Only)
-    interrupt_ack: u64,
-    /// The vring allocation (None after free_vring): one DMA block
-    /// (INV-DMA-1) carved into desc/avail/used (INV-DMA-2).
-    vring: Option<Vring>,
-    /// Next descriptor index to allocate
-    next_desc: AtomicU16,
-    /// Chains whose wait timed out and whose descriptors are LEAKED (the
-    /// request may still be in flight on the device). Leaked chains must
-    /// not count against the in-flight guard forever, and their slots must
-    /// never be handed out again — see note_timed_out_chain().
-    leaked_chains: AtomicU16,
-    /// Kernel-side ordinal of the next avail-ring submission. submit()
-    /// derives the ring slot and the published avail.idx from this shadow
-    /// instead of reading the shared ring back — a corrupted avail.idx
-    /// (stray kernel write into the heap-backed vring) previously made the
-    /// device walk garbage heads and wedge permanently.
-    avail_shadow: AtomicU16,
-    /// Descriptors currently held by LIVE published chains (the SG-chain
-    /// admission budget). The legacy in-flight guard in alloc_desc_chain
-    /// assumes 3 descriptors per chain; an SG chain of N data segments
-    /// holds N+2, so chains-only accounting under-estimates real ring
-    /// pressure exactly when fusing is busiest. Held is incremented at
-    /// chain PUBLISH time (async pending store / sync tombstone publish,
-    /// both under the BLK lock) and released by the completion walker when
-    /// it consumes the chain's used-ring entry — the same lifecycle the
-    /// pending-table window reservation follows. Burned allocations
-    /// (guard rejected / publish refused before submit_quiet) never touch
-    /// this counter. The MMIO legacy queue leaves it at 0 (its chains are
-    /// always 3-desc; its size-8 in-flight guard already caps it at 2).
-    descs_held: AtomicU16,
-}
+// VirtQueue — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtQueue};
 
-/// The carved vring (INV-DMA-1/2): the block owns the allocation; the
-/// slots are disjoint zero-drop views into it (block declared first
-/// only for documentation — slot drops are no-ops).
-struct Vring {
-    block: crate::safety::dma::DmaBlock,
-    /// Descriptor table [queue_size] (driver-owned; device reads).
-    desc: crate::safety::dma::DmaSlot<[Desc]>,
-    /// Available ring header (driver-written).
-    avail: crate::safety::dma::DmaSlot<AvailRing>,
-    /// Used ring header (device-written — read volatile only).
-    used: crate::safety::dma::DmaSlot<UsedRing>,
-    /// Byte offsets of the carved sections (volatile-at offsets and
-    /// register programming derive from these).
-    off_avail: usize,
-    off_used: usize,
-}
+// Vring — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{Vring};
 
 unsafe impl Send for VirtQueue {}
 unsafe impl Sync for VirtQueue {}
@@ -1482,23 +1377,13 @@ break 'wait_done prev_used;
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VirtIOBlkReqHeader {
-    /// Request type (0=read, 1=write, 2=flush)
-    pub type_: u32,
-    /// Reserved
-    pub reserved: u32,
-    /// Sector number
-    pub sector: u64,
-}
+// VirtIOBlkReqHeader — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIOBlkReqHeader};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VirtIOBlkResp {
-    /// Status (0=OK, 1=IOERR, 2=UNSUPPORTED)
-    pub status: u8,
-}
+// VirtIOBlkResp — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIOBlkResp};
 
 impl core::fmt::Display for VirtIOBlkResp {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -29,52 +29,20 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use alloc::string::{String, ToString};
+use alloc::string::ToString; // String moved to types.rs with DiskStat
+
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::types::Spinlock;
 
-/// One device's I/O counters.
-pub struct DiskStat {
-    /// Major device number.
-    pub major: u32,
-    /// First minor device number.
-    pub minor: u32,
-    /// Device name (as in /proc/partitions).
-    pub name: String,
-    /// Reads completed.
-    pub reads: u64,
-    /// Sectors read.
-    pub sectors_read: u64,
-    /// Milliseconds spent reading.
-    pub ms_reading: u64,
-    /// Writes completed.
-    pub writes: u64,
-    /// Sectors written.
-    pub sectors_written: u64,
-    /// Milliseconds spent writing.
-    pub ms_writing: u64,
-    /// I/Os in progress right now.
-    pub io_in_progress: u64,
-    /// Milliseconds spent doing I/O.
-    pub ms_doing_io: u64,
-}
+// DiskStat — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{DiskStat};
 
-/// The live counters of one device.
-struct Entry {
-    major: u32,
-    minor: u32,
-    name: String,
-    reads: AtomicU64,
-    sectors_read: AtomicU64,
-    ms_reading: AtomicU64,
-    writes: AtomicU64,
-    sectors_written: AtomicU64,
-    ms_writing: AtomicU64,
-    io_in_progress: AtomicU64,
-    ms_doing_io: AtomicU64,
-}
+// Entry — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{Entry};
 
 static STATS: Spinlock<Vec<Entry>> = Spinlock::new(Vec::new());
 

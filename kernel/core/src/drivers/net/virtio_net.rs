@@ -10,64 +10,17 @@ use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdTyp
 use crate::net::buffer::SkBuff;
 use crate::sync::types::Spinlock;
 
-/// VirtIO network device configuration
-///
-/// Corresponds to VirtIO network device configuration space
-#[repr(C)]
-pub struct VirtIONetConfig {
-    /// MAC address
-    pub mac: [u8; 6],
-    /// Device status
-    pub status: u16,
-    /// Maximum VIRTIO packet size
-    pub mtu: u16,
-}
+// VirtIONetConfig — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIONetConfig};
 
-/// VirtIO network packet header
-///
-/// Corresponds to VirtIO network device packet header format
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VirtIONetHdr {
-    /// Flags
-    pub flags: u8,
-    /// GSO type
-    pub gso_type: u8,
-    /// Header length
-    pub hdr_len: u16,
-    /// GSO size
-    pub gso_size: u16,
-    /// Checksum start position
-    pub csum_start: u16,
-    /// Checksum offset
-    pub csum_offset: u16,
-    /// Buffer count
-    pub num_buffers: u16,
-}
+// VirtIONetHdr — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIONetHdr};
 
-/// VirtIO network device
-pub struct VirtIONetDevice {
-    /// MMIO base address
-    base_addr: u64,
-    /// MAC address
-    mac: [u8; 6],
-    /// MTU
-    mtu: u16,
-    /// Initialization status
-    initialized: Spinlock<bool>,
-    /// Transmit queue (TX Queue - Queue 0)
-    tx_queue: Spinlock<Option<queue::VirtQueue>>,
-    /// Receive queue (RX Queue - Queue 1)
-    rx_queue: Spinlock<Option<queue::VirtQueue>>,
-    /// Queue size
-    queue_size: u16,
-    /// Statistics
-    stats: Spinlock<DeviceStats>,
-    /// RX buffer address list
-    rx_buffers: Spinlock<alloc::vec::Vec<u64>>,
-    /// Last processed RX used index
-    rx_last_used: Spinlock<u16>,
-}
+// VirtIONetDevice — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIONetDevice};
 
 // SAFETY: All shared state is protected by Spinlocks (irqsave where needed),
 // ensuring no data races across threads/CPUs.
@@ -731,13 +684,10 @@ static VIRTIO_NET_OPS: NetDeviceOps = NetDeviceOps {
     get_stats: Some(virtio_net_get_stats),
 };
 
-/// Global VirtIO network device
-/// Exclusivity witness for the eth0 slots (INV-SLOT-3): publication and
-/// the register-time fill run in single-threaded boot; post-init
-/// mutation of NetDevice (stats, xmit bookkeeping) is serialized by the
-/// NetRx softirq / syscall discipline the poll and ioctl paths already
-/// document — the same serialization the raw static mut relied on.
-struct Eth0Phase;
+// Eth0Phase — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{Eth0Phase};
+
 impl crate::safety::slot::ExclusivityProof for Eth0Phase {}
 static NO_LOCK_NEEDED: Eth0Phase = Eth0Phase;
 

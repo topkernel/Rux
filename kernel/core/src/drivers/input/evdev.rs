@@ -71,42 +71,21 @@ fn ioc_dir(cmd: u32) -> u32 {
 // Input device ID structure
 // ============================================================================
 
-/// Input device ID (input_id)
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct InputId {
-    /// Bus type
-    pub bustype: u16,
-    /// Vendor ID
-    pub vendor: u16,
-    /// Product ID
-    pub product: u16,
-    /// Version
-    pub version: u16,
-}
+// InputId — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{InputId};
 
-/// input_absinfo (uapi layout): current value + the five virtio_absinfo
-/// fields.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct InputAbsinfo {
-    pub value: i32,
-    pub minimum: i32,
-    pub maximum: i32,
-    pub fuzz: i32,
-    pub flat: i32,
-    pub resolution: i32,
-}
+// InputAbsinfo — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{InputAbsinfo};
 
 // ============================================================================
 // Capability bitmaps
 // ============================================================================
 
-/// KEY_CNT = 768 bits = 96 bytes; uniform storage for every event type's
-/// code bitmap (SYN/REL/ABS use far less).
-const BITS_LEN: usize = 96;
-/// Number of event types we carry code bitmaps for: EV_SYN..EV_ABS.
-const BIT_TYPES: usize = 4;
+// BITS_LEN, BIT_TYPES — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{BITS_LEN, BIT_TYPES};
 
 /// Fill `out` with the derived "supported event types" bitmap (what Linux
 /// reports for EVIOCGBIT(0, len)): a type is supported when its code bitmap
@@ -133,48 +112,9 @@ fn evtype_bitmap(bits: &[[u8; BITS_LEN]; BIT_TYPES]) -> [u8; BITS_LEN] {
 /// evdev event queue maximum capacity - from config
 const EVENT_QUEUE_SIZE: usize = crate::config::EVDEV_EVENT_QUEUE_SIZE;
 
-/// evdev device structure
-pub struct EvdevDevice {
-    /// Device name
-    pub name: [u8; 32],
-    /// The file ids of the open file descriptions for this device.
-    /// epoll notification targets a FILE (File.file_id — a per-open
-    /// generation counter, NOT the device number), so the device has to
-    /// remember which files are open on it: an epoll-based reader that
-    /// opened this node is only re-armed when the event notification
-    /// carries ITS file id.
-    pub open_file_ids: Spinlock<[u64; 4]>,
-    /// Number of valid entries in `open_file_ids`.
-    pub open_file_count: core::sync::atomic::AtomicU32,
-    /// Events pushed since boot (rux:inputtrace (retired debug=inputtrace) counter).
-    pub events_pushed: core::sync::atomic::AtomicU32,
-    /// Device ID
-    pub id: InputId,
-    /// Whether it is a pointer device
-    pub is_pointer: bool,
-    /// Code bitmaps for EV_SYN(0)/EV_KEY(1)/EV_REL(2)/EV_ABS(3), read from
-    /// the virtio device config (VIRTIO_INPUT_CFG_EV_BITS) at init.
-    ev_bits: [[u8; BITS_LEN]; BIT_TYPES],
-    /// ABS axis info (min/max/fuzz/flat/res from VIRTIO_INPUT_CFG_ABS_INFO)
-    /// — reported through EVIOCGABS. Slots: 0=ABS_X, 1=ABS_Y,
-    /// 2=ABS_MT_POSITION_X(0x35), 3=ABS_MT_POSITION_Y(0x36). A device that
-    /// ADVERTISES an MT axis must also answer a real range for it —
-    /// libinput rejects whole devices whose MT axes report minimum==
-    /// maximum (the silent device-drop face: probed, never read).
-    absinfo: [InputAbsinfo; 4],
-    /// EVIOCGRAB state (device-level; we have a single client in practice).
-    grabbed: AtomicBool,
-    /// LED state bitmap (bit N = LED_N), maintained from EV_LED writes the
-    /// way Linux's evdev_write → input_inject_event does; readable back via
-    /// EVIOCGLED(len).
-    led_state: AtomicU32,
-    /// Event queue
-    pub event_queue: Spinlock<VecDeque<InputEvent>>,
-    /// Poll/select waiters (P3: event-driven poll). Woken in push_event so
-    /// a waiter blocked in poll() on this device sleeps until a real input
-    /// event arrives instead of waking at tick rate to re-check.
-    pub poll_waitq: crate::process::types::WaitQueueHead,
-}
+// EvdevDevice — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{EvdevDevice};
 
 impl EvdevDevice {
     /// Create new evdev device
@@ -1718,10 +1658,9 @@ fn input_echo_budget(n: u64) -> bool {
 static HUNT_ECHO_LOCK: crate::sync::types::Spinlock<()> =
     crate::sync::types::Spinlock::new(());
 
-pub struct HuntLine {
-    buf: [u8; 192],
-    n: usize,
-}
+// HuntLine — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{HuntLine};
 
 impl HuntLine {
     pub const fn new() -> Self {
@@ -1766,18 +1705,9 @@ impl HuntLine {
     }
 }
 
-// obs-hygiene: the INRD/INOP echo lines were the remaining per-byte
-// writers of the input hunt family — stage them per CPU and flush whole
-// lines through the same emit-lock-coordinated write the HuntLine
-// bursts take, so a kmsg-flood record can no longer splice an INRD line
-// mid-flight (the dhardware "missing lines" class), and two CPUs'
-// echo lines cannot byte-mix (per-CPU stage — the taskdump DUMP_STAGES
-// lesson: a shared stage locked per byte still mixes concurrent
-// writers inside one flushed line).
-struct IttStage {
-    buf: [u8; 128],
-    n: usize,
-}
+// IttStage — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{IttStage};
 
 static ITT_STAGES: [crate::sync::types::Spinlock<IttStage>; crate::config::MAX_CPUS] =
     [const {

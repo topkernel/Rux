@@ -22,39 +22,15 @@ fn device_alias_oob_warned() -> bool {
     !WARNED.swap(true, Ordering::AcqRel)
 }
 
-/// VirtIO PCI Capability types
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VirtIOCapType {
-    CommonCfg = 1,     // VIRTIO_PCI_CAP_COMMON_CFG
-    NotifyCfg = 2,     // VIRTIO_PCI_CAP_NOTIFY_CFG
-    IsrCfg = 3,        // VIRTIO_PCI_CAP_ISR_CFG
-    DeviceCfg = 4,       // VIRTIO_PCI_CAP_DEVICE_CFG
-    PciCfg = 5,        // VIRTIO_PCI_CAP_PCI_CFG
-}
+// VirtIOCapType — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIOCapType};
 
-/// VirtIO PCI Capability structure
-#[repr(C)]
-#[derive(Debug)]
-struct VirtioPCICap {
-    cap_vndr: u8,   // Generic PCI field: PCI_CAP_ID_VNDR
-    cap_next: u8,    // Generic PCI field: next ptr
-    cap_len: u8,     // Generic PCI field: capability length
-    cfg_type: u8,    // Identifies the structure (VirtIOCapType)
-    bar: u8,         // Where to find it
-    id: u8,          // Multiple capabilities of same type
-    padding: [u8; 2], // Pad to full dword
-    offset: u32,     // Offset within bar (little-endian)
-    length: u32,     // Length of structure in bytes (little-endian)
-}
+// VirtioPCICap — the definition moved to drivers/types.rs (its only
+// user here, VirtioPCINotifyCap's cap field, moved with it), so there
+// is no re-export.
 
-/// VirtIO PCI Notify Capability structure (extended)
-#[repr(C)]
-#[derive(Debug)]
-struct VirtioPCINotifyCap {
-    cap: VirtioPCICap,
-    notify_off_multiplier: u32,  // Queue notification offset multiplier
-}
+// VirtioPCINotifyCap — the definition moved to drivers/types.rs; no re-export.
 
 /// PCI Capability list pointer
 const PCI_CAPABILITY_LIST: u8 = 0x34;
@@ -70,44 +46,9 @@ pub mod status {
     pub const DEVICE_NEEDS_RESET: u32 = 0x40;
 }
 
-/// VirtIO PCI device
-pub struct VirtIOPCI {
-    /// PCI configuration space
-    pub pci_config: PCIConfig,
-    /// PCI slot number (used for IRQ calculation)
-    pub pci_slot: u8,
-    /// Common CFG BAR base address
-    pub common_cfg_bar: u64,
-    /// Common CFG BAR offset
-    pub common_cfg_offset: u32,
-    /// Device CFG BAR base address
-    pub device_cfg_bar: u64,
-    /// Device CFG BAR offset
-    pub device_cfg_offset: u32,
-    /// Notify CFG BAR base address
-    pub notify_cfg_bar: u64,
-    /// Notify CFG BAR offset
-    pub notify_cfg_offset: u32,
-    /// Notify offset multiplier
-    pub notify_off_multiplier: u32,
-    /// ISR CFG BAR base address (critical for interrupt status reading)
-    pub isr_cfg_bar: u64,
-    /// ISR CFG BAR offset
-    pub isr_cfg_offset: u32,
-    /// Device base address
-    pub base_addr: u64,
-    /// virtio-blk disk slot this function drives (multi-disk OH Phase 1b:
-    /// the I/O engine — queue, BLK lock, wait queue, pending table — is
-    /// selected through this number). 0 until the probe assigns it.
-    pub blk_slot: usize,
-    /// DIO-CONC: kernel-half VA of the MSI-X table (capability id 0x11),
-    /// 0 when the function has no MSI-X cap or its BAR could not be
-    /// mapped. Set at construction; `enable_msix_vector0` programs entry
-    /// 0 and switches completions onto the MSI vector.
-    pub msix_table_va: u64,
-    /// DIO-CONC: config-space offset of the MSI-X capability (0 = none).
-    pub msix_cap_off: u8,
-}
+// VirtIOPCI — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIOPCI};
 
 impl VirtIOPCI {
     /// The common-config register window (INV-MMIO-1: the BAR mapping

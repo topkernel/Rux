@@ -63,23 +63,13 @@ pub mod status {
     pub const DEVSEL_TIMING: u16 = 0x0600;
 }
 
-/// PCI BAR type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BARType {
-    MemoryMapped,
-    IOMapped,
-    None,
-}
+// BARType — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{BARType};
 
-/// PCI Base Address Register (BAR)
-#[derive(Debug, Clone, Copy)]
-pub struct PCIBAR {
-    pub base_addr: u64,
-    pub size: u64,
-    pub bar_type: BARType,
-    pub prefetchable: bool,
-    pub is_64bit: bool,
-}
+// PCIBAR — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{PCIBAR};
 
 impl PCIBAR {
     pub const fn empty() -> Self {
@@ -98,11 +88,9 @@ impl PCIBAR {
     }
 }
 
-/// PCI configuration space access structure
-#[derive(Debug, Clone, Copy)]
-pub struct PCIConfig {
-    pub base_addr: u64,
-}
+// PCIConfig — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{PCIConfig};
 
 /// Translate an ECAM window address to the VA the kernel dereferences.
 /// riscv64: the identity ECAM window (0x30000000+) is cloned into every

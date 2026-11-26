@@ -12,74 +12,13 @@ pub mod queue;
 pub mod offset;
 pub mod virtio_pci;
 
-/// VirtIO device register layout (compliant with VirtIO 1.0 specification)
-#[repr(C)]
-pub struct VirtIOBlkRegs {
-    /// Magic number (0x00)
-    pub magic_value: u32,
-    /// Version (0x04)
-    pub version: u32,
-    /// Device ID (0x08)
-    pub device_id: u32,
-    /// Vendor ID (0x0C)
-    pub vendor: u32,
-    /// Device features (0x10)
-    pub device_features: u32,
-    /// _reserved (0x14)
-    _reserved1: u32,
-    /// Driver-selected features (0x20)
-    pub driver_features: u32,
-    /// _reserved (0x24)
-    _reserved2: u32,
-    /// Queue select (0x30)
-    pub queue_sel: u32,
-    /// Queue max count (0x34)
-    pub queue_num_max: u32,
-    /// Queue count (0x38)
-    pub queue_num: u32,
-    /// _reserved (0x3C)
-    _reserved3: u32,
-    /// _reserved (0x40)
-    _reserved4: u32,
-    /// Queue ready (0x44) - Modern VirtIO Queue Enable
-    pub queue_ready: u32,
-    /// _reserved (0x48)
-    _reserved5: u32,
-    /// _reserved (0x4C)
-    _reserved6: u32,
-    /// Queue notify (0x50)
-    pub queue_notify: u32,
-    /// _reserved (0x54-0x5C)
-    _reserved7: [u32; 3],
-    /// Interrupt status (0x60)
-    pub interrupt_status: u32,
-    /// Interrupt acknowledge (0x64)
-    pub interrupt_ack: u32,
-    /// _reserved (0x68-0x6C)
-    _reserved8: [u32; 2],
-    /// Driver status (0x70)
-    pub status: u32,
-    /// _reserved (0x74+)
-    _reserved9: [u32; 4],
-}
+// VirtIOBlkRegs — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIOBlkRegs};
 
-/// VirtIO block device
-pub struct VirtIOBlkDevice {
-    /// MMIO base address
-    base_addr: u64,
-    /// Block device
-    pub disk: GenDisk,
-    /// Capacity (sectors)
-    capacity: u64,
-    /// Block size
-    block_size: u32,
-    /// Initialization status
-    initialized: Spinlock<bool>,
-    /// VirtQueue (for I/O operations)
-    virtqueue: Spinlock<Option<queue::VirtQueue>>,
-    /// Queue size
-    queue_size: u16,
-}
+// VirtIOBlkDevice — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtIOBlkDevice};
 
 // SAFETY: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks
 // serialize all mutable access to shared fields.
@@ -1076,13 +1015,9 @@ const IO_BUF_LAYOUT: alloc::alloc::Layout = unsafe {
 // unbounded retention; excess frees go to the heap.
 const IO_BUF_POOL_CAP: usize = 256;
 
-struct IoBufFreelist {
-    /// Parked-buffer chain head, 0 = empty. Stored as usize (address);
-    /// the intrusive next pointer lives in the first 8 bytes of each
-    /// parked buffer.
-    head: usize,
-    count: usize,
-}
+// IoBufFreelist — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{IoBufFreelist};
 
 static IO_BUF_POOLS: [Spinlock<IoBufFreelist>; crate::config::MAX_CPUS] =
     [const {
@@ -1411,13 +1346,9 @@ fn pci_blk_contended_forensics(slot: usize, waiter_site: usize) {
     wedge_put(b'\n');
 }
 
-/// RAII guard for a per-slot BLK lock acquire: records holder forensics
-/// on acquire and clears it on release. Behaviorally identical to
-/// `PCI_BLK_LOCKS[slot].lock_irqsave()` (irqsave + preempt disable).
-pub(crate) struct PciBlkGuard {
-    slot: usize,
-    inner: SpinlockIrqGuard<'static, ()>,
-}
+// PciBlkGuard — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub(crate) use crate::drivers::types::{PciBlkGuard};
 
 impl PciBlkGuard {
     #[inline]
@@ -1580,73 +1511,9 @@ static VIRTIO_MMIO_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync
 /// Maximum number of in-flight async I/O requests per device.
 const MAX_PENDING_IO: usize = 16;
 
-/// Pending async I/O request for MMIO VirtIO.
-struct PendingIo {
-    /// Completion token to signal when done. NULL = TOMBSTONE: the entry
-    /// exists only to keep the chain's descriptor window reserved until
-    /// the completion walker consumes the chain's used-ring entry. Used
-    /// for (a) synchronous chains (their waiter polls its own response
-    /// byte and owns the io_buf) and (b) timed-out async chains whose
-    /// waiter has unwound (the io_buf is deliberately leaked — the device
-    /// may still DMA its status byte — and the completion must never be
-    /// fired into memory its owner stopped owning).
-    completion: *mut crate::fs::io_completion::IoCompletion,
-    /// Pointer to response buffer (allocated during submit, freed on
-    /// completion). NULL in tombstones (nothing to free or read).
-    resp_ptr: *mut u8,
-    /// Layout of response buffer for deallocation.
-    resp_layout: alloc::alloc::Layout,
-    /// Pointer to request header buffer (freed on completion). NULL in
-    /// tombstones.
-    header_ptr: *mut u8,
-    /// Layout of request header buffer for deallocation.
-    header_layout: alloc::alloc::Layout,
-    /// Head descriptor id of this request's chain (PCI only): the key the
-    /// completion walker matches against the used ring's UsedElem.id.
-    /// A virtio-blk chain occupies the three consecutive descriptors
-    /// [head_desc, head_desc+2]; the publish-time window check (see
-    /// pci_pending_slot_reservable) guarantees this id is UNIQUE among live
-    /// table entries, so a used-ring entry can never be misattributed.
-    head_desc: u32,
-    /// Submission ordinal of this chain (PCI only): used-ring entry i maps
-    /// to slot i % MAX_PENDING_IO_PCI, and the walker's positional fast
-    /// path expects THIS entry there. Also the instrumentation key: a fired
-    /// entry whose ordinal != its used-ring index proves the device
-    /// completed out of submission order (VIRTIO_PCI_REORDER_EVENTS).
-    ordinal: u16,
-    /// Tombstone bookkeeping: true when the chain's waiter has TIMED OUT
-    /// (sync deadline or async abandon) and already ran note_timed_out_chain
-    /// on the queue. When the walker finally consumes this tombstone's
-    /// used-ring entry it calls resolve_leaked_chain(), pairing that
-    /// increment — leaked_chains then tracks only chains whose completion
-    /// has genuinely not landed yet, instead of accumulating forever.
-    timed_out: bool,
-    /// DMA data-buffer pointer of this chain (async chains only): the
-    /// device-truth token the completion walker stamps into
-    /// `IoCompletion::complete_with_token`. `bread_wait` compares it
-    /// against its own buffer — a mismatch means the walker delivered
-    /// ANOTHER chain's completion and this buffer's DMA may not have
-    /// landed (the zero-serve guard; the no-journal ext4 root-lookup
-    /// family). 0 on tombstones (nothing fires through them).
-    data_ptr: usize,
-    /// Direction of the chain (async submits only; false on every
-    /// tombstone — trace_dev is 0 there so nothing reports): selects the
-    /// rwbs column of the walker's block:block_rq_complete record.
-    is_write: bool,
-    /// block:block_rq_complete geometry (dev as major<<20|minor, first
-    /// sector, sector count), stored at async submit so the completion
-    /// walker can record the event without any lookup. Zero on
-    /// tombstones and every non-async chain (nothing to report).
-    trace_dev: u32,
-    trace_sector: u64,
-    trace_nr_sector: u32,
-    /// Descriptors this chain occupies: [head_desc, head_desc+n_descs)
-    /// mod queue_size. 3 for the classic header/data/resp chain, N+2 for
-    /// an SG chain with N data segments. Drives the window-overlap check
-    /// (pci_pending_slot_reservable) and the descs_held budget release in
-    /// the completion walker.
-    n_descs: u16,
-}
+// PendingIo — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{PendingIo};
 
 // SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
 // from IRQ/softirq context; raw pointers within are not shared across threads.
@@ -1768,12 +1635,10 @@ pub fn virtio_lock_held() -> bool {
         > 0
 }
 
-/// RAII marker armed around every virtio driver-lock critical section
-/// (debug builds only). IoCompletion::complete() and the wait-queue wake
-/// sites assert !virtio_lock_held() so any reintroduced nesting panics at
-/// the violation point instead of deadlocking the machine.
+// VirtioLockNest — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
 #[cfg(debug_assertions)]
-pub(crate) struct VirtioLockNest;
+pub(crate) use crate::drivers::types::{VirtioLockNest};
 
 #[cfg(debug_assertions)]
 impl VirtioLockNest {
@@ -1794,9 +1659,10 @@ impl core::ops::Drop for VirtioLockNest {
     }
 }
 
-/// Compile-time no-op stand-in for release builds.
+// VirtioLockNest — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
 #[cfg(not(debug_assertions))]
-pub(crate) struct VirtioLockNest;
+pub(crate) use crate::drivers::types::{VirtioLockNest};
 
 #[cfg(not(debug_assertions))]
 impl VirtioLockNest {

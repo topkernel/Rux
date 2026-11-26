@@ -56,50 +56,9 @@ pub const LO_FLAGS_AUTOCLEAR: u32 = 4;
 pub const LO_FLAGS_PARTSCAN: u32 = 8;
 pub const LO_FLAGS_DIRECT_IO: u32 = 16;
 
-struct LoopDev {
-    /// Backing file (LOOP_SET_FD pins an Arc reference).
-    file: Spinlock<Option<Arc<File>>>,
-    /// Data start offset inside the backing file (bytes).
-    offset: AtomicU64,
-    /// Max bytes exposed (0 = whole file from offset).
-    sizelimit: AtomicU64,
-    /// lo_flags mirror (LO_FLAGS_* — display/detach policy only).
-    flags: AtomicU64,
-    /// Backing path for LOOP_GET_STATUS(64) lo_file_name/lo_name.
-    name: Spinlock<[u8; 64]>,
-    /// Serializes the set_pos/read/write dance on the backing file.
-    /// SleepMutex (falloc-wedge lane, 2026-11-16; INV-LOCK-8 rule 3: a
-    /// lock whose holder can block must not be a spinlock): the holder
-    /// runs a whole backing-file read/write — journal commits, block
-    /// I/O waits, and under memory pressure even direct reclaim — which
-    /// sleeps for milliseconds at a time. As a Spinlock that was a
-    /// preempt-disabled section across all of it: every loop request was
-    /// an unpreemptible monopolist window (the falloc-wedge boots
-    /// measured pid 352 at preempt=2 across hundreds of ticks), RCU
-    /// quiescent rounds stalled on the CPU, and fdreap's grace waits
-    /// deferred (the fdreap RCU stall face). Waiters now park on the
-    /// mutex's queue; the section is preemptible.
-    io_lock: crate::sync::types::SleepMutex,
-    /// Re-entrancy guard (pcachewedge lane, 2026-11-15): the pid whose
-    /// request currently owns `io_lock` (0 = none). The backing-file
-    /// write below runs SYNCHRONOUSLY under the lock; under memory
-    /// pressure its allocations enter direct reclaim, whose writeback
-    /// flushes dirty pages of filesystems ON THIS SAME LOOP — the bio
-    /// re-enters loop_request_fn and re-acquires io_lock it already
-    /// holds (the recursive request would park forever on the now-
-    /// sleeping mutex it already holds).
-    /// The guard makes the recursive request FAIL instead: the failed
-    /// write keeps its pages dirty (flush_done's write_ok=false
-    /// discipline) for a later, non-recursive flush — and reclaim-side
-    /// writeback now degrades to clean-only while ANY loop claim is held
-    /// by the current task (see shrink_reclaim), so the reference
-    /// discipline holds: no synchronous writeback under a held io lock.
-    io_owner_pid: AtomicU32,
-    /// The GenDisk handed out to the block layer (stable address: boxed;
-    /// written once at init — the round-5 D-7 conversion makes every
-    /// LoopDev field interior-mutable, so LOOPS is a plain `static`).
-    disk: Spinlock<Option<&'static GenDisk>>,
-}
+// LoopDev — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{LoopDev};
 
 impl LoopDev {
     const fn new() -> Self {
@@ -598,45 +557,13 @@ pub fn partitions_lines() -> Vec<u8> {
 // ioctl dispatcher (hooked from sys_ioctl on the LOOP_FILE_OPS identity)
 // ============================================================================
 
-/// `struct loop_info64` wire size (linux/loop.h): 6*u64 + 4*u32 +
-/// 64 + 64 + 32 + 2*u64 = 232 bytes. The old value (168) truncated
-/// lo_crypt_name/lo_encrypt_key/lo_init — consumers (util-linux losetup,
-/// LTP loop tests) read the tail fields.
-const LOOP_INFO64_SIZE: usize = 232;
-/// `struct loop_info` (legacy) wire size on LP64: int +
-/// __kernel_old_dev_t (u32 on riscv64 — its UAPI defines old dev_t as
-/// unsigned int, verified by offsetof probes against the musl headers
-/// our userspace builds with) + u64 + u32 + 4*int + 64 + 32 + 2*u64 + 4,
-/// padded to 160.
-const LOOP_INFO_SIZE: usize = 160;
-/// Legacy struct loop_info field offsets (LP64 + 32-bit old_dev_t).
-const LI_OFF_NUMBER: usize = 0;
-const LI_OFF_DEVICE: usize = 4;
-const LI_OFF_INODE: usize = 8;
-const LI_OFF_RDEVICE: usize = 16;
-const LI_OFF_OFFSET: usize = 20;
-const LI_OFF_ENCRYPT_TYPE: usize = 24;
-const LI_OFF_KEY_SIZE: usize = 28;
-const LI_OFF_FLAGS: usize = 32;
-const LI_OFF_NAME: usize = 36;
-const LI_OFF_INIT: usize = 132;
-/// LO_NAME_SIZE.
-const LO_NAME_SIZE: usize = 64;
+// LOOP_INFO64_SIZE, LOOP_INFO_SIZE, LI_OFF_NUMBER, LI_OFF_DEVICE, LI_OFF_INODE, LI_OFF_RDEVICE, LI_OFF_OFFSET, LI_OFF_ENCRYPT_TYPE, LI_OFF_KEY_SIZE, LI_OFF_FLAGS, LI_OFF_NAME, LI_OFF_INIT, LO_NAME_SIZE — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{LOOP_INFO64_SIZE, LOOP_INFO_SIZE, LI_OFF_NUMBER, LI_OFF_DEVICE, LI_OFF_INODE, LI_OFF_RDEVICE, LI_OFF_OFFSET, LI_OFF_ENCRYPT_TYPE, LI_OFF_KEY_SIZE, LI_OFF_FLAGS, LI_OFF_NAME, LI_OFF_INIT, LO_NAME_SIZE};
 
-/// Filled view of a loop's status, shared by the legacy/64 serializers.
-struct LoopStatus {
-    device: u64,
-    inode: u64,
-    rdevice: u64,
-    offset: u64,
-    sizelimit: u64,
-    number: u32,
-    encrypt_type: u32,
-    encrypt_key_size: u32,
-    flags: u32,
-    name: [u8; LO_NAME_SIZE],
-    init: [u64; 2],
-}
+// LoopStatus — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{LoopStatus};
 
 fn loop_status_of(idx: usize) -> LoopStatus {
     let mut st = LoopStatus {

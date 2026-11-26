@@ -24,133 +24,53 @@ const VIRTIO_GPU_PCI_VENDOR: u16 = 0x1AF4;
 const CTRL_QUEUE: u16 = 0;   // Control queue
 const CURSOR_QUEUE: u16 = 1; // Cursor queue
 
-/// VirtIO-GPU device
-pub struct VirtioGpuDevice {
-    /// VirtIO PCI device
-    pci: VirtIOPCI,
-    /// Control queue
-    ctrl_queue: Option<VirtQueue>,
-    /// Serializes control-queue descriptor/ring mutation.
-    ///
-    /// send_command hardcodes descriptors 0/1 and bumps the avail index
-    /// in place, so two concurrent submissions would overwrite each
-    /// other's descriptors mid-flight. Today the only externally reachable
-    /// path (flush_framebuffer) happens to serialize through the
-    /// GPU_DEVICE spinlock, but that invariant lives in another module —
-    /// this lock makes it local and future-proof (review RACE:
-    /// "virtio-gpu desc 无锁").
-    cmd_lock: crate::sync::types::Spinlock<()>,
-    /// Framebuffer information
-    fb_info: Option<FrameBufferInfo>,
-    /// Framebuffer pointer
-    fb_ptr: *mut u8,
-    /// Framebuffer layout
-    fb_layout: Option<Layout>,
-    /// Resource ID
-    resource_id: u32,
-    /// Display rectangle
-    display_rect: Rect,
-}
+// VirtioGpuDevice — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{VirtioGpuDevice};
 
-/// VirtIO-GPU command header (24 bytes)
-#[repr(C)]
-struct GpuCtrlHeader {
-    hdr_type: u32,
-    flags: u32,
-    fence_id: u64,
-    ctx_id: u32,
-    padding: u32,
-}
+// GpuCtrlHeader — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{GpuCtrlHeader};
 
-/// Rectangle structure (16 bytes)
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-struct Rect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
+// Rect — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{Rect};
 
-/// Single display output configuration (24 bytes)
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-struct DisplayPmode {
-    rect: Rect,
-    enabled: u32,
-    flags: u32,
-}
+// DisplayPmode — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{DisplayPmode};
 
-/// GET_DISPLAY_INFO response
-/// VirtIO 1.0 specification: header + 16 pmode entries (no num_scanouts)
-#[repr(C)]
-struct RespDisplayInfo {
-    header: GpuCtrlHeader,
-    pmodes: [DisplayPmode; 16],
-}
+// RespDisplayInfo — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{RespDisplayInfo};
 
-/// RESOURCE_CREATE_2D command (32 bytes)
-#[repr(C)]
-struct CmdResourceCreate2d {
-    header: GpuCtrlHeader,
-    resource_id: u32,
-    format: u32,
-    width: u32,
-    height: u32,
-}
+// CmdResourceCreate2d — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{CmdResourceCreate2d};
 
-/// SET_SCANOUT command (48 bytes)
-/// VirtIO 1.2 specification: header(24) + rect(16) + scanout_id(4) + resource_id(4)
-#[repr(C)]
-struct CmdSetScanout {
-    header: GpuCtrlHeader,
-    rect: Rect,
-    scanout_id: u32,
-    resource_id: u32,
-}
+// CmdSetScanout — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{CmdSetScanout};
 
-/// Memory entry (16 bytes)
-#[repr(C)]
-struct MemEntry {
-    addr: u64,
-    length: u32,
-    padding: u32,
-}
+// MemEntry — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{MemEntry};
 
-/// RESOURCE_ATTACH_BACKING command (48 bytes)
-#[repr(C)]
-struct CmdResourceAttachBacking {
-    header: GpuCtrlHeader,
-    resource_id: u32,
-    nr_entries: u32,
-    entry: MemEntry,
-}
+// CmdResourceAttachBacking — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{CmdResourceAttachBacking};
 
-/// RESOURCE_FLUSH command (48 bytes)
-#[repr(C)]
-struct CmdResourceFlush {
-    header: GpuCtrlHeader,
-    rect: Rect,           // rect BEFORE resource_id!
-    resource_id: u32,
-    padding: u32,
-}
+// CmdResourceFlush — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{CmdResourceFlush};
 
-/// TRANSFER_TO_HOST_2D command (56 bytes)
-/// VirtIO 1.2 specification: header(24) + rect(16) + offset(8) + resource_id(4) + padding(4)
-#[repr(C)]
-struct CmdTransferToHost2d {
-    header: GpuCtrlHeader,
-    rect: Rect,
-    offset: u64,
-    resource_id: u32,
-    padding: u32,
-}
+// CmdTransferToHost2d — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{CmdTransferToHost2d};
 
-/// Generic response (24 bytes)
-#[repr(C)]
-struct RespNoData {
-    header: GpuCtrlHeader,
-}
+// RespNoData — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{RespNoData};
 
 unsafe impl Send for VirtioGpuDevice {}
 unsafe impl Sync for VirtioGpuDevice {}

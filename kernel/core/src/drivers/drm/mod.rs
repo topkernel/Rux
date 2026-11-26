@@ -91,20 +91,9 @@ const DRM_MODE_PROP_SIGNED_RANGE: u32 = 2 << 6;
 const DRM_MODE_PROP_ATOMIC: u32 = 0x8000_0000;
 const DRM_MODE_PROP_IMMUTABLE: u32 = 1 << 2;
 
-/// One (name, flags, enums, value, values[]) description of a property.
-#[derive(Clone, Copy)]
-struct PropDesc {
-    prop_id: u32,
-    name: &'static str,
-    flags: u32,
-    /// (enum-name, enum-value) pairs for ENUM/BITMASK props.
-    enums: &'static [(&'static str, u64)],
-    /// Current value of the property on its owning object.
-    value: u64,
-    /// For RANGE props: [min, max]; for ENUM props: the enum values
-    /// (count == enums.len()).
-    values: &'static [u64],
-}
+// PropDesc — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{PropDesc};
 
 const U64_MAX: u64 = u64::MAX;
 const I64_MIN: u64 = i64::MIN as u64;
@@ -337,33 +326,9 @@ fn plane_name_prop() -> PropDesc {
 // Fixed mode (matches the virtio-gpu scanout QEMU was started with)
 // ============================================================================
 
-/// The single display mode exposed on the connector. Struct layout is
-/// uapi struct drm_mode_modeinfo (68 bytes: the horizontal/vertical
-/// fields are __u16 — the old "72" here overran libdrm's exactly-sized
-/// modeinfo array by 4 bytes, corrupting the caller's heap: the OH
-/// composer devhost took a user-mode #GP in ld.so right after its second
-/// GETCONNECTOR and died (r9, "RegHotPlugCallback_ failed 29189" =
-/// IPC ServiceDied — every later screen/hotplug registration lost its
-/// service).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct DrmModeInfo {
-    pub clock: u32,
-    pub hdisplay: u16,
-    pub hsync_start: u16,
-    pub hsync_end: u16,
-    pub htotal: u16,
-    pub hskew: u16,
-    pub vdisplay: u16,
-    pub vsync_start: u16,
-    pub vsync_end: u16,
-    pub vtotal: u16,
-    pub vscan: u16,
-    pub vrefresh: u32,
-    pub flags: u32,
-    pub type_: u32,
-    pub name: [u8; 32],
-}
+// DrmModeInfo — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{DrmModeInfo};
 
 const DRM_MODE_TYPE_PREFERRED: u32 = 1 << 3;
 const DRM_MODE_TYPE_DRIVER: u32 = 1 << 6;
@@ -551,23 +516,9 @@ const DMA_BUF_IOCTL_SYNC: u32 = 0x4008_6200;
 // GEM objects, framebuffers, blobs
 // ============================================================================
 
-/// A dumb-buffer backing store. Kernel-heap allocated (physically
-/// contiguous — same discipline as the virtio-gpu framebuffer), mapped
-/// to userspace by the mmap path and scanned out through its own virtio
-/// 2D resource once flipped.
-pub struct GemObject {
-    pub id: u32,
-    /// Kernel virtual address of the backing (linear map).
-    pub kva: *mut u8,
-    /// Physical address (what virtio ATTACH_BACKING wants).
-    pub phys: u64,
-    pub size: usize,
-    layout: Layout,
-    /// virtio-gpu 2D resource bound to this object (0 = none). Set on
-    /// first scanout.
-    virtio_res: AtomicU32,
-
-}
+// GemObject — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use crate::drivers::types::{GemObject};
 
 // SAFETY: the object's mutable state is a single AtomicU32; kva/phys are
 // stable for the object's lifetime.
@@ -588,25 +539,13 @@ impl Drop for GemObject {
     }
 }
 
-struct FbObject {
-    _gem: Arc<GemObject>,
-    width: u32,
-    height: u32,
-    /// Row pitch in bytes (composer GEMs carry gralloc's 64-pixel
-    /// alignment: 720-wide content on a 3072-byte pitch).
-    pitch: u32,
-    /// virtio_gpu format id the GEM bytes are laid out as.
-    virtio_format: u32,
-}
+// FbObject — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{FbObject};
 
-struct DrmState {
-    gems: BTreeMap<u32, Arc<GemObject>>,
-    fbs: BTreeMap<u32, FbObject>,
-    blobs: BTreeMap<u32, Vec<u8>>,
-    /// virtio resource currently bound to scanout 0 (0 = the boot fbdev
-    /// resource owned by the fbdev driver).
-    scanout_res: u32,
-}
+// DrmState — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use crate::drivers::types::{DrmState};
 
 static DRM_STATE: Spinlock<DrmState> = Spinlock::new(DrmState {
     gems: BTreeMap::new(),

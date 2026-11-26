@@ -41,8 +41,9 @@ use crate::mm::types::{Vma, VmaFlags, VmaType};
 use crate::mm::types::GfpFlags;
 use crate::sync::types::Spinlock;
 
-/// ASHMEM_NAME_LEN (UAPI).
-pub const ASHMEM_NAME_LEN: usize = 256;
+// ASHMEM_NAME_LEN — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ASHMEM_NAME_LEN};
 
 /// Default name reported by ASHMEM_GET_NAME for unnamed areas.
 const ASHMEM_NAME_DEF: &[u8] = b"dev/ashmem\0";
@@ -56,14 +57,9 @@ pub const ASHMEM_WAS_PURGED: i64 = 1;
 pub const ASHMEM_IS_UNPINNED: i64 = 0;
 pub const ASHMEM_IS_PINNED: i64 = 1;
 
-/// struct ashmem_pin { u32 offset; u32 len; } (8 bytes on every ABI).
-/// All-POD wire fields — Copy for the typed uaccess capsule.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AshmemPin {
-    offset: u32,
-    len: u32,
-}
+// AshmemPin — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{AshmemPin};
 
 // ioctl command words, asm-generic encoding: dir<<30 | size<<16 | 0x77<<8 | nr
 // (char[256] payload -> size field 0x100; verified against _IOW() on the
@@ -91,10 +87,9 @@ pub const DEV_ASHMEM: DevNo = DevNo::new(MISC_MAJOR, 62);
 // Page pool
 // ============================================================================
 
-/// Physical page pool backing one ashmem area (SysV ShmPages discipline).
-struct AshmemPages {
-    pages: alloc::vec::Vec<usize>,
-}
+// AshmemPages — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{AshmemPages};
 
 impl AshmemPages {
     fn new(size: usize) -> Option<Self> {
@@ -142,33 +137,17 @@ impl Drop for AshmemPages {
     }
 }
 
-/// One unpinned page range [pgstart, pgend] (inclusive page indices).
-#[derive(Clone, Copy)]
-struct UnpinRange {
-    pgstart: usize,
-    pgend: usize,
-    purged: u32,
-}
+// UnpinRange — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{UnpinRange};
 
-/// Per-open-file-description ashmem area (Linux struct ashmem_area).
-pub struct AshmemArea {
-    inner: Spinlock<AreaInner>,
-}
+// AshmemArea — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{AshmemArea};
 
-struct AreaInner {
-    /// Advisory name (NUL-terminated, at most ASHMEM_NAME_LEN bytes).
-    name: [u8; ASHMEM_NAME_LEN],
-    /// True once a custom name was set via ASHMEM_SET_NAME.
-    name_set: bool,
-    /// Size in bytes, frozen once the pool exists.
-    size: usize,
-    /// Allowed PROT_* bits, starts full, can only narrow.
-    prot_mask: u32,
-    /// Backing pages, created at first mmap.
-    pages: Option<AshmemPages>,
-    /// Sorted, non-overlapping unpinned ranges.
-    unpinned: alloc::vec::Vec<UnpinRange>,
-}
+// AreaInner — the definition moved to drivers/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{AreaInner};
 
 impl AshmemArea {
     fn new() -> Self {
