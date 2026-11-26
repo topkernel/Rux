@@ -152,7 +152,7 @@ and leak hygiene protect the boundary's enforcement machinery).
 
 #### NET/USER/MOUNT/IPC namespaces — PROJECT
 
-- **State:** STUBS: task.rs carries ns_net/ns_user Arcs marked '(stub)' in the comments; CLONE_NEWNET/NEWUSER return shapes unverified — audit row for this lane.
+- **State:** STUBS: the task code (kernel/core/src/process/hotpath.rs, task section) carries ns_net/ns_user Arcs marked '(stub)' in the comments; CLONE_NEWNET/NEWUSER return shapes unverified — audit row for this lane.
 - **Reference:** Reference: full implementations.
 - **Gap class:** project
 - **Regression guard:** LTP namespaces family (expected FAIL — record baseline)

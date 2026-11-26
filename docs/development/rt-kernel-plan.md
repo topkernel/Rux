@@ -29,7 +29,7 @@ Structural facts the plan builds on:
   reference preempts unconditionally for RT classes.
 - SCHED_FIFO/RR + DL (EDF+CBS) exist; the GRQ is one global queue (D-1) — a
   single priority-ordered pick, no cross-CPU balancing to fight.
-- PI is a nice-floor (kernel/src/sync/futex_pi.rs), not rt_mutex chains.
+- PI is a nice-floor (kernel/core/src/sync/hotpath.rs, futex_pi section), not rt_mutex chains.
 - IRQ actions run in hardirq context (no threaded IRQs).
 
 ## What we do NOT import from PREEMPT_RT
@@ -75,8 +75,8 @@ design-divergences.md when stage R6 lands.
   SCHED_FIFO/RR/DL wakes, set need_resched at the wake point (reference
   semantics — check_preempt_curr for RT compares priorities, no latency
   window). With R1+R2 in, the woken RT task starts immediately.
-- Surface: kernel/src/process/task.rs dispatch ladder, sched.rs
-  preempt_check_wake.
+- Surface: kernel/core/src/process/hotpath.rs (task section) dispatch ladder, the
+  sched section's preempt_check_wake.
 - Acceptance: the FIFO/OTHER gap opens (FIFO avg ≤ 1/3 of OTHER); hackbench
   forms improve (they stress wake round trips); LTP sched/rt family green.
 
@@ -104,8 +104,9 @@ design-divergences.md when stage R6 lands.
   notification); the PI futex moves from nice-floor to numeric priority
   propagation along the chain; wire the glibc PTHREAD_PRIO_INHERIT UAPI
   chain (robust registration) so pi_stress runs.
-- Surface: kernel/src/sync/mutex.rs (+ the loom/Kani models extend with the
-  new invariant table — the S-1 harness is standing), futex_pi.rs, robust
+- Surface: the sleep-mutex primitive (kernel/core/src/sync/types.rs; hotpath.rs
+  mutex section) (+ the loom/Kani models extend with the new invariant table —
+  the S-1 harness is standing), the futex_pi section, robust
   list handling in exit.
 - Acceptance: pi_stress completes inversions (dual-column row gets numbers);
   LTP rt-mutex/futex-pi families green; the mutex loom model still passes

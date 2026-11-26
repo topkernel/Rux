@@ -175,7 +175,7 @@ never, gated on real need.
 | serial | MMIO ns16550A console | x86 needs port-I/O 8250 variant (same register semantics) |
 | timer/RTC | SBI timer + goldfish RTC | x86 needs TSC/HPET/LAPIC-timer + `rtc_cmos` |
 | SMP | SBI HSM hart_start + SSIP IPI | x86 needs SIPI + LAPIC IPIs + per-CPU GS base |
-| futex | complete except **all PI ops ENOSYS** (`sync/futex.rs:1226-1279`) | musl OH libc does not require PI futex on the boot path — keep as P2 |
+| futex | complete except **all PI ops ENOSYS** (sync/hotpath.rs, futex_pi section) | musl OH libc does not require PI futex on the boot path — keep as P2 |
 | netlink | ROUTE + KOBJECT_UEVENT | the two protocols ueventd/netd need first |
 | AF_UNIX, pty, inotify, epoll, robust futex, loop, seccomp, ptrace | present | battle-tested by Ubuntu/Xorg/D-Bus bring-up |
 | process_vm_readv/writev | EOPNOTSUPP stubs | watch for debug tooling (faultloggerd) use; not on boot critical path |

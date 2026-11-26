@@ -20,7 +20,7 @@ it. Two independent signatures observed:
 
 1. fork signature: `kselftest: start` -> park walk -> panic. The first
    fork() in the battery (futex wake pair) reaches fork -> dup_mm ->
-   MmStruct::saved_auxv() (mm_struct.rs:1291) — the only saved_auxv
+   MmStruct::saved_auxv() (mm/hotpath.rs, mm_struct section) — the only saved_auxv
    caller on this path. The suite never panics because it never execs
    or forks a real process.
 2. socketpair signature (fork tests gated out): battery passes pipe,

@@ -72,7 +72,7 @@ only the release re-triggers coherence traffic. Pair with a bounded-spin
 panic (debug builds) as cheap deadlock detection, and keep the invariant
 "spinlocks are never held across anything slow" enforced by review.
 
-Audit target: `kernel/src/sync/spinlock.rs` — confirm the current
+Audit target: `kernel/core/src/sync/hotpath.rs` (spinlock section) — confirm the current
 implementation already follows TTAS; if it re-issues CAS in the inner
 loop, fix it (one-line change, measurable on contended paths).
 
@@ -270,8 +270,8 @@ ecosystem bet is settled; our job is the engineering.
 | C4 | Syscall dispatch table per A3 | `syscall/dispatch.rs` | LTP full-sweep parity before/after |
 | C5 | Typed level-indexed page-table walker, pure PTE codec | `arch/x86_64/mm/pagetable.rs`, `mm_ops.rs` | Kani harness parity with riscv64 suite |
 | C6 | Dual-target build: `make build` (riscv64) + `make build-x86` (x86_64), cargo-only | `Makefile`, `build/Makefile`, `build.rs`, `.cargo/config.toml` | both targets green in CI matrix |
-| C7 | TTAS audit + bounded-spin debug panic | `sync/spinlock.rs` | microbench on 4-CPU SMP guest |
-| C8 | Wake-ordering audit (A5) with invariant comments | `sync/condvar.rs`, `sync/futex.rs` | code review + existing SPIN models extended |
+| C7 | TTAS audit + bounded-spin debug panic | `sync/hotpath.rs` (spinlock section) | microbench on 4-CPU SMP guest |
+| C8 | Wake-ordering audit (A5) with invariant comments | `kernel/sync/src/condvar.rs`, the sync/hotpath.rs futex section | code review + existing SPIN models extended |
 
 Deferred (post-Uuntu-gate): A4 fast-path syscalls (ABI audit first),
 A6 fork family (each behind a measurement), full `Result`-ification of
