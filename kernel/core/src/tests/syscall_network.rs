@@ -13,7 +13,7 @@
 use crate::syscall::SyscallNo;
 use crate::syscall::network::{sys_socket, sys_bind, sys_listen, sys_accept, sys_connect, sys_sendto, sys_recvfrom};
 use crate::net::socket::sys_socket_create;
-use crate::fs::file_close;
+use crate::fs::hotpath::file_close;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_syscall_network() {

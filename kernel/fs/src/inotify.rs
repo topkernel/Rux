@@ -33,8 +33,8 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use rux::fs::file::{File, FileOps, FileFlags, get_file_fd_install};
-use rux::fs::inode::Inode;
+use rux::fs::{types::File, types::FileOps, types::FileFlags, hotpath::get_file_fd_install};
+use rux::fs::types::Inode;
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
@@ -43,7 +43,7 @@ use crate::sync::spinlock::Spinlock;
 // ============================================================================
 
 /// inotify event bits (inotify(7)).
-pub use rux::fs::notify_events::inotify_events;
+pub use rux::fs::hotpath::inotify_events;
 
 
 use inotify_events::*;
@@ -418,7 +418,7 @@ pub fn inotify_init1(flags: u32) -> Result<usize, i32> {
     match get_file_fd_install(file) {
         Some(fd) => {
             if flags & IN_CLOEXEC != 0 {
-                rux::fs::set_cloexec_fd(fd, true);
+                rux::fs::hotpath::set_cloexec_fd(fd, true);
             }
             Ok(fd)
         }
@@ -459,12 +459,12 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
     if mask & (IN_ALL_EVENTS | IN_ATTRIB) == 0 {
         return Err(-crate::errno::constants::EINVAL);
     }
-    let file = rux::fs::file::get_file_fd(fd)
+    let file = rux::fs::hotpath::get_file_fd(fd)
         .ok_or(-crate::errno::constants::EBADF)?;
     let instance = instance_of(&file).ok_or(-crate::errno::constants::EINVAL)?;
 
     // Resolve the path to an inode (following symlinks, like Linux).
-    let vpath = rux::fs::vfs::path_lookup(path, 0)?;
+    let vpath = rux::fs::hotpath::path_lookup(path, 0)?;
     let inode = vpath
         .inode
         .ok_or(-crate::errno::constants::ENOENT)?;
@@ -531,7 +531,7 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
 /// inotify_rm_watch: remove a watch by wd. Queues IN_IGNORED (Linux
 /// always delivers it on watch removal).
 pub fn inotify_rm_watch(fd: usize, wd: i32) -> Result<(), i32> {
-    let file = rux::fs::file::get_file_fd(fd)
+    let file = rux::fs::hotpath::get_file_fd(fd)
         .ok_or(-crate::errno::constants::EBADF)?;
     let instance = instance_of(&file).ok_or(-crate::errno::constants::EINVAL)?;
 
@@ -688,7 +688,7 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn inotify_poll(file: &File, _events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+    use rux::fs::hotpath::poll_events::*;
     let instance = match instance_of(file) {
         Some(i) => i,
         None => return 0,

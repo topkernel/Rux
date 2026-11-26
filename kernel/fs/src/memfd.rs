@@ -33,8 +33,8 @@
 use alloc::sync::Arc;
 
 use crate::errno;
-use rux::fs::file::{File, FileFlags, REG_FILE_OPS};
-use rux::fs::inode::{setattr_attr, Inode, InodeMode, INodeOps};
+use rux::fs::{types::File, types::FileFlags, hotpath::REG_FILE_OPS};
+use rux::fs::{hotpath::setattr_attr, types::Inode, types::InodeMode, types::INodeOps};
 
 /// memfd_create flags (UAPI).
 pub const MFD_CLOEXEC: u32 = 0x0001;
@@ -169,7 +169,7 @@ fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 {
 
         let mut guard = inode.data.lock();
         if guard.is_none() {
-            *guard = Some(rux::fs::buffer::FileBuffer::new());
+            *guard = Some(rux::fs::types::FileBuffer::new());
         }
         if let Some(ref mut data) = *guard {
             // R76: FileBuffer is page-backed chunk storage; a large
@@ -309,10 +309,10 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
 
     // (unsafe-slim r3) get_file_fd_install is safe (un-signed, verified):
     // it only inserts the fully initialized File into the fd table.
-    let fd = rux::fs::file::get_file_fd_install(Arc::clone(&file))
+    let fd = rux::fs::hotpath::get_file_fd_install(Arc::clone(&file))
         .ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())?;
     if flags & MFD_CLOEXEC != 0 {
-        rux::fs::set_cloexec_fd(fd, true);
+        rux::fs::hotpath::set_cloexec_fd(fd, true);
     }
     Ok(fd)
 }
@@ -322,7 +322,7 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
 // ============================================================================
 
 fn memfd_file_read(file: &File, buf: &mut [u8]) -> isize {
-    rux::fs::file::reg_file_read_pub(file, buf)
+    rux::fs::hotpath::reg_file_read_pub(file, buf)
 }
 
 fn memfd_file_write(file: &File, buf: &[u8]) -> isize {
@@ -335,20 +335,20 @@ fn memfd_file_write(file: &File, buf: &[u8]) -> isize {
     if seals & F_SEAL_WRITE != 0 {
         return -(errno::constants::EPERM as isize);
     }
-    rux::fs::file::reg_file_write_pub(file, buf)
+    rux::fs::hotpath::reg_file_write_pub(file, buf)
 }
 
 fn memfd_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
-    rux::fs::file::reg_file_lseek_pub(file, offset, whence)
+    rux::fs::hotpath::reg_file_lseek_pub(file, offset, whence)
 }
 
 fn memfd_file_close(file: &File) -> i32 {
-    rux::fs::file::reg_file_close_pub(file)
+    rux::fs::hotpath::reg_file_close_pub(file)
 }
 
 /// File ops for memfd files: identical to REG_FILE_OPS except the write
 /// path enforces F_SEAL_WRITE.
-pub static MEMFD_FILE_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub static MEMFD_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(memfd_file_read)
     .write(memfd_file_write)
     .lseek(memfd_file_lseek)

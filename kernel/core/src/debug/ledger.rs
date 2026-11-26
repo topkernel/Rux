@@ -112,7 +112,7 @@ pub fn compact_line() {
         l.dec(crate::arch::mm::PtLedger::live_count() as u64);
     }
     l.push(b" pagecache_pages=");
-    l.dec(crate::fs::page_cache::page_cache_total_pages() as u64);
+    l.dec(crate::fs::hotpath::page_cache_total_pages() as u64);
     let heap = crate::mm::buddy_allocator::buddy_stats();
     l.push(b" heapK=");
     l.dec((heap.used_bytes / 1024) as u64);

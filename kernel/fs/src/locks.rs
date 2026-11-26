@@ -8,32 +8,32 @@
 //! the count mirrors and the exec text-hold family; this half stores
 //! the mirrors from inside its table critical sections and exposes the
 //! cold rows (fcntl lock arms, slow release paths, the lease-break
-//! machinery) through `lock_hooks::LocksHooks`.
+//! machinery) through `rux::fs::hotpath::LocksHooks`.
 //!
 //! Everything below is the verbatim rung-3 logic; only the count
-//! statics resolve to the framework module (`rux::fs::locks`) and the
+//! statics resolve to the framework module (`rux::fs::hotpath::locks`) and the
 //! release paths gained `_slow` twins for the row bodies.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use rux::fs::file::File;
-use rux::fs::inode::Inode;
+use rux::fs::types::File;
+use rux::fs::types::Inode;
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // The framework half's shared vocabulary + count mirrors (the merged
 // view's `crate::locks` is THIS module — the explicit `pub mod`
 // shadows the glob — so the framework side is named through `rux::`).
-use rux::fs::locks::{
-    inode_lock_key, LockConflict, LockOwner, F_RDLCK_KIND, F_UNLCK_KIND, F_WRLCK_KIND,
-    FLOCK_COUNT, LEASE_COUNT, RECORD_LOCK_COUNT,
+use rux::fs::{
+    hotpath::inode_lock_key, types::LockConflict, types::LockOwner, hotpath::F_RDLCK_KIND, hotpath::F_UNLCK_KIND, hotpath::F_WRLCK_KIND,
+    hotpath::FLOCK_COUNT, hotpath::LEASE_COUNT, hotpath::RECORD_LOCK_COUNT,
 };
 
 // The framework half's directly-called legs, re-exported so the
 // syscall crate's `crate::locks::X` paths keep resolving (its
 // execve ETXTBSY gate and the exec-commit hold live framework-side).
-pub use rux::fs::locks::{
+pub use rux::fs::hotpath::{
     inode_text_hold_acquire_key, inode_text_hold_key, inode_write_open_count,
 };
 

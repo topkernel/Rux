@@ -10,7 +10,7 @@
 //! sys_link test
 
 use alloc::format;
-use crate::fs::{file_link, file_unlink, file_open, file_close, file_mkdir, file_rmdir, FileFlags};
+use crate::fs::{hotpath::file_link, hotpath::file_unlink, hotpath::file_open, hotpath::file_close, hotpath::file_mkdir, hotpath::file_rmdir, types::FileFlags};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_link() {
@@ -30,8 +30,8 @@ fn test_basic_link() {
     // Prior boots may have left these behind (the test rootfs boots
     // read-write and persists) — a leftover target makes link(2)
     // EEXIST and poisons every later boot (the 2026-11-18 incident).
-    let _ = crate::fs::vfs::file_unlink("/test_link_hardlink.txt");
-    let _ = crate::fs::vfs::file_unlink("/test_link_original.txt");
+    let _ = crate::fs::hotpath::file_unlink("/test_link_hardlink.txt");
+    let _ = crate::fs::hotpath::file_unlink("/test_link_original.txt");
     // Create original file
     let oldpath = "/test_link_original.txt";
 
@@ -53,8 +53,8 @@ fn test_basic_link() {
                     // (that mismatch is what made this test fail on every
                     // run). stat_file_by_path resolves through the same
                     // VFS path the link went through.
-                    use crate::fs::stat_file_by_path;
-                    let (mut st_old, mut st_new) = (crate::fs::Stat::default(), crate::fs::Stat::default());
+                    use crate::fs::hotpath::stat_file_by_path;
+                    let (mut st_old, mut st_new) = (crate::fs::types::Stat::default(), crate::fs::types::Stat::default());
                     match (stat_file_by_path(oldpath, &mut st_old), stat_file_by_path(newpath, &mut st_new)) {
                         (Ok(()), Ok(())) => {
                             if st_old.st_ino == st_new.st_ino {
@@ -106,8 +106,8 @@ fn test_link_persistence() {
             Ok(()) => {
                 // Verify links still exist — through the VFS (stat), not
                 // the shadowed RAM-rootfs tree (see test_basic_link).
-                use crate::fs::stat_file_by_path;
-                let (mut st1, mut st2) = (crate::fs::Stat::default(), crate::fs::Stat::default());
+                use crate::fs::hotpath::stat_file_by_path;
+                let (mut st1, mut st2) = (crate::fs::types::Stat::default(), crate::fs::types::Stat::default());
                 if stat_file_by_path(linkpath1, &mut st1).is_ok()
                     && stat_file_by_path(linkpath2, &mut st2).is_ok()
                 {

@@ -52,8 +52,8 @@ use crate::process::task::TaskState;
 // moved framework-side (fs::perf_ctr — the fs-substrate devirtualization:
 // arch traps and the scheduler call them directly, zero indirection);
 // the readers below delegate to the framework cells.
-pub use rux::fs::perf_ctr::{CpuTime, CPU_TIME, CTXT_SWITCHES, FORKS};
-pub use rux::fs::perf_ctr::{charge_tick, note_switch, note_fork};
+pub use rux::fs::{types::CpuTime, hotpath::CPU_TIME, hotpath::CTXT_SWITCHES, hotpath::FORKS};
+pub use rux::fs::hotpath::{charge_tick, note_switch, note_fork};
 
 pub fn total_context_switches() -> u64 {
     CTXT_SWITCHES.load(Ordering::Relaxed)

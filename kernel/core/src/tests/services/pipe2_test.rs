@@ -4,7 +4,7 @@
 //!
 
 use crate::pipe::{Pipe, PipeBuffer, create_pipe, pipe_file_read, pipe_file_write};
-use rux::fs::file::File;
+use rux::fs::types::File;
 
 /// Borrow the Pipe backing a pipe-end File — the same raw-pointer access the
 /// data-path callbacks in fs/pipe.rs perform (the old free-function

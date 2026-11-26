@@ -5,7 +5,7 @@
 
 // Test: File descriptor management (FdTable)
 use crate::println;
-use crate::fs::file::{FdTable, File, FileFlags};
+use crate::fs::types::{FdTable, File, FileFlags};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_fdtable() {

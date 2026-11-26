@@ -1702,7 +1702,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
 /// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
 fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
-    crate::fs::perf_ctr::timer_inc(cpu);
+    crate::fs::hotpath::timer_inc(cpu);
 
     // Wakewatch long-IRQ-off-window probe (UART perf gate round 2,
     // 2026-10-20): THIS tick arriving >100 ms after the previous one on
@@ -1870,7 +1870,7 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // account_process_tick): the idle task means the CPU had nothing to
     // run, otherwise the tick is user time (the timer hit the task in
     // user mode) or system time (it hit it in kernel mode).
-    crate::fs::perf_ctr::charge_tick(regs.user_mode());
+    crate::fs::hotpath::charge_tick(regs.user_mode());
 
     // 0b. CPU-time accounting: charge the tick to the interrupted task,
     // user or system time by the mode the timer hit (user tasks only).

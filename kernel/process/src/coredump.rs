@@ -35,8 +35,8 @@
 //! in the wstatus word.
 
 #![forbid(unsafe_code)]
-use crate::fs::elf::{Elf64Ehdr, Elf64Phdr};
-use crate::fs::file::FileFlags;
+use crate::fs::types::{Elf64Ehdr, Elf64Phdr};
+use crate::fs::types::FileFlags;
 use crate::task::{rlimit_res, Task};
 use alloc::vec::Vec;
 
@@ -223,7 +223,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
 
     // The sysctl cell lives in the fs procfs leaf since the
     // fs-substrate flip; the row hands the snapshot.
-    let pattern = crate::fs::leaf_glue::procfs::core_pattern();
+    let pattern = crate::fs::hotpath::procfs::core_pattern();
     // comm is a NUL-terminated 16-byte field of the valid task.
     let c = task.comm();
     let comm: &[u8] = &c[..c.iter().position(|&b| b == 0).unwrap_or(c.len())];
@@ -282,7 +282,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
 ///
 /// `task` is the current task in its exit path (fdtable + mm still alive).
 pub fn do_coredump(task: &Task, sig: i32) -> bool {
-    use crate::fs::vfs::file_open;
+    use crate::fs::hotpath::file_open;
     use crate::mm::mm_struct::MmFlags;
 
     // Gate 1: dumpability — SUID_DUMP_DISABLE (setuid binaries, prctl)
@@ -321,12 +321,12 @@ pub fn do_coredump(task: &Task, sig: i32) -> bool {
             if vma.vma_type() == crate::mm::vma::VmaType::Device {
                 continue;
             }
-            let mut pf = crate::fs::elf::PF_R;
+            let mut pf = crate::fs::hotpath::PF_R;
             if f.is_writable() {
-                pf |= crate::fs::elf::PF_W;
+                pf |= crate::fs::hotpath::PF_W;
             }
             if f.is_executable() {
-                pf |= crate::fs::elf::PF_X;
+                pf |= crate::fs::hotpath::PF_X;
             }
             segs.push((vma.start().as_usize() as u64, vma.size() as u64, pf));
         }
@@ -408,7 +408,7 @@ pub fn do_coredump(task: &Task, sig: i32) -> bool {
     };
     // Take our own Arc reference and immediately free the fd slot so the
     // dying task's fd table is not perturbed.
-    let file = crate::fs::get_file_fd(fd);
+    let file = crate::fs::hotpath::get_file_fd(fd);
     if let Some(fdt) = task.try_fdtable() {
         let _ = fdt.close_fd(fd);
     }
@@ -444,7 +444,7 @@ pub fn do_coredump(task: &Task, sig: i32) -> bool {
     push_phdr(
         &mut head,
         &Elf64Phdr {
-            p_type: crate::fs::elf::ElfPtType::PT_NOTE as u32,
+            p_type: crate::fs::types::ElfPtType::PT_NOTE as u32,
             p_flags: 0,
             p_offset: note_off as u64,
             p_vaddr: 0,
@@ -459,7 +459,7 @@ pub fn do_coredump(task: &Task, sig: i32) -> bool {
         push_phdr(
             &mut head,
             &Elf64Phdr {
-                p_type: crate::fs::elf::ElfPtType::PT_LOAD as u32,
+                p_type: crate::fs::types::ElfPtType::PT_LOAD as u32,
                 p_flags: *pflags,
                 p_offset: *off,
                 p_vaddr: *vaddr,

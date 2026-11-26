@@ -10,7 +10,7 @@
 //! infrastructure (the fake BinderAlloc with phys=0) must be mem::forget
 //! at the end so Drop never hands the buddy allocator a bogus block.
 
-use crate::fs::dev_t::{DevNo, MISC_MAJOR};
+use crate::fs::{types::DevNo, hotpath::MISC_MAJOR};
 use alloc::vec::Vec;
 use crate::ipc::binder::{
     devno_ctx, ev_name, BufBlock, BinderAlloc, BinderCtx, DEV_BINDER, DEV_HWBINDER,

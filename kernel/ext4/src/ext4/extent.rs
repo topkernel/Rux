@@ -5,7 +5,7 @@
 //! ext4 extent tree support
 
 use crate::errno;
-use rux::fs::bio;
+use rux::fs::hotpath;
 
 /// Extent header magic number
 pub const EXT4_EXT_MAGIC: u16 = 0xF30A;
@@ -337,18 +337,18 @@ fn find_run_in_external_extent(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
     // SAFETY: bh is pinned by bread; b_data is a block-sized slice.
-    let bh = bio::bread(fs.device, block_num).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let data = bio::bh_data(&bh);
+    let bh = hotpath::bread(fs.device, block_num).ok_or(errno::Errno::IOError.as_neg_i32())?;
+    let data = hotpath::bh_data(&bh);
     {
         let header = node_header(data);
         if header.eh_magic != EXT4_EXT_MAGIC || header.eh_entries > header.eh_max {
-            bio::brelse(bh);
+            hotpath::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let max_slots = (fs.block_size as usize - core::mem::size_of::<Ext4ExtentHeader>())
             / core::mem::size_of::<Ext4Extent>();
         if header.eh_max as usize > max_slots {
-            bio::brelse(bh);
+            hotpath::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let result = if header.eh_depth == 0 {
@@ -370,7 +370,7 @@ fn find_run_in_external_extent(
                 find_run_in_external_extent(fs, child_block, logical_block, depth + 1, for_write)
             }
         };
-        bio::brelse(bh);
+        hotpath::brelse(bh);
         result
     }
 }
@@ -1147,11 +1147,11 @@ fn find_block_in_external_extent_ex(
     if depth > 5 {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    // SAFETY: bio::bread returns a valid buffer_head; casts below stay
+    // SAFETY: hotpath::bread returns a valid buffer_head; casts below stay
     // within the block-sized b_data.
     // The read edge owns brelse on EVERY path; the recursion nests one
     // buffer per level (each bread pins independently, as before).
-    bio::with_block(fs.device, block_num, |data| -> Result<(u64, bool), i32> {
+    hotpath::with_block(fs.device, block_num, |data| -> Result<(u64, bool), i32> {
         let header = node_header(data);
         if header.eh_magic != EXT4_EXT_MAGIC
             || header.eh_entries > header.eh_max
@@ -1236,13 +1236,13 @@ fn find_block_in_external_extent(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // SAFETY: bio::bread returns a valid buffer_head whose b_data is a properly
+    // SAFETY: hotpath::bread returns a valid buffer_head whose b_data is a properly
     // aligned block-sized byte slice; the subsequent casts to Ext4ExtentHeader,
     // Ext4Extent, and Ext4ExtentIdx are within this buffer and eh_entries is
     // validated against the on-disk header.
     // The read edge owns brelse on EVERY path (the interleaved
     // release-on-error returns below were the raw shape).
-    match bio::with_block(fs.device, block_num, |data| -> Result<u64, i32> {
+    match hotpath::with_block(fs.device, block_num, |data| -> Result<u64, i32> {
         let header = node_header(data);
 
         if header.eh_magic != EXT4_EXT_MAGIC {
@@ -1460,7 +1460,7 @@ fn alloc_meta_block(
     let blk = allocator.alloc_block(goal)?;
     *meta_sectors += (fs.block_size / 512) as u64;
     // Zero the fresh metadata block (the sync edge owns the protocol).
-    bio::with_block_mut(fs.device, blk, |data, _| {
+    hotpath::with_block_mut(fs.device, blk, |data, _| {
         data.fill(0);
         Ok(())
     })?;
@@ -1474,9 +1474,9 @@ fn read_node(
     blk: u64,
 ) -> Result<alloc::vec::Vec<u8>, i32> {
     // SAFETY: bh pinned by bread; b_data is a block-sized slice.
-    let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let data = bio::bh_data(&bh).to_vec();
-    bio::brelse(bh);
+    let bh = hotpath::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
+    let data = hotpath::bh_data(&bh).to_vec();
+    hotpath::brelse(bh);
     Ok(data)
 }
 
@@ -1513,12 +1513,12 @@ fn write_node(
     if fs.metadata_csum && data.len() >= 4 {
         let mut sealed = alloc::vec::Vec::from(data);
         crate::ext4::csum::extent_block_csum_set(csum_seed, &mut sealed);
-        return bio::with_block_mut(fs.device, blk, |data, _| {
+        return hotpath::with_block_mut(fs.device, blk, |data, _| {
             data.copy_from_slice(&sealed);
             Ok(())
         });
     }
-    bio::with_block_mut(fs.device, blk, |block_data, _| {
+    hotpath::with_block_mut(fs.device, blk, |block_data, _| {
         block_data.copy_from_slice(data);
         Ok(())
     })

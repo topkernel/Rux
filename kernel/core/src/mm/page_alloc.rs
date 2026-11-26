@@ -765,7 +765,7 @@ pub fn oom_forensic_dump(site: &str) {
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: {}",
-        crate::fs::page_cache::pcache_reclaim_census_line()
+        crate::fs::hotpath::pcache_reclaim_census_line()
     );
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.

@@ -172,7 +172,7 @@ pub struct MountNamespace {
     /// global VFS root (CLONE_NEWNS does not move "/" — it only private-
     /// copies the mount table). Reserved as the pivot_root bookkeeping
     /// anchor; path_lookup still walks the shared dentry tree.
-    pub root: Spinlock<Option<Arc<crate::fs::dentry::Dentry>>>,
+    pub root: Spinlock<Option<Arc<crate::fs::types::Dentry>>>,
     /// Private copy of the mount table. Copy-on-write: modifications after
     /// CLONE_NEWNS only touch this Vec, never the parent's.
     pub mounts: Spinlock<Vec<MountEntry>>,
@@ -188,7 +188,7 @@ pub struct MountNamespace {
     /// mount) until NO spawn could finish inside appspawn's 3 s child
     /// watchdog. Linux unmounts a private namespace's mounts when its
     /// last task exits; Drop below restores exactly that contract.
-    pub vfs_mounts: Spinlock<Vec<Arc<crate::fs::dentry::VfsMountInternal>>>,
+    pub vfs_mounts: Spinlock<Vec<Arc<crate::fs::types::VfsMountInternal>>>,
 }
 
 impl Drop for MountNamespace {
@@ -196,10 +196,10 @@ impl Drop for MountNamespace {
         // Last owner of this namespace is gone: detach every mount it
         // attached (Linux mntput-on-nsput). The init namespace is held
         // by a static Arc and never drops, so boot mounts are safe.
-        let mounts: Vec<Arc<crate::fs::dentry::VfsMountInternal>> =
+        let mounts: Vec<Arc<crate::fs::types::VfsMountInternal>> =
             core::mem::take(&mut *self.vfs_mounts.lock());
         for mnt in mounts.iter().rev() {
-            crate::fs::vfs::vfs_umount_object(mnt);
+            crate::fs::hotpath::vfs_umount_object(mnt);
         }
     }
 }
@@ -208,7 +208,7 @@ impl MountNamespace {
     fn new(inum: u64, mounts: Vec<MountEntry>) -> Self {
         Self {
             inum,
-            root: Spinlock::new(crate::fs::vfs::get_vfs_root()),
+            root: Spinlock::new(crate::fs::hotpath::get_vfs_root()),
             mounts: Spinlock::new(mounts),
             vfs_mounts: Spinlock::new(Vec::new()),
         }
@@ -217,7 +217,7 @@ impl MountNamespace {
 
 /// sc98: record a freshly attached mount in the CURRENT namespace so its
 /// Drop can detach it when the namespace dies (see MountNamespace::vfs_mounts).
-pub fn ns_track_vfsmount(mnt: Arc<crate::fs::dentry::VfsMountInternal>) {
+pub fn ns_track_vfsmount(mnt: Arc<crate::fs::types::VfsMountInternal>) {
     let ns = current_mnt_ns();
     ns.vfs_mounts.lock().push(mnt);
 }
@@ -519,7 +519,7 @@ pub fn current_user_ns() -> Arc<UserNamespace> {
 fn boot_mount_entries() -> Vec<MountEntry> {
     // Read the legacy global registry (populated by do_mount at boot) and
     // stamp each row with a permanent id.
-    crate::fs::mount::get_global_mounts()
+    crate::fs::hotpath::get_global_mounts()
         .into_iter()
         .map(|(d, m, f, fl)| MountEntry {
             mount_id: alloc_mount_id(),
@@ -567,7 +567,7 @@ pub fn ns_get_mounts() -> Vec<MountEntry> {
 
 /// True when `path` is a mountpoint of the current mount namespace.
 pub fn ns_is_mountpoint(path: &str) -> bool {
-    let norm = crate::fs::path::path_normalize(path);
+    let norm = crate::fs::hotpath::path_normalize(path);
     let ns = current_mnt_ns();
     let table = ns.mounts.lock();
     table.iter().any(|e| e.mount_point == norm)
@@ -846,7 +846,7 @@ pub fn unshare_namespaces(flags: u64) -> Result<(), i32> {
                 .ns_mount
                 .as_ref()
                 .map(|p| p.root.lock().clone())
-                .unwrap_or_else(|| crate::fs::vfs::get_vfs_root());
+                .unwrap_or_else(|| crate::fs::hotpath::get_vfs_root());
             let ns = Arc::new(MountNamespace::new(alloc_ns_inum(), table));
             // Inherit the previous ns's pivot anchor (see the clone site).
             *ns.root.lock() = old_root;
@@ -1091,7 +1091,7 @@ fn ns_file_content(handle: &NsRef) -> Vec<u8> {
 pub fn open_ns_file(pid: u32, kind: NsKind, flags: u32) -> Result<usize, i32> {
     let file = build_ns_file(pid, kind, flags)?;
     // (unsafe-slim r3) get_file_fd_install is safe (un-signed, verified).
-    crate::fs::file::get_file_fd_install(file)
+    crate::fs::hotpath::get_file_fd_install(file)
         .ok_or(crate::errno::Errno::TooManyOpenFiles.as_neg_i32())
 }
 
@@ -1102,7 +1102,7 @@ pub fn build_ns_file(
     pid: u32,
     kind: NsKind,
     flags: u32,
-) -> Result<Arc<crate::fs::File>, i32> {
+) -> Result<Arc<crate::fs::types::File>, i32> {
     let handle = crate::process::find_task_by_pid(pid)
         .map(|t| task_ns_handle(t, kind))
         .ok_or(crate::errno::Errno::NoSuchProcess.as_neg_i32())?;
@@ -1115,17 +1115,17 @@ pub fn build_ns_file(
     // via set_private_data and is reclaimed in ns_file_close (the
     // framework edge pair file_private_data_ref/_take_boxed,
     // INV-PROC-NSFILE-1/2).
-    let file = Arc::new(crate::fs::File::new(crate::fs::FileFlags::new(flags)));
+    let file = Arc::new(crate::fs::types::File::new(crate::fs::types::FileFlags::new(flags)));
     file.set_ops(&NS_FILE_OPS);
     file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
 
-    let mut inode = crate::fs::inode::Inode::new(
+    let mut inode = crate::fs::types::Inode::new(
         handle.inum(),
-        crate::fs::inode::InodeMode::new(
-            crate::fs::inode::InodeMode::S_IFREG | 0o444,
+        crate::fs::types::InodeMode::new(
+            crate::fs::types::InodeMode::S_IFREG | 0o444,
         ),
     );
-    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+    inode.fs_id = crate::fs::hotpath::FS_ID_PROCFS;
     file.set_inode(Arc::new(inode));
 
     // Keep the namespace alive for the fd's lifetime.
@@ -1138,7 +1138,7 @@ struct NsFileContent {
     data: Vec<u8>,
 }
 
-fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+fn ns_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
     // private_data is the NsFileContent installed by open_ns_file.
     match super::r#unsafe::file_private_data_ref::<NsFileContent>(file) {
         Some(content) => {
@@ -1157,13 +1157,13 @@ fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-fn ns_file_close(file: &crate::fs::File) -> i32 {
+fn ns_file_close(file: &crate::fs::types::File) -> i32 {
     // The exactly-once reclaim of the constructor's Box (see ns_file_read).
     drop(super::r#unsafe::file_private_data_take_boxed::<NsFileContent>(file));
     0
 }
 
-pub(crate) static NS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub(crate) static NS_FILE_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(ns_file_read)
     .close(ns_file_close)
     .build();
@@ -1220,7 +1220,7 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
     }
 
     // fd validated non-negative; get_file_fd returns an Arc clone.
-    let file = crate::fs::get_file_fd(fd as usize)
+    let file = crate::fs::hotpath::get_file_fd(fd as usize)
         .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
 
     // The write-once inode cell has a safe read accessor (get_inode).
@@ -1277,7 +1277,7 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
 /// chroot is fs state, not namespace state.
 fn reanchor_root_for_mnt_ns(task: &mut Task, ns: &Arc<MountNamespace>) {
     let Some(fs) = task.fs_arc() else { return };
-    let global_root = crate::fs::vfs::get_vfs_root();
+    let global_root = crate::fs::hotpath::get_vfs_root();
     let ns_root = ns
         .root
         .lock()
@@ -1303,7 +1303,7 @@ fn reanchor_root_for_mnt_ns(task: &mut Task, ns: &Arc<MountNamespace>) {
             fs.set_root_is_pivot(true);
             // cwd outside the new root resets to it (pivot discipline).
             let cwd = task.get_cwd();
-            let cwd_norm = crate::fs::path::path_normalize(
+            let cwd_norm = crate::fs::hotpath::path_normalize(
                 core::str::from_utf8(&cwd).unwrap_or("/"),
             );
             if cwd_norm != "/" && !cwd_norm.starts_with(path.as_str()) {

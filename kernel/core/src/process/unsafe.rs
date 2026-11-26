@@ -168,7 +168,7 @@ pub fn dump_read_page(mm: &crate::mm::mm_struct::MmStruct, va: u64, out: &mut [u
 /// lives only within the callback that owns `file` — the same
 /// discipline every FileOps implementation argued inline before.
 #[inline]
-pub fn file_private_data_ref<T>(file: &crate::fs::File) -> Option<&T> {
+pub fn file_private_data_ref<T>(file: &crate::fs::types::File) -> Option<&T> {
     // SAFETY: INV-PROC-NSFILE-1 — write-once cell read through the
     // shared borrow the callback owns; T matches the constructor's Box.
     let p = unsafe { *file.private_data.get() }?;
@@ -183,7 +183,7 @@ pub fn file_private_data_ref<T>(file: &crate::fs::File) -> Option<&T> {
 /// and `Box::from_raw` consumes the constructor's `Box::into_raw`
 /// allocation, matching the ownership transfer documented there.
 #[inline]
-pub fn file_private_data_take_boxed<T>(file: &crate::fs::File) -> Option<alloc::boxed::Box<T>> {
+pub fn file_private_data_take_boxed<T>(file: &crate::fs::types::File) -> Option<alloc::boxed::Box<T>> {
     // SAFETY: INV-PROC-NSFILE-2 — the take is under the close path's
     // single-threaded-per-File discipline; None after the first take.
     let p = unsafe { &mut *file.private_data.get() }.take()?;
@@ -199,7 +199,7 @@ pub fn file_private_data_take_boxed<T>(file: &crate::fs::File) -> Option<alloc::
 /// epoll `entries` lock guards every mutable touch of an EpollFile's
 /// lists). Same slot-population contract as the shared arm.
 #[inline]
-pub fn file_private_data_mut<T>(file: &crate::fs::File) -> Option<&'static mut T> {
+pub fn file_private_data_mut<T>(file: &crate::fs::types::File) -> Option<&'static mut T> {
     // SAFETY: INV-PROC-NSFILE-1 mutable arm — identity-checked slot
     // read; the caller's lock discipline excludes concurrent aliases.
     let p = unsafe { *file.private_data.get() }?;
@@ -601,10 +601,10 @@ pub fn exec_copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
 /// e_phnum or its derived phdr_count).
 #[inline]
 pub fn exec_phdr_at(
-    ehdr: &crate::fs::elf::Elf64Ehdr,
+    ehdr: &crate::fs::types::Elf64Ehdr,
     data: &[u8],
     index: usize,
-) -> Option<crate::fs::elf::Elf64Phdr> {
+) -> Option<crate::fs::types::Elf64Phdr> {
     // SAFETY: INV-PROC-EXEC-ELF-1 — validated image, bounded index.
     unsafe { ehdr.get_program_header(data, index) }
 }
@@ -614,9 +614,9 @@ pub fn exec_phdr_at(
 /// INV-PROC-EXEC-ELF-1 (header arm): `from_bytes` validates
 /// magic/layout internally; None for malformed images.
 #[inline]
-pub fn exec_ehdr_from(data: &[u8]) -> Option<crate::fs::elf::Elf64Ehdr> {
+pub fn exec_ehdr_from(data: &[u8]) -> Option<crate::fs::types::Elf64Ehdr> {
     // SAFETY: INV-PROC-EXEC-ELF-1 — self-validating parser.
-    unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(data) }
+    unsafe { crate::fs::types::Elf64Ehdr::from_bytes(data) }
 }
 
 /// The fresh-tree mapping allocator (mm/mod.rs).

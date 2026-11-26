@@ -240,7 +240,7 @@ pub struct Jbd2BufferTriggerType {
 pub struct Handle {
     /// The deferred-publication capture header (the framework's
     /// fixed-offset view; see INV-JSEAM-1).
-    pub capture: rux::fs::journal_seam::JournalCaptureState,
+    pub capture: rux::fs::types::JournalCaptureState,
     /// Which compound transaction is this update a part of?
     pub h_transaction: Option<Arc<Transaction>>,
     /// Which journal handle belongs to
@@ -316,7 +316,7 @@ impl Handle {
 impl Default for Handle {
     fn default() -> Self {
         Self {
-            capture: rux::fs::journal_seam::JournalCaptureState::new(),
+            capture: rux::fs::types::JournalCaptureState::new(),
             h_transaction: None,
             h_journal: None,
             h_rsv_handle: None,

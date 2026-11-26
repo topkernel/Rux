@@ -29,7 +29,7 @@
 // Ext4DirEntry::from_bytes's guards).)
 use super::dir::Ext4DirEntry;
 use super::Ext4FileSystem;
-use rux::fs::bio;
+use rux::fs::hotpath;
 
 /// dx hash versions (the reference's ext4.h enum). On-disk roots carry
 /// the SIGNED base (0-2); the sb's unsigned-hash flag shifts them +3 at
@@ -265,7 +265,7 @@ pub fn dirhash(name: &[u8], version: u8, seed: &[u32; 4]) -> Option<(u32, u32)> 
 
 /// One frame of the dx descent: a parsed index block.
 struct DxFrame {
-    bh: *mut bio::BufferHead,
+    bh: *mut rux::fs::types::BufferHead,
     /// Offset of the entries[] array inside b_data. entry[0] carries the
     /// countlimit overlay in its HASH half (u32 at entries_off: low u16
     /// limit, high u16 count) — exactly the reference's entries pointer.
@@ -296,12 +296,12 @@ fn read_dir_logical_block(
     fs: &Ext4FileSystem,
     dir: &super::inode::Ext4Inode,
     index: u64,
-) -> Option<*mut bio::BufferHead> {
+) -> Option<*mut rux::fs::types::BufferHead> {
     let phys = dir.get_data_block(fs, index).ok()?;
     if phys == 0 {
         return None;
     }
-    bio::bread(fs.device, phys)
+    hotpath::bread(fs.device, phys)
 }
 
 /// Parse an index block: countlimit position + limit/count values.
@@ -376,10 +376,10 @@ pub fn dx_find_entry(
     let root_bh = read_dir_logical_block(fs, dir, 0)?;
     let (hash, root_at, indirect_levels, root_eoff, root_count);
     {
-        // SAFETY: bh from bio::bread; read-only access below.
-        let data = bio::bh_data(&root_bh);
+        // SAFETY: bh from hotpath::bread; read-only access below.
+        let data = hotpath::bh_data(&root_bh);
         if data.len() < block_size {
-            bio::brelse(root_bh);
+            hotpath::brelse(root_bh);
             return None;
         }
         // dx_probe's validation order: hash version, unused flags,
@@ -391,28 +391,28 @@ pub fn dx_find_entry(
             || hash_version == DX_HASH_HALF_MD4
             || hash_version == DX_HASH_TEA)
         {
-            bio::brelse(root_bh);
+            hotpath::brelse(root_bh);
             return None;
         }
         if unused_flags & 1 != 0 || levels > 1 {
-            bio::brelse(root_bh);
+            hotpath::brelse(root_bh);
             return None;
         }
         let Some((_, entries_off, count, _)) =
             parse_index_block(data, block_size, fs.metadata_csum)
         else {
-            bio::brelse(root_bh);
+            hotpath::brelse(root_bh);
             return None;
         };
         if count == 0 || count > (block_size / 8) {
-            bio::brelse(root_bh);
+            hotpath::brelse(root_bh);
             return None;
         }
         // Final hash version: signed base + the sb unsigned flag
         // (dx_probe: `hash_version <= DX_HASH_TEA → += s_hash_unsigned`).
         let version = hash_version + if fs.hash_unsigned { 3 } else { 0 };
         let Some((h, _minor)) = dirhash(name.as_bytes(), version, &fs.hash_seed) else {
-            bio::brelse(root_bh);
+            hotpath::brelse(root_bh);
             return None;
         };
         hash = h;
@@ -452,7 +452,7 @@ pub fn dx_find_entry(
                 let fr = &frames[level];
                 // SAFETY: bh alive in the frame; read-only access.
                 (
-                    entry_block(bio::bh_data(&fr.bh), fr.entries_off, fr.at),
+                    entry_block(hotpath::bh_data(&fr.bh), fr.entries_off, fr.at),
                     fr.hash,
                 )
             };
@@ -471,7 +471,7 @@ pub fn dx_find_entry(
             };
             let parsed = {
                 // SAFETY: nbh just read; read-only access.
-                let data = bio::bh_data(&nbh);
+                let data = hotpath::bh_data(&nbh);
                 if data.len() < block_size {
                     None
                 } else {
@@ -498,7 +498,7 @@ pub fn dx_find_entry(
                 }
             };
             let Some((eoff, count, at)) = parsed else {
-                bio::brelse(nbh);
+                hotpath::brelse(nbh);
                 dx_release(&mut frames);
                 return None;
             };
@@ -513,7 +513,7 @@ pub fn dx_find_entry(
             let top = &frames[frames.len() - 1];
             // SAFETY: bh alive in the frame; read-only access.
             (
-                entry_block(bio::bh_data(&top.bh), top.entries_off, top.at),
+                entry_block(hotpath::bh_data(&top.bh), top.entries_off, top.at),
                 top.hash,
             )
         };
@@ -523,7 +523,7 @@ pub fn dx_find_entry(
         let mut found: Option<Ext4DirEntry> = None;
         {
             // SAFETY: lbh just read; read-only access.
-            let data = bio::bh_data(&lbh);
+            let data = hotpath::bh_data(&lbh);
             let mut offset = 0usize;
             while offset < block_size {
                 let entry = Ext4DirEntry::from_bytes(&data[offset..], block_size);
@@ -541,7 +541,7 @@ pub fn dx_find_entry(
                 offset += entry.rec_len as usize;
             }
         }
-        bio::brelse(lbh);
+        hotpath::brelse(lbh);
         if let Some(e) = found {
             break Ok(e);
         }
@@ -563,7 +563,7 @@ pub fn dx_find_entry(
         let bhash = {
             let fr = &frames[level];
             // SAFETY: bh alive in the frame; read-only access.
-            entry_hash(bio::bh_data(&fr.bh), fr.entries_off, fr.at)
+            entry_hash(hotpath::bh_data(&fr.bh), fr.entries_off, fr.at)
         };
         // ext4_htree_next_block's stop rule: only for LSB-0 (even)
         // lookup hashes does the walk stop, and only when the next
@@ -582,7 +582,7 @@ pub fn dx_find_entry(
             let block = {
                 let fr = &frames[level];
                 // SAFETY: bh alive in the frame; read-only access.
-                entry_block(bio::bh_data(&fr.bh), fr.entries_off, fr.at)
+                entry_block(hotpath::bh_data(&fr.bh), fr.entries_off, fr.at)
             };
             level += 1;
             let Some(nbh) = read_dir_logical_block(fs, dir, block as u64) else {
@@ -591,22 +591,22 @@ pub fn dx_find_entry(
             };
             let parsed = {
                 // SAFETY: nbh just read; read-only access.
-                let data = bio::bh_data(&nbh);
+                let data = hotpath::bh_data(&nbh);
                 parse_index_block(data, block_size, fs.metadata_csum)
                     .map(|(_, eoff, count, _)| (eoff, count))
             };
             let Some((eoff, count)) = parsed else {
-                bio::brelse(nbh);
+                hotpath::brelse(nbh);
                 dx_release(&mut frames);
                 return None;
             };
             if count == 0 {
-                bio::brelse(nbh);
+                hotpath::brelse(nbh);
                 dx_release(&mut frames);
                 return None;
             }
             let old = &mut frames[level];
-            bio::brelse(old.bh);
+            hotpath::brelse(old.bh);
             old.bh = nbh;
             old.entries_off = eoff;
             old.count = count;
@@ -619,7 +619,7 @@ pub fn dx_find_entry(
 
 fn dx_release(frames: &mut alloc::vec::Vec<DxFrame>) {
     for f in frames.iter_mut() {
-        bio::brelse(f.bh);
+        hotpath::brelse(f.bh);
     }
     frames.clear();
 }

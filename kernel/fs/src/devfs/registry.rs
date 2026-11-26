@@ -14,8 +14,8 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use crate::sync::spinlock::Spinlock;
-use rux::fs::file::FileOps;
-use super::dev_t::DevNo;
+use rux::fs::types::FileOps;
+use rux::fs::types::DevNo;
 
 /// Character device registry
 struct CharDeviceRegistry {

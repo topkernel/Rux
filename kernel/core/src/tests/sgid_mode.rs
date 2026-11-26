@@ -55,7 +55,7 @@ pub fn test_sgid_mode() {
         (dir, 0o2000, 0o2000, "S_ISGID without any exec is untouched"),
     ];
     for (dm, mode, want, what) in cases {
-        let got = crate::fs::vfs::mode_strip_sgid(dm, 12345, mode);
+        let got = crate::fs::hotpath::mode_strip_sgid(dm, 12345, mode);
         if got == want {
             test_pass(what);
         } else {

@@ -15,12 +15,12 @@ use super::{test_fail, test_group_start, test_pass};
 
 /// Build a synthetic /dev/loopN file (the devfs_open pattern: LOOP_FILE_OPS
 /// ops identity + boxed DevNo in private_data) for loop_file_ioctl.
-fn make_loop_file(minor: u32) -> alloc::sync::Arc<crate::fs::file::File> {
-    let file = alloc::sync::Arc::new(crate::fs::file::File::new(
-        crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_RDWR),
+fn make_loop_file(minor: u32) -> alloc::sync::Arc<crate::fs::types::File> {
+    let file = alloc::sync::Arc::new(crate::fs::types::File::new(
+        crate::fs::types::FileFlags::new(crate::fs::types::FileFlags::O_RDWR),
     ));
-    file.set_ops(crate::fs::leaf_glue::devfs::loop_file_ops());
-    let devno = crate::fs::dev_t::DevNo::new(crate::fs::dev_t::LOOP_MAJOR, minor);
+    file.set_ops(crate::fs::hotpath::devfs::loop_file_ops());
+    let devno = crate::fs::types::DevNo::new(crate::fs::hotpath::LOOP_MAJOR, minor);
     let b = alloc::boxed::Box::new(devno);
     file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
     file
@@ -75,12 +75,12 @@ pub fn test_loop_flags() {
     }
 
     // ---- FS_IOC chattr flags gate unlink with EPERM ----
-    use crate::fs::inode::{FS_APPEND_FL, FS_IMMUTABLE_FL};
+    use crate::fs::hotpath::{FS_APPEND_FL, FS_IMMUTABLE_FL};
     let path = "/unit_loop_flag_test";
-    match crate::fs::file_open(path, crate::fs::file::FileFlags::O_WRONLY | crate::fs::file::FileFlags::O_CREAT, 0o600) {
+    match crate::fs::hotpath::file_open(path, crate::fs::types::FileFlags::O_WRONLY | crate::fs::types::FileFlags::O_CREAT, 0o600) {
         Ok(fd) => {
             let mut flagged = 0usize;
-            if let Some(file) = (unsafe { crate::fs::get_file_fd(fd) }) {
+            if let Some(file) = (unsafe { crate::fs::hotpath::get_file_fd(fd) }) {
                 // SAFETY: inode cell written once at open time; read-only.
                 if let Some(inode) = (unsafe { &*file.inode.get() }).as_ref() {
                     inode.ioc_flags.store(FS_IMMUTABLE_FL, core::sync::atomic::Ordering::Release);
@@ -88,17 +88,17 @@ pub fn test_loop_flags() {
                 }
             }
             if flagged == 1 {
-                match crate::fs::vfs::file_unlink(path) {
+                match crate::fs::hotpath::file_unlink(path) {
                     Err(e) if e == -crate::syscall::errno::EPERM => {
                         test_pass("unlink IMMUTABLE file -> EPERM");
                         // Append-only next.
-                        if let Some(file) = (unsafe { crate::fs::get_file_fd(fd) }) {
+                        if let Some(file) = (unsafe { crate::fs::hotpath::get_file_fd(fd) }) {
                             // SAFETY: inode cell written once at open time.
                             if let Some(inode) = (unsafe { &*file.inode.get() }).as_ref() {
                                 inode.ioc_flags.store(FS_APPEND_FL, core::sync::atomic::Ordering::Release);
                             }
                         }
-                        match crate::fs::vfs::file_unlink(path) {
+                        match crate::fs::hotpath::file_unlink(path) {
                             Err(e) if e == -crate::syscall::errno::EPERM => {
                                 test_pass("unlink APPEND file -> EPERM");
                             }
@@ -108,17 +108,17 @@ pub fn test_loop_flags() {
                     _ => test_fail("unlink IMMUTABLE file", "expected EPERM"),
                 }
                 // Clear and remove the scratch file.
-                if let Some(file) = (unsafe { crate::fs::get_file_fd(fd) }) {
+                if let Some(file) = (unsafe { crate::fs::hotpath::get_file_fd(fd) }) {
                     // SAFETY: inode cell written once at open time.
                     if let Some(inode) = (unsafe { &*file.inode.get() }).as_ref() {
                         inode.ioc_flags.store(0, core::sync::atomic::Ordering::Release);
                     }
                 }
-                let _ = crate::fs::vfs::file_unlink(path);
+                let _ = crate::fs::hotpath::file_unlink(path);
             } else {
                 test_fail("FS_IOC gate setup", "could not reach inode of scratch file");
             }
-            let _ = crate::fs::file_close(fd);
+            let _ = crate::fs::hotpath::file_close(fd);
         }
         Err(_) => super::test_skip("FS_IOC gate", "scratch file create failed"),
     }

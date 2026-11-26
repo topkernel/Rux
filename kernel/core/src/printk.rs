@@ -1572,8 +1572,8 @@ pub static KMSG_FIRST_FLAGS: AtomicUsize = AtomicUsize::new(0);
 /// `return 0` (EOF) made every kmsg consumer spin: hilogd's kmsg parser
 /// thread (`hilogd_kmsg`) read-EOF-looped at 100% CPU on one of two
 /// vCPUs for the whole OH boot.
-fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
-    let nonblock = file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+fn kmsg_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
+    let nonblock = file.flags().bits() & crate::fs::types::FileFlags::O_NONBLOCK != 0;
     KMSG_FIRST_FLAGS
         .compare_exchange(0, file.flags().bits() as usize, Ordering::Relaxed, Ordering::Relaxed)
         .ok();
@@ -1784,7 +1784,7 @@ fn kmsg_console_allows_echo() -> bool {
 /// a bounded trickle — the reference's own devkmsg ratelimit spirit) and
 /// `off` (ring only). The RING always records every line in all three
 /// modes, so hilog consumers lose nothing.
-fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+fn kmsg_file_write(_file: &crate::fs::types::File, buf: &[u8]) -> isize {
     // hilogcensus (cmdline hilogcensus=1): per-caller /dev/kmsg volume.
     crate::debug::hilogcensus::kmsg_write(buf);
     let text = core::str::from_utf8(buf).unwrap_or("<binary>");
@@ -1803,8 +1803,8 @@ fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 /// position exists; always writable. The old stub returned POLLERR —
 /// epoll treats that as permanently ready, so every kmsg waiter
 /// woke, read EOF, and re-armed in a tight loop.
-fn kmsg_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+fn kmsg_file_poll(file: &crate::fs::types::File, events: u16) -> u16 {
+    use crate::fs::hotpath::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 {
         let rb = RING_BUFFER.lock_irqsave();
@@ -1819,7 +1819,7 @@ fn kmsg_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
 }
 
 /// lseek handler for /dev/kmsg.
-fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+fn kmsg_file_lseek(file: &crate::fs::types::File, offset: isize, whence: i32) -> isize {
     match whence {
         0 => {
             // SEEK_SET
@@ -1845,7 +1845,7 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
 }
 
 /// FileOps for /dev/kmsg
-pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static KMSG_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(kmsg_file_read)
     .write(kmsg_file_write)
     .lseek(kmsg_file_lseek)
@@ -1856,10 +1856,10 @@ pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builde
 ///
 /// Must be called after devfs is initialized.
 pub fn init_kmsg_device() {
-    use crate::fs::dev_t::DEV_KMSG;
+    use crate::fs::hotpath::DEV_KMSG;
 
-    crate::fs::leaf_glue::devfs::register_char_device(DEV_KMSG, &KMSG_OPS);
-    let _ = crate::fs::leaf_glue::devfs::mknod("kmsg", DEV_KMSG, 0o666 | 0o20000);
+    crate::fs::hotpath::devfs::register_char_device(DEV_KMSG, &KMSG_OPS);
+    let _ = crate::fs::hotpath::devfs::mknod("kmsg", DEV_KMSG, 0o666 | 0o20000);
 }
 
 // ==================== /proc/kmsg Blocking Stream ====================
@@ -1887,7 +1887,7 @@ pub fn proc_kmsg_open() -> i32 {
 }
 
 /// /proc/kmsg close hook: release the single-reader gate.
-fn proc_kmsg_close(_file: &crate::fs::file::File) -> i32 {
+fn proc_kmsg_close(_file: &crate::fs::types::File) -> i32 {
     PROC_KMSG_OPEN.store(false, Ordering::Release);
     0
 }
@@ -1912,7 +1912,7 @@ fn proc_kmsg_close(_file: &crate::fs::file::File) -> i32 {
 /// the printk-side wake_up_all never holds the WQ lock against a
 /// waiter. Cost: up to ~1 jiffy of record-delivery latency, vs the
 /// 60-92K EOF reads/s the snapshot produced.
-fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+fn proc_kmsg_read(_file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
     loop {
         // Produce one record if the cursor has not caught up.
         let produced = {
@@ -2027,8 +2027,8 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
 
 /// /proc/kmsg poll: POLLIN iff unconsumed records exist; always writable
 /// (matches kmsg_file_poll's shape; epoll waiters need the edge).
-fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+fn proc_kmsg_poll(_file: &crate::fs::types::File, events: u16) -> u16 {
+    use crate::fs::hotpath::poll_events::*;
     let rb = RING_BUFFER.lock_irqsave();
     let readable = rb.read_seq < RING_NEXT_SEQ.load(Ordering::Relaxed);
     drop(rb);
@@ -2043,13 +2043,13 @@ fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
 }
 
 /// /proc/kmsg lseek: the stream is unseekable (Linux no_llseek → ESPIPE).
-fn proc_kmsg_lseek(_file: &crate::fs::file::File, _offset: isize, _whence: i32) -> isize {
+fn proc_kmsg_lseek(_file: &crate::fs::types::File, _offset: isize, _whence: i32) -> isize {
     -(crate::errno::constants::ESPIPE as isize)
 }
 
 /// FileOps for the /proc/kmsg stream (attached by procfs_get_file_ops
 /// for the node whose content_generator is generate_kmsg).
-pub static PROC_KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static PROC_KMSG_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(proc_kmsg_read)
     .lseek(proc_kmsg_lseek)
     .close(proc_kmsg_close)

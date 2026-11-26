@@ -124,7 +124,7 @@ pub fn load() -> Result<CpioStats, &'static str> {
 
     // The global-sb typed view through the hook row (the rootfs leaf
     // lives in the fs crate; the trait is the seam).
-    let sb = crate::fs::leaf_glue::rootfs::sb_view().ok_or("rootfs not initialized")?;
+    let sb = crate::fs::hotpath::rootfs::sb_view().ok_or("rootfs not initialized")?;
 
     let stats = (crate::api::fs::boot_hooks().initrd_unpack_newc)(
         cpio.as_slice(), sb,

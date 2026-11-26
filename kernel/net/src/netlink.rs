@@ -31,7 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::errno::constants;
-use crate::fs::file::{File, FileFlags, FileOps};
+use crate::fs::types::{File, FileFlags, FileOps};
 use crate::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
@@ -1328,7 +1328,7 @@ fn netlink_file_close(file: &File) -> i32 {
 }
 
 fn netlink_file_poll(file: &File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+    use crate::fs::hotpath::poll_events::*;
     // SAFETY: ops identity was verified (see netlink_file_read).
     let socket = match netlink_of_file(file) {
         Some(s) => s,

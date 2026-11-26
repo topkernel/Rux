@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::fs::dev_t::{DevNo, MEM_MAJOR, TTY_MAJOR, INPUT_MAJOR, DEV_NULL, DEV_ZERO, DEV_RANDOM, DEV_URANDOM, DEV_KMSG, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER, EVDEV_MINOR_BASE};
+use crate::fs::{types::DevNo, hotpath::MEM_MAJOR, hotpath::TTY_MAJOR, hotpath::INPUT_MAJOR, hotpath::DEV_NULL, hotpath::DEV_ZERO, hotpath::DEV_RANDOM, hotpath::DEV_URANDOM, hotpath::DEV_KMSG, hotpath::DEV_EVDEV_KEYBOARD, hotpath::DEV_EVDEV_POINTER, hotpath::EVDEV_MINOR_BASE};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_dev_t() {

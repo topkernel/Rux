@@ -272,7 +272,7 @@ pub fn alloc_page_table() -> Option<u64> {
                             // mm would self-deadlock on the PteLock we hold.
                             for _ in 0..4 {
                                 let freed =
-                                    crate::fs::page_cache::get_page_cache().shrink(32);
+                                    crate::fs::hotpath::get_page_cache().shrink(32);
                                 if freed == 0 {
                                     break;
                                 }

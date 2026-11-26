@@ -42,9 +42,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use crate::errno;
-use rux::fs::inode::file_type;
-use rux::fs::inode::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
-use rux::fs::superblock::{FileSystemType, SuperBlock};
+use rux::fs::hotpath::file_type;
+use rux::fs::types::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
+use rux::fs::types::{FileSystemType, SuperBlock};
 use crate::sched::cgroup::{self, CgroupNode, LIMIT_MAX};
 
 // ============================================================================
@@ -490,7 +490,7 @@ static GLOBAL_CGROUP2_SB: core::sync::atomic::AtomicPtr<SuperBlock> =
 // SAFETY: FsContext is a valid mount context from the VFS; the superblock
 // is a plain SuperBlock with no filesystem-private invariants.
 fn cgroup2_mount(
-    _fs_context: &rux::fs::superblock::FsContext<'_>,
+    _fs_context: &rux::fs::types::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let sb = Box::new(SuperBlock::new(4096, CGROUP2_MAGIC));
     Ok(Box::into_raw(sb))
@@ -522,14 +522,14 @@ pub fn init_cgroupfs() -> Result<(), i32> {
     }
 
     // Filesystem type registration (for `mount -t cgroup2`).
-    rux::fs::superblock::register_filesystem(&CGROUP2_FS_TYPE)?;
+    rux::fs::hotpath::register_filesystem(&CGROUP2_FS_TYPE)?;
 
     Ok(())
 }
 
 /// Register the mount in the /proc/mounts table.
 fn register_cgroup2_mount(target: &str) {
-    rux::fs::mount::register_mount("cgroup2", target, "cgroup2", "rw");
+    rux::fs::hotpath::register_mount("cgroup2", target, "cgroup2", "rw");
 }
 
 /// Whether a cgroup2 hierarchy is currently MOUNTED.
@@ -565,10 +565,10 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
     }
 
     // Dentry tree mount.
-    rux::fs::vfs::vfs_mount(
+    rux::fs::hotpath::vfs_mount(
         target,
         create_root_inode(),
-        rux::fs::mount::MntFlags::new(0),
+        rux::fs::types::MntFlags::new(0),
     );
     register_cgroup2_mount(target);
     // Mount-state visibility: /proc/[pid]/cgroup now reports the
@@ -631,7 +631,7 @@ fn make_dir_inode(node: Arc<CgroupNode>) -> Arc<Inode> {
         ino_of_dir(node_ref),
         InodeMode::new(InodeMode::S_IFDIR | 0o755),
     );
-    inode.fs_id = rux::fs::inode::FS_ID_CGROUPFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_CGROUPFS;
     inode.ops = Some(&CGROUP_INODE_OPS);
     inode.private_data = Some(leak_ino_data(node, CgroupFileKind::Dir));
     Arc::new(inode)
@@ -651,7 +651,7 @@ fn make_file_inode(node: Arc<CgroupNode>, kind: CgroupFileKind) -> Arc<Inode> {
         ino_of_file(node_ref, kind),
         InodeMode::new(InodeMode::S_IFREG | mode),
     );
-    inode.fs_id = rux::fs::inode::FS_ID_CGROUPFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_CGROUPFS;
     inode.ops = Some(&CGROUP_INODE_OPS);
     inode.private_data = Some(leak_ino_data(node, kind));
     Arc::new(inode)
@@ -806,7 +806,7 @@ fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, er
 
 /// cgroupfs getattr.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn cgroupfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn cgroupfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     let data = match ino_data(inode) {
         Some(d) => d,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -848,7 +848,7 @@ fn cgroupfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
 /// Control-file CONTENT stays kernel-owned.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
@@ -859,8 +859,8 @@ fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     match attr {
         setattr_attr::ATTR_MODE => {
             data.mode_ovr.store((arg1 as u32) & 0o7777, core::sync::atomic::Ordering::Relaxed);
-            let keep_type = inode.mode.bits() & rux::fs::inode::InodeMode::S_IFMT;
-            inode.update_cached_mode(rux::fs::inode::InodeMode::new(
+            let keep_type = inode.mode.bits() & rux::fs::types::InodeMode::S_IFMT;
+            inode.update_cached_mode(rux::fs::types::InodeMode::new(
                 keep_type | ((arg1 as u32) & 0o7777),
             ));
             0
@@ -885,7 +885,7 @@ fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
 /// cgroupfs open: snapshot control-file content for reads.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn cgroupfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
+fn cgroupfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -903,11 +903,11 @@ fn cgroupfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
 
 /// cgroupfs get_file_ops.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn cgroupfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::FileOps> {
+fn cgroupfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&CGROUP_FILE_OPS)
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -946,7 +946,7 @@ struct CgroupFileContent {
     data: Vec<u8>,
 }
 
-fn cgroupfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn cgroupfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // private_data is either None or a valid CgroupFileContent placed by
     // cgroupfs_open; it is only freed by cgroupfs_file_close
     // (INV-FS-FILEPRIV-1, resolved through the framework edge).
@@ -968,7 +968,7 @@ fn cgroupfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-fn cgroupfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn cgroupfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // The inode cell is write-once at open (File::get_inode discipline).
     let inode = match file.get_inode().cloned() {
         Some(i) => i,
@@ -988,7 +988,7 @@ fn cgroupfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
     }
 }
 
-fn cgroupfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn cgroupfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     // See cgroupfs_file_read (INV-FS-FILEPRIV-1).
     {
         let content = match rux::fs::r#unsafe::file_privdata_ref::<CgroupFileContent>(file) {
@@ -1010,7 +1010,7 @@ fn cgroupfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isiz
     }
 }
 
-fn cgroupfs_file_close(file: &rux::fs::File) -> i32 {
+fn cgroupfs_file_close(file: &rux::fs::types::File) -> i32 {
     // The take empties the cell first; the Box::from_raw reclaim is the
     // framework edge's exactly-once drop (INV-FS-FILEPRIV-1).
     if let Some(content) = rux::fs::r#unsafe::file_privdata_take::<CgroupFileContent>(file) {
@@ -1020,7 +1020,7 @@ fn cgroupfs_file_close(file: &rux::fs::File) -> i32 {
 }
 
 /// cgroupfs file operations table.
-pub static CGROUP_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static CGROUP_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(cgroupfs_file_read)
     .write(cgroupfs_file_write)
     .lseek(cgroupfs_file_lseek)
@@ -1035,7 +1035,7 @@ pub static CGROUP_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
 
 /// The cgroup mount entry (old mount.rs "cgroup2"|"cgroup" arm,
 /// verbatim including the v1 controller-parity EINVAL gate).
-pub fn mount_cgroup(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_cgroup(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, mnt_flags);
     // cgroup v1 controller parity (launcher-errno lane): the reference
     // kernel exposes the MEMORY controller only — every other
@@ -1064,5 +1064,5 @@ pub fn mount_cgroup(source: &str, target: &str, fs_type: &str, data: Option<&str
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["cgroup2", "cgroup"], mount_cgroup);
+    rux::fs::hotpath::register(&["cgroup2", "cgroup"], mount_cgroup);
 }

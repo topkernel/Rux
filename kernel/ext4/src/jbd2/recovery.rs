@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use super::journal::{Journal, Tid};
 use super::types::*;
 
-use rux::fs::bio;
+use rux::fs::hotpath;
 
 // ============================================================================
 // Error codes
@@ -73,7 +73,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     let journal_last = journal.j_last;
 
     // Read journal superblock to get s_start and s_sequence
-    let sb_bh = match bio::bread(device, journal.jmap(0)) {
+    let sb_bh = match hotpath::bread(device, journal.jmap(0)) {
         Some(b) => b,
         None => return Err(EIO),
     };
@@ -81,11 +81,11 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     // The superblock is at the start of the block (the typed view
     // rides the framework's ext4_edges).
     let (start_block, start_seq) = {
-        let sb = rux::fs::r#unsafe::typed_ref::<journal_superblock_t>(bio::bh_data(&sb_bh))
+        let sb = rux::fs::r#unsafe::typed_ref::<journal_superblock_t>(hotpath::bh_data(&sb_bh))
             .expect("journal superblock view");
         let start = u32::from_be(sb.s_start);
         let seq = u32::from_be(sb.s_sequence);
-        bio::brelse(sb_bh);
+        hotpath::brelse(sb_bh);
         (start, seq)
     };
 
@@ -123,7 +123,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         if abs_block == 0 {
             break; // unmapped hole between journal extents
         }
-        let bh = match bio::bread(device, abs_block) {
+        let bh = match hotpath::bread(device, abs_block) {
             Some(b) => b,
             None => break,
         };
@@ -132,26 +132,26 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         // the framework's ext4_edges); the magic check below validates
         // the contents before use.
         let (magic, blocktype, sequence) = {
-            let hdr = rux::fs::r#unsafe::typed_ref::<journal_header_t>(bio::bh_data(&bh))
+            let hdr = rux::fs::r#unsafe::typed_ref::<journal_header_t>(hotpath::bh_data(&bh))
                 .expect("journal header view");
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
         };
 
-        if magic != JBD2_MAGIC_NUMBER { bio::brelse(bh); break; }
+        if magic != JBD2_MAGIC_NUMBER { hotpath::brelse(bh); break; }
 
         match blocktype {
             JBD2_DESCRIPTOR_BLOCK => {
                 // CSUM_V2/V3: a descriptor whose tail checksum fails ends
                 // the trustworthy log region (reference recovery.c PASS_SCAN
                 // treats it as stale/unverifiable and stops extending).
-                let desc_ok = descriptor_block_csum_verify(journal, bio::bh_data(&bh));
+                let desc_ok = descriptor_block_csum_verify(journal, hotpath::bh_data(&bh));
                 if !desc_ok {
-                    bio::brelse(bh);
+                    hotpath::brelse(bh);
                     break;
                 }
                 if replay_start == 0 { replay_start = next_block; }
                 let nr = count_tags(bh, tag_size, header_size, tail_size, block_size);
-                bio::brelse(bh);
+                hotpath::brelse(bh);
                 for _ in 0..nr { next_block = wrap_block(next_block, journal_first, journal_last); scanned += 1; }
                 continue;
             }
@@ -159,11 +159,11 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 // CSUM_V2/V3: only a commit block with a valid checksum
                 // completes a transaction (reference
                 // jbd2_commit_block_csum_verify).
-                let commit_ok = commit_block_csum_verify(journal, bio::bh_data(&bh));
+                let commit_ok = commit_block_csum_verify(journal, hotpath::bh_data(&bh));
                 if commit_ok {
                     last_found_seq = sequence;
                 }
-                bio::brelse(bh);
+                hotpath::brelse(bh);
                 next_block = wrap_block(next_block, journal_first, journal_last);
                 continue;
             }
@@ -171,12 +171,12 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 // Collect revoke records for the replay filter (review 5.6:
                 // recovery must not replay old metadata over blocks that
                 // were freed then reallocated).
-                super::revoke::scan_revoke_block(journal, bio::bh_data(&bh), sequence);
-                bio::brelse(bh);
+                super::revoke::scan_revoke_block(journal, hotpath::bh_data(&bh), sequence);
+                hotpath::brelse(bh);
                 next_block = wrap_block(next_block, journal_first, journal_last);
                 continue;
             }
-            _ => { bio::brelse(bh); }
+            _ => { hotpath::brelse(bh); }
         }
         next_block = wrap_block(next_block, journal_first, journal_last);
     }
@@ -200,7 +200,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         if abs_block == 0 {
             break; // unmapped hole between journal extents
         }
-        let bh = match bio::bread(device, abs_block) {
+        let bh = match hotpath::bread(device, abs_block) {
             Some(b) => b,
             None => break,
         };
@@ -208,12 +208,12 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         // b_data starts with journal_header_t (typed view via the
         // framework's ext4_edges); magic check validates.
         let (magic, blocktype, sequence) = {
-            let hdr = rux::fs::r#unsafe::typed_ref::<journal_header_t>(bio::bh_data(&bh))
+            let hdr = rux::fs::r#unsafe::typed_ref::<journal_header_t>(hotpath::bh_data(&bh))
                 .expect("journal header view");
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
         };
 
-        if magic != JBD2_MAGIC_NUMBER { bio::brelse(bh); break; }
+        if magic != JBD2_MAGIC_NUMBER { hotpath::brelse(bh); break; }
 
         match blocktype {
             JBD2_DESCRIPTOR_BLOCK => {
@@ -221,13 +221,13 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                     // CSUM_V2/V3: an unverifiable descriptor ends replay
                     // (reference recovery.c: "Invalid checksum recovering
                     // block" -> -EFSBADCRC).
-                    let desc_ok = descriptor_block_csum_verify(journal, bio::bh_data(&bh));
+                    let desc_ok = descriptor_block_csum_verify(journal, hotpath::bh_data(&bh));
                     if !desc_ok {
-                        bio::brelse(bh);
+                        hotpath::brelse(bh);
                         break;
                     }
                     let tags = parse_tag_entries(bh, tag_size, header_size, tail_size, block_size);
-                    bio::brelse(bh);
+                    hotpath::brelse(bh);
                     for tag in tags {
                         cur = wrap_block(cur, journal_first, journal_last);
                         scanned += 1;
@@ -241,19 +241,19 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                     }
                 } else {
                     let nr = count_tags(bh, tag_size, header_size, tail_size, block_size);
-                    bio::brelse(bh);
+                    hotpath::brelse(bh);
                     for _ in 0..nr { cur = wrap_block(cur, journal_first, journal_last); scanned += 1; }
                 }
                 continue;
             }
             JBD2_COMMIT_BLOCK => {
-                let commit_ok = commit_block_csum_verify(journal, bio::bh_data(&bh));
-                bio::brelse(bh);
+                let commit_ok = commit_block_csum_verify(journal, hotpath::bh_data(&bh));
+                hotpath::brelse(bh);
                 if commit_ok && sequence >= info.start_transaction && sequence <= info.end_transaction {
                     info.nr_replays += 1;
                 }
             }
-            _ => { bio::brelse(bh); }
+            _ => { hotpath::brelse(bh); }
         }
         cur = wrap_block(cur, journal_first, journal_last);
     }
@@ -272,14 +272,14 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
     let device = journal
         .j_bio_device
         .expect("jbd2: bio device used before ext4 install");
-    let sb_bh = match bio::bread(device, journal.jmap(0)) {
+    let sb_bh = match hotpath::bread(device, journal.jmap(0)) {
         Some(b) => b,
         None => return Err(EIO),
     };
     // The superblock is at the start of the block (typed view via the
     // framework's ext4_edges).
     {
-        let block = bio::bh_data_mut(&sb_bh);
+        let block = hotpath::bh_data_mut(&sb_bh);
         let sb = rux::fs::r#unsafe::typed_ref_mut::<journal_superblock_t>(block)
             .expect("journal superblock view");
         sb.s_start = 0u32.to_be();
@@ -288,25 +288,25 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
         // rewritten s_start/s_sequence (reference jbd2_superblock_csum).
         if journal.has_csum_v2or3() {
             sb.s_checksum = 0;
-            let block = bio::bh_data(&sb_bh);
+            let block = hotpath::bh_data(&sb_bh);
             let bytes: &[u8] = &block[..size_of::<journal_superblock_t>()];
             let csum = crate::ext4::csum::crc32c(0xFFFF_FFFF, bytes);
             sb.s_checksum = csum.to_be();
         }
-        bio::bh_set_state_bit(&sb_bh, rux::fs::bio::BufferState::BH_Dirty);
+        hotpath::bh_set_state_bit(&sb_bh, rux::fs::types::BufferState::BH_Dirty);
     }
-    let sync_res = bio::sync_dirty_buffer(sb_bh);
-    bio::brelse(sb_bh);
+    let sync_res = hotpath::sync_dirty_buffer(sb_bh);
+    hotpath::brelse(sb_bh);
     sync_res?;
     journal.j_tail_sequence.store(next_seq, core::sync::atomic::Ordering::SeqCst);
     journal.j_transaction_sequence.store(next_seq, core::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
-fn count_tags(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> usize {
+fn count_tags(bh: *mut rux::fs::types::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> usize {
     let mut c = 0usize;
     let mut off = hdr_size;
-    let data = bio::bh_data(&bh);
+    let data = hotpath::bh_data(&bh);
     while off + tag_size <= blk_size - tail_size {
         let flags = tag_flags(&data[off..off + tag_size], tag_size);
         c += 1;
@@ -360,10 +360,10 @@ fn parse_tag(tag: &[u8], tag_size: usize) -> TagEntry {
 }
 
 /// Parse all tags of a descriptor block into replay entries.
-fn parse_tag_entries(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> Vec<TagEntry> {
+fn parse_tag_entries(bh: *mut rux::fs::types::BufferHead, tag_size: usize, hdr_size: usize, tail_size: usize, blk_size: usize) -> Vec<TagEntry> {
     let mut tags = Vec::new();
     let mut off = hdr_size;
-    let data = bio::bh_data(&bh);
+    let data = hotpath::bh_data(&bh);
     while off + tag_size <= blk_size - tail_size {
         let tag = &data[off..off + tag_size];
         let e = parse_tag(tag, tag_size);
@@ -457,31 +457,31 @@ fn replay_data(
     if data_abs == 0 {
         return; // unmapped hole — nothing to replay from
     }
-    let data_bh = match bio::bread(device, data_abs) { Some(b) => b, None => return };
+    let data_bh = match hotpath::bread(device, data_abs) { Some(b) => b, None => return };
     if let Some(csum) = tag_csum {
         let ok = {
-            let data = bio::bh_data(&data_bh);
+            let data = hotpath::bh_data(&data_bh);
             block_tag_csum_verify(journal, csum, sequence, data, tag_csum_truncated(journal))
         };
         if !ok {
             crate::pr_warn!("JBD2: invalid checksum recovering data block {}", fs_block);
-            bio::brelse(data_bh);
+            hotpath::brelse(data_bh);
             return;
         }
     }
-    let fs_bh = match bio::bread(device, fs_block) { Some(b) => b, None => { bio::brelse(data_bh); return } };
+    let fs_bh = match hotpath::bread(device, fs_block) { Some(b) => b, None => { hotpath::brelse(data_bh); return } };
     // Views ride the audited bio edges; len is the minimum of both
     // buffer sizes.
     {
-        let src = bio::bh_data(&data_bh);
-        let dst = bio::bh_data_mut(&fs_bh);
+        let src = hotpath::bh_data(&data_bh);
+        let dst = hotpath::bh_data_mut(&fs_bh);
         let len = core::cmp::min(src.len(), dst.len());
         dst[..len].copy_from_slice(&src[..len]);
-        bio::bh_set_state_bit(&fs_bh, rux::fs::bio::BufferState::BH_Dirty);
+        hotpath::bh_set_state_bit(&fs_bh, rux::fs::types::BufferState::BH_Dirty);
     }
-    bio::sync_dirty_buffer(fs_bh).ok();
-    bio::brelse(fs_bh);
-    bio::brelse(data_bh);
+    hotpath::sync_dirty_buffer(fs_bh).ok();
+    hotpath::brelse(fs_bh);
+    hotpath::brelse(data_bh);
 }
 
 /// Whether this journal's tags carry truncated (V2) checksums.

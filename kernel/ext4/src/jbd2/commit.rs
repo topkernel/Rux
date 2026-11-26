@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use super::journal::{Journal, Tid, Transaction, TransactionState};
 use super::types::*;
 
-use rux::fs::bio;
+use rux::fs::hotpath;
 
 // ============================================================================
 // Error codes
@@ -42,8 +42,8 @@ pub fn jbd2_journal_commit_transaction(
     // the world's pending publications here: every filesystem block this
     // commit writes (the write-through fast path below, the slow-path
     // data blocks, the journal superblock) goes through
-    // bio::sync_dirty_buffer, whose guard satisfies exactly that block's
-    // pre/entry/post obligations first (bio::flush_publication_constraints).
+    // hotpath::sync_dirty_buffer, whose guard satisfies exactly that block's
+    // pre/entry/post obligations first (hotpath::flush_publication_constraints).
     // The old whole-queue drain at this entry made every forced commit —
     // and therefore every fsync/fdatasync, which force a commit — pay the
     // global publication backlog, looping for as long as creators kept
@@ -124,7 +124,7 @@ pub fn jbd2_journal_commit_transaction(
         let blocks: alloc::vec::Vec<u64> =
             dirty_buffers.iter().map(|(b, _)| *b).collect();
         let _ext4_guard = crate::ext4::EXT4_BIG_LOCK.lock();
-        let first_err = bio::sync_dirty_blocks_batched(device, &blocks, true);
+        let first_err = hotpath::sync_dirty_blocks_batched(device, &blocks, true);
         // Sequences advance; the log itself consumed no space (j_head,
         // j_tail, j_free unchanged).
         journal
@@ -151,7 +151,7 @@ pub fn jbd2_journal_commit_transaction(
     // superblock bookkeeping: the registered buffers reach their final
     // locations identically on both paths, and the journal-area copies
     // below stay format-compatible belt-and-suspenders. The syncs go
-    // through bio::sync_dirty_buffer's per-block publication-constraint
+    // through hotpath::sync_dirty_buffer's per-block publication-constraint
     // guard, exactly like the fast path.
     {
         // BATCHED WRITE-THROUGH (paired-test item 3) — same shape and
@@ -160,7 +160,7 @@ pub fn jbd2_journal_commit_transaction(
         let blocks: alloc::vec::Vec<u64> =
             dirty_buffers.iter().map(|(b, _)| *b).collect();
         let _ext4_guard = crate::ext4::EXT4_BIG_LOCK.lock();
-        let first_err = bio::sync_dirty_blocks_batched(device, &blocks, true);
+        let first_err = hotpath::sync_dirty_blocks_batched(device, &blocks, true);
         if first_err != 0 {
             journal.abort(first_err);
             *commit_transaction.t_state.lock() = TransactionState::Finished;
@@ -297,7 +297,7 @@ pub fn jbd2_journal_commit_transaction(
             // fast path above).
             // bread on a valid device returns a cached (or
             // freshly-read) buffer head for any valid block number.
-            let src_bh = match bio::bread(device, blocknr) {
+            let src_bh = match hotpath::bread(device, blocknr) {
                 Some(b) => b,
                 None => {
                     journal.abort(EIO);
@@ -313,15 +313,15 @@ pub fn jbd2_journal_commit_transaction(
             // inode bitmap / inode tables. 0 = unmapped hole: abort.
             let data_abs_block = journal.jmap(current_journal_block);
             if data_abs_block == 0 {
-                bio::brelse(src_bh);
+                hotpath::brelse(src_bh);
                 journal.abort(EIO);
                 *commit_transaction.t_state.lock() = TransactionState::Finished;
                 return Err(EIO);
             }
-            let data_bh = match bio::bread(device, data_abs_block) {
+            let data_bh = match hotpath::bread(device, data_abs_block) {
                 Some(b) => b,
                 None => {
-                    bio::brelse(src_bh);
+                    hotpath::brelse(src_bh);
                     journal.abort(EIO);
                     *commit_transaction.t_state.lock() = TransactionState::Finished;
                     return Err(EIO);
@@ -332,8 +332,8 @@ pub fn jbd2_journal_commit_transaction(
             // is the journal block size. Views ride the audited bio
             // edges (bh_data / bh_data_mut).
             {
-                let src_bytes = bio::bh_data(&src_bh);
-                let dst_bytes = bio::bh_data_mut(&data_bh);
+                let src_bytes = hotpath::bh_data(&src_bh);
+                let dst_bytes = hotpath::bh_data_mut(&data_bh);
                 let n = core::cmp::min(src_bytes.len(), dst_bytes.len());
                 dst_bytes[..n].copy_from_slice(&src_bytes[..n]);
                 // Tag checksum over the frozen image (reference
@@ -341,13 +341,13 @@ pub fn jbd2_journal_commit_transaction(
                 // block bytes)).
                 let data_bytes: &[u8] = &dst_bytes[..block_size.min(dst_bytes.len())];
                 tag_csums[i] = block_tag_csum(journal, tid, data_bytes);
-                bio::bh_set_state_bit(&data_bh, rux::fs::bio::BufferState::BH_Dirty);
+                hotpath::bh_set_state_bit(&data_bh, rux::fs::types::BufferState::BH_Dirty);
             }
-            bio::brelse(src_bh);
+            hotpath::brelse(src_bh);
             current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
-            let sync_res = bio::sync_dirty_buffer(data_bh);
-            bio::brelse(data_bh);
+            let sync_res = hotpath::sync_dirty_buffer(data_bh);
+            hotpath::brelse(data_bh);
             if let Err(e) = sync_res {
                 journal.abort(e);
                 *commit_transaction.t_state.lock() = TransactionState::Finished;
@@ -362,7 +362,7 @@ pub fn jbd2_journal_commit_transaction(
             *commit_transaction.t_state.lock() = TransactionState::Finished;
             return Err(EIO);
         }
-        let bh = match bio::bread(device, abs_block) {
+        let bh = match hotpath::bread(device, abs_block) {
             Some(b) => b,
             None => {
                 journal.abort(EIO);
@@ -431,17 +431,17 @@ pub fn jbd2_journal_commit_transaction(
 
         // b_data is block_size bytes; views ride the bio edges.
         {
-            let dst = bio::bh_data_mut(&bh);
+            let dst = hotpath::bh_data_mut(&bh);
             let n = core::cmp::min(dst.len(), desc_data.len());
             dst[..n].copy_from_slice(&desc_data[..n]);
-            bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
+            hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
         }
 
         // R20-FS5 (F3): release the bh BEFORE propagating a sync error — the
         // old `map_err(..)?` early-return leaked one bh reference per error,
         // permanently pinning the cache entry.
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
+        let sync_res = hotpath::sync_dirty_buffer(bh);
+        hotpath::brelse(bh);
         if let Err(e) = sync_res {
             journal.abort(e);
             *commit_transaction.t_state.lock() = TransactionState::Finished;
@@ -455,7 +455,7 @@ pub fn jbd2_journal_commit_transaction(
     // The write-through pass at the head of the slow path has already
     // synced every registered buffer to its final location (Arm-2 R2';
     // the old comment here claimed the ops themselves had synced inline —
-    // that predates bio::sync_dirty_buffer's under-handle deferral, which
+    // that predates hotpath::sync_dirty_buffer's under-handle deferral, which
     // leaves op-time metadata dirty in the buffer cache). A full
     // sync_buffers scan would still be redundant and would add SMP
     // contention on the block-cache bucket spinlocks.
@@ -482,7 +482,7 @@ pub fn jbd2_journal_commit_transaction(
         *commit_transaction.t_state.lock() = TransactionState::Finished;
         return Err(EIO);
     }
-    let commit_bh = match bio::bread(device, commit_abs_block) {
+    let commit_bh = match hotpath::bread(device, commit_abs_block) {
         Some(b) => b,
         None => {
             journal.abort(EIO);
@@ -501,7 +501,7 @@ pub fn jbd2_journal_commit_transaction(
     // the block window rides the bio edges.
     let commit_bytes: &[u8] = crate::safety::bytes::bytes_of(&commit_hdr);
     {
-        let block = bio::bh_data_mut(&commit_bh);
+        let block = hotpath::bh_data_mut(&commit_bh);
         for b in block.iter_mut() { *b = 0; }
         let n = core::cmp::min(block.len(), commit_bytes.len());
         block[..n].copy_from_slice(&commit_bytes[..n]);
@@ -518,12 +518,12 @@ pub fn jbd2_journal_commit_transaction(
                 .expect("commit header view");
             hdr.h_chksum[0] = csum.to_be();
         }
-        bio::bh_set_state_bit(&commit_bh, rux::fs::bio::BufferState::BH_Dirty);
+        hotpath::bh_set_state_bit(&commit_bh, rux::fs::types::BufferState::BH_Dirty);
     }
     current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
-    let sync_res = bio::sync_dirty_buffer(commit_bh);
-    bio::brelse(commit_bh);
+    let sync_res = hotpath::sync_dirty_buffer(commit_bh);
+    hotpath::brelse(commit_bh);
     if let Err(e) = sync_res {
         journal.abort(e);
         *commit_transaction.t_state.lock() = TransactionState::Finished;
@@ -620,8 +620,8 @@ fn write_journal_superblock(
     new_start: u64,
     new_sequence: u32,
 ) -> Result<(), i32> {
-    // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-    let bh = match bio::bread(device, sb_block) {
+    // SAFETY: hotpath::bread returns a valid BufferHead or None (handled).
+    let bh = match hotpath::bread(device, sb_block) {
         Some(b) => b,
         None => return Err(EIO),
     };
@@ -630,7 +630,7 @@ fn write_journal_superblock(
     // framework's ext4_edges (packed struct — alignment check is
     // trivially satisfied).
     {
-        let block = bio::bh_data_mut(&bh);
+        let block = hotpath::bh_data_mut(&bh);
         let sb = rux::fs::r#unsafe::typed_ref_mut::<journal_superblock_t>(block)
             .expect("journal superblock view");
         sb.s_start = (new_start as u32).to_be();
@@ -641,15 +641,15 @@ fn write_journal_superblock(
         // NOT j_csum_seed, NOT the full block.
         if journal.has_csum_v2or3() {
             sb.s_checksum = 0;
-            let block = bio::bh_data(&bh);
+            let block = hotpath::bh_data(&bh);
             let bytes: &[u8] = &block[..size_of::<journal_superblock_t>()];
             let csum = crate::ext4::csum::crc32c(0xFFFF_FFFF, bytes);
             sb.s_checksum = csum.to_be();
         }
-        bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
+        hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
     }
 
-    let sync_res = bio::sync_dirty_buffer(bh);
-    bio::brelse(bh);
+    let sync_res = hotpath::sync_dirty_buffer(bh);
+    hotpath::brelse(bh);
     sync_res
 }

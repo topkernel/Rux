@@ -30,8 +30,8 @@
 //! x86_64 unit-test kernel lesson, INV-SVCTEST-1's sibling).
 
 #![forbid(unsafe_code)]
-use crate::fs::elf::Elf64Ehdr;
-use crate::fs::file::File;
+use crate::fs::types::Elf64Ehdr;
+use crate::fs::types::File;
 use crate::process::task::Task;
 
 // ==================== ProcessHooks (lifecycle) ====================

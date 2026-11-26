@@ -15,10 +15,9 @@
 
 use crate::drivers::blkdev::GenDisk;
 use crate::errno;
-use rux::fs::bio;
 use rux::api::ext4::Ext4Hooks;
-use rux::fs::file::File;
-use rux::fs::inode::{Inode, INodeOps};
+use rux::fs::types::File;
+use rux::fs::types::{Inode, INodeOps};
 use crate::jbd2;
 use crate::process::r#unsafe as proc_edges;
 
@@ -221,7 +220,7 @@ fn kmsg_write_at_row(ino: u32, offset: u64, data: &[u8]) -> isize {
     super::file::ext4_kernel_write_at(fs, ino, offset, data)
 }
 
-fn journal_dirty_row(handle: *mut (), bh: *mut bio::BufferHead) {
+fn journal_dirty_row(handle: *mut (), bh: *mut rux::fs::types::BufferHead) {
     // The slot is set/cleared by this task around the enclosing ext4
     // operation; the typed view rides boxed_mut.
     if !handle.is_null() {
@@ -230,7 +229,7 @@ fn journal_dirty_row(handle: *mut (), bh: *mut bio::BufferHead) {
     }
 }
 
-fn journal_forget_row(handle: *mut (), bh: *mut bio::BufferHead) {
+fn journal_forget_row(handle: *mut (), bh: *mut rux::fs::types::BufferHead) {
     // As journal_dirty_row.
     if !handle.is_null() {
         let h = handle as *mut jbd2::journal::Handle;
@@ -259,7 +258,7 @@ pub fn mount_instance_table_row(
     target: &str,
     fs_type: &str,
     _data: Option<&str>,
-    mnt_flags: rux::fs::mount::MntFlags,
+    mnt_flags: rux::fs::types::MntFlags,
 ) -> Result<(), i32> {
     // ext2/ext4 from a LOOP device: a second ext4 instance on the
     // loop's GenDisk (LTP mount/umount tests: losetup an mkfs.ext2
@@ -278,12 +277,12 @@ pub fn mount_instance_table_row(
             // (metadata_csum) — mirror it in the VFS mount flags so all
             // write paths fail EROFS at the VFS, not inside ext4.
             let mnt_flags = if effective_ro && !mnt_flags.is_readonly() {
-                rux::fs::mount::MntFlags::new(mnt_flags.bits() | rux::fs::mount::MntFlags::MNT_READONLY)
+                rux::fs::types::MntFlags::new(mnt_flags.bits() | rux::fs::types::MntFlags::MNT_READONLY)
             } else {
                 mnt_flags
             };
-            rux::fs::vfs::vfs_mount(target, root, mnt_flags);
-            rux::fs::mount::register_mount(
+            rux::fs::hotpath::vfs_mount(target, root, mnt_flags);
+            rux::fs::hotpath::register_mount(
                 source,
                 target,
                 fs_type,
@@ -320,7 +319,7 @@ pub fn mount_instance_table_row(
             // journal replay — the OH init mounting /dev/block/vdb
             // before any other ext4).
             super::mount_ext4_flags(disk, mnt_flags.is_readonly()).map_err(|e| e as i32)?;
-            rux::fs::vfs::vfs_mount(target, super::create_root_inode(), mnt_flags);
+            rux::fs::hotpath::vfs_mount(target, super::create_root_inode(), mnt_flags);
         } else {
             // Additional disks: separate instance (mount_loop_instance
             // discipline — no journal replay, like a fresh scratch
@@ -328,13 +327,13 @@ pub fn mount_instance_table_row(
             let (root, effective_ro) =
                 super::mount_loop_instance(disk, mnt_flags.is_readonly()).map_err(|e| e as i32)?;
             let mnt_flags = if effective_ro && !mnt_flags.is_readonly() {
-                rux::fs::mount::MntFlags::new(mnt_flags.bits() | rux::fs::mount::MntFlags::MNT_READONLY)
+                rux::fs::types::MntFlags::new(mnt_flags.bits() | rux::fs::types::MntFlags::MNT_READONLY)
             } else {
                 mnt_flags
             };
-            rux::fs::vfs::vfs_mount(target, root, mnt_flags);
+            rux::fs::hotpath::vfs_mount(target, root, mnt_flags);
         }
-        rux::fs::mount::register_mount(
+        rux::fs::hotpath::register_mount(
             source,
             target,
             fs_type,
@@ -364,8 +363,8 @@ pub fn mount_instance_table_row(
     } else {
         return Err(errno::Errno::NoSuchDevice.as_neg_i32());
     }
-    rux::fs::vfs::vfs_mount(target, super::create_root_inode(), mnt_flags);
-    rux::fs::mount::register_mount(
+    rux::fs::hotpath::vfs_mount(target, super::create_root_inode(), mnt_flags);
+    rux::fs::hotpath::register_mount(
         "/dev/vda",
         target,
         fs_type,
@@ -375,7 +374,7 @@ pub fn mount_instance_table_row(
 }
 
 fn mount_rows_register_row() {
-    rux::fs::mount_table::register(
+    rux::fs::hotpath::register(
         &["ext4", "ext3", "ext2"],
         mount_instance_table_row,
     );
@@ -383,7 +382,7 @@ fn mount_rows_register_row() {
 
 /// Register the hook table + the mount-table rows (idempotent:
 /// OnceSlot first-wins; mount_table::register dedups by name set).
-/// In-tree interim: called from ext4::init (boot order: bio::init ->
+/// In-tree interim: called from ext4::init (boot order: hotpath::bio_init ->
 /// ext4::init -> ... -> mounts). At the flip: bin's register_all
 /// owns this call.
 pub fn register_all() {

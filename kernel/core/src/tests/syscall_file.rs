@@ -7,9 +7,9 @@
 //!
 //! Includes: open, close, read, write, lseek, fstat, mkdir, rmdir, unlink, getdents64
 
-use crate::fs::{file_open, file_close, file_stat, Stat, FileFlags};
-use crate::fs::vfs;
-use crate::fs::get_file_fd;
+use crate::fs::{hotpath::file_open, hotpath::file_close, hotpath::file_stat, types::Stat, types::FileFlags};
+use crate::fs::hotpath;
+use crate::fs::hotpath::get_file_fd;
 use crate::syscall::SyscallNo;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
@@ -100,7 +100,7 @@ fn test_sys_open_close() {
             }
 
             // Cleanup
-            let _ = vfs::file_unlink("/test_create_syscall.txt");
+            let _ = hotpath::file_unlink("/test_create_syscall.txt");
         }
         Err(_) => {
             test_skip("sys_open O_CREAT", "filesystem not writable");
@@ -190,7 +190,7 @@ fn test_sys_read_write() {
                 }
             }
             let _ = file_close(fd);
-            let _ = vfs::file_unlink("/test_write_syscall.txt");
+            let _ = hotpath::file_unlink("/test_write_syscall.txt");
         }
         Err(_) => {
             test_skip("sys_write", "filesystem not writable");
@@ -332,7 +332,7 @@ fn test_sys_lseek() {
 fn test_sys_mkdir_rmdir() {
     // Test creating directory
     let dirname = "/test_syscall_mkdir";
-    match vfs::file_mkdir(dirname, 0o755) {
+    match hotpath::file_mkdir(dirname, 0o755) {
         Ok(()) => {
             test_pass("sys_mkdir creates directory");
 
@@ -348,7 +348,7 @@ fn test_sys_mkdir_rmdir() {
             }
 
             // Test duplicate creation (may succeed or fail)
-            match vfs::file_mkdir(dirname, 0o755) {
+            match hotpath::file_mkdir(dirname, 0o755) {
                 Ok(()) => {
                     test_skip("sys_mkdir duplicate", "implementation allows mkdir on existing dir");
                 }
@@ -358,7 +358,7 @@ fn test_sys_mkdir_rmdir() {
             }
 
             // Test removing empty directory
-            match vfs::file_rmdir(dirname) {
+            match hotpath::file_rmdir(dirname) {
                 Ok(()) => {
                     test_pass("sys_rmdir empty directory");
 
@@ -383,7 +383,7 @@ fn test_sys_mkdir_rmdir() {
     }
 
     // Test removing nonexistent directory
-    match vfs::file_rmdir("/nonexistent_dir_xyz") {
+    match hotpath::file_rmdir("/nonexistent_dir_xyz") {
         Ok(()) => {
             test_fail("sys_rmdir (nonexistent)", "should fail");
         }
@@ -393,7 +393,7 @@ fn test_sys_mkdir_rmdir() {
     }
 
     // Test removing root directory (should fail)
-    match vfs::file_rmdir("/") {
+    match hotpath::file_rmdir("/") {
         Ok(()) => {
             test_fail("sys_rmdir root", "should fail");
         }
@@ -404,12 +404,12 @@ fn test_sys_mkdir_rmdir() {
 
     // Test removing non-empty directory (should fail)
     // Create parent and child directories
-    match vfs::file_mkdir("/test_nonempty_dir", 0o755) {
+    match hotpath::file_mkdir("/test_nonempty_dir", 0o755) {
         Ok(()) => {
-            match vfs::file_mkdir("/test_nonempty_dir/subdir", 0o755) {
+            match hotpath::file_mkdir("/test_nonempty_dir/subdir", 0o755) {
                 Ok(_) => {
                     // Try to remove non-empty directory
-                    match vfs::file_rmdir("/test_nonempty_dir") {
+                    match hotpath::file_rmdir("/test_nonempty_dir") {
                         Ok(()) => {
                             test_skip("sys_rmdir non-empty", "implementation allows rmdir on non-empty");
                         }
@@ -418,13 +418,13 @@ fn test_sys_mkdir_rmdir() {
                         }
                     }
                     // Cleanup
-                    let _ = vfs::file_rmdir("/test_nonempty_dir/subdir");
+                    let _ = hotpath::file_rmdir("/test_nonempty_dir/subdir");
                 }
                 Err(_) => {
                     test_skip("sys_rmdir non-empty", "cannot create subdir");
                 }
             }
-            let _ = vfs::file_rmdir("/test_nonempty_dir");
+            let _ = hotpath::file_rmdir("/test_nonempty_dir");
         }
         Err(_) => {
             test_skip("sys_rmdir non-empty", "filesystem not writable");
@@ -439,7 +439,7 @@ fn test_sys_unlink() {
             let _ = file_close(fd);
 
             // Delete file using unlink
-            match vfs::file_unlink("/test_unlink_file.txt") {
+            match hotpath::file_unlink("/test_unlink_file.txt") {
                 Ok(()) => {
                     test_pass("sys_unlink removes file");
 
@@ -464,7 +464,7 @@ fn test_sys_unlink() {
     }
 
     // Test deleting nonexistent file
-    match vfs::file_unlink("/nonexistent_file_xyz.txt") {
+    match hotpath::file_unlink("/nonexistent_file_xyz.txt") {
         Ok(()) => {
             test_fail("sys_unlink (nonexistent)", "should fail");
         }
@@ -474,7 +474,7 @@ fn test_sys_unlink() {
     }
 
     // Test deleting root directory (should fail)
-    match vfs::file_unlink("/") {
+    match hotpath::file_unlink("/") {
         Ok(()) => {
             test_fail("sys_unlink root", "should fail");
         }

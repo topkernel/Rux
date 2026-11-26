@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
 use crate::mm::pagemap::AddressSpace;
-use crate::fs::FdTable;
+use crate::fs::types::FdTable;
 use crate::signal::{SignalStruct, SigPending};
 use crate::config::TIME_SLICE_TICKS as DEFAULT_TIME_SLICE;
 use alloc::boxed::Box;
@@ -1219,7 +1219,7 @@ pub struct Task {
     /// Filesystem information (cwd, root, umask)
     ///
     /// Shared between threads when CLONE_FS is used
-    fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+    fs: Option<alloc::sync::Arc<crate::fs::types::FsStruct>>,
 
     /// Signal handling structure (signal_struct)
     /// Use Arc for CLONE_SIGHAND sharing between threads
@@ -1852,7 +1852,7 @@ impl Task {
             brk: core::sync::atomic::AtomicU64::new(0),
             oom_score_adj: core::sync::atomic::AtomicI32::new(0),
             ioprio: core::sync::atomic::AtomicI32::new(0),
-            fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
+            fs: Some(alloc::sync::Arc::new(crate::fs::types::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
             sem_undo: Spinlock::new(alloc::vec::Vec::new()),
             itimer_ids: [
@@ -1976,7 +1976,7 @@ impl Task {
     fn register_slot_deferred_sizes() {
         crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
         crate::mm::deferred_free::register_deferred_size(
-            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::types::FdTable>(),
         );
         crate::mm::deferred_free::register_deferred_size(
             2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
@@ -5396,7 +5396,7 @@ impl Task {
     }
 
     /// Get Arc reference to fs_struct (for CLONE_FS)
-    pub fn fs_arc(&self) -> Option<alloc::sync::Arc<crate::fs::FsStruct>> {
+    pub fn fs_arc(&self) -> Option<alloc::sync::Arc<crate::fs::types::FsStruct>> {
         self.fs.clone()
     }
 
@@ -5411,7 +5411,7 @@ impl Task {
     }
 
     /// Set fs_struct
-    pub fn set_fs(&mut self, fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>) {
+    pub fn set_fs(&mut self, fs: Option<alloc::sync::Arc<crate::fs::types::FsStruct>>) {
         self.fs = fs;
     }
 
@@ -5627,7 +5627,7 @@ pub use task_offsets::*;
 /// Get current process's file descriptor table
 ///
 /// Returns None if no current task is set or task has no fdtable.
-pub fn get_current_fdtable() -> Option<&'static crate::fs::FdTable> {
+pub fn get_current_fdtable() -> Option<&'static crate::fs::types::FdTable> {
     match crate::sched::current() {
         Some(c) => c.try_fdtable(),
         None => None,

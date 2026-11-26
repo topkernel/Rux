@@ -1205,7 +1205,7 @@ pub fn release_cache_mapping_pin(ppn: usize) {
     let key = page.mapping() as u64;
     let index = page.index() as u64;
     if key != 0 {
-        crate::fs::page_cache::get_page_cache().put_by_key(key, index);
+        crate::fs::hotpath::get_page_cache().put_by_key(key, index);
     }
 }
 
@@ -1406,7 +1406,7 @@ pub fn copy_page_table_cow(
                         if pte0.bits() & cow_flags::PCACHE != 0 {
                             let key = page.mapping() as u64;
                             let index = page.index() as u64;
-                            if !crate::fs::page_cache::get_page_cache()
+                            if !crate::fs::hotpath::get_page_cache()
                                 .pin_by_key(key, index)
                             {
                                 // Entry vanished while a pin existed —

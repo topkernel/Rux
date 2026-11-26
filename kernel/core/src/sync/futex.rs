@@ -5805,7 +5805,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 if let Some(f) = fdt.get_file(fd as usize) {
                                     let kind = match f.get_ops() {
                                         Some(ops) => {
-                                            let p = ops as *const crate::fs::FileOps;
+                                            let p = ops as *const crate::fs::types::FileOps;
                                             if crate::api::net::is_unix_socket_ops(ops) {
                                                 match crate::api::net::unix_fd_bound_peer(
                                                     fd as usize,
@@ -6280,7 +6280,7 @@ fn rwfz_op_log(uaddr: usize, op: i32, val: u32, result: i64) {
 /// resolve <ino> through the memfd name registry (recorded at
 /// memfd_create) so APPFD/APPMAP can name the engine libs the children
 /// map through memfds ("anon_inode:[17] memfd:libXXX").
-fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
+fn probe_file_path(f: &crate::fs::types::File) -> alloc::string::String {
     let p = f.path();
     if let Some(rest) = p.strip_prefix("anon_inode:[") {
         if let Some(num) = rest.strip_suffix(']') {

@@ -47,7 +47,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use crate::fs::file::{File, FileFlags, FileOps};
+use crate::fs::types::{File, FileFlags, FileOps};
 use crate::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
@@ -214,7 +214,7 @@ pub struct UnixSocket {
     /// The reg key IS the inode identity, so keeping the Arc prevents
     /// (fs_id, ino) from being recycled while this socket is bound —
     /// the same reason Linux's unix socket holds its inode.
-    node_inode: Spinlock<Option<alloc::sync::Arc<crate::fs::inode::Inode>>>,
+    node_inode: Spinlock<Option<alloc::sync::Arc<crate::fs::types::Inode>>>,
     /// Connected peer (STREAM, and DGRAM socketpairs). Weak both ways: no
     /// Arc cycle, and the peer's close() makes upgrade() fail — that IS
     /// the EOF/EPIPE signal.
@@ -728,7 +728,7 @@ fn fs_reg_key(raw: &str) -> Result<String, i32> {
     if raw.len() > PATH_LIMIT {
         return Err(-36); // ENAMETOOLONG
     }
-    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW)?;
+    let vp = crate::fs::hotpath::path_lookup(raw, crate::fs::hotpath::LOOKUP_FOLLOW)?;
     let inode = vp.inode.ok_or(-2i32)?;
     Ok(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
 }
@@ -1198,7 +1198,7 @@ fn unix_recvmsg_user(
             if let Some(peer) = sock.peer_arc() {
                 let fid = peer.file_id.load(Ordering::Acquire);
                 if fid != 0 {
-                    crate::fs::event_notify::epoll_notify_file(fid);
+                    crate::fs::hotpath::epoll_notify_file(fid);
                 }
             }
             Ok(UnixRecvResult {
@@ -1276,7 +1276,7 @@ fn unix_recvmsg_user(
                     peer.wait_queue.wake_up_one();
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
-                        crate::fs::event_notify::epoll_notify_file(fid);
+                        crate::fs::hotpath::epoll_notify_file(fid);
                     }
                 }
             }
@@ -1441,7 +1441,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
         // unlinked while it stayed bound). Undo the stray node so bind
         // does not litter the fs.
         if !addr.key.starts_with('\0') {
-            let _ = crate::fs::vfs::vfs_unlink(&addr.key);
+            let _ = crate::fs::hotpath::vfs_unlink(&addr.key);
             *sock.node_inode.lock() = None;
         }
         return Err(-98); // EADDRINUSE
@@ -1476,23 +1476,23 @@ fn is_fs_path(key: &str) -> bool {
 /// Returns the retyped inode — the socket's name-table identity.
 fn create_socket_node(
     path: &str,
-) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i32> {
+) -> Result<alloc::sync::Arc<crate::fs::types::Inode>, i32> {
     // O_WRONLY|O_CREAT|O_EXCL — the transient fd is closed immediately.
-    match crate::fs::file_open(path, 0o1 | 0o100 | 0o200 | 0o1000, 0o777) {
+    match crate::fs::hotpath::file_open(path, 0o1 | 0o100 | 0o200 | 0o1000, 0o777) {
         Ok(fd) => {
             // fd is a valid open descriptor from file_open above.
             let inode = {
-                let file = match crate::fs::get_file_fd(fd) {
+                let file = match crate::fs::hotpath::get_file_fd(fd) {
                     Some(f) => f,
                     None => {
-                        crate::fs::close_file_fd(fd);
+                        crate::fs::hotpath::close_file_fd(fd);
                         return Err(-5); // EIO
                     }
                 };
                 match file.get_inode() {
                     Some(i) => i.clone(),
                     None => {
-                        crate::fs::close_file_fd(fd);
+                        crate::fs::hotpath::close_file_fd(fd);
                         return Err(-5); // EIO
                     }
                 }
@@ -1500,14 +1500,14 @@ fn create_socket_node(
             // Retype to S_IFSOCK (mode bits: 0777 & ~umask was applied at
             // create; keep the permission bits, swap the type field).
             let full_mode =
-                crate::fs::inode::InodeMode::S_IFSOCK | (inode.mode.bits() & 0o777);
+                crate::fs::types::InodeMode::S_IFSOCK | (inode.mode.bits() & 0o777);
             let ret = inode.op_setattr(
-                crate::fs::inode::setattr_attr::ATTR_MODE,
+                crate::fs::hotpath::setattr_attr::ATTR_MODE,
                 full_mode as u64,
                 0,
             );
             // SAFETY: fd is a valid open descriptor from file_open above.
-            crate::fs::close_file_fd(fd);
+            crate::fs::hotpath::close_file_fd(fd);
             if ret != 0 {
                 return Err(ret);
             }
@@ -1700,7 +1700,7 @@ pub fn unix_connect(
             // arrival.
             let fid = server.file_id.load(Ordering::Acquire);
             if fid != 0 {
-                crate::fs::event_notify::epoll_notify_file(fid);
+                crate::fs::hotpath::epoll_notify_file(fid);
             }
             // rux:socksnap (retired debug=socksnap) (launcher-chain hunt, b16): name every client
             // that reaches a Spawn-family listener. The OH appspawn
@@ -2688,7 +2688,7 @@ pub fn unix_send(
                 // arrival, not just empty→nonempty transitions).
                 let fid = target.file_id.load(Ordering::Acquire);
                 if fid != 0 {
-                    crate::fs::event_notify::epoll_notify_file(fid);
+                    crate::fs::hotpath::epoll_notify_file(fid);
                 }
                 return Ok(sent_len);
             }
@@ -2932,7 +2932,7 @@ pub fn unix_recv(
                     }
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
-                        crate::fs::event_notify::epoll_notify_file(fid);
+                        crate::fs::hotpath::epoll_notify_file(fid);
                     }
                 }
                 return Ok(UnixRecvResult {
@@ -2971,7 +2971,7 @@ pub fn unix_recv(
                 if let Some(peer) = sock.peer_arc() {
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
-                        crate::fs::event_notify::epoll_notify_file(fid);
+                        crate::fs::hotpath::epoll_notify_file(fid);
                     }
                 }
                 return Ok(UnixRecvResult {
@@ -3032,7 +3032,7 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
             // EOF is a readability edge for the peer's watchers too.
             let fid = peer.file_id.load(Ordering::Acquire);
             if fid != 0 {
-                crate::fs::event_notify::epoll_notify_file(fid);
+                crate::fs::hotpath::epoll_notify_file(fid);
             }
         }
     }
@@ -3132,7 +3132,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
         // its EPOLLET watchers must see (Xorg detects dead clients this way).
         let fid = peer.file_id.load(Ordering::Acquire);
         if fid != 0 {
-            crate::fs::event_notify::epoll_notify_file(fid);
+            crate::fs::hotpath::epoll_notify_file(fid);
         }
     }
     // Drop the pinned socket-node inode (its identity was our reg key).
@@ -3601,7 +3601,7 @@ fn unix_recv_stream_user(
                 peer.wait_queue.wake_up_one();
                 let fid = peer.file_id.load(Ordering::Acquire);
                 if fid != 0 {
-                    crate::fs::event_notify::epoll_notify_file(fid);
+                    crate::fs::hotpath::epoll_notify_file(fid);
                 }
             }
             if !files.is_empty() {
@@ -3678,7 +3678,7 @@ fn unix_file_close(file: &File) -> i32 {
 }
 
 fn unix_file_poll(file: &File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+    use crate::fs::hotpath::poll_events::*;
     // SAFETY: ops identity was verified (see unix_file_read).
     let socket = match unix_of_file(file) {
         Some(s) => s,
@@ -3932,7 +3932,7 @@ pub fn unix_socketpair(type_: i32) -> Result<(usize, usize), i32> {
             // Unwind the first fd so neither side leaks.
             // SAFETY: close_file_fd operates on the current task's fd
             // table; fd0 was just installed by unix_socket_install.
-            let _ = crate::fs::file::close_file_fd(fd0);
+            let _ = crate::fs::hotpath::close_file_fd(fd0);
             Err(e)
         }
     }
@@ -4314,6 +4314,6 @@ pub fn unix_park_audit() {
 /// 118th param-sender hunt: resolve the connected PEER of a unix-socket
 /// File as a strong Arc (None = not a unix socket / no live peer). Read
 /// diag contract: own locks only, no allocation.
-pub fn unix_peer_of_file(file: &crate::fs::File) -> Option<alloc::sync::Arc<UnixSocket>> {
+pub fn unix_peer_of_file(file: &crate::fs::types::File) -> Option<alloc::sync::Arc<UnixSocket>> {
     unix_of_file_diag(file).and_then(|s| s.peer_arc())
 }

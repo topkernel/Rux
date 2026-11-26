@@ -34,8 +34,8 @@
 #![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 
-use crate::fs::dev_t::DevNo;
-use crate::fs::FileOps;
+use crate::fs::types::DevNo;
+use crate::fs::types::FileOps;
 use crate::sync::spinlock::Spinlock;
 
 // ioctl numbers — _IOR/_IOW('A', nr, ...) with the exact sizes from
@@ -54,7 +54,7 @@ const ACCESS_TOKENID_SET_PERMISSION: u32 = ioc(1, 8, 12);
 
 const ACCESS_TOKEN_MINOR: u32 = 0xB7;
 
-pub const DEV_ACCESS_TOKEN: DevNo = DevNo::new(crate::fs::dev_t::MISC_MAJOR, ACCESS_TOKEN_MINOR);
+pub const DEV_ACCESS_TOKEN: DevNo = DevNo::new(crate::fs::hotpath::MISC_MAJOR, ACCESS_TOKEN_MINOR);
 
 #[derive(Clone, Copy, Default)]
 struct TokenInfo {
@@ -377,7 +377,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
 
 /// Dispatch entry from sys_ioctl (None when the file is not ours; ops
 /// identity check — evdev/binder pattern).
-pub fn access_token_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Option<i64> {
+pub fn access_token_file_ioctl(file: &crate::fs::types::File, request: u32, arg: usize) -> Option<i64> {
     let ops = file.get_ops()?;
     if !core::ptr::eq(ops as *const _, &ACCESS_TOKEN_OPS as *const _) {
         return None;
@@ -385,12 +385,12 @@ pub fn access_token_file_ioctl(file: &crate::fs::File, request: u32, arg: usize)
     Some(access_token_ioctl(request, arg))
 }
 
-fn at_close(_file: &crate::fs::File) -> i32 {
+fn at_close(_file: &crate::fs::types::File) -> i32 {
     0
 }
 
-fn at_poll(_file: &crate::fs::File, _events: u16) -> u16 {
-    crate::fs::event_notify::poll_events::POLLIN | crate::fs::event_notify::poll_events::POLLRDNORM
+fn at_poll(_file: &crate::fs::types::File, _events: u16) -> u16 {
+    crate::fs::hotpath::poll_events::POLLIN | crate::fs::hotpath::poll_events::POLLRDNORM
 }
 
 pub static ACCESS_TOKEN_OPS: FileOps = FileOps::builder()
@@ -400,13 +400,13 @@ pub static ACCESS_TOKEN_OPS: FileOps = FileOps::builder()
 
 /// Register the char device (called from devfs init, next to binder).
 pub fn register() {
-    let _ = crate::fs::leaf_glue::devfs::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
+    let _ = crate::fs::hotpath::devfs::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
     crate::pr_info!("atid: /dev/access_token_id registered");
 }
 
 /// The devfs registration row (IpcHooks): the framework's devfs
 /// populate asks for the char-device number + ops static instead of
 /// naming them directly.
-pub fn char_device() -> Option<(crate::fs::dev_t::DevNo, &'static crate::fs::file::FileOps)> {
+pub fn char_device() -> Option<(crate::fs::types::DevNo, &'static crate::fs::types::FileOps)> {
     Some((DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS))
 }

@@ -773,7 +773,7 @@ static LAST_ISIG_JIFFY: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 /// IRQ-context half of the ^C path: record an ISIG character (INTR ^C /
 /// QUIT ^\ / SUSP ^Z) for task-context delivery. Never sends directly.
 fn tty_isig_record(c: u8) {
-    let lflag = crate::fs::leaf_glue::tty::console_lflag();
+    let lflag = crate::fs::hotpath::tty::console_lflag();
     const L_ISIG: u32 = 0x0001;
     if lflag & L_ISIG == 0 {
         return;
@@ -821,7 +821,7 @@ fn tty_isig_deliver(signo: i32) {
     LAST_ISIG_JIFFY.store(now, core::sync::atomic::Ordering::Release);
 
     // Target the tty foreground process group; fall back to the caller's.
-    let mut pgid = crate::fs::leaf_glue::tty::console_fg_pgid();
+    let mut pgid = crate::fs::hotpath::tty::console_fg_pgid();
     if pgid == 0 {
         pgid = crate::process::current_pgid();
     }
@@ -983,7 +983,7 @@ pub fn uart_rx_bridge_to_tty() {
             break;
         }
         match UART_RX_BUF.get() {
-            Some(c) => crate::fs::leaf_glue::tty::console_receive_byte(c),
+            Some(c) => crate::fs::hotpath::tty::console_receive_byte(c),
             None => break,
         }
     }
@@ -1217,10 +1217,10 @@ pub fn uart_has_data() -> bool {
 
 /// Process input character: handle ISIG, echo, and newline translation.
 fn process_input(c: u8) -> Option<u8> {
-    let echo_enabled = crate::fs::leaf_glue::tty::console_echo_enabled();
+    let echo_enabled = crate::fs::hotpath::tty::console_echo_enabled();
 
     // ISIG processing (signal generation characters)
-    let lflag = crate::fs::leaf_glue::tty::console_lflag();
+    let lflag = crate::fs::hotpath::tty::console_lflag();
     const L_ISIG: u32 = 0x0001;
     if lflag & L_ISIG != 0 {
         let signo = match c {

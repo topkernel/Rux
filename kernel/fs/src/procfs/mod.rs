@@ -46,9 +46,9 @@ use alloc::format;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use rux::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType};
-use rux::fs::inode::{Inode, InodeMode, Ino, INodeOps};
-use rux::fs::mount::{VfsMount, MntFlags};
+use rux::fs::types::{SuperBlock, SuperBlockFlags, FileSystemType};
+use rux::fs::types::{Inode, InodeMode, Ino, INodeOps};
+use rux::fs::types::{VfsMount, MntFlags};
 use crate::errno;
 
 // Sub-modules for individual procfs entries
@@ -133,7 +133,7 @@ pub(crate) fn fdinfo_file_of(ino: u64) -> Option<(u64, u32)> {
     let pid_val = ino / 10000;
     let rem = ino % 10000;
     let fd = rem.checked_sub(FDINFO_FILE_INO_OFF)?;
-    if pid::is_valid_pid(pid_val) && (fd as usize) < rux::fs::file::MAX_FDS {
+    if pid::is_valid_pid(pid_val) && (fd as usize) < rux::fs::types::MAX_FDS {
         Some((pid_val, fd as u32))
     } else {
         None
@@ -1226,7 +1226,7 @@ static GLOBAL_PROC_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
 /// ProcFS mount function
 // SAFETY: _fs_context is a valid FsContext reference from the VFS mount call;
 // ProcFSSuperBlock is a simple wrapper with no unsafe invariants.
-fn procfs_mount(_fs_context: &rux::fs::superblock::FsContext<'_>) -> Result<*mut SuperBlock, i32> {
+fn procfs_mount(_fs_context: &rux::fs::types::FsContext<'_>) -> Result<*mut SuperBlock, i32> {
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut SuperBlock;
     Ok(procfs_sb_ptr)
@@ -1423,7 +1423,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         None => {
             // Fallback: create a minimal root node
             let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-            inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+            inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
             inode.ops = Some(&PROCFS_INODE_OPS);
             return alloc::sync::Arc::new(inode);
         }
@@ -1435,7 +1435,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
     // report the fs_id-0 fallback device while every /proc/<pid> inode
     // reported procfs's, so /proc looked like a device boundary in the
     // middle of procfs (find -xdev, du -x mis-walk).
-    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
     inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
     alloc::sync::Arc::new(inode)
@@ -1460,7 +1460,7 @@ pub fn exists(path: &str) -> bool {
 
 /// Initialize ProcFS
 pub fn init_procfs() -> Result<(), i32> {
-    use rux::fs::superblock::register_filesystem;
+    use rux::fs::hotpath::register_filesystem;
 
     // 1. Register filesystem type
     register_filesystem(&PROCFS_FS_TYPE)?;
@@ -1569,7 +1569,7 @@ fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
                     let fd_num: u64 = name
                         .iter()
                         .fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
-                    if (fd_num as usize) < rux::fs::file::MAX_FDS {
+                    if (fd_num as usize) < rux::fs::types::MAX_FDS {
                         return Ok(pid_val * 10000 + FD_LINK_INO_OFF + fd_num);
                     }
                 }
@@ -1616,7 +1616,7 @@ fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
             let fd_num: u64 = name
                 .iter()
                 .fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
-            if (fd_num as usize) < rux::fs::file::MAX_FDS {
+            if (fd_num as usize) < rux::fs::types::MAX_FDS {
                 return Ok(pid_val * 10000 + FDINFO_FILE_INO_OFF + fd_num);
             }
         }
@@ -1649,10 +1649,10 @@ fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 
 /// ProcFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn procfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn procfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     // Distinct st_dev for procfs: fallback only — the central stat exits
     // overwrite this with the instance's anonymous device
-    // (inode::stat_dev_user, Linux get_anon_bdev semantics), so procfs
+    // (rux::fs::hotpath::stat_dev_user, Linux get_anon_bdev semantics), so procfs
     // vs the root ext4 (and any other mount) always report different
     // devices (RESOLVE_NO_XDEV / openat2 st_dev comparison, LTP
     // openat202's resolve-no-xdev case).
@@ -1924,7 +1924,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 // reuses the VFS-layer PROCFS_DIR_OPS (private_data = pid).
                 if name == b"fd" && ino == pid_val * 10000 + FD_DIR_INO_OFF {
                     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-                    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                     inode.ops = Some(&PROCFS_DIR_OPS);
                     inode.private_data = Some(pid_val as usize as *mut u8);
                     return Ok(Arc::new(inode));
@@ -1935,7 +1935,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 // PROCFS_INODE_OPS with a ProcFSNode like other pid files).
                 if name == b"attr" && ino == pid_val * 10000 + ATTR_DIR_INO_OFF {
                     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-                    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                     inode.ops = Some(&PROCFS_INODE_OPS);
                     // private_data None + is_attr_dir(ino) drives lookups.
                     return Ok(Arc::new(inode));
@@ -1951,7 +1951,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 if name == b"task" && ino == pid_val * 10000 + TASK_DIR_INO_OFF {
                     let mut inode =
                         Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-                    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                     inode.ops = Some(&PROCFS_INODE_OPS);
                     // private_data None + is_task_dir(ino) drives lookups
                     // and readdir below.
@@ -1962,7 +1962,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 // lookups/readdir below.
                 if name == b"fdinfo" && ino == pid_val * 10000 + FDINFO_DIR_INO_OFF {
                     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-                    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                     inode.ops = Some(&PROCFS_INODE_OPS);
                     return Ok(Arc::new(inode));
                 }
@@ -1971,7 +1971,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 // readdir run through PROCFS_NS_DIR_OPS.
                 if name == b"ns" && ino == pid_val * 10000 + NS_DIR_INO_OFF {
                     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-                    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                     inode.ops = Some(&PROCFS_NS_DIR_OPS);
                     inode.private_data = Some(pid_val as usize as *mut u8);
                     return Ok(Arc::new(inode));
@@ -1983,7 +1983,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
                 {
                     let mut inode =
                         Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
-                    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                     inode.ops = Some(&PROCFS_INODE_OPS);
                     // private_data None + ino encodes (pid, fd); handled by
                     // procfs_readlink below.
@@ -2026,7 +2026,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
 
         let mut inode = Inode::new(ino, mode);
-    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;  // icache isolation (VFS-H8)
+    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;  // icache isolation (VFS-H8)
         inode.ops = Some(&PROCFS_INODE_OPS);
         inode.private_data = Some(raw_ptr);
         return Ok(Arc::new(inode));
@@ -2043,7 +2043,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
             if pid::is_valid_pid(tid) {
                 let mode = InodeMode::new(InodeMode::S_IFDIR | 0o555);
                 let mut inode = Inode::new(tid, mode);
-                inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+                inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
                 inode.ops = Some(&PROCFS_INODE_OPS);
                 return Ok(Arc::new(inode));
             }
@@ -2085,7 +2085,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
         let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o644));
-        inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+        inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
         inode.ops = Some(&PROCFS_INODE_OPS);
         inode.private_data = Some(raw_ptr);
         // Owned by the task itself (Linux procfs pid attr files): the
@@ -2133,7 +2133,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
         let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o444));
-        inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+        inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
         inode.ops = Some(&PROCFS_INODE_OPS);
         inode.private_data = Some(raw_ptr);
         return Ok(Arc::new(inode));
@@ -2148,7 +2148,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
             if current_pid() as u64 == pid_val || find_task_by_pid(pid_val as u32).is_some() {
                 let mode = InodeMode::new(InodeMode::S_IFDIR | 0o555);
                 let mut inode = Inode::new(pid_val, mode);
-    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;  // icache isolation (VFS-H8)
+    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;  // icache isolation (VFS-H8)
                 inode.ops = Some(&PROCFS_INODE_OPS);
                 // private_data for PID dirs is set lazily when accessed
                 return Ok(Arc::new(inode));
@@ -2172,7 +2172,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
     };
 
     let mut inode = Inode::new(child.ino, mode);
-    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;  // icache isolation (VFS-H8)
+    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;  // icache isolation (VFS-H8)
     inode.ops = Some(&PROCFS_INODE_OPS);
     inode.private_data = Some(Arc::as_ptr(&child) as *mut u8);
     Ok(Arc::new(inode))
@@ -2188,7 +2188,7 @@ pub struct ProcfsFileContent {
 }
 
 /// ProcFS file read operation
-fn procfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn procfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // The content box is this description's private data
     // (INV-FS-FILEPRIV-1, the framework edge).
     if let Some(content) = rux::fs::r#unsafe::file_privdata_ref::<ProcfsFileContent>(file) {
@@ -2210,7 +2210,7 @@ fn procfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 /// ProcFS file write operation: /proc/sys sysctl files (P1) and
 /// /proc/[pid]/oom_score_adj. Everything else stays EINVAL — procfs has no
 /// other writable nodes.
-fn procfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn procfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // The inode cell is write-once at open (File::get_inode discipline);
     // the node rides inode.private_data (INV-FS-PRIVDATA-1).
     let inode = match file.get_inode().cloned() {
@@ -2301,7 +2301,7 @@ fn procfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 }
 
 /// ProcFS file lseek operation
-fn procfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn procfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     // The content box is this description's private data
     // (INV-FS-FILEPRIV-1, mut twin: lseek and read on one description
     // are serialized the same way the pre-edge direct store was).
@@ -2355,7 +2355,7 @@ fn procfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize 
 }
 
 /// ProcFS file close operation
-fn procfs_file_close(file: &rux::fs::File) -> i32 {
+fn procfs_file_close(file: &rux::fs::types::File) -> i32 {
     // The take empties the cell first (no use-after-free window); the
     // Box reclaim rides the framework edge (INV-FS-FILEPRIV-1).
     drop(rux::fs::r#unsafe::file_privdata_take::<ProcfsFileContent>(file));
@@ -2370,7 +2370,7 @@ fn procfs_file_close(file: &rux::fs::File) -> i32 {
 /// in the why-slow boot error-stream diff). Content stays kernel-owned.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
@@ -2411,8 +2411,8 @@ fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 /// epoll-add /proc/self/mountinfo (EPOLLIN|EPOLLET); epoll_ctl answers
 /// EPERM for poll-less files, so without this op the monitor's kernel
 /// source never armed.
-fn procfs_file_poll(_file: &rux::fs::File, events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+fn procfs_file_poll(_file: &rux::fs::types::File, events: u16) -> u16 {
+    use rux::fs::hotpath::poll_events::*;
     let mut r = 0u16;
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;
@@ -2424,7 +2424,7 @@ fn procfs_file_poll(_file: &rux::fs::File, events: u16) -> u16 {
 }
 
 /// ProcFS file operations table
-pub static PROCFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static PROCFS_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(procfs_file_read)
     .write(procfs_file_write)
     .lseek(procfs_file_lseek)
@@ -2433,30 +2433,30 @@ pub static PROCFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
     .build();
 
 /// /proc/<pid> DIRECTORY operations. The open path attaches a pinned
-/// pidfd identity (`rux::fs::pidfd::PidFdData`) to the file, so these
+/// pidfd identity (`rux::fs::types::PidFdData`) to the file, so these
 /// descriptors work as pidfds for pidfd_send_signal / pidfd_getfd and
 /// poll() as exit readiness — the pre-pidfd_open(2) mechanism the
 /// reference kernel still supports (open("/proc/<pid>") + pidfd ops).
 /// Directory behavior otherwise matches DIR_FILE_OPS (EISDIR read,
 /// entry-index lseek); close drops the pin.
-fn proc_piddir_close(file: &rux::fs::File) -> i32 {
-    rux::fs::pidfd::pidfd_dir_close(file)
+fn proc_piddir_close(file: &rux::fs::types::File) -> i32 {
+    rux::fs::hotpath::pidfd_dir_close(file)
 }
 
-fn proc_piddir_poll(file: &rux::fs::File, events: u16) -> u16 {
-    rux::fs::pidfd::pidfd_dir_poll(file, events)
+fn proc_piddir_poll(file: &rux::fs::types::File, events: u16) -> u16 {
+    rux::fs::hotpath::pidfd_dir_poll(file, events)
 }
 
-pub static PROC_PIDDIR_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
-    .read(rux::fs::file::dir_read_eisdir)
-    .lseek(rux::fs::file::dir_file_lseek)
+pub static PROC_PIDDIR_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
+    .read(rux::fs::hotpath::dir_read_eisdir)
+    .lseek(rux::fs::hotpath::dir_file_lseek)
     .poll(proc_piddir_poll)
     .close(proc_piddir_close)
     .build();
 
 /// ProcFS get_file_ops: return ops based on inode type
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn procfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn procfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         // /proc/kmsg is a BLOCKING STREAM, not a snapshot dynamic file:
         // hilogd.rd_kmsg read-EOF-looped at 60-92K/s on the snapshot
@@ -2481,7 +2481,7 @@ fn procfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps>
         if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
             return Some(&PROC_PIDDIR_OPS);
         }
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -2489,7 +2489,7 @@ fn procfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps>
 
 /// ProcFS open: pre-read content for regular files
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn procfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
+fn procfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     if !inode.mode.is_regular_file() {
         // /proc/<pid> directories: attach the pinned pidfd identity at
         // open (instance-checked; a later pid reuse under the same pid
@@ -2499,9 +2499,9 @@ fn procfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
             && pid::is_valid_pid(inode.ino)
         {
             if let Some(data) =
-                rux::fs::pidfd::make_pidfd_data(inode.ino as u32)
+                rux::fs::hotpath::make_pidfd_data(inode.ino as u32)
             {
-                rux::fs::pidfd::attach(file, data);
+                rux::fs::hotpath::attach(file, data);
             }
         }
         return 0;
@@ -2545,18 +2545,18 @@ fn procfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
 
 /// Generate directory entries for a /proc/[pid]/ directory
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<rux::fs::inode::VfsDirEntry> {
-    use rux::fs::inode::file_type;
+fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<rux::fs::types::VfsDirEntry> {
+    use rux::fs::hotpath::file_type;
 
     let mut entries = alloc::vec::Vec::new();
 
     // . and ..
-    entries.push(rux::fs::inode::VfsDirEntry {
+    entries.push(rux::fs::types::VfsDirEntry {
         ino: pid,
         name: alloc::vec![b'.'],
         file_type: file_type::DT_DIR,
     });
-    entries.push(rux::fs::inode::VfsDirEntry {
+    entries.push(rux::fs::types::VfsDirEntry {
         ino: 1, // proc root ino
         name: alloc::vec![b'.', b'.'],
         file_type: file_type::DT_DIR,
@@ -2585,7 +2585,7 @@ fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<rux::fs::inode::VfsDirE
     ];
 
     for (name, ft) in files.iter() {
-        entries.push(rux::fs::inode::VfsDirEntry {
+        entries.push(rux::fs::types::VfsDirEntry {
             ino: pid,
             name: name.to_vec(),
             file_type: *ft,
@@ -2597,8 +2597,8 @@ fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<rux::fs::inode::VfsDirE
 
 /// ProcFS readdir: list directory entries
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
-    use rux::fs::inode::file_type;
+fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::types::VfsDirEntry>> {
+    use rux::fs::hotpath::file_type;
 
     // PID directory: private_data is None, inode.ino stores the PID
     // Only match when private_data is absent (distinguishes from root procfs inode)
@@ -2612,7 +2612,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
     // pid-hash bucket locks, format names after the walk — no
     // allocation while holding the bucket spinlocks.
     if inode.private_data.is_none() && is_task_dir(inode.ino) {
-        use rux::fs::inode::file_type;
+        use rux::fs::hotpath::file_type;
         let pid_val = (inode.ino / 10000) as u32;
         let mut tids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
         crate::process::pid_hash::pid_hash_for_each_task(|t| {
@@ -2623,7 +2623,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
         tids.sort_unstable();
         let entries = tids
             .into_iter()
-            .map(|tid| rux::fs::inode::VfsDirEntry {
+            .map(|tid| rux::fs::types::VfsDirEntry {
                 ino: tid,
                 name: alloc::format!("{}", tid).into_bytes(),
                 file_type: file_type::DT_DIR,
@@ -2634,11 +2634,11 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
 
     // /proc/[pid]/fdinfo directory: one status file per open fd.
     if inode.private_data.is_none() && is_fdinfo_dir(inode.ino) {
-        use rux::fs::inode::file_type;
+        use rux::fs::hotpath::file_type;
         let pid_val = inode.ino / 10000;
         let entries = crate::procfs::pid::list_fds(pid_val)
             .into_iter()
-            .map(|(fd, _)| rux::fs::inode::VfsDirEntry {
+            .map(|(fd, _)| rux::fs::types::VfsDirEntry {
                 ino: pid_val * 10000 + FDINFO_FILE_INO_OFF + fd as u64,
                 name: alloc::format!("{}", fd).into_bytes(),
                 file_type: file_type::DT_REG,
@@ -2649,7 +2649,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
 
     // /proc/[pid]/attr directory: three label files.
     if inode.private_data.is_none() && is_attr_dir(inode.ino) {
-        use rux::fs::inode::file_type;
+        use rux::fs::hotpath::file_type;
         let pid_val = inode.ino / 10000;
         let mut entries = alloc::vec::Vec::new();
         for (i, name) in [
@@ -2663,7 +2663,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
         .iter()
         .enumerate()
         {
-            entries.push(rux::fs::inode::VfsDirEntry {
+            entries.push(rux::fs::types::VfsDirEntry {
                 ino: pid_val * 10000 + ATTR_FILE_INO_OFF + i as u64,
                 name: name.to_vec(),
                 file_type: file_type::DT_REG,
@@ -2684,7 +2684,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
             ProcFSType::RegularFile => file_type::DT_REG,
             ProcFSType::SymbolicLink => file_type::DT_LNK,
         };
-        entries.push(rux::fs::inode::VfsDirEntry {
+        entries.push(rux::fs::types::VfsDirEntry {
             ino: *ino,
             name: name.clone(),
             file_type: dt,
@@ -2707,7 +2707,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
             if pid == 0 {
                 continue;
             }
-            entries.push(rux::fs::inode::VfsDirEntry {
+            entries.push(rux::fs::types::VfsDirEntry {
                 ino: pid as u64,
                 name: alloc::format!("{}", pid).into_bytes(),
                 file_type: file_type::DT_DIR,
@@ -2769,7 +2769,7 @@ fn procfs_ns_dir_iget(
     ino: Ino,
 ) -> Result<Arc<Inode>, errno::Errno> {
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
-    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
     // private_data None + ino encodes (pid, kind); handled by
     // procfs_readlink / procfs_getattr.
@@ -2780,22 +2780,22 @@ fn procfs_ns_dir_iget(
 /// SAFETY: VFS callback contract; private_data stores the PID.
 fn procfs_ns_dir_readdir(
     inode: &Inode,
-) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
-    use rux::fs::inode::file_type;
+) -> Option<alloc::vec::Vec<rux::fs::types::VfsDirEntry>> {
+    use rux::fs::hotpath::file_type;
     let pid_val = inode.private_data? as usize as u64;
     let mut entries = alloc::vec::Vec::new();
-    entries.push(rux::fs::inode::VfsDirEntry {
+    entries.push(rux::fs::types::VfsDirEntry {
         ino: inode.ino,
         name: alloc::vec![b'.'],
         file_type: file_type::DT_DIR,
     });
-    entries.push(rux::fs::inode::VfsDirEntry {
+    entries.push(rux::fs::types::VfsDirEntry {
         ino: 1,
         name: alloc::vec![b'.', b'.'],
         file_type: file_type::DT_DIR,
     });
     for kind in crate::process::ns::NsKind::ALL {
-        entries.push(rux::fs::inode::VfsDirEntry {
+        entries.push(rux::fs::types::VfsDirEntry {
             ino: pid_val * 10000 + NS_LINK_INO_OFF + kind.index(),
             name: kind.name().as_bytes().to_vec(),
             file_type: file_type::DT_LNK,
@@ -2806,7 +2806,7 @@ fn procfs_ns_dir_readdir(
 
 /// Getattr of the ns directory itself.
 /// SAFETY: VFS callback contract.
-fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     stat.st_ino = inode.ino;
     stat.st_mode = InodeMode::S_IFDIR | 0o555;
     stat.st_size = 0;
@@ -2841,7 +2841,7 @@ pub fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errn
         return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     let fd: u64 = name.iter().fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
-    if fd as usize >= rux::fs::file::MAX_FDS {
+    if fd as usize >= rux::fs::types::MAX_FDS {
         return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     // Closed (or out-of-range) fds are ENOENT, like Linux.
@@ -2868,7 +2868,7 @@ pub fn procfs_fd_dir_iget(
     ino: Ino,
 ) -> Result<Arc<Inode>, errno::Errno> {
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
-    inode.fs_id = rux::fs::inode::FS_ID_PROCFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
     Ok(Arc::new(inode))
 }
@@ -2943,16 +2943,16 @@ fn partitions_generate() -> alloc::vec::Vec<u8> {
 // ============================================================================
 
 /// The proc mount entry (old mount.rs "proc"|"procfs" arm, verbatim).
-pub fn mount_proc(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_proc(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data);
     mount_procfs().map_err(|e| e as i32)?;
-    rux::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
-    rux::fs::mount::register_mount(fs_type, target, "proc", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, create_root_inode(), mnt_flags);
+    rux::fs::hotpath::register_mount(fs_type, target, "proc", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["proc", "procfs"], mount_proc);
+    rux::fs::hotpath::register(&["proc", "procfs"], mount_proc);
 }
 
 // ============================================================================
@@ -2961,7 +2961,7 @@ pub fn mount_register() {
 // ============================================================================
 
 /// Synthetic INodeOps for procfs directory shortcuts (e.g., /proc/[pid]/fd/).
-pub static PROCFS_DIR_OPS: rux::fs::inode::INodeOps = rux::fs::inode::INodeOps {
+pub static PROCFS_DIR_OPS: rux::fs::types::INodeOps = rux::fs::types::INodeOps {
     lookup: Some(procfs_fd_dir_lookup),
     create: None,
     link: None,
@@ -2986,15 +2986,15 @@ pub static PROCFS_DIR_OPS: rux::fs::inode::INodeOps = rux::fs::inode::INodeOps {
 
 /// Readdir callback for synthetic procfs directories.
 /// Reads PID from inode.private_data, calls pid::list_fds().
-fn procfs_dir_readdir(inode: &rux::fs::inode::Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
+fn procfs_dir_readdir(inode: &rux::fs::types::Inode) -> Option<alloc::vec::Vec<rux::fs::types::VfsDirEntry>> {
     let pid = inode.private_data? as u64;
     let fds = pid::list_fds(pid);
 
-    let entries: alloc::vec::Vec<rux::fs::inode::VfsDirEntry> = fds.iter().map(|(fd, _path)| {
-        rux::fs::inode::VfsDirEntry {
+    let entries: alloc::vec::Vec<rux::fs::types::VfsDirEntry> = fds.iter().map(|(fd, _path)| {
+        rux::fs::types::VfsDirEntry {
             ino: *fd as u64,
             name: alloc::format!("{}", fd).into_bytes(),
-            file_type: rux::fs::inode::file_type::DT_LNK,
+            file_type: rux::fs::hotpath::file_type::DT_LNK,
         }
     }).collect();
 

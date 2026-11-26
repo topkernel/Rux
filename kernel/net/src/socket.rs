@@ -10,7 +10,7 @@ use crate::sync::spinlock::Spinlock;
 use crate::process::wait::WaitQueueHead;
 use core::cell::UnsafeCell;
 
-use crate::fs::file::{File, FileFlags, FileOps, FdTable};
+use crate::fs::types::{File, FileFlags, FileOps, FdTable};
 
 // ============================================================================
 // Socket Type Definitions
@@ -1651,7 +1651,7 @@ fn socket_close(file: &File) -> i32 {
 }
 
 fn socket_file_poll(file: &File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+    use crate::fs::hotpath::poll_events::*;
     let mut ready = 0u16;
 
     let socket = match socket_borrow(file, "poll") {
@@ -1784,7 +1784,7 @@ pub static SOCKET_OPS: FileOps = FileOps::builder()
 /// Pseudo-device id for sockfs-style stat identities (the pipe analog:
 /// PIPE_STAT_DEV). Sockets created by socket(2)/accept(2) have no VFS
 /// inode, so fstat(2) needs the anonymous-file branch of
-/// fs::vfs::file_stat to answer for them — Linux stats sockets on
+/// rux::fs::hotpath::file_stat to answer for them — Linux stats sockets on
 /// sockfs with mode S_IFSOCK|0777 and a distinct st_ino.
 pub const SOCK_STAT_DEV: u64 = 0x736f_636b_7300_0001;
 
@@ -1806,7 +1806,7 @@ pub const SOCK_STAT_DEV: u64 = 0x736f_636b_7300_0001;
 /// out ("Connection timed out"), the fifo's only writer closed, and
 /// logind logged "Session c1 logged out" milliseconds after the
 /// create (gdmr64-r71, session-21 hunt).
-pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::types::Stat) -> Option<i32> {
     let ops = file.get_ops()?;
     let is_socket = core::ptr::eq(ops as *const _, &SOCKET_OPS as *const _)
         || core::ptr::eq(
@@ -1922,7 +1922,7 @@ impl SocketTable {
                     // sk wake). See the file_id field note.
                     let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
                     if fid != 0 {
-                        crate::fs::event_notify::epoll_notify_file(fid);
+                        crate::fs::hotpath::epoll_notify_file(fid);
                     }
                 }
             }
@@ -1948,7 +1948,7 @@ impl SocketTable {
                     let woken = s.wait_queue.wake_up_all();
                     let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
                     if fid != 0 {
-                        crate::fs::event_notify::epoll_notify_file(fid);
+                        crate::fs::hotpath::epoll_notify_file(fid);
                     }
                     crate::trace::trace_net_udp_wake(
                         udp_fd,
@@ -2290,7 +2290,7 @@ pub fn socket_of_arc(file: &Arc<File>) -> Option<Arc<Socket>> {
     // fake success on e.g. a pipe; getpeername accidentally returned
     // ENOTSOCK only because of its state check).
     {
-        // get_ops is the typed ops-cell read (fs::file).
+        // get_ops is the typed ops-cell read (rux::fs::hotpath::file).
         match file.get_ops() {
             Some(ops) if core::ptr::eq(ops, &SOCKET_OPS) => {}
             _ => return None,

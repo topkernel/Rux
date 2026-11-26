@@ -1451,11 +1451,11 @@ fn build_code_page() -> [u8; 4096] {
         // their own arch before trusting the vDSO image. Mirrors
         // fs::elf::Elf64Ehdr::check_machine.
         #[cfg(feature = "aarch64")]
-        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_AARCH64 as u16;
+        let e_machine: u16 = crate::fs::types::ElfMachine::EM_AARCH64 as u16;
         #[cfg(feature = "riscv64")]
-        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_RISCV as u16;
+        let e_machine: u16 = crate::fs::types::ElfMachine::EM_RISCV as u16;
         #[cfg(feature = "x86_64")]
-        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_X86_64 as u16;
+        let e_machine: u16 = crate::fs::types::ElfMachine::EM_X86_64 as u16;
         e[18..20].copy_from_slice(&e_machine.to_le_bytes());
         e[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
         e[24..32].copy_from_slice(&(F_CLOCK_GETTIME as u64).to_le_bytes()); // entry

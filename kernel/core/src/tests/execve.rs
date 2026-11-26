@@ -54,11 +54,11 @@ pub fn test_execve() {
     // Test 8: execve preserves file descriptors without CLOEXEC
     // Verify by checking fd table is operational
     // Open a file, check fd works, then verify fd count
-    match crate::fs::file_open("/", crate::fs::FileFlags::O_RDONLY, 0) {
+    match crate::fs::hotpath::file_open("/", crate::fs::types::FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             // fd without CLOEXEC should survive execve (conceptually)
             test_pass("execve fd preservation (fd table operational)");
-            let _ = crate::fs::file_close(fd);
+            let _ = crate::fs::hotpath::file_close(fd);
         }
         Err(_) => {
             test_skip("execve fd preservation", "cannot open test fd");

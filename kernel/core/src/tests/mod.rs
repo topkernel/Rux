@@ -505,15 +505,15 @@ fn setup_boot_task_fdtable() {
     // scheduler is not running); nothing else can alias it concurrently.
     unsafe {
         if (*task).try_fdtable().is_none() {
-            (*task).set_fdtable(Some(Arc::new(crate::fs::FdTable::new())));
+            (*task).set_fdtable(Some(Arc::new(crate::fs::types::FdTable::new())));
         }
         // Console file as fd 0: TTY-class ioctls (TCGETS/TIOCGWINSZ/...)
         // are gated on file_is_tty(), and the CONDEV_OPS backing is the
         // same one /dev/console opens hand out.
-        let console_file = Arc::new(crate::fs::File::new(
-            crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_RDWR),
+        let console_file = Arc::new(crate::fs::types::File::new(
+            crate::fs::types::FileFlags::new(crate::fs::types::FileFlags::O_RDWR),
         ));
-        console_file.set_ops(crate::fs::leaf_glue::devfs::condev_ops());
+        console_file.set_ops(crate::fs::hotpath::devfs::condev_ops());
         if let Some(ft) = (*task).try_fdtable() {
             if let Some(fd) = ft.alloc_fd() {
                 let _ = ft.install_fd(fd, console_file);

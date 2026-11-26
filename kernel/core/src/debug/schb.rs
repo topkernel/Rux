@@ -200,18 +200,18 @@ pub fn oom_anat_dump() {
     taskdump_raw_line(b"\nOOM-ANAT sizes: vma=");
     taskdump_dec(core::mem::size_of::<crate::mm::vma::Vma>() as u64);
     taskdump_raw_line(b" file=");
-    taskdump_dec(core::mem::size_of::<crate::fs::file::File>() as u64);
+    taskdump_dec(core::mem::size_of::<crate::fs::types::File>() as u64);
     taskdump_raw_line(b" dentry=");
-    taskdump_dec(core::mem::size_of::<crate::fs::dentry::Dentry>() as u64);
+    taskdump_dec(core::mem::size_of::<crate::fs::types::Dentry>() as u64);
     taskdump_raw_line(b" inode=");
-    taskdump_dec(core::mem::size_of::<crate::fs::inode::Inode>() as u64);
+    taskdump_dec(core::mem::size_of::<crate::fs::types::Inode>() as u64);
     taskdump_raw_line(b" mm=");
     taskdump_dec(core::mem::size_of::<crate::mm::mm_struct::MmStruct>() as u64);
     taskdump_raw_line(b" ptregs=");
     taskdump_dec(core::mem::size_of::<crate::arch::pt_regs::PtRegs>() as u64);
     taskdump_raw_line(b" fdte=");
     taskdump_dec(
-        core::mem::size_of::<[Option<alloc::sync::Arc<crate::fs::file::File>>; 1024]>() as u64
+        core::mem::size_of::<[Option<alloc::sync::Arc<crate::fs::types::File>>; 1024]>() as u64
             + 128,
     );
     taskdump_raw_line(b"\nOOM-ANAT buddy live pages by order:\n");

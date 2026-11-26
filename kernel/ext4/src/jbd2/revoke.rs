@@ -214,7 +214,7 @@ pub fn jbd2_journal_write_revoke_records(
     journal: &Arc<Journal>,
     commit_transaction: &Arc<Transaction>,
 ) -> Result<usize, i32> {
-    use rux::fs::bio;
+    use rux::fs::hotpath;
 
     let Some(device) = journal.j_bio_device else {
         return Ok(0);
@@ -261,7 +261,7 @@ pub fn jbd2_journal_write_revoke_records(
             return Err(EIO);
         }
 
-        let bh = match bio::bread(device, abs_block) {
+        let bh = match hotpath::bread(device, abs_block) {
             Some(b) => b,
             None => return Err(EIO),
         };
@@ -270,7 +270,7 @@ pub fn jbd2_journal_write_revoke_records(
         // Writes stay inside b_data (views ride the audited bio edges;
         // the struct->bytes copy rides safety::bytes).
         {
-            let block = bio::bh_data_mut(&bh);
+            let block = hotpath::bh_data_mut(&bh);
             for b in block.iter_mut() {
                 *b = 0;
             }
@@ -304,7 +304,7 @@ pub fn jbd2_journal_write_revoke_records(
                 let csum = crate::ext4::csum::crc32c(journal.csum_seed(), bytes);
                 block[n - tail_len..].copy_from_slice(&csum.to_be_bytes());
             }
-            bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
+            hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
         }
         current_journal_block += 1;
         if current_journal_block >= journal.j_last {
@@ -312,8 +312,8 @@ pub fn jbd2_journal_write_revoke_records(
         }
         journal.j_head.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
 
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
+        let sync_res = hotpath::sync_dirty_buffer(bh);
+        hotpath::brelse(bh);
         sync_res?;
 
         idx += take;

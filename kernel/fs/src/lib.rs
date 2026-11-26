@@ -26,7 +26,7 @@ pub use rux::wait_event_interruptible;
 pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println, print, print_status};
 pub use rux::syscall;
 extern crate alloc;
-pub use rux::fs::file::File;
+pub use rux::fs::types::File;
 
 // The fs leaves, flat at the crate root (seed-core-design 2c.2).
 pub mod pipe;
@@ -60,7 +60,7 @@ pub use ::ext4::{ext4, jbd2};
 // Every framework fs item at this crate's root (glob re-export — the
 // framework no longer declares the moved leaves, so no name conflicts):
 // the syscall crate's merged view (`pub use fs;`) resolves through it.
-pub use rux::fs::*;
+pub use rux::fs::{r#unsafe, hotpath::*, types::*};
 
 // Service-internal tests live CENTRALLY in kernel/core/src/tests/services/
 // (the project test-location rule); compiled here for crate visibility.
@@ -109,7 +109,7 @@ pub fn run_unit_tests() {
 /// own built-in list used before the tranche (tmpfs, procfs, devfs,
 /// sysfs, cgroup, debugfs, tracefs) with selinuxfs last (it registered
 /// through the hook row). The framework invokes this ONCE, from
-/// mount_table::register_builtin_handlers at its boot point — never at
+/// rux::fs::hotpath::register_builtin_handlers at its boot point — never at
 /// rust_main time (the mount table and the allocator are not up yet
 /// that early; an early call wedges x86_64 before the console exists,
 /// the boot.S 'R'-beacon reboot loop).
@@ -165,7 +165,7 @@ pub fn register_all() {
     // The locks family's cold rows (fs-rest split): the fcntl lock arms
     // and the slow release bodies behind the framework half's count
     // gates. Same contract — publishing stores plain values only.
-    rux::fs::lock_hooks::register_locks_hooks(rux::fs::lock_hooks::LocksHooks {
+    rux::fs::hotpath::register_locks_hooks(rux::fs::hotpath::LocksHooks {
         flock_release_slow: crate::locks::flock_release_file_slow,
         ofd_release_slow: crate::locks::ofd_release_file_slow,
         posix_release_slow: crate::locks::posix_release_key_slow,

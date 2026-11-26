@@ -7,12 +7,12 @@
 //! kernel/core/src/fs/ext4/{csum,indirect}.rs per the test-layout policy
 //! (those host-side blocks never compiled in this no_std crate).
 
-use crate::fs::stat::Stat;
-use crate::fs::superblock::{
-    get_fs_type, register_filesystem, unregister_filesystem, FileSystemType, SuperBlock,
-    SuperBlockFlags, FsContext,
+use crate::fs::types::Stat;
+use crate::fs::{
+    hotpath::get_fs_type, hotpath::register_filesystem, hotpath::unregister_filesystem, types::FileSystemType, types::SuperBlock,
+    types::SuperBlockFlags, types::FsContext,
 };
-use crate::fs::vt::{VT_MODE, VT_REFS, VT_AUTO, VT_PROCESS, NR_VT};
+use crate::fs::hotpath::{VT_MODE, VT_REFS, VT_AUTO, VT_PROCESS, NR_VT};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;

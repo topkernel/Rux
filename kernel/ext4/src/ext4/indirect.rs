@@ -9,7 +9,7 @@
 // through bread-pinned blocks (INV-BIO-BH's pin) with the triple
 // bounds-checked against the block before the chain walk steps.)
 use crate::errno;
-use rux::fs::bio;
+use rux::fs::hotpath;
 
 pub const POINTERS_PER_BLOCK: usize = 1024;
 
@@ -170,7 +170,7 @@ pub fn read_indirect_block(
     // The read window rides bio's typed pin edge; the u32 decode rides
     // the framework's alignment-checked view (empty on a misaligned
     // buffer — the corrupt-disk class, never UB).
-    bio::with_block_ro(fs.device, indirect_block, |data| {
+    hotpath::with_block_ro(fs.device, indirect_block, |data| {
         let block_numbers =
             rux::fs::r#unsafe::typed_slice::<u32>(data, 0, data.len() / 4);
         if index >= block_numbers.len() {
@@ -244,7 +244,7 @@ pub fn write_indirect_block(
     // The write window rides the block-update edge (bread -> &mut view
     // -> dirty -> journal tag -> sync -> brelse); the u32 decode rides
     // the framework's alignment-checked view.
-    bio::with_block_mut(fs.device, indirect_block, |data, _bh| {
+    hotpath::with_block_mut(fs.device, indirect_block, |data, _bh| {
         let block_numbers =
             rux::fs::r#unsafe::typed_slice_mut::<u32>(data, 0, data.len() / 4);
         if index >= block_numbers.len() {

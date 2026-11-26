@@ -78,7 +78,7 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
         return -(22i64) as u64;
     }
 
-    let file = match crate::fs::file::get_file_fd(fd as usize) {
+    let file = match crate::fs::hotpath::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(9i64) as u64, // EBADF
     };
@@ -131,7 +131,7 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
     let arg = args[2] as u64;
     let nr_args = args[3] as u32;
 
-    let file = match crate::fs::file::get_file_fd(fd as usize) {
+    let file = match crate::fs::hotpath::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(9i64) as u64, // EBADF
     };
@@ -157,7 +157,7 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
             // Hold the actual file reference (immune to fd reuse) and verify
             // it really is an eventfd — anything else would make completion
             // notification write garbage into an unrelated file.
-            let efile = match crate::fs::file::get_file_fd(eventfd_fd as usize) {
+            let efile = match crate::fs::hotpath::get_file_fd(eventfd_fd as usize) {
                 Some(f) => f,
                 None => return -(9i64) as u64,
             };

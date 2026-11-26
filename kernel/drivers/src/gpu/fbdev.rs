@@ -321,21 +321,21 @@ pub fn create_var_screeninfo(info: &FrameBufferInfo) -> FbVarScreeninfo {
 
 /// /dev/fb0 file operations: a real char device so ioctls and mmap
 /// dispatch on the FILE's ops identity (no fd-number heuristics).
-pub static FB_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static FB_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(fb_read)
     .write(fb_write)
     .build();
 
-fn fb_read(_file: &crate::fs::File, _buf: &mut [u8]) -> isize {
+fn fb_read(_file: &crate::fs::types::File, _buf: &mut [u8]) -> isize {
     -29 // ESPIPE-like: reads unsupported (mmap instead)
 }
 
-fn fb_write(_file: &crate::fs::File, _buf: &[u8]) -> isize {
+fn fb_write(_file: &crate::fs::types::File, _buf: &[u8]) -> isize {
     -29
 }
 
 /// True when the File is the /dev/fb0 char device.
-pub fn is_fb_file(file: &crate::fs::File) -> bool {
+pub fn is_fb_file(file: &crate::fs::types::File) -> bool {
     match file.get_ops() {
         Some(ops) => core::ptr::eq(ops as *const _, &FB_OPS as *const _),
         None => false,
@@ -345,11 +345,11 @@ pub fn is_fb_file(file: &crate::fs::File) -> bool {
 /// Register the fb char device and create /dev/fb0 (called from boot
 /// after devfs is up and the GPU framebuffer exists).
 pub fn init_fbdev() -> Result<(), ()> {
-    crate::fs::leaf_glue::devfs::register_char_device(
-        crate::fs::dev_t::DEV_FB0,
+    crate::fs::hotpath::devfs::register_char_device(
+        crate::fs::hotpath::DEV_FB0,
         &FB_OPS,
     )?;
-    crate::fs::leaf_glue::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
+    crate::fs::hotpath::devfs::mknod("/fb0", crate::fs::hotpath::DEV_FB0, 0o666)?;
 
     // Auto-flush presenter for flush-less renderers (stock Xorg).
     let started = crate::process::kthread::kthread_run(

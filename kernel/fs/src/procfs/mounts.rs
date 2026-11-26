@@ -113,7 +113,7 @@ pub fn generate() -> Vec<u8> {
         ));
     }
 
-    for (device, mount_point, fs_type, options) in rux::fs::mount::get_mounts() {
+    for (device, mount_point, fs_type, options) in rux::fs::hotpath::get_mounts() {
         if mount_point == "/" || seen.iter().any(|s| *s == mount_point) {
             continue; // "/" and boot-layout entries already emitted
         }
@@ -194,7 +194,7 @@ pub fn mount_id_for(path: &str) -> u32 {
     for m in boot_mounts().iter() {
         consider(m.mount_point, m.mount_id);
     }
-    for e in rux::fs::mount::get_mount_entries() {
+    for e in rux::fs::hotpath::get_mount_entries() {
         consider(&e.mount_point, e.mount_id);
     }
     best
@@ -221,7 +221,7 @@ pub fn generate_mountinfo() -> Vec<u8> {
         ));
     }
 
-    for entry in rux::fs::mount::get_mount_entries() {
+    for entry in rux::fs::hotpath::get_mount_entries() {
         let (device, mount_point, fs_type, options) =
             (&entry.device, &entry.mount_point, &entry.fs_type, &entry.flags);
         if mount_point == "/" || seen.iter().any(|s| *s == mount_point) {

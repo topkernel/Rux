@@ -201,7 +201,7 @@ pub struct MmStruct {
     /// its fd, every later demand fill silently produced ZERO pages (the
     /// get_file_fd lookup failed) and ld.so died parsing zero ELF data.
     /// This pin table is the vm_file equivalent.
-    vma_files: RwSpinlock<alloc::collections::BTreeMap<usize, alloc::sync::Arc<crate::fs::file::File>>>,
+    vma_files: RwSpinlock<alloc::collections::BTreeMap<usize, alloc::sync::Arc<crate::fs::types::File>>>,
 
     /// Address space type
     space_type: PageTableType,
@@ -508,7 +508,7 @@ impl MmStruct {
     /// so the write denial lives until the last fork descendant exits.
     pub fn inherit_exe_text(&self, parent: &MmStruct) {
         if let Some(key) = *parent.exe_text_key.lock() {
-            crate::fs::locks::inode_text_hold_acquire_key(key);
+            crate::fs::hotpath::inode_text_hold_acquire_key(key);
             *self.exe_text_key.lock() = Some(key);
         }
     }
@@ -1145,7 +1145,7 @@ impl MmStruct {
     /// Acquire VMA write lock
     #[inline]
     /// Pin a file reference for a file-backed VMA (Linux vm_file hold).
-    pub fn pin_vma_file(&self, vma_start: usize, file: alloc::sync::Arc<crate::fs::file::File>) {
+    pub fn pin_vma_file(&self, vma_start: usize, file: alloc::sync::Arc<crate::fs::types::File>) {
         self.vma_files.write().insert(vma_start, file);
     }
 
@@ -1156,7 +1156,7 @@ impl MmStruct {
 
     /// Fetch the pinned file for a VMA (demand-fault fill source). The pin
     /// keeps the file alive even after the mapping fd was closed.
-    pub fn get_vma_file(&self, vma_start: usize) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    pub fn get_vma_file(&self, vma_start: usize) -> Option<alloc::sync::Arc<crate::fs::types::File>> {
         self.vma_files.read().get(&vma_start).cloned()
     }
 
@@ -1166,7 +1166,7 @@ impl MmStruct {
     pub fn try_get_vma_file(
         &self,
         vma_start: usize,
-    ) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    ) -> Option<alloc::sync::Arc<crate::fs::types::File>> {
         let m = self.vma_files.try_read()?;
         m.get(&vma_start).cloned()
     }
@@ -1313,7 +1313,7 @@ impl Drop for MmStruct {
         // this mm dying releases its share of the write denial on the
         // exec'd image — the last drop re-enables write opens of the file.
         if let Some(key) = self.exe_text_key.lock().take() {
-            crate::fs::locks::inode_text_hold_release(key);
+            crate::fs::hotpath::inode_text_hold_release(key);
         }
 
         // Free ASID

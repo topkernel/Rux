@@ -1294,7 +1294,7 @@ fn read_value(ev: &PerfEvent) -> u64 {
 
 /// read(2): the read-format word set (never records — reference
 /// semantics; records travel through the mmap ring).
-fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+fn perf_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
     let ev = match event_of(file) {
         Some(e) => e,
         None => return -(crate::errno::constants::EBADF as isize),
@@ -1329,8 +1329,8 @@ fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// poll(2): readable while unwritten ring data exists.
-fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+fn perf_poll(file: &crate::fs::types::File, events: u16) -> u16 {
+    use crate::fs::hotpath::poll_events::*;
     let mut ready = 0u16;
     let Some(ev) = event_of(file) else { return POLLERR };
     if events & POLLIN != 0 {
@@ -1353,7 +1353,7 @@ fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
     ready
 }
 
-fn event_of(file: &crate::fs::File) -> Option<&'static PerfEvent> {
+fn event_of(file: &crate::fs::types::File) -> Option<&'static PerfEvent> {
     // SAFETY: private_data is an UnsafeCell; we hold &File so no
     // concurrent mutable access. The pointer stays valid while the
     // File exists (close unregisters + frees under the fd's lifetime).
@@ -1362,7 +1362,7 @@ fn event_of(file: &crate::fs::File) -> Option<&'static PerfEvent> {
     Some(unsafe { &*(ptr as *const PerfEvent) })
 }
 
-fn perf_close(file: &crate::fs::File) -> i32 {
+fn perf_close(file: &crate::fs::types::File) -> i32 {
     let Some(ptr) = (unsafe { *file.private_data.get() }) else { return 0 };
     // SAFETY: see event_of.
     let ev = unsafe { &*(ptr as *const PerfEvent) };
@@ -1424,7 +1424,7 @@ fn perf_close(file: &crate::fs::File) -> i32 {
 }
 
 /// perf event file operations (read/poll/close).
-pub static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static PERF_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(perf_read)
     .close(perf_close)
     .poll(perf_poll)
@@ -1432,7 +1432,7 @@ pub static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 
 /// Poll-wait registration (event-driven poll, misc dispatcher).
 pub fn perf_poll_wait(
-    file: &crate::fs::File,
+    file: &crate::fs::types::File,
     task: *mut crate::process::task::Task,
 ) -> bool {
     let Some(ev) = event_of(file) else { return false };
@@ -1442,7 +1442,7 @@ pub fn perf_poll_wait(
 }
 
 pub fn perf_poll_unwait(
-    file: &crate::fs::File,
+    file: &crate::fs::types::File,
     task: *mut crate::process::task::Task,
 ) {
     if let Some(ev) = event_of(file) {
@@ -1456,7 +1456,7 @@ pub fn perf_poll_unwait(
 /// data (power of two). Dispatched from sys_mmap by PERF_OPS identity
 /// (binder/io_uring pattern).
 pub fn perf_mmap_handler(
-    file: &crate::fs::File,
+    file: &crate::fs::types::File,
     addr: usize,
     length: usize,
     offset: u64,
@@ -1714,7 +1714,7 @@ pub fn perf_mmap_handler(
 
 /// Returns Some(ret) when the file is a perf fd (sys_ioctl dispatch,
 /// binder pattern).
-pub fn perf_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Option<i64> {
+pub fn perf_file_ioctl(file: &crate::fs::types::File, request: u32, arg: usize) -> Option<i64> {
     let ops = file.get_ops()?;
     if !core::ptr::eq(ops as *const _, &PERF_OPS as *const _) {
         return None;
@@ -1722,7 +1722,7 @@ pub fn perf_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Opti
     Some(perf_ioctl(file, request, arg))
 }
 
-fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
+fn perf_ioctl(file: &crate::fs::types::File, request: u32, arg: usize) -> i64 {
     let Some(ev) = event_of(file) else { return -(crate::errno::constants::EBADF as i64) };
     // hp88 hunt bisect: noarm — ENABLE/REFRESH pretend success but the
     // event never arms (no tick hooks, no softirq, no emit).
@@ -2065,9 +2065,9 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     // sys_mmap requires a writable fd for that combination. Reference
     // perf fds are anon-inode-like and bypass mode checks; carrying
     // O_RDWR achieves the same through our gate.
-    let file_flags = crate::fs::file::FileFlags::O_RDWR;
-    let file = Arc::new(crate::fs::File::new(
-        crate::fs::file::FileFlags::new(file_flags),
+    let file_flags = crate::fs::types::FileFlags::O_RDWR;
+    let file = Arc::new(crate::fs::types::File::new(
+        crate::fs::types::FileFlags::new(file_flags),
     ));
     file.set_ops(&PERF_OPS);
     file.set_private_data(ev_ptr as *mut u8);
@@ -2090,7 +2090,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     match fdtable.install_fd(fd, file) {
         Ok(()) => {
             if flags & PERF_FLAG_FD_CLOEXEC != 0 {
-                crate::fs::set_cloexec_fd(fd, true);
+                crate::fs::hotpath::set_cloexec_fd(fd, true);
             }
             fd as i64
         }

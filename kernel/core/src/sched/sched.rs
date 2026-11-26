@@ -1528,7 +1528,7 @@ pub(crate) fn context_switch(prev: &mut Task, next: &mut Task) {
     // counters (Linux's __schedule accounting). The task being switched
     // OUT is the one that is charged: it blocked (voluntary) or was
     // preempted while still runnable (involuntary).
-    crate::fs::perf_ctr::note_switch(prev);
+    crate::fs::hotpath::note_switch(prev);
 
     if next.is_fork_child() {
         next.clear_fork_child();
@@ -6286,7 +6286,7 @@ pub fn scheduler_tick() {
     crate::api::sched::sched_ev_drain(6);
     crate::debug::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
-    crate::fs::perf_ctr::note_sched_run(cpu_id);
+    crate::fs::hotpath::note_sched_run(cpu_id);
     // phantom-bits orphan scan: bits the interrupted task carried INTO
     // the tick whose release never executed (softirq bit outside any
     // open window / stranded hardirq bit). rux:leakhunt (retired debug=leakhunt)-gated inside.
@@ -7488,7 +7488,7 @@ pub fn scheduler_tick() {
     }
 
     // Update load average (auto-throttled to every 5 seconds).
-    crate::fs::perf_ctr::update_load_avg();
+    crate::fs::hotpath::update_load_avg();
 
     // R18-3b: full context line for correlation.
     // R18-3: per-tick canary check — DIAGNOSED (r18): pid 305's call
@@ -9431,7 +9431,7 @@ pub fn cpu_idle_loop() -> ! {
             crate::arch::cpu::wfi();
             // WW_IDLE_PHASE 5: WFI returned, idle accounting + mark clear.
             ww_idle_phase_set(cpu_id, 5);
-            crate::fs::perf_ctr::account_idle_cycles(
+            crate::fs::hotpath::account_idle_cycles(
                 cpu_id,
                 crate::arch::cpu::read_time().wrapping_sub(idle_t0),
             );

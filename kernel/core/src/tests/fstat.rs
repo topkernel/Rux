@@ -10,7 +10,7 @@
 //! sys_fstat test
 
 use alloc::format;
-use crate::fs::{file_open, file_close, file_stat, Stat, FileFlags};
+use crate::fs::{hotpath::file_open, hotpath::file_close, hotpath::file_stat, types::Stat, types::FileFlags};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_fstat() {

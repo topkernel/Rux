@@ -22,8 +22,8 @@
 #![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
-use crate::fs::{File, FileOps};
-use crate::fs::dev_t::DevNo;
+use crate::fs::{types::File, types::FileOps};
+use crate::fs::types::DevNo;
 use crate::drivers::net::space::{DeviceStats, NetDevice};
 use crate::net::buffer::SkBuff;
 

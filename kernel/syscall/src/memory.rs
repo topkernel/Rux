@@ -491,7 +491,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // captured here (the fd is masked out of the generic attach below) and
     // pinned onto the resulting VMA so mprotect() can enforce the
     // read-only-open EACCES rule (LTP mprotect01 case 3).
-    let mut zero_dev_shared_file: Option<alloc::sync::Arc<crate::fs::file::File>> = None;
+    let mut zero_dev_shared_file: Option<alloc::sync::Arc<rux::fs::types::File>> = None;
 
     // length of 0 is invalid per POSIX
     if length == 0 {
@@ -627,16 +627,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             None => return mmap_error::EBADF,
             Some(file) => {
                 let accmode = file.flags().bits()
-                    & crate::fs::file::FileFlags::O_ACCMODE;
+                    & rux::fs::types::FileFlags::O_ACCMODE;
                 // O_PATH descriptors cannot back a mapping — Linux rejects
                 // them before the access-mode rules (LTP open13: mmap on
                 // an O_PATH fd must fail).
-                if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                if file.flags().bits() & rux::fs::types::FileFlags::O_PATH != 0 {
                     return mmap_error::EBADF;
                 }
-                let readable = accmode != crate::fs::file::FileFlags::O_WRONLY;
-                let writable = accmode == crate::fs::file::FileFlags::O_RDWR
-                    || accmode == crate::fs::file::FileFlags::O_WRONLY;
+                let readable = accmode != rux::fs::types::FileFlags::O_WRONLY;
+                let writable = accmode == rux::fs::types::FileFlags::O_RDWR
+                    || accmode == rux::fs::types::FileFlags::O_WRONLY;
                 if !readable {
                     return mmap_error::EACCES;
                 }
@@ -673,7 +673,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // Check if this is an io_uring fd
     if fd >= 0 {
         // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
-        if let Some(file) = crate::fs::file::get_file_fd(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
                 let io_uring_ops = core::ptr::addr_of!(crate::io_uring::IO_URING_OPS);
                 if core::ptr::eq(ops as *const _, io_uring_ops as *const _) {
@@ -693,7 +693,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // Dispatch on the File's ops identity (binder/io_uring pattern).
     if fd >= 0 {
         // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
-        if let Some(file) = crate::fs::file::get_file_fd(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
                 if core::ptr::eq(ops as *const _, &crate::perf::PERF_OPS as *const _) {
                     return match crate::perf::perf_mmap_handler(
@@ -717,7 +717,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // them via the offsets handed out in BR_TRANSACTION/BR_REPLY).
     if fd >= 0 {
         // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
-        if let Some(file) = crate::fs::file::get_file_fd(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
                 if core::ptr::eq(ops as *const _, &crate::ipc::binder::BINDER_OPS as *const _) {
                     return match crate::ipc::binder::binder_mmap_handler(
@@ -743,7 +743,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // Non-anonymous mapping: the file must exist and be mappable (Linux:
     // -ENODEV when the file has no ->mmap; -EBADF when the fd is bad).
     if (map_flags & map::MAP_ANONYMOUS == 0) && fd >= 0 {
-        match crate::fs::file::get_file_fd(fd as usize) {
+        match rux::fs::hotpath::get_file_fd(fd as usize) {
             Some(file) => {
                 if file.get_ops().is_none() {
                     return mmap_error::ENODEV;
@@ -915,10 +915,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // writers into it.
                     if vma_type == VmaType::FileBacked && fd >= 0 {
                         // The File Arc keeps the write-once inode alive.
-                        let is_zero_dev = crate::fs::file::get_file_fd(fd as usize)
+                        let is_zero_dev = rux::fs::hotpath::get_file_fd(fd as usize)
                             .and_then(|f| f.get_inode().map(|i| {
                                 i.mode.is_char_device()
-                                    && i.rdev == crate::fs::dev_t::DEV_ZERO.to_user_dev()
+                                    && i.rdev == rux::fs::hotpath::DEV_ZERO.to_user_dev()
                             }))
                             .unwrap_or(false);
                         if is_zero_dev {
@@ -934,7 +934,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // case 3). Capture the file here; it is pinned
                             // onto the VMA after the mapping succeeds.
                             zero_dev_shared_file = if map_flags & map::MAP_SHARED != 0 {
-                                crate::fs::file::get_file_fd(fd as usize)
+                                rux::fs::hotpath::get_file_fd(fd as usize)
                             } else {
                                 None
                             };
@@ -951,7 +951,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // PageTableEntry::{V,R,W,U,A,D} flag names alias the
                     // identical bits in both mm layers.
                     if fd >= 0 {
-                        let is_fb = crate::fs::file::get_file_fd(fd as usize)
+                        let is_fb = rux::fs::hotpath::get_file_fd(fd as usize)
                             .map(|f| rux::api::drivers::is_fb_file(&f))
                             .unwrap_or(false);
                         if is_fb {
@@ -1024,7 +1024,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // returned. Same device-mapping discipline as fb0:
                     // physical pages installed up front, Device VMA.
                     if fd >= 0 {
-                        let drm_file = crate::fs::file::get_file_fd(fd as usize);
+                        let drm_file = rux::fs::hotpath::get_file_fd(fd as usize);
                         if let Some(file) = drm_file {
                             if crate::drivers::drm::is_drm_file(&file)
                                 || crate::drivers::drm::is_prime_file(&file)
@@ -1123,7 +1123,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     if fd >= 0 {
                         // SAFETY: fd validated above; get_file_fd returns a
                         // valid Arc<File> or None.
-                        let ashmem_file = crate::fs::file::get_file_fd(fd as usize);
+                        let ashmem_file = rux::fs::hotpath::get_file_fd(fd as usize);
                         if let Some(file) = ashmem_file {
                             if crate::drivers::ashmem::is_ashmem_file(&file) {
                                 let shared = map_flags & map::MAP_SHARED != 0;
@@ -1159,7 +1159,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // every binder waiter on their txn stacks (the
                     // bootevent.account.ready stall).
                     if vma_type == VmaType::FileBacked && fd >= 0 {
-                        let unmappable = crate::fs::file::get_file_fd(fd as usize)
+                        let unmappable = rux::fs::hotpath::get_file_fd(fd as usize)
                                 .map(|f| {
                                     // File Arc keeps the write-once inode alive.
                                     match f.get_inode() {
@@ -1177,7 +1177,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 })
                                 .unwrap_or(false);
                         if unmappable {
-                            let ops_tag = crate::fs::file::get_file_fd(fd as usize)
+                            let ops_tag = rux::fs::hotpath::get_file_fd(fd as usize)
                                 .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
                                 .unwrap_or(0);
                             // HOTPATH-PRINT: unmappable-fd ENODEV path only (device/fifo/socket, once per bad mmap)
@@ -1189,7 +1189,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 prot_flags,
                                 map_flags,
                                 ops_tag,
-                                crate::fs::file::get_file_fd(fd as usize)
+                                rux::fs::hotpath::get_file_fd(fd as usize)
                                     .map(|f| f.path())
                                     .unwrap_or_default(),
                             );
@@ -2489,7 +2489,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
 fn vma_file_by_range(
     address_space: &crate::mm::mm_struct::MmStruct,
     addr: usize,
-) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+) -> Option<alloc::sync::Arc<rux::fs::types::File>> {
     let vma_mgr = address_space.vma_read();
     let vma = vma_mgr.find(crate::mm::page::VirtAddr::new(addr))?;
     let fd = vma.file_fd();
@@ -2630,7 +2630,7 @@ fn mremap_carry_file_attrs(
     piece_offset: usize,
     fd: i32,
     file_size: u64,
-    pinned: Option<&alloc::sync::Arc<crate::fs::file::File>>,
+    pinned: Option<&alloc::sync::Arc<rux::fs::types::File>>,
 ) {
     let found = {
         let mut mgr = address_space.vma_write();
@@ -3450,7 +3450,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
                                     // next file reusing the inode number
                                     // (msync01 after mincore04, 4/4).
                                     page_in_memory =
-                                        crate::fs::page_cache::get_page_cache().resident(
+                                        rux::fs::hotpath::get_page_cache().resident(
                                             inode.fs_id,
                                             inode.ino,
                                             idx,
@@ -4116,7 +4116,7 @@ pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
     // identity is inspected, no mutation (safe fns — the old wrapper
     // was vestigial).
     {
-        let file = match crate::fs::file::get_file_fd(fd as usize) {
+        let file = match rux::fs::hotpath::get_file_fd(fd as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };

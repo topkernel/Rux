@@ -8,7 +8,7 @@
 //! (RW_CHUNK, clamp_rw_count, the mmap ring) moved here bodily.
 
 #![forbid(unsafe_code)]
-use crate::fs::File;
+use crate::fs::types::File;
 
 /// The per-iteration chunk for bulk read/write staging (the io
 /// service's historical constant — io_uring references it).
@@ -49,7 +49,7 @@ pub struct SyscallHooks {
     /// the x86 trap stall-dump (param hunt).
     pub param_stall_dump: fn(),
     /// eventfd ops identity (futex/io_uring compares).
-    pub is_eventfd_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub is_eventfd_ops: fn(&'static crate::fs::types::FileOps) -> bool,
     /// EFAULT census line (the sleep-EFAULT hunt's per-call trace).
     pub syscall_eio_line: fn(u64, &[u64; 6]),
     /// net/unix's epoll binding dump (the AF_UNIX wedge hunt).
@@ -113,7 +113,7 @@ pub fn timerfd_expire_notify(tfd: u64) { (hooks().timerfd_expire_notify)(tfd) }
 #[inline]
 pub fn param_stall_dump() { (hooks().param_stall_dump)() }
 #[inline]
-pub fn is_eventfd_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_eventfd_ops)(ops) }
+pub fn is_eventfd_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_eventfd_ops)(ops) }
 #[inline]
 pub fn syscall_eio_line(nr: u64, args: &[u64; 6]) { (hooks().syscall_eio_line)(nr, args) }
 #[inline]

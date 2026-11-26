@@ -478,7 +478,7 @@ fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
                 gicv3::eoi(intid);
             }
             gicv3::IPI_SGI_INTID => {
-                crate::fs::perf_ctr::soft_inc(cpu);
+                crate::fs::hotpath::soft_inc(cpu);
                 crate::arch::ipi::handle_software_ipi(cpu);
                 gicv3::eoi(intid);
             }
@@ -503,7 +503,7 @@ fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
 /// scheduler tick, softlockup, and the preemptible in-IRQ reschedule.
 fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
-    crate::fs::perf_ctr::timer_inc(cpu);
+    crate::fs::hotpath::timer_inc(cpu);
 
     // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
     // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
@@ -517,7 +517,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     }
 
     // 0. Per-CPU time accounting for /proc/stat
-    crate::fs::perf_ctr::charge_tick(regs.user_mode());
+    crate::fs::hotpath::charge_tick(regs.user_mode());
 
     // 0b. CPU-time accounting: user or system time by the mode the
     // timer hit; idle accounting for kthreads.

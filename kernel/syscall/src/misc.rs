@@ -48,13 +48,13 @@ fn ep_erased(ep: *mut EpollFile) -> *mut u8 { ep as *mut u8 }
 
 // The event-notification plumbing moved to the framework home
 // (fs/event_notify.rs, crate-plan step 2); historical paths re-export.
-pub use crate::fs::event_notify::{poll_events, epoll_events, EPollEvent};
-use crate::fs::event_notify::{
+pub use rux::fs::{hotpath::poll_events, hotpath::epoll_events, types::EPollEvent};
+use rux::fs::hotpath::{
     self, epoll_notify_file, epoll_wake_register, epoll_wake_unregister,
     epoll_wake_unregister_all, signalfd_notify_task, signalfd_register,
     signalfd_unregister,
 };
-use crate::fs::event_notify::{EpollWakeNode, WakeFn};
+use rux::fs::types::{EpollWakeNode, WakeFn};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// pollfd structure (struct pollfd)
@@ -238,13 +238,13 @@ pub fn epoll_dump_for_file(file_id: u64) {
     let mut out: alloc::vec::Vec<(usize, u32, u64, alloc::vec::Vec<(i32, u32, u64, u32, u64)>)> =
         alloc::vec::Vec::new();
     {
-        let mut registry = event_notify::epoll_wake_shard(file_id).lock_irqsave();
+        let mut registry = hotpath::epoll_wake_shard(file_id).lock_irqsave();
         // Read-only walk of linked nodes under the shard lock
         // (INV-SYSC-1 via unsafe::list_*).
         let head = registry.init_once();
         let mut cur = r#unsafe::list_first(head);
         while cur != head {
-            let node: &EpollWakeNode = event_notify::list_entry_pub(cur);
+            let node: &EpollWakeNode = hotpath::list_entry_pub(cur);
             cur = r#unsafe::list_next(cur);
             if node.file_id != file_id {
                 continue;
@@ -329,14 +329,14 @@ pub fn epoll_interest_snapshot() {
         // Sharded since leg-31: sweep the shards one lock at a time
         // (never nested — same release-before-next discipline as the
         // original single-lock pass). Diagnostic-only path (socksnap).
-        for shard in crate::fs::event_notify::EPOLL_WAKE_SHARDED.iter() {
+        for shard in rux::fs::hotpath::EPOLL_WAKE_SHARDED.iter() {
             let mut registry = shard.lock_irqsave();
             // Read-only walk of linked nodes under the shard lock
             // (INV-SYSC-1 via unsafe::list_*).
             let head = registry.init_once();
             let mut cur = r#unsafe::list_first(head);
             while cur != head {
-                let node: &EpollWakeNode = event_notify::list_entry_pub(cur);
+                let node: &EpollWakeNode = hotpath::list_entry_pub(cur);
                 cur = r#unsafe::list_next(cur);
                 let ep = node.ep;
                 let ep_usize = ep as usize;
@@ -400,7 +400,7 @@ pub fn epoll_interest_snapshot() {
 }
 
 /// Epoll file close callback
-fn epoll_file_close(file: &crate::fs::File) -> i32 {
+fn epoll_file_close(file: &rux::fs::types::File) -> i32 {
     // (review-s2b perf) this instance is gone — release the purge gate's
     // reference (see EPOLL_INSTANCES).
     EPOLL_INSTANCES.fetch_sub(1, core::sync::atomic::Ordering::Release);
@@ -582,7 +582,7 @@ fn epoll_has_ready_events(epoll: &EpollFile) -> bool {
 /// reference kernel's 17% idle posture on the same image (the LoopEvent
 /// / "in WaitTimeout" / "End to OnEventHandler" debug lines ARE those
 /// empty passes made visible).
-fn epoll_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
+fn epoll_file_poll(file: &rux::fs::types::File, events: u16) -> u16 {
     use poll_events::*;
     if events & POLLIN == 0 {
         return 0;
@@ -620,7 +620,7 @@ pub(crate) static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 /// wrote — upstream starvation). timerfd: unread expiration count +
 /// interval. pipe: readable bytes + closed flags. Diagnostic only;
 /// called from the sleepsnap/TXN-HANG census contexts (bounded reads).
-pub fn oh67_fd_ready(file: &crate::fs::File) -> Option<alloc::string::String> {
+pub fn oh67_fd_ready(file: &rux::fs::types::File) -> Option<alloc::string::String> {
     use core::sync::atomic::Ordering::Relaxed;
     let ops = file.get_ops()?;
     if core::ptr::eq(ops as *const _, &EVENTFD_OPS as *const _) {
@@ -763,7 +763,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     // here and reused per round. nfds is already bounded (<= 1024), so
     // these are bounded buffers.
     let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
-    let mut files: alloc::vec::Vec<alloc::sync::Arc<crate::fs::File>> =
+    let mut files: alloc::vec::Vec<alloc::sync::Arc<rux::fs::types::File>> =
         alloc::vec::Vec::with_capacity(nfds);
 
     // Poll loop with timeout support. The expiry decision runs on the
@@ -990,7 +990,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                                     b't'
                                 } else if is(&EVENTFD_OPS) {
                                     b'v'
-                                } else if is(&crate::fs::pidfd::PIDFD_OPS)
+                                } else if is(&rux::fs::hotpath::PIDFD_OPS)
                                     || is(&crate::fs::procfs::PROC_PIDDIR_OPS)
                                 {
                                     b'd'
@@ -1176,8 +1176,8 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
 // ============================================================================
 
 /// Per-fd-type poll-wait registration pair, dispatched by FileOps identity.
-type PollWaitRegFn = fn(&crate::fs::File, *mut ::process::task::Task) -> bool;
-type PollWaitUnregFn = fn(&crate::fs::File, *mut ::process::task::Task);
+type PollWaitRegFn = fn(&rux::fs::types::File, *mut ::process::task::Task) -> bool;
+type PollWaitUnregFn = fn(&rux::fs::types::File, *mut ::process::task::Task);
 
 /// Resolve the poll-wait register/unregister pair for `file`, or None when
 /// the file type has no producer-woken readiness queue.
@@ -1189,7 +1189,7 @@ type PollWaitUnregFn = fn(&crate::fs::File, *mut ::process::task::Task);
 /// epoll_wait blocker registers on the target's readiness queue and sleeps
 /// until a real producer event (data arrival, space freed, EOF, connect
 /// queued, inotify event, input event, timer expiry, signal arrival).
-fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnregFn)> {
+fn poll_wait_impls(file: &rux::fs::types::File) -> Option<(PollWaitRegFn, PollWaitUnregFn)> {
     let ops = file.get_ops()? as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
     if is(&crate::net::unix::UNIX_SOCKET_OPS) {
@@ -1241,12 +1241,12 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     }
     // pidfds (pidfd_open files and /proc/<pid> dir fds): exit readiness
     // wakes through the global pidfd queue (do_exit notifies).
-    if is(&crate::fs::pidfd::PIDFD_OPS)
+    if is(&rux::fs::hotpath::PIDFD_OPS)
         || is(&crate::fs::procfs::PROC_PIDDIR_OPS)
     {
         return Some((
-            crate::fs::pidfd::pidfd_poll_wait,
-            crate::fs::pidfd::pidfd_poll_unwait,
+            rux::fs::hotpath::pidfd_poll_wait,
+            rux::fs::hotpath::pidfd_poll_unwait,
         ));
     }
     if is(&SIGNALFD_OPS) {
@@ -1308,7 +1308,7 @@ enum PollEventWait {
 /// caller's fdtable), so the private_data objects behind them outlive the
 /// registrations.
 fn poll_event_wait_round(
-    files: &[alloc::sync::Arc<crate::fs::File>],
+    files: &[alloc::sync::Arc<rux::fs::types::File>],
     task: *mut ::process::task::Task,
     // ABSOLUTE monotonic-ns deadline (None = wait forever). Armed as a
     // HIGH-RESOLUTION wake (same discipline as nanosleep) so short
@@ -2016,7 +2016,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     });
     let epoll_ptr = alloc::boxed::Box::into_raw(epoll) as *mut u8;
 
-    let file = alloc::sync::Arc::new(crate::fs::File::new(
+    let file = alloc::sync::Arc::new(rux::fs::types::File::new(
         crate::fs::FileFlags::new(crate::fs::FileFlags::O_RDWR)
     ));
     file.set_ops(&EPOLL_OPS);
@@ -2078,7 +2078,7 @@ pub fn sys_epoll_create1(args: SyscallArgs) -> i64 {
 fn epoll_watches_epoll(
     root: *mut EpollFile,
     needle: *mut EpollFile,
-    fdtable: &crate::fs::file::FdTable,
+    fdtable: &rux::fs::types::FdTable,
     depth: u32,
 ) -> bool {
     if depth >= 6 {
@@ -2145,7 +2145,7 @@ fn epoll_watches_epoll(
 /// Longest chain of nested epoll instances starting at `root` (root = 1).
 fn epoll_chain_depth(
     root: *mut EpollFile,
-    fdtable: &crate::fs::file::FdTable,
+    fdtable: &rux::fs::types::FdTable,
     depth: u32,
 ) -> u32 {
     if depth >= 6 {
@@ -3057,7 +3057,7 @@ pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
         Some(f) => f,
         None => return,
     };
-    let mut epfds: alloc::vec::Vec<(usize, alloc::sync::Arc<crate::fs::File>)> =
+    let mut epfds: alloc::vec::Vec<(usize, alloc::sync::Arc<rux::fs::types::File>)> =
         alloc::vec::Vec::new();
     fdtable.for_each_file(|fd, f| {
         if f.get_ops()
@@ -3451,7 +3451,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // Vec inside the lock.
         const EPOLL_WIRE_CAP: usize = 512;
         let mut watched: alloc::vec::Vec<(
-            alloc::sync::Arc<crate::fs::File>,
+            alloc::sync::Arc<rux::fs::types::File>,
             u16,
             core::option::Option<u32>,
         )> = alloc::vec::Vec::with_capacity(EPOLL_WIRE_CAP);
@@ -4198,7 +4198,7 @@ impl EventFd {
     }
 }
 
-fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+fn eventfd_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     if buf.len() < 8 {
         return -errno::EINVAL as isize;
     }
@@ -4213,7 +4213,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // Blocking semantics (review批次1: previously returned EAGAIN even for
     // blocking fds, busy-looping every poll/read caller).
     if efd.counter.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+        if file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK != 0 {
             return -errno::EAGAIN as isize;
         }
         match efd.block_until(|| efd.counter.load(core::sync::atomic::Ordering::Relaxed) != 0) {
@@ -4225,7 +4225,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     loop {
         let val = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
         if val == 0 {
-            if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+            if file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK != 0 {
                 return -errno::EAGAIN as isize;
             }
             // Raced to zero between the wake and the CAS: block again.
@@ -4260,7 +4260,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+fn eventfd_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     if buf.len() < 8 {
         return -errno::EINVAL as isize;
     }
@@ -4308,7 +4308,7 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
             None => {
                 // Overflow: counter + val > u64::MAX
                 let flags = file.flags().bits();
-                if flags & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+                if flags & rux::fs::types::FileFlags::O_NONBLOCK != 0 {
                     return -errno::EAGAIN as isize;
                 }
                 // Blocking mode: wait for a reader to drain the counter
@@ -4326,7 +4326,7 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     }
 }
 
-fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
+fn eventfd_poll(file: &rux::fs::types::File, events: u16) -> u16 {
     use crate::misc::poll_events::*;
     let mut ready = 0u16;
 
@@ -4348,7 +4348,7 @@ fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     ready
 }
 
-fn eventfd_close(file: &crate::fs::File) -> i32 {
+fn eventfd_close(file: &rux::fs::types::File) -> i32 {
     // R20-5: free the boxed EventFd — File has no Drop impl and
     // private_data is a raw pointer, so the old comment ("freed when File
     // is dropped") was wrong: it leaked on every close. Runs only on the
@@ -4405,7 +4405,7 @@ impl TimerFd {
     }
 }
 
-fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+fn timerfd_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     if buf.len() < 8 {
         return -errno::EINVAL as isize;
     }
@@ -4418,7 +4418,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // Blocking read (review批次1: previously EAGAIN — busy loop for every
     // blocking timerfd consumer). Block until an expiration is pending.
     if tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire) == 0 {
-        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+        if file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK != 0 {
             return -errno::EAGAIN as isize;
         }
         loop {
@@ -4459,7 +4459,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     8
 }
 
-fn timerfd_close(file: &crate::fs::File) -> i32 {
+fn timerfd_close(file: &rux::fs::types::File) -> i32 {
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let tfd = match ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
@@ -4490,7 +4490,7 @@ fn timerfd_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
+fn timerfd_poll(file: &rux::fs::types::File, events: u16) -> u16 {
     use crate::misc::poll_events::*;
     let mut ready = 0u16;
 
@@ -4584,7 +4584,7 @@ pub(crate) static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder(
 
 /// Register `task` on the timerfd's wait queue; timerfd_expire_notify
 /// wakes it when the timer fires.
-fn timerfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -> bool {
+fn timerfd_poll_wait(file: &rux::fs::types::File, task: *mut ::process::task::Task) -> bool {
     // SAFETY: the dispatcher identity-checked the File against TIMERFD_OPS;
     // private_data was installed by sys_timerfd_create as Box::into_raw and
     // stays valid while the File exists.
@@ -4598,7 +4598,7 @@ fn timerfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
 }
 
 /// Remove a registration added by timerfd_poll_wait.
-fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
+fn timerfd_poll_unwait(file: &rux::fs::types::File, task: *mut ::process::task::Task) {
     // SAFETY: same contract as timerfd_poll_wait.
     if let Some(tfd) = ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         tfd.wait_queue.remove(task);
@@ -4613,7 +4613,7 @@ fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task)
 /// from poll_wait_impls — every poll()/epoll_wait() over an eventfd fell
 /// back to the 10 ms re-check slice (latency plus a full fd-set rescan
 /// per slice per waiter, the same tax the 26th removed for binder).
-fn eventfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -> bool {
+fn eventfd_poll_wait(file: &rux::fs::types::File, task: *mut ::process::task::Task) -> bool {
     // SAFETY: the dispatcher identity-checked the File against EVENTFD_OPS;
     // private_data was installed by sys_eventfd2 as Box::into_raw and stays
     // valid while the File exists.
@@ -4627,7 +4627,7 @@ fn eventfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
 }
 
 /// Remove a registration added by eventfd_poll_wait.
-fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
+fn eventfd_poll_unwait(file: &rux::fs::types::File, task: *mut ::process::task::Task) {
     // SAFETY: same contract as eventfd_poll_wait.
     if let Some(efd) = ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         efd.wait_queue.remove(task);
@@ -4636,7 +4636,7 @@ fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task)
 
 /// Register `task` on the signalfd's wait queue; signalfd_notify_task
 /// wakes it when a masked signal arrives.
-fn signalfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -> bool {
+fn signalfd_poll_wait(file: &rux::fs::types::File, task: *mut ::process::task::Task) -> bool {
     // SAFETY: the dispatcher identity-checked the File against SIGNALFD_OPS;
     // private_data was installed by sys_signalfd4_impl as Box::into_raw and
     // stays valid while the File exists.
@@ -4650,7 +4650,7 @@ fn signalfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) 
 }
 
 /// Remove a registration added by signalfd_poll_wait.
-fn signalfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
+fn signalfd_poll_unwait(file: &rux::fs::types::File, task: *mut ::process::task::Task) {
     // SAFETY: same contract as signalfd_poll_wait.
     if let Some(sfd) = ::process::r#unsafe::file_private_data_ref::<SignalFd>(file) {
         sfd.wait_queue.remove(task);
@@ -4690,7 +4690,7 @@ struct SignalFd {
 /// wait queue (woken by signalfd_notify_task / signals) or return EAGAIN
 /// for O_NONBLOCK fds. The consumed signal is removed from pending, so it
 /// never reaches a handler (sigtimedwait-style consumption).
-fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+fn signalfd_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     if buf.len() < SIGNALFD_SIGINFO_SIZE {
         return -errno::EINVAL as isize;
     }
@@ -4750,7 +4750,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         }
 
         // Nothing readable.
-        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+        if file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK != 0 {
             return -errno::EAGAIN as isize;
         }
 
@@ -4780,7 +4780,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// signalfd poll: POLLIN iff a pending signal intersects the fd mask.
-fn signalfd_poll(file: &crate::fs::File, events: u16) -> u16 {
+fn signalfd_poll(file: &rux::fs::types::File, events: u16) -> u16 {
     use crate::misc::poll_events::*;
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
@@ -4803,7 +4803,7 @@ fn signalfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     ready
 }
 
-fn signalfd_close(file: &crate::fs::File) -> i32 {
+fn signalfd_close(file: &rux::fs::types::File) -> i32 {
     // Runs only on the last Arc reference: no blocked reader can hold the
     // box. Purge the wake-registry entry BEFORE freeing (identity-keyed on
     // the queue address).
@@ -4904,12 +4904,12 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
     });
     let sfd_ptr = alloc::boxed::Box::into_raw(sfd) as *mut u8;
 
-    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    let mut file_flags = rux::fs::types::FileFlags::O_RDWR;
     if flags & SFD_NONBLOCK != 0 {
-        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+        file_flags |= rux::fs::types::FileFlags::O_NONBLOCK;
     }
-    let file = alloc::sync::Arc::new(crate::fs::File::new(
-        crate::fs::file::FileFlags::new(file_flags),
+    let file = alloc::sync::Arc::new(rux::fs::types::File::new(
+        rux::fs::types::FileFlags::new(file_flags),
     ));
     file.set_ops(&SIGNALFD_OPS);
     file.set_private_data(sfd_ptr);
@@ -4993,12 +4993,12 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
     let efd_ptr = alloc::boxed::Box::into_raw(efd) as *mut u8;
 
     // Build file flags
-    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    let mut file_flags = rux::fs::types::FileFlags::O_RDWR;
     if flags & EFD_NONBLOCK != 0 {
-        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+        file_flags |= rux::fs::types::FileFlags::O_NONBLOCK;
     }
 
-    let file = alloc::sync::Arc::new(crate::fs::File::new(crate::fs::file::FileFlags::new(file_flags)));
+    let file = alloc::sync::Arc::new(rux::fs::types::File::new(rux::fs::types::FileFlags::new(file_flags)));
     file.set_ops(&EVENTFD_OPS);
     file.set_private_data(efd_ptr);
 
@@ -5217,12 +5217,12 @@ fn sys_timerfd_create_inner(args: SyscallArgs) -> i64 {
     let tfd_ptr = alloc::boxed::Box::into_raw(tfd) as *mut u8;
 
     // Build file flags
-    let mut file_flags = crate::fs::file::FileFlags::O_RDONLY;
+    let mut file_flags = rux::fs::types::FileFlags::O_RDONLY;
     if flags & TFD_NONBLOCK != 0 {
-        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+        file_flags |= rux::fs::types::FileFlags::O_NONBLOCK;
     }
 
-    let file = alloc::sync::Arc::new(crate::fs::File::new(crate::fs::file::FileFlags::new(file_flags)));
+    let file = alloc::sync::Arc::new(rux::fs::types::File::new(rux::fs::types::FileFlags::new(file_flags)));
     file.set_ops(&TIMERFD_OPS);
     file.set_private_data(tfd_ptr);
     // Bind the TimerFd to its File's generation id so the expiry path

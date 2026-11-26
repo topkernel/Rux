@@ -42,7 +42,7 @@ pub use buffer::{
 /// `*_socket_from_fd` checks). The File's lifetime keeps the Arc alive
 /// (close() is the only drop path); increment-before-clone keeps the
 /// returned Arc independent of the slot.
-pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
+pub(crate) fn file_arc<T>(file: &crate::fs::types::File) -> Option<alloc::sync::Arc<T>> {
     let ptr = file.private_data_ptr()? as *const T;
     // SAFETY: INV-NETARC-1 — the pointer is a live Arc::into_raw value
     // of this type (ops identity checked by the caller); the increment
@@ -58,7 +58,7 @@ pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::A
 /// drop — flush held data, protocol close; INV-NETARC-1 + the caller's
 /// ops identity check). The cell is emptied first, making a second
 /// reclaim impossible.
-pub(crate) fn reclaim_file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
+pub(crate) fn reclaim_file_arc<T>(file: &crate::fs::types::File) -> Option<alloc::sync::Arc<T>> {
     let ptr = file.private_data_ptr()? as *const T;
     file.clear_private_data();
     // SAFETY: INV-NETARC-1 — reconstructing consumes the slot's single
@@ -69,7 +69,7 @@ pub(crate) fn reclaim_file_arc<T>(file: &crate::fs::file::File) -> Option<alloc:
 /// Take the Arc OUT of a closing socket File's private_data slot and
 /// drop it (the close path — INV-NETARC-1 + the caller's ops identity
 /// check; the slot is cleared under the file's own close serialization).
-pub(crate) fn take_file_arc<T>(file: &crate::fs::file::File) -> Option<()> {
+pub(crate) fn take_file_arc<T>(file: &crate::fs::types::File) -> Option<()> {
     let ptr = file.private_data_ptr()? as *const T;
     // SAFETY: INV-NETARC-1 — reconstructing the stored Arc consumes the
     // slot's single reference (close is the last user of the file).

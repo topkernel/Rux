@@ -6,13 +6,12 @@
 //! ext4 file operations
 
 use crate::errno;
-use rux::fs::bio;
+use rux::fs::hotpath;
 use crate::ext4::indirect;
-use rux::fs::file::{File, FileOps};
-use rux::fs::inode::Inode;
-use rux::fs::io_completion::IoCompletion;
-use rux::fs::page_cache;
-use rux::fs::readahead::ReadAheadState;
+use rux::fs::types::{File, FileOps};
+use rux::fs::types::Inode;
+use rux::fs::types::IoCompletion;
+use rux::fs::types::ReadAheadState;
 
 // ============================================================================
 // sc105: demand-fault read attribution counters
@@ -64,14 +63,14 @@ pub fn ext4_file_read(
     // bread round trip — a 1 MiB direct read was 256 serialized device
     // waits (226x off the reference's single 1 MiB request). Resolve the
     // request's blocks into physically-consecutive runs, submit each run
-    // as ONE multi-block request (bio::bread_async_multi — the batching
+    // as ONE multi-block request (hotpath::bread_async_multi — the batching
     // the page-cache fill has used since the readahead window), keep a
     // window of runs in flight, and wait ONCE per window: requests
     // behind the first complete while the first is waited on. Fall back
     // to the per-block body when the fs block size differs from the
     // block cache's fixed 4096 (multi-block sector math is cache-block
     // based) or per-run on any async failure.
-    if block_size == bio::get_block_cache().cache_block_size() as usize && inode.has_extent() {
+    if block_size == hotpath::get_block_cache().cache_block_size() as usize && inode.has_extent() {
         let mut dst = DioReadDst::Staging(buf);
         if let Some(n) = ext4_dio_read_batched(fs, inode, offset, &mut dst, to_read, block_size) {
             return Ok(n);
@@ -194,7 +193,7 @@ fn ext4_dio_read_batched(
     to_read: usize,
     block_size: usize,
 ) -> Option<usize> {
-    use rux::fs::io_completion::IoCompletion;
+    use rux::fs::types::IoCompletion;
 
     const MAX_BATCH: usize = 64;
     const MAX_BLOCKS_PER_WINDOW: u64 = 512;
@@ -249,11 +248,11 @@ fn ext4_dio_read_batched(
         // INV-BIO-BHREF: bread pins the BufferHead until brelse; the
         // data view rides the safe accessor.
         {
-            let bh = match bio::bread(fs.device, phys) {
+            let bh = match hotpath::bread(fs.device, phys) {
                 Some(b) => b,
                 None => return None,
             };
-            let data = bio::bh_data(&bh);
+            let data = hotpath::bh_data(&bh);
             crate::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
                 block_index,
@@ -263,7 +262,7 @@ fn ext4_dio_read_batched(
                 data.as_ptr(),
             );
             let served = dst.put(dst_off, &data[block_offset..block_offset + len]);
-            bio::brelse(bh);
+            hotpath::brelse(bh);
             served
         }
     }
@@ -667,7 +666,7 @@ fn ext4_dio_read_batched(
         if n > 1 {
             let mut k: u64 = 1;
             while k < n {
-                if bio::block_cached(fs.device, run_phys + k) {
+                if hotpath::block_cached(fs.device, run_phys + k) {
                     break;
                 }
                 k += 1;
@@ -676,7 +675,7 @@ fn ext4_dio_read_batched(
         }
         // A single block that the cache holds: per-block serve (bread
         // serves the cached, possibly dirty, truth).
-        if n == 1 && bio::block_cached(fs.device, run_phys) {
+        if n == 1 && hotpath::block_cached(fs.device, run_phys) {
             match serve_one_block(fs, inode, current_offset, buf_offset, dst, remaining, block_size)
             {
                 Some(n2) => {
@@ -780,10 +779,10 @@ fn ext4_file_read_perblock(
         // INV-BIO-BHREF: bread pins the BufferHead until brelse; the
         // data view rides the safe accessor (block-sized, aligned).
         {
-            let bh = bio::bread(fs.device, this_block)
+            let bh = hotpath::bread(fs.device, this_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let data = bio::bh_data(&bh);
+            let data = hotpath::bh_data(&bh);
             // rux:exthunt (retired debug=exthunt): O_DIRECT serve truth (see exthunt_rd_od).
             crate::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
@@ -804,7 +803,7 @@ fn ext4_file_read_perblock(
             buf_offset += read_in_block;
             current_offset += read_in_block;
 
-            bio::brelse(bh);
+            hotpath::brelse(bh);
         }
     }
 
@@ -822,7 +821,7 @@ pub enum ReadDst {
     /// Throw-away destination (mm filemap_fault cache warm-up): the read
     /// runs for its SIDE EFFECT — populating the page cache through the
     /// readahead/fault-around machinery — and the bytes are never copied.
-    /// The caller pins the frames with `page_cache::get_phys` afterwards.
+    /// The caller pins the frames with `hotpath::get_phys` afterwards.
     Discard(usize),
 }
 
@@ -983,7 +982,7 @@ impl WriteSrc {
 /// Performance design: a cache miss no longer pays one synchronous virtio
 /// round trip per 4 KiB page. The miss triggers a BATCH fill — all missing
 /// pages of the current request plus a read-ahead window (when the access
-/// looks sequential) are submitted back-to-back with `bio::bread_async` and
+/// looks sequential) are submitted back-to-back with `hotpath::bread_async` and
 /// completed with ONE sleep/wake cycle, then served from the page cache.
 /// Before this, every page miss was a synchronous submit/sleep/wake
 /// (~1.8 ms under TCG) and the old read-ahead never fired at all on the PCI
@@ -1004,7 +1003,7 @@ fn ext4_file_read_cached_dst(
     let to_read = core::cmp::min(dst.len() as u64, available) as usize;
     let block_size = fs.block_size as u64;
     let block_size_usize = fs.block_size as usize;
-    let cache = page_cache::get_page_cache();
+    let cache = hotpath::get_page_cache();
     let ino = inode.ino as u64;
     // Filesystem identity for the page-cache key (review 5.3: cross-FS key
     // collisions on small inode numbers).
@@ -1189,7 +1188,7 @@ fn ext4_file_read_cached_dst(
             FAULT_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         let window = if seq_contd || offset == 0 {
-            core::cmp::max(demand_pages, rux::fs::readahead::MAX_READAHEAD_BLOCKS as u64)
+            core::cmp::max(demand_pages, rux::fs::hotpath::MAX_READAHEAD_BLOCKS as u64)
         } else if demand_pages == 1 && offset % block_size == 0 {
             // sc105 fault-around: a single page-aligned one-page read is
             // the mmap demand-fault signature (the fault path preads
@@ -1205,7 +1204,7 @@ fn ext4_file_read_cached_dst(
             // hit the cache; plain random preads only pay one extra merged
             // device request.
             FAULT_FILL_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            core::cmp::max(demand_pages, rux::fs::readahead::FAULT_AROUND_BLOCKS as u64)
+            core::cmp::max(demand_pages, rux::fs::hotpath::FAULT_AROUND_BLOCKS as u64)
         } else {
             FAULT_FILL_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Random seek: read only what the request needs.
@@ -1235,8 +1234,8 @@ fn ext4_file_read_cached_dst(
                 Err(_) => return Err(errno::Errno::IOError.as_neg_i32()),
             };
             if block_nr != 0 {
-                if let Some(bh) = bio::bread(fs.device, block_nr) {
-                    let data = bio::bh_data(&bh);
+                if let Some(bh) = hotpath::bread(fs.device, block_nr) {
+                    let data = hotpath::bh_data(&bh);
                     // rux:exthunt (retired debug=exthunt): sync-fallback serve truth (see
                     // exthunt_rd_serve).
                     crate::ext4::extent::exthunt_rd_serve(
@@ -1259,12 +1258,12 @@ fn ext4_file_read_cached_dst(
                         }
                         Err(e) => {
                             cache.insert(fs_id, ino, page_index, block_nr, data);
-                            bio::brelse(bh);
+                            hotpath::brelse(bh);
                             return if total_read == 0 { Err(e) } else { Ok(total_read) };
                         }
                     }
                     cache.insert(fs_id, ino, page_index, block_nr, data);
-                    bio::brelse(bh);
+                    hotpath::brelse(bh);
                     continue;
                 }
                 // Synchronous read failed: report I/O error rather than
@@ -1325,17 +1324,17 @@ const MAX_MERGE_BLOCKS: u64 = 64;
 ///
 /// Resolves each uncached page's physical block; runs of physically
 /// consecutive blocks are COALESCED into single multi-block requests
-/// (`bio::bread_async_multi`). The whole batch is submitted back-to-back,
+/// (`hotpath::bread_async_multi`). The whole batch is submitted back-to-back,
 /// the device is kicked ONCE, and a single sleep/wake cycle drains it.
 /// Requests that cannot be submitted asynchronously (device without async
 /// support, or the virtqueue is momentarily full) fall back to a synchronous
-/// `bio::bread` AFTER draining what is already in flight — forward progress
+/// `hotpath::bread` AFTER draining what is already in flight — forward progress
 /// is always guaranteed.
 #[allow(clippy::too_many_arguments)]
 fn fill_page_cache_batch(
     fs: &crate::ext4::Ext4FileSystem,
     inode: &crate::ext4::inode::Ext4Inode,
-    cache: &page_cache::PageCache,
+    cache: &rux::fs::types::PageCache,
     fs_id: u64,
     ino: u64,
     start: u64,
@@ -1354,7 +1353,7 @@ fn fill_page_cache_batch(
     // change; verified by the KSTACK-HW probe on the next roll.
     let mut completions: [IoCompletion; MAX_BATCH] =
         [const { IoCompletion::new() }; MAX_BATCH];
-    let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); MAX_BATCH];
+    let mut bh_ptrs = [core::ptr::null_mut::<rux::fs::types::BufferHead>(); MAX_BATCH];
     // Per submitted request: first file page index, first physical block,
     // and block count (skipped/sparse pages must not shift insert indices —
     // review EXT4-H6 discipline).
@@ -1431,7 +1430,7 @@ fn fill_page_cache_batch(
         let submit_blocks = if nblocks > 1 {
             let mut k = 0u64;
             while k < nblocks as u64 {
-                if bio::block_cached(fs.device, block_nr + k) {
+                if hotpath::block_cached(fs.device, block_nr + k) {
                     break;
                 }
                 k += 1;
@@ -1445,7 +1444,7 @@ fn fill_page_cache_batch(
             nblocks
         };
 
-        match bio::bread_async_multi(fs.device, block_nr, submit_blocks, &completions[count]) {
+        match hotpath::bread_async_multi(fs.device, block_nr, submit_blocks, &completions[count]) {
             Some(bh) => {
                 // rux:exthunt (retired debug=exthunt): batch submit truth (see exthunt_rd_batch).
                 crate::ext4::extent::exthunt_rd_batch(
@@ -1480,15 +1479,15 @@ fn fill_page_cache_batch(
                 } else {
                     // No async path at all: synchronous per-block reads
                     // (correctness fallback, e.g. loop devices).
-                    // SAFETY: bio::bread returns a valid pinned BufferHead
+                    // SAFETY: hotpath::bread returns a valid pinned BufferHead
                     // on success; b_data points to a block-sized buffer.
                     let mut ok = true;
                     for k in 0..n {
                         {
-                            if let Some(bh) = bio::bread(fs.device, block_nr + k) {
-                                let data = bio::bh_data(&bh);
+                            if let Some(bh) = hotpath::bread(fs.device, block_nr + k) {
+                                let data = hotpath::bh_data(&bh);
                                 cache.insert(fs_id, ino, run_first + k, block_nr + k, &data);
-                                bio::brelse(bh);
+                                hotpath::brelse(bh);
                             } else {
                                 ok = false; // I/O error: stop filling
                                 break;
@@ -1515,10 +1514,10 @@ fn fill_page_cache_batch(
 /// as a valid page.
 #[allow(clippy::too_many_arguments)]
 fn drain_batch(
-    cache: &page_cache::PageCache,
+    cache: &rux::fs::types::PageCache,
     fs_id: u64,
     ino: u64,
-    bh_ptrs: &[*mut bio::BufferHead],
+    bh_ptrs: &[*mut rux::fs::types::BufferHead],
     ra_idx: &[u64],
     ra_blk: &[u64],
     ra_len: &[u32],
@@ -1530,7 +1529,7 @@ fn drain_batch(
     // pci_submit_read_async): publish N chains, notify once, then wait.
     crate::drivers::blkdev::kick_all_pending_disks();
     for i in 0..count {
-        status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
+        status[i] = hotpath::bread_wait(bh_ptrs[i], &completions[i]);
     }
     // Insert completed pages into the page cache under their own indices.
     for i in 0..count {
@@ -1538,7 +1537,7 @@ fn drain_batch(
         // BufferHead with fully populated b_data (status 0 only); the
         // data view rides the INV-BIO-BHREF accessor.
         if status[i] == 0 {
-            let data = bio::bh_data(&bh_ptrs[i]);
+            let data = hotpath::bh_data(&bh_ptrs[i]);
             let blocks = ra_len[i] as usize;
             if blocks <= 1 {
                 cache.insert(fs_id, ino, ra_idx[i], ra_blk[i], data);
@@ -1559,15 +1558,15 @@ fn drain_batch(
             // intentionally held forever (bounded by the rarity of 10s
             // stalls; freeing it corrupted unrelated pages). A real
             // device EIO COMPLETED its chain — brelse is safe there.
-            if status[i] == rux::fs::io_completion::WAIT_TIMED_OUT {
+            if status[i] == rux::fs::hotpath::WAIT_TIMED_OUT {
                 crate::pr_err!(
                     "ext4: leaked timed-out read-ahead bh (block {}) — device may still DMA",
                     ra_blk[i]
                 );
             } else {
-                bio::brelse(bh_ptrs[i]);
+                hotpath::brelse(bh_ptrs[i]);
             }
-        } else if status[i] == rux::fs::io_completion::WAIT_TIMED_OUT {
+        } else if status[i] == rux::fs::hotpath::WAIT_TIMED_OUT {
             // Multi-block private buffer, timed out (the waiter already
             // abandoned the pending so no late completion fires into
             // its stack): the device may still DMA into it.
@@ -1582,7 +1581,7 @@ fn drain_batch(
             // device EIO completed its chain — the DMA is done.
             // bfree_multi's contract — private (non-cached) buffer,
             // DMA quiesced (status != WAIT_TIMED_OUT above).
-            bio::bfree_multi(bh_ptrs[i]);
+            hotpath::bfree_multi(bh_ptrs[i]);
         }
     }
 }
@@ -1665,10 +1664,10 @@ impl<'a> DioWriteSrc<'a> {
 }
 
 /// In-flight cap of the GUP write window — one chain per span, so the
-/// bound matches bio::MAX_WRITE_BATCH's device-pressure shape.
+/// bound matches rux::fs::types::MAX_WRITE_BATCH's device-pressure shape.
 const MAX_GUP_WRITE_SPANS: usize = 32;
 
-/// Write-side GUP chain window (GUP-DIO): bio::WriteBatch's contract
+/// Write-side GUP chain window (GUP-DIO): rux::fs::types::WriteBatch's contract
 /// (quiet span submit / one-kick drain / per-span status) where every
 /// span is ONE scatter-gather chain built from the span's PINNED user
 /// frames. Spans are formed by the caller at <= MAX_SG_SEGS_PER_CHAIN
@@ -1787,7 +1786,7 @@ impl GupWriteChains {
 /// window (same submit/flush/status surface — the dio_drain! macro is
 /// written against it).
 enum DioWin {
-    Batch(bio::WriteBatch),
+    Batch(rux::fs::types::WriteBatch),
     Gup(GupWriteChains),
 }
 
@@ -1955,7 +1954,7 @@ fn ext4_file_write_src(
     const DIO_MAX_MERGE: u64 = 64;
     let mut dio_window: Option<DioWin> = if dio_fast && fs.block_size == 4096 {
         match &wsrc {
-            DioWriteSrc::Staging(_) => Some(DioWin::Batch(bio::WriteBatch::new())),
+            DioWriteSrc::Staging(_) => Some(DioWin::Batch(rux::fs::types::WriteBatch::new())),
             DioWriteSrc::User { .. } => {
                 if (*fs.device).has_async_write_sg() {
                     Some(DioWin::Gup(GupWriteChains::new(fs.device)))
@@ -2064,7 +2063,7 @@ fn ext4_file_write_src(
                         if n > 1 {
                             let mut k: u64 = 1;
                             while k < n {
-                                if bio::block_cached(fs.device, first_phys + k) {
+                                if hotpath::block_cached(fs.device, first_phys + k) {
                                     break;
                                 }
                                 k += 1;
@@ -2074,7 +2073,7 @@ fn ext4_file_write_src(
                         // Cached single block: the buffer cache holds the
                         // truth (possibly dirty) — the per-block body
                         // below serves it; no direct submission.
-                        if n == 1 && bio::block_cached(fs.device, first_phys) {
+                        if n == 1 && hotpath::block_cached(fs.device, first_phys) {
                             n = 0;
                         }
                         let span_bytes = n as usize * block_size as usize;
@@ -2234,9 +2233,9 @@ fn ext4_file_write_src(
                                 "mat", inode.ino, block_index, phys,
                             );
                             {
-                                if let Some(bh) = bio::getblk_zero(fs.device, phys) {
-                                    bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                                    bio::brelse(bh);
+                                if let Some(bh) = hotpath::getblk_zero(fs.device, phys) {
+                                    hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                                    hotpath::brelse(bh);
                                 } else {
                                     partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32());
                                 }
@@ -2288,8 +2287,8 @@ fn ext4_file_write_src(
                                 "hole", inode.ino, block_index, new_block,
                             );
                             {
-                                if let Some(bh) = bio::getblk_zero(fs.device, new_block) {
-                                    bio::brelse(bh);
+                                if let Some(bh) = hotpath::getblk_zero(fs.device, new_block) {
+                                    hotpath::brelse(bh);
                                 } else {
                                     partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32());
                                 }
@@ -2311,19 +2310,19 @@ fn ext4_file_write_src(
                     // Zero the new block (deferred-dirty: the write loop
                     // below leaves the data buffer BH_Dirty; the block
                     // cache write-back persists it — see ext4_file_write).
-                    // SAFETY: bio::bread returns a valid BufferHead;
+                    // SAFETY: hotpath::bread returns a valid BufferHead;
                     // b_data is a block-sized writable buffer.
                     {
-                        let bh = match bio::bread(fs.device, new_block) {
+                        let bh = match hotpath::bread(fs.device, new_block) {
                             Some(b) => b,
                             None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
                         };
 
-                        for byte in bio::bh_data_mut(&bh).iter_mut() {
+                        for byte in hotpath::bh_data_mut(&bh).iter_mut() {
                             *byte = 0;
                         }
-                        bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                        bio::brelse(bh);
+                        hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                        hotpath::brelse(bh);
                     }
 
                     // Update inode block pointer
@@ -2345,7 +2344,7 @@ fn ext4_file_write_src(
             Err(e) => partial_or_err!('block_loop, e),
         };
 
-        // SAFETY: bio::bread returns a valid BufferHead; b_data is a writable
+        // SAFETY: hotpath::bread returns a valid BufferHead; b_data is a writable
         // block-sized buffer. The slice ranges are bounded by block_size.
         {
             // FULL-BLOCK OVERWRITE (flush-wall fix, 2026-11): when this
@@ -2368,19 +2367,19 @@ fn ext4_file_write_src(
                     let write_in_block =
                         core::cmp::min(remaining, block_size as usize);
                     if write_in_block >= 4096 {
-                        bio::getblk_overwrite(fs.device, block_num)
+                        hotpath::getblk_overwrite(fs.device, block_num)
                     } else {
-                        bio::bread(fs.device, block_num)
+                        hotpath::bread(fs.device, block_num)
                     }
                 } else {
-                    bio::bread(fs.device, block_num)
+                    hotpath::bread(fs.device, block_num)
                 }
             } {
                 Some(b) => b,
                 None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
             };
 
-            let data = bio::bh_data_mut(&bh);
+            let data = hotpath::bh_data_mut(&bh);
             let remaining = to_write as usize - total_written;
             let available_in_block = block_size as usize - block_offset;
             let write_in_block = core::cmp::min(remaining, available_in_block);
@@ -2409,8 +2408,8 @@ fn ext4_file_write_src(
             // (ext4_sync_file syncs the file's dirty data blocks), the
             // buffer-cache eviction path (dirty victims are synced before
             // reuse), and sync(2).
-            bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-            bio::brelse(bh);
+            hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+            hotpath::brelse(bh);
             // Dirty-note (see DIRTY_DATA_BLOCKS): the fsync walk is
             // note-driven for regular files — every data block left
             // BH_Dirty here must be in the set.
@@ -2555,18 +2554,18 @@ pub fn allocate_blocks_for_file(
         for k in 0..run_len as u64 {
             let data_block = run_start + k;
             // Zero newly allocated data block (deferred-dirty).
-            // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+            // SAFETY: hotpath::bread returns a valid BufferHead; b_data is a
             // block-sized writable buffer. We zero it before use.
             {
-                let bh = bio::bread(fs.device, data_block)
+                let bh = hotpath::bread(fs.device, data_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                for byte in bio::bh_data_mut(&bh).iter_mut() {
+                for byte in hotpath::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
 
-                bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                bio::brelse(bh);
+                hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                hotpath::brelse(bh);
             }
             // Dirty-note (see DIRTY_DATA_BLOCKS).
             note_dirty_data_block(fs as *const _ as u64, inode.ino as u64, data_block);
@@ -2683,17 +2682,17 @@ fn allocate_blocks_with_extents(
         };
 
         // Zero each new block in the run (deferred-dirty, no sync).
-        // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+        // SAFETY: hotpath::bread returns a valid BufferHead; b_data is a
         // block-sized writable buffer.
         for b in run_start..run_start + run_len as u64 {
             {
-                let bh = bio::bread(fs.device, b)
+                let bh = hotpath::bread(fs.device, b)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                for byte in bio::bh_data_mut(&bh).iter_mut() {
+                for byte in hotpath::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
-                bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                bio::brelse(bh);
+                hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                hotpath::brelse(bh);
             }
         }
         // Dirty-notes for the zeroed run (see DIRTY_DATA_BLOCKS).
@@ -2836,20 +2835,20 @@ pub fn allocate_indirect_block(
             inode.block[12] = indirect_block as u32;
 
             // Zero indirect block
-            // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+            // SAFETY: hotpath::bread returns a valid BufferHead; b_data is a
             // block-sized writable buffer. We zero it to initialize block
             // pointers before use.
             {
-                let bh = bio::bread(fs.device, indirect_block)
+                let bh = hotpath::bread(fs.device, indirect_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                for byte in bio::bh_data_mut(&bh).iter_mut() {
+                for byte in hotpath::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
 
-                bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                let sync_res = bio::sync_dirty_buffer(bh);
-                bio::brelse(bh);
+                hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                let sync_res = hotpath::sync_dirty_buffer(bh);
+                hotpath::brelse(bh);
                 sync_res?;
             }
         }
@@ -2874,7 +2873,7 @@ pub fn allocate_indirect_block(
 
                 // Zero double indirect block: the block-update edge
                 // owns pin/dirty/journal/sync/release (INV-BIO-BLOCKUPD).
-                bio::with_block_mut(fs.device, double_block, |data, _| {
+                hotpath::with_block_mut(fs.device, double_block, |data, _| {
                     data.fill(0);
                     Ok(())
                 })?;
@@ -2897,7 +2896,7 @@ pub fn allocate_indirect_block(
 
                 // Zero single indirect block: same block-update edge
                 // (INV-BIO-BLOCKUPD).
-                bio::with_block_mut(fs.device, indirect_block, |data, _| {
+                hotpath::with_block_mut(fs.device, indirect_block, |data, _| {
                     data.fill(0);
                     Ok(())
                 })?;
@@ -3290,7 +3289,7 @@ fn ext4_sync_file_inner(
     // syncs). Ordering for whenever those foreign entry blocks DO reach
     // disk is enforced per-block at every write site (guards on
     // sync_dirty_buffer / eviction / commit write-through).
-    let _ = bio::flush_publications_scoped();
+    let _ = hotpath::flush_publications_scoped();
 
     // RUN-BASED data sync (paired-test item 3, 2026-11-17): the old
     // shape materialized the WHOLE file map (one extent lookup per block,
@@ -3298,7 +3297,7 @@ fn ext4_sync_file_inner(
     // extent file, ONE extent-tree walk per run resolves the whole span
     // (an 8 MiB file is 1-3 extents, not 2048 lookups); absent-durable
     // blocks skip without a pin; the surviving dirty blocks go out in
-    // ONE batched window (bio::sync_dirty_blocks_batched — a single
+    // ONE batched window (hotpath::sync_dirty_blocks_batched — a single
     // device drain) instead of one serialized round trip each. This is
     // the measured 691 us -> sub-200 us fsync class on the fio
     // write+fsync row. Indirect-mapped files keep the old per-block
@@ -3316,11 +3315,11 @@ fn ext4_sync_file_inner(
         let mut walk_err: Option<i32> = None;
         for blk in notes {
             // SAFETY: fs.device is the fs's registered GenDisk (probe only).
-            if bio::block_dirty_cached(fs.device, blk) {
+            if hotpath::block_dirty_cached(fs.device, blk) {
                 batch.push(blk);
             }
             if batch.len() >= 4096 {
-                let rc = bio::sync_dirty_blocks_batched(fs.device, &batch, false);
+                let rc = hotpath::sync_dirty_blocks_batched(fs.device, &batch, false);
                 if rc != 0 {
                     still_dirty.extend_from_slice(&batch);
                     if walk_err.is_none() {
@@ -3331,7 +3330,7 @@ fn ext4_sync_file_inner(
             }
         }
         if !batch.is_empty() {
-            let rc = bio::sync_dirty_blocks_batched(fs.device, &batch, false);
+            let rc = hotpath::sync_dirty_blocks_batched(fs.device, &batch, false);
             if rc != 0 {
                 still_dirty.extend_from_slice(&batch);
                 if walk_err.is_none() {
@@ -3376,13 +3375,13 @@ fn ext4_sync_file_inner(
             // the 3.9M breads/s CPU burn (fsw br=59M on the test suite row).
             // SAFETY: fs.device is the fs's registered GenDisk.
             for k in 0..n {
-                if bio::block_dirty_cached(fs.device, phys + k) {
+                if hotpath::block_dirty_cached(fs.device, phys + k) {
                     batch.push(phys + k);
                 }
             }
             blk += n;
             if batch.len() >= WALK_CHUNK {
-                let rc = bio::sync_dirty_blocks_batched(fs.device, &batch, false);
+                let rc = hotpath::sync_dirty_blocks_batched(fs.device, &batch, false);
                 batch.clear();
                 if rc != 0 {
                     return Err(rc);
@@ -3393,7 +3392,7 @@ fn ext4_sync_file_inner(
             return Err(e);
         }
         if !batch.is_empty() {
-            let rc = bio::sync_dirty_blocks_batched(fs.device, &batch, false);
+            let rc = hotpath::sync_dirty_blocks_batched(fs.device, &batch, false);
             if rc != 0 {
                 return Err(rc);
             }
@@ -3407,19 +3406,19 @@ fn ext4_sync_file_inner(
                 continue; // sparse hole
             }
             // SAFETY: fs.device is the fs's registered GenDisk.
-            if bio::block_absent_durable(fs.device, block) {
+            if hotpath::block_absent_durable(fs.device, block) {
                 continue;
             }
             {
-                let bh = bio::bread(fs.device, block)
+                let bh = hotpath::bread(fs.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let sync_res = if bio::bh_is_dirty(&bh) {
-                    bio::sync_dirty_buffer(bh)
+                let sync_res = if hotpath::bh_is_dirty(&bh) {
+                    hotpath::sync_dirty_buffer(bh)
                 } else {
                     Ok(())
                 };
-                bio::brelse(bh);
+                hotpath::brelse(bh);
                 sync_res?;
             }
         }
@@ -3441,8 +3440,8 @@ fn ext4_sync_file_inner(
     // round trip.
     if let Some(tbl_blk) = super::inode::inode_table_block_of(fs, inode.ino) {
         // SAFETY: fs.device is the fs's registered GenDisk (probe only).
-        if bio::block_dirty_cached(fs.device, tbl_blk) {
-            let rc = bio::sync_dirty_blocks_batched(
+        if hotpath::block_dirty_cached(fs.device, tbl_blk) {
+            let rc = hotpath::sync_dirty_blocks_batched(
                 fs.device,
                 core::slice::from_ref(&tbl_blk),
                 false,
@@ -3491,7 +3490,7 @@ fn ext4_sync_file_inner(
         // sync_all_excluding -> is_dirty -> state lock at null+0x30).
         // The per-file set below walks no shared cache.)
         if !inode.has_extent() {
-            // SAFETY: bio::bread returns valid BufferHeads; the indirect
+            // SAFETY: hotpath::bread returns valid BufferHeads; the indirect
             // blocks are plain metadata blocks of this inode.
             {
                 let mut chain = [0u64; 2];
@@ -3505,13 +3504,13 @@ fn ext4_sync_file_inner(
                     if *top == 0 {
                         continue;
                     }
-                    let bh = match bio::bread(fs.device, *top) {
+                    let bh = match hotpath::bread(fs.device, *top) {
                         Some(b) => b,
                         None => continue,
                     };
                     // Sync the top-level indirect block itself.
-                    if bio::bh_is_dirty(&bh) {
-                        let _ = bio::sync_dirty_buffer(bh);
+                    if hotpath::bh_is_dirty(&bh) {
+                        let _ = hotpath::sync_dirty_buffer(bh);
                     }
                     // Double-indirect: sync each pointed single-indirect
                     // block (they hold the data pointers).
@@ -3519,7 +3518,7 @@ fn ext4_sync_file_inner(
                         let ppc = (fs.block_size / 4) as usize;
                         for i in 0..ppc {
                             let v = {
-                                let src = bio::bh_data(&bh);
+                                let src = hotpath::bh_data(&bh);
                                 let mut b4 = [0u8; 4];
                                 let end = (i * 4 + 4).min(src.len());
                                 if i * 4 < end {
@@ -3529,22 +3528,22 @@ fn ext4_sync_file_inner(
                                 u32::from_le_bytes(b4) as u64
                             };
                             if v != 0 {
-                                if let Some(sb) = bio::bread(fs.device, v) {
-                                    if bio::bh_is_dirty(&sb) {
-                                        let _ = bio::sync_dirty_buffer(sb);
+                                if let Some(sb) = hotpath::bread(fs.device, v) {
+                                    if hotpath::bh_is_dirty(&sb) {
+                                        let _ = hotpath::sync_dirty_buffer(sb);
                                     }
-                                    bio::brelse(sb);
+                                    hotpath::brelse(sb);
                                 }
                             }
                         }
                     }
-                    bio::brelse(bh);
+                    hotpath::brelse(bh);
                 }
             }
         }
     }
 
-    // NO whole-cache flush here (the old bio::sync_buffers() tail). It
+    // NO whole-cache flush here (the old hotpath::sync_buffers() tail). It
     // existed to catch unregistered metadata left dirty by the lazy
     // write-back, but none of it belongs to THIS fsync:
     // - F's data blocks: synced above.
@@ -3619,11 +3618,11 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
     let offset = file.get_pos() as u64;
 
     // P2 O_DIRECT: bypass the page cache entirely and serve straight
-    // from the block layer (ext4_file_read walks bio::bread). The
+    // from the block layer (ext4_file_read walks hotpath::bread). The
     // write side already runs uncached-synchronous (ext4_file_write),
     // so only the read path needs the branch. Simplification vs Linux:
     // offset/length block alignment is not enforced.
-    if file.flags_bits() & rux::fs::file::FileFlags::O_DIRECT != 0 {
+    if file.flags_bits() & rux::fs::types::FileFlags::O_DIRECT != 0 {
         // Reference parity (generic_file_read_iter's DIO leg):
         // filemap_write_and_wait_range BEFORE the direct read — a
         // buffered writer's dirty page-cache frames must reach the
@@ -3723,9 +3722,9 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                 // without an explicit notify every read(2) on an ext4
                 // file dropped the event (LTP inotify01: the whole
                 // expected-event train shifted by one).
-                rux::fs::notify_hooks::notify_file(
+                rux::fs::hotpath::notify_file(
                     file,
-                    rux::fs::notify_hooks::ino_events::IN_ACCESS,
+                    rux::fs::hotpath::ino_events::IN_ACCESS,
                 );
             }
             if probe {
@@ -3781,7 +3780,7 @@ fn ext4_dio_read_gup_core(
     to_read: usize,
 ) -> Option<usize> {
     let block_size = fs.block_size as usize;
-    if block_size != bio::get_block_cache().cache_block_size() as usize || !inode.has_extent() {
+    if block_size != hotpath::get_block_cache().cache_block_size() as usize || !inode.has_extent() {
         return None;
     }
     // The GUP arm expresses runs only as SG chains of pinned pieces.
@@ -3833,7 +3832,7 @@ pub fn ext4_file_read_dio_user_vfs(file: &File, dst: *mut u8, count: usize) -> O
         stamp_atime_relatime(
             ext4_inode as *const super::inode::Ext4Inode as *mut super::inode::Ext4Inode,
         );
-        rux::fs::notify_hooks::notify_file(file, rux::fs::notify_hooks::ino_events::IN_ACCESS);
+        rux::fs::hotpath::notify_file(file, rux::fs::hotpath::ino_events::IN_ACCESS);
     }
     Some(n as isize)
 }
@@ -3898,7 +3897,7 @@ pub fn ext4_file_pread_dio_user_vfs(
 /// fault-around detector warming the surrounding window, exactly as a
 /// read_at from the old private-copy fault path did).
 ///
-/// The caller then pins frames with `page_cache::get_phys` and maps them
+/// The caller then pins frames with `hotpath::get_phys` and maps them
 /// directly (Linux filemap_fault shape). Returns false when the file is
 /// not resolvable through the ext4 read path (treated as "not cacheable"
 /// by the fault arm, which falls back to a private copy).
@@ -3938,7 +3937,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
     let _pos_guard = file.io_lock.guard();
 
     // Get current file position (O_APPEND: always write at end of file)
-    let offset = if file.flags().bits() & rux::fs::file::FileFlags::O_APPEND != 0 {
+    let offset = if file.flags().bits() & rux::fs::types::FileFlags::O_APPEND != 0 {
         // Computed inside the core, from the disk-fresh inode under the
         // big lock — an append racing on a different open description
         // must be visible before our offset is fixed.
@@ -3979,9 +3978,9 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
     // Route-1: defer the write on journal-less images unless the
     // description demands write-return durability.
     let durability = file.flags().bits()
-        & (rux::fs::file::FileFlags::O_SYNC
-            | rux::fs::file::FileFlags::O_DSYNC
-            | rux::fs::file::FileFlags::O_DIRECT);
+        & (rux::fs::types::FileFlags::O_SYNC
+            | rux::fs::types::FileFlags::O_DSYNC
+            | rux::fs::types::FileFlags::O_DIRECT);
     // Delayed allocation (perf-gaps 2026-11): plain buffered writes
     // (no O_SYNC/O_DSYNC/O_DIRECT) take the page-cache fast path —
     // write(2) copies into (dirty) frames and defers allocation +
@@ -4003,11 +4002,11 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             ext4_ino,
             Some(inode),
             offset,
-            durability & (rux::fs::file::FileFlags::O_SYNC
-                | rux::fs::file::FileFlags::O_DSYNC) == 0,
+            durability & (rux::fs::types::FileFlags::O_SYNC
+                | rux::fs::types::FileFlags::O_DSYNC) == 0,
             buf,
             &[0],
-            durability & rux::fs::file::FileFlags::O_DIRECT != 0,
+            durability & rux::fs::types::FileFlags::O_DIRECT != 0,
         )
     };
     if written > 0 {
@@ -4027,7 +4026,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         // victims to serialized one-at-a-time eviction syncs (the
         // measured 10.6 ms 1 MiB DIO write class). no-op for block
         // sizes the span machinery cannot express.
-        if durability & rux::fs::file::FileFlags::O_DIRECT != 0 && !fs.read_only {
+        if durability & rux::fs::types::FileFlags::O_DIRECT != 0 && !fs.read_only {
             let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
             let mut flusher = SpanFlusher::new();
             run_sync_spans(
@@ -4069,9 +4068,9 @@ pub fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, count: u
     // delayed-allocation page-cache path (pwrite/mmap-writeback flushes
     // still come through ext4_write_at_core directly).
     let durability = file.flags().bits()
-        & (rux::fs::file::FileFlags::O_SYNC
-            | rux::fs::file::FileFlags::O_DSYNC
-            | rux::fs::file::FileFlags::O_DIRECT);
+        & (rux::fs::types::FileFlags::O_SYNC
+            | rux::fs::types::FileFlags::O_DSYNC
+            | rux::fs::types::FileFlags::O_DIRECT);
     if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         ext4_buffered_write(
             fs,
@@ -4085,17 +4084,17 @@ pub fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, count: u
             inode.ino as u32,
             Some(inode),
             offset,
-            durability & (rux::fs::file::FileFlags::O_SYNC
-                | rux::fs::file::FileFlags::O_DSYNC) == 0,
+            durability & (rux::fs::types::FileFlags::O_SYNC
+                | rux::fs::types::FileFlags::O_DSYNC) == 0,
             data,
             &[0],
-            durability & rux::fs::file::FileFlags::O_DIRECT != 0,
+            durability & rux::fs::types::FileFlags::O_DIRECT != 0,
         );
         // O_DIRECT write-return durability — see the write(2) twin
         // (paired-test item 1): plugged span drain of the written
         // range so a direct pwrite is device-acked at return.
         if written > 0
-            && durability & rux::fs::file::FileFlags::O_DIRECT != 0
+            && durability & rux::fs::types::FileFlags::O_DIRECT != 0
             && !fs.read_only
         {
             let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
@@ -4141,7 +4140,7 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
     // and sleep inside it (Linux holds i_rwsem across exactly this).
     let _pos_guard = file.io_lock.guard();
 
-    let offset = if file.flags().bits() & rux::fs::file::FileFlags::O_APPEND != 0 {
+    let offset = if file.flags().bits() & rux::fs::types::FileFlags::O_APPEND != 0 {
         u64::MAX
     } else {
         file.get_pos()
@@ -4174,9 +4173,9 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
     }
 
     let durability = file.flags().bits()
-        & (rux::fs::file::FileFlags::O_SYNC
-            | rux::fs::file::FileFlags::O_DSYNC
-            | rux::fs::file::FileFlags::O_DIRECT);
+        & (rux::fs::types::FileFlags::O_SYNC
+            | rux::fs::types::FileFlags::O_DSYNC
+            | rux::fs::types::FileFlags::O_DIRECT);
     let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: the audited ext4_buffered_write span (user-source copy
         // contract: wsrc is access_ok-validated by the syscall layer).
@@ -4200,11 +4199,11 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
             inode.ino as u32,
             Some(inode),
             offset,
-            durability & (rux::fs::file::FileFlags::O_SYNC
-                | rux::fs::file::FileFlags::O_DSYNC) == 0,
+            durability & (rux::fs::types::FileFlags::O_SYNC
+                | rux::fs::types::FileFlags::O_DSYNC) == 0,
             &staged,
             &[0],
-            durability & rux::fs::file::FileFlags::O_DIRECT != 0,
+            durability & rux::fs::types::FileFlags::O_DIRECT != 0,
         )
     };
     if written > 0 {
@@ -4217,9 +4216,9 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
         // inotify IN_MODIFY: this fast path bypasses File::write,
         // whose wrapper owns the notify on the staged path (same
         // discipline as the read twin, LTP inotify01).
-        rux::fs::notify_hooks::notify_file(
+        rux::fs::hotpath::notify_file(
             file,
-            rux::fs::notify_hooks::ino_events::IN_MODIFY,
+            rux::fs::hotpath::ino_events::IN_MODIFY,
         );
     }
     written
@@ -4243,9 +4242,9 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
     };
 
     let durability = file.flags().bits()
-        & (rux::fs::file::FileFlags::O_SYNC
-            | rux::fs::file::FileFlags::O_DSYNC
-            | rux::fs::file::FileFlags::O_DIRECT);
+        & (rux::fs::types::FileFlags::O_SYNC
+            | rux::fs::types::FileFlags::O_DSYNC
+            | rux::fs::types::FileFlags::O_DIRECT);
     let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: the audited ext4_buffered_write span (user-source copy
         // contract: wsrc is access_ok-validated by the syscall layer).
@@ -4270,20 +4269,20 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
             inode.ino as u32,
             Some(inode),
             offset,
-            durability & (rux::fs::file::FileFlags::O_SYNC
-                | rux::fs::file::FileFlags::O_DSYNC) == 0,
+            durability & (rux::fs::types::FileFlags::O_SYNC
+                | rux::fs::types::FileFlags::O_DSYNC) == 0,
             &staged,
             &[0],
-            durability & rux::fs::file::FileFlags::O_DIRECT != 0,
+            durability & rux::fs::types::FileFlags::O_DIRECT != 0,
         )
     };
     if written > 0 {
         // inotify IN_MODIFY: the staged path's File::write_at wrapper
         // owns the notify; this fast path bypasses it (same discipline
         // as the read twin, LTP inotify01).
-        rux::fs::notify_hooks::notify_file(
+        rux::fs::hotpath::notify_file(
             file,
-            rux::fs::notify_hooks::ino_events::IN_MODIFY,
+            rux::fs::hotpath::ino_events::IN_MODIFY,
         );
     }
     written
@@ -4311,7 +4310,7 @@ pub const GUP_DIO_WRITE_MIN: usize = 64 * 1024;
 #[allow(clippy::too_many_arguments)]
 fn ext4_dio_write_gup_run(
     fs: &crate::ext4::Ext4FileSystem,
-    inode: Option<&rux::fs::inode::Inode>,
+    inode: Option<&rux::fs::types::Inode>,
     ext4_ino: u32,
     offset: u64,
     src: *const u8,
@@ -4366,7 +4365,7 @@ pub fn ext4_file_write_dio_user_vfs(file: &File, src: *const u8, count: usize) -
     // ext4_file_write_user_vfs): at/after the limit EFBIG+SIGXFSZ,
     // crossing truncates to the boundary.
     let mut count = count;
-    let offset = if file.flags().bits() & rux::fs::file::FileFlags::O_APPEND != 0 {
+    let offset = if file.flags().bits() & rux::fs::types::FileFlags::O_APPEND != 0 {
         u64::MAX
     } else {
         file.get_pos()
@@ -4411,9 +4410,9 @@ pub fn ext4_file_write_dio_user_vfs(file: &File, src: *const u8, count: usize) -
         };
         file.set_pos(end);
         // IN_MODIFY: same discipline as ext4_file_write_user_vfs.
-        rux::fs::notify_hooks::notify_file(
+        rux::fs::hotpath::notify_file(
             file,
-            rux::fs::notify_hooks::ino_events::IN_MODIFY,
+            rux::fs::hotpath::ino_events::IN_MODIFY,
         );
     }
     Some(written)
@@ -4441,9 +4440,9 @@ pub fn ext4_file_pwrite_dio_user_vfs(
     let written =
         ext4_dio_write_gup_run(fs, Some(inode), inode.ino as u32, offset, src, count)?;
     if written > 0 {
-        rux::fs::notify_hooks::notify_file(
+        rux::fs::hotpath::notify_file(
             file,
-            rux::fs::notify_hooks::ino_events::IN_MODIFY,
+            rux::fs::hotpath::ino_events::IN_MODIFY,
         );
     }
     Some(written)
@@ -4505,7 +4504,7 @@ pub fn ext4_kernel_write_at(
 ///   without a following fsync/sync is not durable.
 fn ext4_buffered_write(
     fs: &crate::ext4::Ext4FileSystem,
-    inode: &rux::fs::inode::Inode,
+    inode: &rux::fs::types::Inode,
     offset: u64,
     src: WriteSrc,
 ) -> isize {
@@ -4530,7 +4529,7 @@ fn ext4_buffered_write(
     let sb_ptr = sbi as *const super::inode::Ext4Inode as *mut super::inode::Ext4Inode;
     let fs_id = fs as *const crate::ext4::Ext4FileSystem as u64;
     let ino = inode.ino as u64;
-    let cache = page_cache::get_page_cache();
+    let cache = hotpath::get_page_cache();
     let ps = crate::mm::PAGE_SIZE as u64;
     let psu = crate::mm::PAGE_SIZE;
 
@@ -4836,12 +4835,12 @@ fn ext4_buffered_write(
                             p as usize + buf_start,
                             want,
                         ) {
-                            page_cache::DirtyUserOutcome::Installed => {
+                            rux::fs::types::DirtyUserOutcome::Installed => {
                                 copied += want;
                                 served = true;
                                 break;
                             }
-                            page_cache::DirtyUserOutcome::Contention => {
+                            rux::fs::types::DirtyUserOutcome::Contention => {
                                 // Lost the insert race — loop back to
                                 // pin-and-copy.
                                 if rounds > 8 {
@@ -4849,7 +4848,7 @@ fn ext4_buffered_write(
                                 }
                                 continue;
                             }
-                            page_cache::DirtyUserOutcome::Fault => {
+                            rux::fs::types::DirtyUserOutcome::Fault => {
                                 user_fault = true;
                                 break;
                             }
@@ -5097,7 +5096,7 @@ fn ext4_buffered_write(
         if let Some((free, _mark, target)) = rux::api::mm::zone_dirty_writeback_state() {
             let shortfall = target.saturating_sub(free);
             if shortfall > 0 {
-                shrunk = page_cache::get_page_cache().writeback_recover(shortfall);
+                shrunk = hotpath::get_page_cache().writeback_recover(shortfall);
             }
         }
         let dt = crate::timer::get_jiffies().saturating_sub(t0);
@@ -5121,17 +5120,17 @@ fn ext4_buffered_write(
                 dt,
                 free_now,
                 mark,
-                page_cache::dirty_pages()
+                hotpath::dirty_pages()
             );
             if shrunk == 0 {
                 crate::pr_info!(
                     "WB-WATERMARK census: {}",
-                    page_cache::pcache_reclaim_census_line()
+                    hotpath::pcache_reclaim_census_line()
                 );
                 static HIST_PRINTS: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if HIST_PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
-                    crate::pr_info!("{}", page_cache::pcache_dirty_histogram());
+                    crate::pr_info!("{}", hotpath::pcache_dirty_histogram());
                 }
             }
         }
@@ -5157,7 +5156,7 @@ static WRITER_FLUSH_IN_FLIGHT: core::sync::atomic::AtomicBool =
 /// dentry-visible size. Shared by the fd write paths and the kernel-side
 /// writer (klogd) so both leave identical cache state.
 fn refresh_cached_vfs_inode(
-    vi: &rux::fs::inode::Inode,
+    vi: &rux::fs::types::Inode,
     ext4_inode: &super::inode::Ext4Inode,
 ) {
     let fresh_size = ext4_inode.get_size();
@@ -5179,7 +5178,7 @@ fn refresh_cached_vfs_inode(
     // so this guard sees nothing to hold.
     let size = if fresh_size < vi.get_size()
         && vi.private_data.is_some_and(|p| {
-            rux::fs::page_cache::get_page_cache()
+            rux::fs::hotpath::get_page_cache()
                 .dirty_extent_hint(p as u64, vi.ino as u64)
                 .is_some_and(|e| e > fresh_size)
         }) {
@@ -5214,7 +5213,7 @@ fn refresh_cached_vfs_inode(
 fn ext4_write_at_core(
     fs: &crate::ext4::Ext4FileSystem,
     ext4_ino: u32,
-    inode: Option<&rux::fs::inode::Inode>,
+    inode: Option<&rux::fs::types::Inode>,
     offset: u64,
     defer_unjournaled: bool,
     buf: &[u8],
@@ -5230,7 +5229,7 @@ fn ext4_write_at_core(
 fn ext4_write_at_core_src(
     fs: &crate::ext4::Ext4FileSystem,
     ext4_ino: u32,
-    inode: Option<&rux::fs::inode::Inode>,
+    inode: Option<&rux::fs::types::Inode>,
     offset: u64,
     // Route-1 (leg 52, item 3): allow the write to run DEFERRED on a
     // journal-less filesystem (see the handle arm below). The fd callers
@@ -5333,7 +5332,7 @@ fn ext4_write_at_core_src(
             // wake path was never broken).
             if let Some(vi) = inode {
                 refresh_cached_vfs_inode(vi, &ext4_inode);
-            } else if let Some(vi) = rux::fs::inode::icache_lookup(
+            } else if let Some(vi) = rux::fs::hotpath::icache_lookup(
                 ext4_ino as u64,
                 fs as *const crate::ext4::Ext4FileSystem as u64,
             ) {
@@ -5382,7 +5381,7 @@ fn ext4_write_at_core_src(
                         match &wsrc {
                             DioWriteSrc::Staging(buf) => {
                                 if dio_fast {
-                                    page_cache::get_page_cache().writeback_update_range_multi(
+                                    hotpath::get_page_cache().writeback_update_range_multi(
                                         fs as *const crate::ext4::Ext4FileSystem as u64,
                                         ext4_ino as u64,
                                         offset,
@@ -5390,7 +5389,7 @@ fn ext4_write_at_core_src(
                                         skip_pfns,
                                     );
                                 } else {
-                                    page_cache::get_page_cache().writeback_populate_range_multi(
+                                    hotpath::get_page_cache().writeback_populate_range_multi(
                                         fs as *const crate::ext4::Ext4FileSystem as u64,
                                         ext4_ino as u64,
                                         offset,
@@ -5403,7 +5402,7 @@ fn ext4_write_at_core_src(
                                 // GUP-DIO: the same UPDATE-only coherence
                                 // walk, reading the written bytes from the
                                 // pinned frames (no staging copy exists).
-                                page_cache::get_page_cache().writeback_update_range_pinned(
+                                hotpath::get_page_cache().writeback_update_range_pinned(
                                     fs as *const crate::ext4::Ext4FileSystem as u64,
                                     ext4_ino as u64,
                                     offset,
@@ -5453,7 +5452,7 @@ fn ext4_write_at_core_src(
 /// necessarily clean writes: an I/O error leaves the page dirty for the
 /// next sync and still drops the flush pin here).
 pub fn ext4_flush_dirty_inode(
-    inode: &rux::fs::inode::Inode,
+    inode: &rux::fs::types::Inode,
     first_index: u64,
     last_index: u64,
 ) -> usize {
@@ -5482,7 +5481,7 @@ pub fn ext4_flush_dirty_inode(
     };
     let fs_id = fs_ref as *const crate::ext4::Ext4FileSystem as u64;
     let ino = inode.ino as u64;
-    let cache = page_cache::get_page_cache();
+    let cache = hotpath::get_page_cache();
 
     // Run width (pages per collected chunk / maximal run). 16 matched the
     // run-batched flush's first cut (64 KiB spans); 64 quadruples the run
@@ -5578,12 +5577,12 @@ pub fn ext4_flush_dirty_inode(
             // SAFETY: probe/pin of the fs's ITB cache block; the pin is
             // balanced inside submit_span's settle (or the put below).
             {
-                if bio::block_dirty_cached(dev, tbl_blk) {
-                    let cache = rux::fs::bio::get_block_cache();
+                if hotpath::block_dirty_cached(dev, tbl_blk) {
+                    let cache = rux::fs::hotpath::get_block_cache();
                     if let Some(bh) = cache.peek_buffer((mj, mi), tbl_blk) {
-                        if bio::bh_is_dirty(&bh) {
+                        if hotpath::bh_is_dirty(&bh) {
                             let mut bhs = alloc::vec![bh];
-                            let bytes: &[u8] = bio::bh_data(&bh);
+                            let bytes: &[u8] = hotpath::bh_data(&bh);
                             flusher.submit_span(
                                 dev,
                                 tbl_blk * (4096 / 512),
@@ -5616,7 +5615,7 @@ pub fn ext4_flush_dirty_inode(
 /// persistent failure keeps a page dirty — the standing contract).
 fn flush_run(
     fs: &crate::ext4::Ext4FileSystem,
-    inode: &rux::fs::inode::Inode,
+    inode: &rux::fs::types::Inode,
     run: &[(u64, u64)],
     stage: &mut alloc::vec::Vec<u8>,
     done_out: &mut [(u64, u64, bool)],
@@ -5793,9 +5792,9 @@ fn flush_run(
 /// bits (the standing durability points retry), mirroring the sync path's
 /// error contract.
 struct SpanFlusher {
-    batch: rux::fs::bio::WriteBatch,
+    batch: rux::fs::types::WriteBatch,
     /// Per in-flight span (submission order): its pinned buffer heads.
-    pending_bhs: alloc::vec::Vec<alloc::vec::Vec<*mut rux::fs::bio::BufferHead>>,
+    pending_bhs: alloc::vec::Vec<alloc::vec::Vec<*mut rux::fs::types::BufferHead>>,
     /// Per in-flight span (submission order): the SETTLE GUARD snapshot
     /// (wrfsync lane, 2026-11-17). Empty = unguarded span (data spans:
     /// the flush owns the whole file and the write core re-reads the
@@ -5817,7 +5816,7 @@ struct SpanFlusher {
 impl SpanFlusher {
     fn new() -> Self {
         Self {
-            batch: rux::fs::bio::WriteBatch::new(),
+            batch: rux::fs::types::WriteBatch::new(),
             pending_bhs: alloc::vec::Vec::new(),
             pending_snaps: alloc::vec::Vec::new(),
             dev: None,
@@ -5836,7 +5835,7 @@ impl SpanFlusher {
         dev: &'static crate::drivers::blkdev::GenDisk,
         sector: u64,
         bytes: &[u8],
-        bhs: &mut alloc::vec::Vec<*mut rux::fs::bio::BufferHead>,
+        bhs: &mut alloc::vec::Vec<*mut rux::fs::types::BufferHead>,
         snap: Option<&[u8]>,
     ) {
         self.dev = Some(dev);
@@ -5861,13 +5860,13 @@ impl SpanFlusher {
                         // SAFETY: bh is a pinned cached BufferHead whose
                         // content just persisted.
                         {
-                            bio::bh_clear_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty)
+                            hotpath::bh_clear_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty)
                         };
                     }
                 }
                 for &bh in bhs.iter() {
                     // SAFETY: pinned by peek_buffer; balanced put.
-                    rux::fs::bio::get_block_cache().put(bh);
+                    rux::fs::hotpath::get_block_cache().put(bh);
                 }
                 bhs.clear();
                 return;
@@ -5896,7 +5895,7 @@ impl SpanFlusher {
         // SleepMutex — re-entry under run_sync_spans' hold is legal).
         let _ext4_guard = crate::ext4::EXT4_BIG_LOCK.lock();
         self.batch.flush();
-        let cache = rux::fs::bio::get_block_cache();
+        let cache = rux::fs::hotpath::get_block_cache();
         for (i, bhs) in self.pending_bhs.drain(..).enumerate() {
             let snap = self.pending_snaps.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
             if self.batch.status(i) == 0 {
@@ -5905,7 +5904,7 @@ impl SpanFlusher {
                 for &bh in bhs.iter() {
                     // SAFETY: bh is a pinned cached BufferHead; b_data is
                     // its block-sized buffer.
-                    let cur = bio::bh_data(&bh);
+                    let cur = hotpath::bh_data(&bh);
                     if !snap.is_empty() {
                         if snap.len() - off < cur.len() || cur[..] != snap[off..off + cur.len()] {
                             // Settle guard tripped: the buffer changed
@@ -5925,7 +5924,7 @@ impl SpanFlusher {
                         // span's device write was acked AND the buffer
                         // still matches the persisted bytes.
                         {
-                            bio::bh_clear_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty)
+                            hotpath::bh_clear_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty)
                         };
                     }
                 }
@@ -5952,13 +5951,13 @@ impl SpanFlusher {
 /// window drain, and only for spans the device acked.
 fn run_sync_spans(
     fs: &crate::ext4::Ext4FileSystem,
-    inode: &rux::fs::inode::Inode,
+    inode: &rux::fs::types::Inode,
     off0: u64,
     run_bytes: usize,
     stage: &mut alloc::vec::Vec<u8>,
     flusher: &mut SpanFlusher,
 ) {
-    // The buffer cache's block size is fixed at 4096 (bio::get_block_cache);
+    // The buffer cache's block size is fixed at 4096 (hotpath::get_block_cache);
     // a different fs block size has no 1:1 page/block mapping — leave the
     // dirty buffers to the standing durability points.
     if fs.block_size != 4096 {
@@ -5991,11 +5990,11 @@ fn run_sync_spans(
     // SAFETY: dev is the fs's registered GenDisk; only identity fields
     // are read here.
     let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
-    let cache = rux::fs::bio::get_block_cache();
+    let cache = rux::fs::hotpath::get_block_cache();
 
     // Span assembly state: pinned dirty buffer heads whose block numbers
     // are physically consecutive.
-    let mut span_bhs: alloc::vec::Vec<*mut rux::fs::bio::BufferHead> =
+    let mut span_bhs: alloc::vec::Vec<*mut rux::fs::types::BufferHead> =
         alloc::vec::Vec::with_capacity(16);
     let mut span_first_phys: u64 = 0;
     let mut span_len: u64 = 0;
@@ -6013,7 +6012,7 @@ fn run_sync_spans(
                 for &bh in span_bhs.iter() {
                     // SAFETY: bh is pinned (peek_buffer) and holds a
                     // 4096-byte b_data Vec.
-                    let src = bio::bh_data(&bh);
+                    let src = hotpath::bh_data(&bh);
                     stage[dst_off..dst_off + src.len()].copy_from_slice(src);
                     dst_off += src.len();
                 }
@@ -6057,7 +6056,7 @@ fn run_sync_spans(
                 continue;
             }
         };
-        let dirty = bio::bh_is_dirty(&bh);
+        let dirty = hotpath::bh_is_dirty(&bh);
         if !dirty {
             { cache.put(bh) };
             close_span!();
@@ -6065,9 +6064,9 @@ fn run_sync_spans(
         }
         // Publication-constrained block: the guarded drain owns its
         // ordering — sync_dirty_buffer satisfies the constraint first.
-        if rux::fs::bio::publication_constrained(mj, mi, phys) {
+        if rux::fs::hotpath::publication_constrained(mj, mi, phys) {
             // SAFETY: bh is a pinned dirty BufferHead.
-            let _ = rux::fs::bio::sync_dirty_buffer(bh);
+            let _ = rux::fs::hotpath::sync_dirty_buffer(bh);
             { cache.put(bh) };
             close_span!();
             continue;
@@ -6248,7 +6247,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
     // op-level self-notify double-fired the event — masked by the
     // inotify last-event merge except when another watcher event
     // interleaved between the two fires (review CR-3).
-    let ret = if file.flags_bits() & rux::fs::file::FileFlags::O_DIRECT != 0 {
+    let ret = if file.flags_bits() & rux::fs::types::FileFlags::O_DIRECT != 0 {
         match ext4_file_read(fs, ext4_inode, offset, buf) {
             Ok(read_bytes) => {
                 if read_bytes > 0 {

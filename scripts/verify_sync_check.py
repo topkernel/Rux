@@ -43,7 +43,10 @@ def extract_fn(text, name, impl_type=None):
         i = 0
         while i < len(lines):
             stripped = lines[i].strip()
-            if re.match(rf'\bimpl\s+{re.escape(impl_type)}\b', stripped):
+            # `impl<'a> Path<'a> {` and `impl<T> Foo<T> {` carry their generic parameters between
+            # the keyword and the type; without this the block is not recognized and the
+            # search runs unscoped over the whole file (in a merged file: the wrong method)
+            if re.match(rf'\bimpl\s*(?:<[^>]*>\s*)?{re.escape(impl_type)}\b', stripped):
                 block_start = i
                 depth = 0
                 j = i
@@ -475,7 +478,7 @@ MAPPINGS = [
     {
         "name": "fs/stat",
         "verify": "kernel/verify/src/fs/stat_test.rs",
-        "kernel": "kernel/core/src/fs/stat.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "Stat",
         "compare": [
             "new",
@@ -492,7 +495,7 @@ MAPPINGS = [
     {
         "name": "fs/path_normalize",
         "verify": "kernel/verify/src/fs/path_test.rs",
-        "kernel": "kernel/core/src/fs/path.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # free function
         "compare": ["path_normalize"],
         "skip": [],
@@ -501,7 +504,7 @@ MAPPINGS = [
     {
         "name": "fs/path",
         "verify": "kernel/verify/src/fs/path_test.rs",
-        "kernel": "kernel/core/src/fs/path.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "Path",
         "compare": [
             "new", "is_absolute", "is_empty", "as_str",
@@ -514,7 +517,7 @@ MAPPINGS = [
     {
         "name": "fs/path_component",
         "verify": "kernel/verify/src/fs/path_test.rs",
-        "kernel": "kernel/core/src/fs/path.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "PathComponent",
         "compare": ["new", "name", "is_current", "is_parent", "is_root", "is_empty"],
         "skip": [],
@@ -748,7 +751,7 @@ MAPPINGS = [
     {
         "name": "fs/inode_mode",
         "verify": "kernel/verify/src/fs/inode_test.rs",
-        "kernel": "kernel/core/src/fs/inode.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "InodeMode",
         "compare": [
             "new", "is_regular_file", "is_directory", "is_char_device",
@@ -760,7 +763,7 @@ MAPPINGS = [
     {
         "name": "fs/inode_hash",
         "verify": "kernel/verify/src/fs/inode_test.rs",
-        "kernel": "kernel/core/src/fs/inode.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # free function
         "compare": ["inode_hash"],
         "skip": [],
@@ -769,7 +772,7 @@ MAPPINGS = [
     {
         "name": "fs/file_flags",
         "verify": "kernel/verify/src/fs/file_test.rs",
-        "kernel": "kernel/core/src/fs/file.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "FileFlags",
         "compare": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits", "set_bits", "add_flags"],
         "skip": [],
@@ -819,7 +822,7 @@ MAPPINGS = [
     {
         "name": "fs/dentry_flags",
         "verify": "kernel/verify/src/fs/dentry_test.rs",
-        "kernel": "kernel/core/src/fs/dentry.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "DentryFlags",
         "compare": ["new", "is_hashed", "is_unhashed", "bits"],
         "skip": [],
@@ -828,7 +831,7 @@ MAPPINGS = [
     {
         "name": "fs/dentry_hash",
         "verify": "kernel/verify/src/fs/dentry_test.rs",
-        "kernel": "kernel/core/src/fs/dentry.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # free function
         "compare": ["dentry_hash"],
         "skip": [],
@@ -858,7 +861,7 @@ MAPPINGS = [
     {
         "name": "fs/dev_no",
         "verify": "kernel/verify/src/fs/dev_t_test.rs",
-        "kernel": "kernel/core/src/fs/dev_t.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "DevNo",
         "compare": ["new", "from_u64", "to_u64"],
         "skip": [],
@@ -927,7 +930,7 @@ MAPPINGS = [
     {
         "name": "fs/elf_phdr",
         "verify": "kernel/verify/src/fs/elf_test.rs",
-        "kernel": "kernel/core/src/fs/elf.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "Elf64Phdr",
         "compare": ["is_load", "is_readable", "is_writable", "is_executable"],
         "skip": [],
@@ -936,7 +939,7 @@ MAPPINGS = [
     {
         "name": "fs/permission",
         "verify": "kernel/verify/src/fs/permission_test.rs",
-        "kernel": "kernel/core/src/fs/permission.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # free function
         "compare": ["generic_permission"],
         "skip": [],
@@ -1069,7 +1072,7 @@ MAPPINGS = [
     {
         "name": "fs/superblock_flags",
         "verify": "kernel/verify/src/fs/superblock_test.rs",
-        "kernel": "kernel/core/src/fs/superblock.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "SuperBlockFlags",
         "compare": ["new", "is_readonly", "is_active", "bits"],
         "skip": [],
@@ -1080,7 +1083,7 @@ MAPPINGS = [
     {
         "name": "fs/mount_flags",
         "verify": "kernel/verify/src/fs/mount_test.rs",
-        "kernel": "kernel/core/src/fs/mount.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "MntFlags",
         "compare": ["new", "is_readonly", "is_noexec", "is_nosuid", "bits"],
         "skip": [],
@@ -1091,7 +1094,7 @@ MAPPINGS = [
     {
         "name": "fs/file_flags_ext",
         "verify": "kernel/verify/src/fs/file_flags_test.rs",
-        "kernel": "kernel/core/src/fs/file.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "FileFlags",
         "compare": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits"],
         "skip": [],
@@ -1221,7 +1224,7 @@ MAPPINGS = [
     {
         "name": "fs/readahead",
         "verify": "kernel/verify/src/fs/readahead_test.rs",
-        "kernel": "kernel/core/src/fs/readahead.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "ReadAheadState",
         "compare": ["new", "on_read"],
         "skip": [],
@@ -1284,7 +1287,7 @@ MAPPINGS = [
     {
         "name": "fs/umask",
         "verify": "kernel/verify/src/fs/umask_test.rs",
-        "kernel": "kernel/core/src/fs/fs_struct.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # free functions extracted from apply_umask/set_umask
         "compare": [],
         "skip": [],
@@ -1368,7 +1371,7 @@ MAPPINGS = [
     {
         "name": "fs/io_completion",
         "verify": "kernel/verify/src/fs/io_completion_test.rs",
-        "kernel": "kernel/core/src/fs/io_completion.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": "IoCompletion",
         "compare": ["new", "complete", "is_done", "try_wait", "reset"],
         "skip": ["wait"],
@@ -1379,7 +1382,7 @@ MAPPINGS = [
     {
         "name": "fs/wait_for_all",
         "verify": "kernel/verify/src/fs/io_completion_test.rs",
-        "kernel": "kernel/core/src/fs/io_completion.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # free function
         "compare": [],
         "skip": [],
@@ -1438,7 +1441,7 @@ MAPPINGS = [
     {
         "name": "fs/page_offset",
         "verify": "kernel/verify/src/fs/page_offset_test.rs",
-        "kernel": "kernel/core/src/fs/buffer.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # page offset/index arithmetic extracted as standalone fns
         "compare": [],
         "skip": [],
@@ -1485,7 +1488,7 @@ MAPPINGS = [
     {
         "name": "fs/bio",
         "verify": "kernel/verify/src/fs/bio_test.rs",
-        "kernel": "kernel/core/src/fs/bio.rs",
+        "kernel": "kernel/core/src/fs/hotpath.rs",
         "type": None,  # BufferState + hash_index extracted
         "compare": [],
         "skip": [],

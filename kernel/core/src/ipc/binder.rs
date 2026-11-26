@@ -70,7 +70,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::errno::constants::{EBADF, EBUSY, EFAULT, EAGAIN, EINTR, EINVAL, ESRCH};
-use crate::fs::dev_t::{DevNo, MISC_MAJOR};
+use crate::fs::{types::DevNo, hotpath::MISC_MAJOR};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
@@ -3133,7 +3133,7 @@ fn node_is_dead(world: &World, node: &Arc<BinderNode>) -> bool {
 /// dispatches here only for binder files — one raw window replaces the
 /// per-call-site derefs this file carried. The borrow is pinned by the
 /// fd owning the Arc (same contract as fs/pipe.rs's INV-PIPE-PRIV).
-fn proc_of_file(file: &crate::fs::File) -> Option<&'static BinderProc> {
+fn proc_of_file(file: &crate::fs::types::File) -> Option<&'static BinderProc> {
     // SAFETY: INV-BINDER-PRIV above.
     let ptr = unsafe { *file.private_data.get() }? as *const BinderProc;
     if ptr.is_null() {
@@ -3144,7 +3144,7 @@ fn proc_of_file(file: &crate::fs::File) -> Option<&'static BinderProc> {
 
 /// Owned twin of [`proc_of_file`]: ioctl paths hold the proc across
 /// sleeps, so they take a proper Arc clone instead of a borrow.
-fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
+fn proc_ref(file: &crate::fs::types::File) -> Option<Arc<BinderProc>> {
     // SAFETY: INV-BINDER-PRIV — the pointer is Arc::into_raw(BinderProc)
     // installed at open; ManuallyDrop never drops, so the count is
     // unchanged and the clone below is a proper +1 the caller owns.
@@ -3154,7 +3154,7 @@ fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
 }
 
 /// Called from devfs_open: allocate the per-open process context.
-pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
+pub fn binder_open(file: &crate::fs::types::File, ctx: BinderCtx) -> i32 {
     // Linux stamps binder_proc->pid from current->group_leader: the
     // process id, not the opening thread's tid. GET_SENDER_INFO feeds
     // this into the access-token registry lookup — with a worker-thread
@@ -3206,7 +3206,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
 /// and wakes the WAITING ones, forcing each looper back to userspace
 /// so it re-evaluates its context (the reference comment: "make sure
 /// the thread goes back to userspace to complete the deferred close").
-pub fn binder_flush(file: &crate::fs::File) {
+pub fn binder_flush(file: &crate::fs::types::File) {
     // INV-BINDER-PRIV capsule (same contract binder_close/poll rely on).
     let proc = match proc_of_file(file) {
         Some(p) => p,
@@ -3232,7 +3232,7 @@ pub fn binder_flush(file: &crate::fs::File) {
 /// FileOps.close: drop the process context. Drains all work lists (breaking
 /// txn->proc Arc cycles), fails in-flight transactions targeting or
 /// originating here, and releases the mmap region.
-pub fn binder_close(file: &crate::fs::File) -> i32 {
+pub fn binder_close(file: &crate::fs::types::File) -> i32 {
     // INV-BINDER-PRIV close twin: take the single strong reference
     // stashed at open and clear the slot. The one audited take window.
     let proc = {
@@ -3889,7 +3889,7 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
 
 /// mmap handler (sys_mmap dispatch for BINDER_OPS files).
 pub fn binder_mmap_handler(
-    file: &crate::fs::File,
+    file: &crate::fs::types::File,
     addr: usize,
     length: usize,
     offset: u64,
@@ -4364,7 +4364,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
 /// &thread->wait) is carried by binder_poll_wait/binder_poll_unwait via
 /// the sys_poll wait-registry (our FileOps::poll hook has no poll-table
 /// parameter; the registration pair delivers the wake instead).
-fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
+fn binder_poll(file: &crate::fs::types::File, _events: u16) -> u16 {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (proc_ref(file)) else {
         return 0;
@@ -4407,7 +4407,7 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
     };
     drop(w);
     if has {
-        crate::fs::event_notify::poll_events::POLLIN | crate::fs::event_notify::poll_events::POLLRDNORM
+        crate::fs::hotpath::poll_events::POLLIN | crate::fs::hotpath::poll_events::POLLRDNORM
     } else {
         0
     }
@@ -4420,7 +4420,7 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
 /// through the same queue the blocking BWR read wait uses, so a parked
 /// poll() on the binder fd wakes the moment thread work arrives — no
 /// 10 ms re-check slice.
-pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
+pub fn binder_poll_wait(file: &crate::fs::types::File, task: *mut crate::process::task::Task) -> bool {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (proc_ref(file)) else {
         return false;
@@ -4460,7 +4460,7 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
 /// Remove a registration added by binder_poll_wait (poll round teardown;
 /// the reference has no analogue because its poll_table owns the entry —
 /// our registry is per wait round, so no pollfree hazard exists).
-pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
+pub fn binder_poll_unwait(file: &crate::fs::types::File, task: *mut crate::process::task::Task) {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (proc_ref(file)) else {
         return;
@@ -4485,7 +4485,7 @@ pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::tas
 }
 
 /// File operations for /dev/binder (registered in the devfs char registry).
-pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static BINDER_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .close(binder_close)
     .poll(binder_poll)
     .flush(binder_flush)
@@ -4500,7 +4500,7 @@ fn current_tid() -> u32 {
 }
 
 /// Returns Some(ret) when the file is a binder fd, None otherwise.
-pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Option<i64> {
+pub fn binder_file_ioctl(file: &crate::fs::types::File, request: u32, arg: usize) -> Option<i64> {
     let ops = file.get_ops()?;
     if !core::ptr::eq(ops as *const _, &BINDER_OPS as *const _) {
         return None;
@@ -4672,7 +4672,7 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
     0
 }
 
-fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
+fn binder_ioctl(file: &crate::fs::types::File, request: u32, arg: usize) -> i64 {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (proc_ref(file)) else {
         return -(EBADF as i64);
@@ -4913,7 +4913,7 @@ fn binder_ioctl_write_read(
     proc: &Arc<BinderProc>,
     thread: &Arc<BinderThread>,
     arg: usize,
-    file: &crate::fs::File,
+    file: &crate::fs::types::File,
 ) -> i64 {
     let mut bwr = BinderWriteRead {
         write_size: 0,
@@ -5013,7 +5013,7 @@ fn binder_ioctl_write_read(
         }
     }
     if bwr.read_size > 0 {
-        let non_block = file.flags_bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+        let non_block = file.flags_bits() & crate::fs::types::FileFlags::O_NONBLOCK != 0;
         let ret = binder_thread_read(
             proc,
             thread,

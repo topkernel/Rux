@@ -17,8 +17,8 @@
 //! mount-table registration.
 
 #![forbid(unsafe_code)]
-use crate::fs::file::File;
-use crate::fs::inode::Inode;
+use crate::fs::types::File;
+use crate::fs::types::Inode;
 
 /// The fs-service hook set.
 #[derive(Clone, Copy)]
@@ -29,7 +29,7 @@ pub struct FsHooks {
     pub notify_file_close: fn(&File),
     pub alloc_cookie: fn() -> u32,
     // ---- pipe per-File ops ----
-    pub pipe_stat: fn(&File, &mut crate::fs::Stat) -> Option<i32>,
+    pub pipe_stat: fn(&File, &mut crate::fs::types::Stat) -> Option<i32>,
     pub pipe_get_sz: fn(&File) -> Option<usize>,
     pub pipe_set_sz: fn(&File, usize) -> Result<usize, i32>,
     pub pipe_oasync_register: fn(&File, i32),
@@ -45,10 +45,10 @@ pub struct FsHooks {
     pub memfd_get_seals: fn(&File) -> Result<u32, i32>,
     pub memfd_name_by_ino: fn(u64) -> Option<&'static str>,
     // ---- ops-identity probes (fd-kind census + futex dumps) ----
-    pub is_pipe_ops: fn(&'static crate::fs::FileOps) -> bool,
-    pub is_fifo_ops: fn(&'static crate::fs::FileOps) -> bool,
-    pub is_inotify_ops: fn(&'static crate::fs::FileOps) -> bool,
-    pub is_memfd_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub is_pipe_ops: fn(&'static crate::fs::types::FileOps) -> bool,
+    pub is_fifo_ops: fn(&'static crate::fs::types::FileOps) -> bool,
+    pub is_inotify_ops: fn(&'static crate::fs::types::FileOps) -> bool,
+    pub is_memfd_ops: fn(&'static crate::fs::types::FileOps) -> bool,
     // ---- misc leaf surfaces ----
     /// fsctx's selinuxfs root-inode factory.
     pub selinuxfs_root_inode: fn() -> Option<alloc::sync::Arc<Inode>>,
@@ -114,10 +114,10 @@ pub fn alloc_cookie() -> u32 {
 }
 
 // ---- ergonomic accessors (the net_hooks shape) ----
-pub fn is_pipe_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_pipe_ops)(ops) }
-pub fn is_fifo_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_fifo_ops)(ops) }
-pub fn is_inotify_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_inotify_ops)(ops) }
-pub fn is_memfd_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_memfd_ops)(ops) }
+pub fn is_pipe_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_pipe_ops)(ops) }
+pub fn is_fifo_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_fifo_ops)(ops) }
+pub fn is_inotify_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_inotify_ops)(ops) }
+pub fn is_memfd_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_memfd_ops)(ops) }
 pub fn pipe_diag_snapshot(file: &File) -> Option<(usize, usize, bool, bool)> { (hooks().pipe_diag_snapshot)(file) }
 pub fn memfd_name_by_ino(ino: u64) -> Option<&'static str> { (hooks().memfd_name_by_ino)(ino) }
 
@@ -129,8 +129,8 @@ pub fn memfd_name_by_ino(ino: u64) -> Option<&'static str> { (hooks().memfd_name
 // kept as plain comments; its own #![forbid(unsafe_code)] line is gone
 // because the one at the top of this file covers the whole module.
 // Two edits were forced by the join, both to the joined part's imports:
-// its own `use crate::fs::file::File;` is dropped, and `Inode` leaves
-// `use crate::fs::inode::{..}` (the first half imports both).
+// its own `use crate::fs::types::File;` is dropped, and `Inode` leaves
+// `use crate::fs::hotpath::inode::{..}` (the first half imports both).
 // ---------------------------------------------------------------------------
 // MIT License
 //
@@ -171,11 +171,11 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::fs::dev_t::DevNo;
-use crate::fs::file::FileOps;
-use crate::fs::inode::{InodeMode, INodeOps};
-use crate::fs::leaf_glue::{InputEventReg, RamfsView, TmpfsTagKind};
-use crate::fs::Stat;
+use crate::fs::types::DevNo;
+use crate::fs::types::FileOps;
+use crate::fs::types::{InodeMode, INodeOps};
+use crate::fs::{types::InputEventReg, hotpath::RamfsView, types::TmpfsTagKind};
+use crate::fs::types::Stat;
 use crate::safety::slot::OnceSlot;
 
 type ShowFn = Box<dyn Fn() -> Vec<u8> + Send + Sync>;
@@ -251,7 +251,7 @@ pub struct LeafBootHooks {
         fn(&[u8], &'static dyn RamfsView) -> Result<crate::initrd::CpioStats, &'static str>,
     // ---- char_dev ----
     /// The boot task's stdio (init.rs's init_std_fds_for_task body).
-    pub char_dev_init_std_fds: fn(&crate::fs::FdTable),
+    pub char_dev_init_std_fds: fn(&crate::fs::types::FdTable),
 }
 
 impl LeafBootHooks {
@@ -533,7 +533,7 @@ pub fn path_hooks() -> &'static LeafPathHooks {
 }
 
 // ---- LocksHooks: the locks-family cold rows (from fs/lock_hooks.rs) ----
-use crate::fs::locks::LockOwner;
+use crate::fs::types::LockOwner;
 // The fcntl lock arms plus the slow release bodies the framework
 // half's count gates arm; the forwarding wrappers stay in
 // fs/lock_hooks.rs until pass 2 files them as hot-path code.
@@ -553,15 +553,15 @@ pub struct LocksHooks {
     /// Lease release for a dying description (LEASE_COUNT != 0).
     pub lease_release_slow: fn(u64),
     /// The lease-break machinery (a conflicting lease exists).
-    pub break_lease_slow: fn(&crate::fs::inode::Inode, bool) -> Result<(), crate::errno::Errno>,
+    pub break_lease_slow: fn(&crate::fs::types::Inode, bool) -> Result<(), crate::errno::Errno>,
     // ---- fcntl arms (cold: only lock-taking syscalls reach them) ----
     /// F_GETLK conflict probe.
-    pub posix_test_lock: fn(&crate::fs::file::File, LockOwner, bool, u64, u64) -> Option<crate::fs::locks::LockConflict>,
+    pub posix_test_lock: fn(&crate::fs::types::File, LockOwner, bool, u64, u64) -> Option<crate::fs::types::LockConflict>,
     /// F_SETLK/W core (kind is a F_*_KIND byte).
-    pub posix_set_lock: fn(&crate::fs::file::File, LockOwner, u8, u64, u64, bool) -> Result<(), crate::errno::Errno>,
+    pub posix_set_lock: fn(&crate::fs::types::File, LockOwner, u8, u64, u64, bool) -> Result<(), crate::errno::Errno>,
     /// F_SETLEASE / F_GETLEASE.
-    pub set_lease: fn(&crate::fs::file::File, i16) -> Result<(), crate::errno::Errno>,
-    pub get_lease: fn(&crate::fs::file::File) -> i16,
+    pub set_lease: fn(&crate::fs::types::File, i16) -> Result<(), crate::errno::Errno>,
+    pub get_lease: fn(&crate::fs::types::File) -> i16,
 }
 
 impl LocksHooks {

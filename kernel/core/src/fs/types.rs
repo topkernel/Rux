@@ -136,7 +136,7 @@ pub struct DirentCacheSnapshot {
     /// VFS_DIR_EPOCH when materialization started.
     pub epoch: u64,
     /// Full ordered listing WITH the dot entries synthesized.
-    pub entries: alloc::vec::Vec<crate::fs::inode::VfsDirEntry>,
+    pub entries: alloc::vec::Vec<VfsDirEntry>,
 }
 
 #[repr(C, align(16))]
@@ -193,7 +193,7 @@ pub struct File {
     /// place at the first read by the filesystem that owns the
     /// description (ext4 today); mutated only under io_lock (the same
     /// serialization the Box form had).
-    pub ra: UnsafeCell<Option<crate::fs::readahead::ReadAheadState>>,
+    pub ra: UnsafeCell<Option<ReadAheadState>>,
 }
 
 /// fasync owner set via F_SETOWN/F_SETOWN_EX (kept on the open file
@@ -427,7 +427,7 @@ pub struct INodeOps {
 
     /// Get file operations for this inode
     /// This allows inode-specific file operations
-    pub get_file_ops: Option<fn(&Inode) -> Option<&'static crate::fs::file::FileOps>>,
+    pub get_file_ops: Option<fn(&Inode) -> Option<&'static FileOps>>,
 
     /// List directory entries.
     /// Returns a vector of VfsDirEntry on success, None if not a directory / error.
@@ -477,7 +477,7 @@ pub struct INodeOps {
 
     /// Called when a file is opened. Allows FS to set up file.private_data.
     /// Returns 0 on success, negative errno on failure.
-    pub open: Option<fn(&Inode, &crate::fs::File) -> i32>,
+    pub open: Option<fn(&Inode, &File) -> i32>,
 
     // ==================== Permission Operations ====================
 
@@ -489,7 +489,7 @@ pub struct INodeOps {
 
     /// Get attributes (stat)
     /// Returns 0 on success, fills in stat structure
-    pub getattr: Option<fn(&Inode, &mut crate::fs::Stat) -> i32>,
+    pub getattr: Option<fn(&Inode, &mut Stat) -> i32>,
 
     /// Set attributes
     /// attr: ATTR_MODE (1), ATTR_UID (2), ATTR_GID (3), ATTR_SIZE (4), ATTR_UID_GID (5)
@@ -523,7 +523,7 @@ pub enum InodeState {
     IDying = 2,
 }
 
-pub(super) struct AnonDevMap(pub(super) alloc::collections::BTreeMap<u64, crate::fs::dev_t::DevNo>);
+pub(super) struct AnonDevMap(pub(super) alloc::collections::BTreeMap<u64, DevNo>);
 
 #[repr(C)]
 pub struct Inode {
@@ -1374,7 +1374,7 @@ pub(super) struct WriteSlot {
     pub(super) data: WriteSource,
     /// Pre-armed completion; reset by flush() for reuse (the same
     /// discipline the direct-read batch's stack array follows).
-    pub(super) completion: crate::fs::io_completion::IoCompletion,
+    pub(super) completion: IoCompletion,
     /// Device-side start sector of this span (512-byte units) — the
     /// fusion key. Only meaningful on the deferred path.
     pub(super) sector: u64,

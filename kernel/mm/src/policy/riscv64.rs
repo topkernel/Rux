@@ -425,7 +425,7 @@ pub fn handle_mm_fault(
     let effective_size = vm_file
         .as_ref()
         .and_then(|f| {
-            if let Some(live) = crate::fs::leaf_glue::devfs::reg_current_size(f.as_ref()) {
+            if let Some(live) = crate::fs::hotpath::devfs::reg_current_size(f.as_ref()) {
                 return Some(live as usize);
             }
             // SAFETY: inode cell written at open time; read-only.
@@ -561,7 +561,7 @@ pub fn handle_mm_fault(
             // VMA's start and pin a foreign file's cache page.
             let file = vm_file.clone().or_else(|| {
                 if vma_file_fd >= 0 {
-                    crate::fs::get_file_fd(vma_file_fd as usize)
+                    crate::fs::hotpath::get_file_fd(vma_file_fd as usize)
                 } else {
                     None
                 }
@@ -582,7 +582,7 @@ pub fn handle_mm_fault(
                                     if let Some(inode) =
                                         crate::fs::r#unsafe::file_inode(&f)
                                     {
-                                        crate::fs::page_cache::get_page_cache().mark_dirty(
+                                        crate::fs::hotpath::get_page_cache().mark_dirty(
                                             inode.fs_id,
                                             inode.ino as u64,
                                             (file_offset / PAGE_SIZE_USIZE) as u64,
@@ -597,7 +597,7 @@ pub fn handle_mm_fault(
                         }
                     } else {
                         // Legacy non-ext4 alias: permanent pin, unchanged.
-                        match crate::fs::page_cache::shared_file_fault_page(
+                        match crate::fs::hotpath::shared_file_fault_page(
                             &f,
                             file_offset as u64,
                         ) {
@@ -696,7 +696,7 @@ pub fn handle_mm_fault(
                         // produced zero pages (Ubuntu ld.so).
                         let file = vm_file
                             .clone()
-                            .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
+                            .or_else(|| crate::fs::hotpath::get_file_fd(vma_file_fd as usize));
                         if let Some(file) = file {
                             let bytes_to_read = core::cmp::min(
                                 PAGE_SIZE_USIZE,

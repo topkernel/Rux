@@ -7,7 +7,7 @@
 //!
 //! Includes: read, write, writev, dup, dup2, fcntl, ioctl, pipe2
 
-use crate::fs::{file_open, file_close, file_fcntl, fcntl, FileFlags};
+use crate::fs::{hotpath::file_open, hotpath::file_close, hotpath::file_fcntl, hotpath::fcntl, types::FileFlags};
 use crate::syscall::{SyscallNo, SyscallArgs};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
@@ -98,7 +98,7 @@ fn test_sys_read_write() {
     match file_open(filename, FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             unsafe {
-                match crate::fs::get_file_fd(fd) {
+                match crate::fs::hotpath::get_file_fd(fd) {
                     Some(file) => {
                         // Test 1: Read data
                         let mut buf = [0u8; 64];
@@ -174,7 +174,7 @@ fn test_sys_read_write() {
     match file_open("/test_write_io.txt", FileFlags::O_CREAT | FileFlags::O_WRONLY | FileFlags::O_TRUNC, 0o644) {
         Ok(fd) => {
             unsafe {
-                match crate::fs::get_file_fd(fd) {
+                match crate::fs::hotpath::get_file_fd(fd) {
                     Some(file) => {
                         // Test writing data
                         let data = b"IO test data";
@@ -204,7 +204,7 @@ fn test_sys_read_write() {
                 }
             }
             let _ = file_close(fd);
-            let _ = crate::fs::vfs::file_unlink("/test_write_io.txt");
+            let _ = crate::fs::hotpath::file_unlink("/test_write_io.txt");
         }
         Err(_) => {
             test_skip("sys_write file", "filesystem not writable");
@@ -478,7 +478,7 @@ fn test_sys_dup() {
 
                 // Verify the duplicated fd refers to the same file by reading from it
                 unsafe {
-                    if let Some(file) = crate::fs::get_file_fd(new_fd) {
+                    if let Some(file) = crate::fs::hotpath::get_file_fd(new_fd) {
                         let mut buf = [0u8; 32];
                         file.lseek(0, 0);
                         let bytes = file.read(buf.as_mut_ptr(), 32);
@@ -517,7 +517,7 @@ fn test_sys_dup() {
 
                 // Verify the target fd can read
                 unsafe {
-                    if let Some(file) = crate::fs::get_file_fd(target_fd as usize) {
+                    if let Some(file) = crate::fs::hotpath::get_file_fd(target_fd as usize) {
                         let mut buf = [0u8; 32];
                         file.lseek(0, 0);
                         let bytes = file.read(buf.as_mut_ptr(), 32);

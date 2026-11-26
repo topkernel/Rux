@@ -705,14 +705,14 @@ pub fn do_exit(exit_code: i32) -> ! {
         // starved). The dying task can make no forward progress in its
         // section; drop the lock and wake all waiters so the filesystem
         // survives the kill.
-        crate::fs::journal_seam::EXT4_BIG_LOCK.release_if_owner(current_pid);
+        crate::fs::hotpath::EXT4_BIG_LOCK.release_if_owner(current_pid);
 
         // ===== VFS mutation lock force-release =====
         // Same leak family: do_exit does not unwind Rust guards, so a
         // task killed inside a lookup+mutate window would strand
         // VFS_MUTATION_LOCK (a SleepMutex since the sync-realign lane)
         // on a dead owner forever.
-        crate::fs::vfs::VFS_MUTATION_LOCK.release_if_owner(current_pid);
+        crate::fs::hotpath::VFS_MUTATION_LOCK.release_if_owner(current_pid);
 
         // ===== Ptrace tracer death: auto-detach tracees =====
         // Linux forgets the tracing relationship when the tracer exits
@@ -1159,7 +1159,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // target's state, so the global queue's spurious wakes are
         // harmless; this CPU holds preempt_count, so they run after the
         // terminal schedule below.
-        crate::fs::pidfd::exit_notify_all_waiters();
+        crate::fs::hotpath::exit_notify_all_waiters();
 
         // ===== exit_notify: Defer parent notification =====
         // CRITICAL: Do NOT wake the parent here.  If the parent runs on

@@ -28,8 +28,8 @@ use alloc::format;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-use rux::fs::dev_t::DevNo;
-use rux::fs::file::{File, FileOps, FileFlags};
+use rux::fs::types::DevNo;
+use rux::fs::types::{File, FileOps, FileFlags};
 use crate::tty::{termios_to_kernel_bytes, termios_from_kernel_bytes, TERMIOS_KERNEL_SIZE, 
     termios_from_termio_bytes, termios_from_user_bytes, termios_to_termio_bytes,
     termios_to_user_bytes, TtyDevice, TERMIOS_USER_SIZE, TERMIO_USER_SIZE,
@@ -305,7 +305,7 @@ fn devfs_remove_slave_node(index: u32) {
 /// depth and spilled frames into the adjacent heap page (TICK-CANARY r18-3
 /// diagnosis in sched.rs), zeroing a live kernel object allocated there.
 fn evict_pts_dentry(index: u32) {
-    if let Some(pts_dentry) = rux::fs::vfs::shallow_dentry_walk(&["dev", "pts"]) {
+    if let Some(pts_dentry) = rux::fs::hotpath::shallow_dentry_walk(&["dev", "pts"]) {
         pts_dentry.remove_child(&format!("{}", index));
     }
 }
@@ -479,7 +479,7 @@ fn ptmx_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn ptmx_poll(file: &File, events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+    use rux::fs::hotpath::poll_events::*;
 
     let pair = match pair_of(file) {
         Some(p) => p,
@@ -641,7 +641,7 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn pty_slave_poll(file: &File, events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+    use rux::fs::hotpath::poll_events::*;
 
     let pair = match pair_of(file) {
         Some(p) => p,
@@ -894,7 +894,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
         // in its tcsetpgrp retry loop, and bare `xterm` could never run
         // a working shell.
         TIOCGPTPEER if is_master => {
-            use rux::fs::file::{get_file_fd_install, File, FileFlags};
+            use rux::fs::{hotpath::get_file_fd_install, types::File, types::FileFlags};
 
             const O_RDWR: u32 = 0o2;
             const O_NONBLOCK: u32 = 0o4000;
@@ -922,7 +922,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             // identity (rdev 136:N) instead of the anonymous-file
             // fallback. Best-effort: the pair lives in PTY_TABLE, so a
             // lookup miss here is benign.
-            if let Ok(vp) = rux::fs::vfs::path_lookup(
+            if let Ok(vp) = rux::fs::hotpath::path_lookup(
                 &format!("/dev/pts/{}", pair.index),
                 0,
             ) {

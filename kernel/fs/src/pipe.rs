@@ -390,7 +390,7 @@ impl Pipe {
     pub fn epoll_notify_read_end(&self) {
         let fid = self.epoll_read_fid.load(Ordering::Acquire);
         if fid != 0 {
-            rux::fs::event_notify::epoll_notify_file(fid);
+            rux::fs::hotpath::epoll_notify_file(fid);
         }
     }
 
@@ -399,7 +399,7 @@ impl Pipe {
     pub fn epoll_notify_write_end(&self) {
         let fid = self.epoll_write_fid.load(Ordering::Acquire);
         if fid != 0 {
-            rux::fs::event_notify::epoll_notify_file(fid);
+            rux::fs::hotpath::epoll_notify_file(fid);
         }
     }
 
@@ -528,7 +528,7 @@ impl Pipe {
 /// were never called and bypassed the wait-queue logic of the FileOps
 /// versions — keeping them invited misuse.
 
-use rux::fs::file::{File, FileOps, FileFlags};
+use rux::fs::types::{File, FileOps, FileFlags};
 
 // ============================================================================
 // vmsplice(2) helpers — LTP vmsplice01..04
@@ -1282,7 +1282,7 @@ fn oasync_notify(pipe_addr: usize, readable: bool) {
 }
 
 pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+    use rux::fs::hotpath::poll_events::*;
     let mut ready = 0u16;
 
     if let Some(pipe) = file_pipe_private(file) {
@@ -1483,7 +1483,7 @@ const PIPE_STAT_DEV: u64 = 0x7069_7066_7300_0001;
 /// with the console or a real file.
 ///
 /// Returns `Some(0)` when `file` is a pipe File, `None` otherwise.
-pub fn pipe_file_stat(file: &File, stat: &mut rux::fs::Stat) -> Option<i32> {
+pub fn pipe_file_stat(file: &File, stat: &mut rux::fs::types::Stat) -> Option<i32> {
     let ops = file.get_ops()?;
     if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
         return None;

@@ -20,7 +20,7 @@ const BG_FREE_BLOCKS_OFF: usize = 12;
 const SB_FREE_BLOCKS_OFF: usize = 12;
 
 use crate::errno;
-use rux::fs::bio;
+use rux::fs::hotpath;
 use crate::ext4::superblock::Ext4GroupDesc;
 
 // ============================================================================
@@ -353,11 +353,11 @@ impl<'a> BlockAllocator<'a> {
         // and a leftover registration makes a later commit re-READ the
         // dead block from disk and write the stale bytes back (the
         // revoke-threshold slow commits). Pinned or clean buffers are
-        // skipped inside (bio::drop_freed_block_forgotten). Crash
+        // skipped inside (hotpath::drop_freed_block_forgotten). Crash
         // ordering is carried by the bitmap/GD/SB deferred writes and
         // the revoke records, not by the dead content.
         for i in 0..len as u64 {
-            rux::fs::bio::drop_freed_block_forgotten(self.fs.device, start + i);
+            rux::fs::hotpath::drop_freed_block_forgotten(self.fs.device, start + i);
         }
         self.write_block_bitmap(block_bitmap_block, &bitmap)?;
 
@@ -379,10 +379,10 @@ impl<'a> BlockAllocator<'a> {
     }
 
     fn read_block_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
-        let bh = bio::bread(self.fs.device, bitmap_block)
+        let bh = hotpath::bread(self.fs.device, bitmap_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
-        let bitmap = bio::bh_data(&bh).to_vec();
-        bio::brelse(bh);
+        let bitmap = hotpath::bh_data(&bh).to_vec();
+        hotpath::brelse(bh);
         Ok(bitmap)
     }
 
@@ -402,7 +402,7 @@ impl<'a> BlockAllocator<'a> {
     /// replay is still suppressed by the deletion paths' revoke records.
     /// Outside a handle the inline sync path is unchanged.
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
-        bio::with_block_mut(self.fs.device, bitmap_block, |data, _| {
+        hotpath::with_block_mut(self.fs.device, bitmap_block, |data, _| {
             data.copy_from_slice(bitmap);
             Ok(())
         })?;
@@ -433,7 +433,7 @@ impl<'a> BlockAllocator<'a> {
 
         // BG_FREE_BLOCKS_OFF is within the block (descriptor layout);
         // the deferred edge owns dirty+journal (F4-R2: durability-deferred).
-        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+        hotpath::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
             crate::safety::bytes::write_at::<u16>(data, desc_offset + BG_FREE_BLOCKS_OFF, free_blocks);
             // metadata_csum write path: the read path verifies each group
             // descriptor's bg_checksum at MOUNT (a stale checksum refuses
@@ -457,7 +457,7 @@ impl<'a> BlockAllocator<'a> {
         let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
         // SB_FREE_BLOCKS_OFF is within the superblock; the deferred edge
         // owns dirty+journal (F4-R2: durability-deferred like the GD twin).
-        bio::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
+        hotpath::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
             let current = crate::safety::bytes::read_at::<u32>(data, sb_start + SB_FREE_BLOCKS_OFF).unwrap_or(0);
             let new_count = (current as i64 + delta as i64) as u32;
             crate::safety::bytes::write_at::<u32>(data, sb_start + SB_FREE_BLOCKS_OFF, new_count);
@@ -531,7 +531,7 @@ pub(crate) fn set_bitmap_csum_in_gd(
 
     // desc_offset + desc_size is within the 4K block; the fields
     // written are within desc_size when the bounds checks passed.
-    bio::with_block_mut(fs.device, desc_block, |data, _| {
+    hotpath::with_block_mut(fs.device, desc_block, |data, _| {
         let d = &mut data[desc_offset..desc_offset + group_desc_size];
         d[lo_off..lo_off + 2].copy_from_slice(&((csum & 0xFFFF) as u16).to_le_bytes());
         if group_desc_size >= hi_off + 2 {
@@ -851,17 +851,17 @@ impl<'a> InodeAllocator<'a> {
 
     /// Read inode bitmap
     fn read_inode_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
-        let bh = bio::bread(self.fs.device, bitmap_block)
+        let bh = hotpath::bread(self.fs.device, bitmap_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
-        let bitmap = bio::bh_data(&bh).to_vec();
-        bio::brelse(bh);
+        let bitmap = hotpath::bh_data(&bh).to_vec();
+        hotpath::brelse(bh);
         Ok(bitmap)
     }
 
     /// Write back inode bitmap. JOURNAL DISCIPLINE: registered with the
     /// current handle (family b fix — see write_block_bitmap).
     fn write_inode_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
-        bio::with_block_mut(self.fs.device, bitmap_block, |data, _| {
+        hotpath::with_block_mut(self.fs.device, bitmap_block, |data, _| {
             data.copy_from_slice(bitmap);
             Ok(())
         })?;
@@ -908,7 +908,7 @@ impl<'a> InodeAllocator<'a> {
 
         // bg_free_inodes_count_lo is within the block; the deferred edge
         // owns dirty+journal (F4-R2 durability-deferred).
-        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+        hotpath::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
             crate::safety::bytes::write_at::<u16>(data, desc_offset + 14, free_inodes);
             // metadata_csum write path: re-seal this descriptor slot after
             // the counter change (see update_group_desc_free_blocks).
@@ -954,14 +954,14 @@ impl<'a> InodeAllocator<'a> {
         let nbits = inodes_per_group as usize;
         let nbytes = nbits.div_ceil(8);
         let used = {
-            let bh = bio::bread(self.fs.device, bitmap_block)
+            let bh = hotpath::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let data = bio::bh_data(&bh);
+            let data = hotpath::bh_data(&bh);
             let used: u32 = data[..nbytes.min(data.len())]
                 .iter()
                 .map(|b| b.count_ones())
                 .sum();
-            bio::brelse(bh);
+            hotpath::brelse(bh);
             used
         };
         let unused = (inodes_per_group - used as u64) as u16;
@@ -994,7 +994,7 @@ impl<'a> InodeAllocator<'a> {
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
         // The writes below are in-bounds of the descriptor slot; the
         // deferred edge owns dirty+journal (F4-R2 class).
-        bio::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
+        hotpath::with_block_deferred_mut(self.fs.device, desc_block, |data, _| {
             if desc_offset + 0x1E <= data.len() {
                 crate::safety::bytes::write_at::<u16>(data, desc_offset + 0x1C, unused);
             }
@@ -1024,7 +1024,7 @@ impl<'a> InodeAllocator<'a> {
         let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
         // s_free_inodes_count sits at offset 16 within the superblock; the
         // deferred edge owns dirty+journal (F4-R2 durability-deferred).
-        bio::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
+        hotpath::with_block_deferred_mut(self.fs.device, sb_block as u64, |data, _| {
             let current = crate::safety::bytes::read_at::<u32>(data, sb_start + 16).unwrap_or(0);
             let new_count = (current as i32 + delta) as u32;
             crate::safety::bytes::write_at::<u32>(data, sb_start + 16, new_count);

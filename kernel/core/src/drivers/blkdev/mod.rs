@@ -87,20 +87,20 @@ pub struct GenDisk {
     /// Registration contract (INV-BLKDEV-2, the driver-registration edge):
     /// the implementation receives the registered `&GenDisk` and must keep
     /// `buf` a valid DMA target until the completion fires.
-    pub async_read_fn: Option<fn(&GenDisk, u64, &mut [u8], &crate::fs::io_completion::IoCompletion) -> i32>,
+    pub async_read_fn: Option<fn(&GenDisk, u64, &mut [u8], &crate::fs::types::IoCompletion) -> i32>,
     /// Async write function (device-specific async submit without blocking).
     /// The DATA buffer is the DMA SOURCE: the registered implementation
     /// asserts the caller keeps it valid and unmodified until the
     /// completion fires (the write-batch contract, INV-BLKDEV-2).
-    pub async_write_fn: Option<fn(&GenDisk, u64, &[u8], &crate::fs::io_completion::IoCompletion) -> i32>,
+    pub async_write_fn: Option<fn(&GenDisk, u64, &[u8], &crate::fs::types::IoCompletion) -> i32>,
     /// Async scatter-gather read (one fused request over N segments whose
     /// combined length covers a contiguous sector range starting at
     /// `sector`). None on devices without SG support — callers fall back
     /// to per-segment `async_read_fn` submissions.
-    pub async_read_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
+    pub async_read_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::types::IoCompletion) -> i32>,
     /// Async scatter-gather write — the fused form of `async_write_fn`;
     /// every segment is a DMA source under the same stability contract.
-    pub async_write_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
+    pub async_write_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::types::IoCompletion) -> i32>,
 }
 
 unsafe impl Send for GenDisk {}
@@ -170,7 +170,7 @@ impl GenDisk {
     /// Registering `f` asserts the INV-BLKDEV-2 contract on its behalf.
     pub fn set_async_read_fn(
         &mut self,
-        f: fn(&GenDisk, u64, &mut [u8], &crate::fs::io_completion::IoCompletion) -> i32,
+        f: fn(&GenDisk, u64, &mut [u8], &crate::fs::types::IoCompletion) -> i32,
     ) {
         self.async_read_fn = Some(f);
     }
@@ -178,7 +178,7 @@ impl GenDisk {
     /// Set async write function (for async I/O submission without blocking)
     pub fn set_async_write_fn(
         &mut self,
-        f: fn(&GenDisk, u64, &[u8], &crate::fs::io_completion::IoCompletion) -> i32,
+        f: fn(&GenDisk, u64, &[u8], &crate::fs::types::IoCompletion) -> i32,
     ) {
         self.async_write_fn = Some(f);
     }
@@ -186,7 +186,7 @@ impl GenDisk {
     /// Set async SG read function (fused multi-segment requests)
     pub fn set_async_read_sg_fn(
         &mut self,
-        f: fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32,
+        f: fn(&GenDisk, u64, &[DmaSeg], &crate::fs::types::IoCompletion) -> i32,
     ) {
         self.async_read_sg_fn = Some(f);
     }
@@ -194,7 +194,7 @@ impl GenDisk {
     /// Set async SG write function (fused multi-segment requests)
     pub fn set_async_write_sg_fn(
         &mut self,
-        f: fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32,
+        f: fn(&GenDisk, u64, &[DmaSeg], &crate::fs::types::IoCompletion) -> i32,
     ) {
         self.async_write_sg_fn = Some(f);
     }
@@ -346,7 +346,7 @@ pub fn blkdev_read_async(
     disk: &'static GenDisk,
     sector: u64,
     buf: &mut [u8],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     {
         if let Some(async_fn) = disk.async_read_fn {
@@ -416,7 +416,7 @@ pub fn blkdev_write_async(
     disk: &'static GenDisk,
     sector: u64,
     buf: &[u8],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     {
         if let Some(async_fn) = disk.async_write_fn {
@@ -478,7 +478,7 @@ pub fn blkdev_read_async_sg(
     disk: &'static GenDisk,
     sector: u64,
     segs: &[DmaSeg],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     {
         if let Some(async_fn) = disk.async_read_sg_fn {
@@ -527,7 +527,7 @@ pub fn blkdev_write_async_sg(
     disk: &'static GenDisk,
     sector: u64,
     segs: &[DmaSeg],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     {
         if let Some(async_fn) = disk.async_write_sg_fn {

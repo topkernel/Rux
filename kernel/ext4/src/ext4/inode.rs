@@ -293,7 +293,7 @@ impl Ext4Inode {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, i32> {
-        use rux::fs::bio;
+        use rux::fs::hotpath;
 
         let file_size = self.get_size();
         if offset >= file_size {
@@ -340,13 +340,13 @@ impl Ext4Inode {
             }
 
             // SAFETY: fs.device is a valid GenDisk pointer for the mounted filesystem;
-            // this_block is a resolved data block; bio::bread returns a valid BufferHead.
+            // this_block is a resolved data block; hotpath::bread returns a valid BufferHead.
             {
-                let bh = bio::bread(fs.device, this_block)
+                let bh = hotpath::bread(fs.device, this_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                // SAFETY: bh is a valid buffer head from bio::bread; b_data is block_size bytes
-                let data = bio::bh_data(&bh);
+                // SAFETY: bh is a valid buffer head from hotpath::bread; b_data is block_size bytes
+                let data = hotpath::bh_data(&bh);
                 let remaining = to_read - total_read;
                 let available_in_block = block_size - block_offset;
                 let read_in_block = core::cmp::min(remaining, available_in_block);
@@ -358,7 +358,7 @@ impl Ext4Inode {
                 buf_offset += read_in_block;
                 current_offset += read_in_block;
 
-                bio::brelse(bh);
+                hotpath::brelse(bh);
             }
         }
 
@@ -379,7 +379,7 @@ pub fn read_inode(
     fs: &crate::ext4::Ext4FileSystem,
     ino: u32,
 ) -> Result<Ext4InodeOnDisk, i32> {
-    use rux::fs::bio;
+    use rux::fs::hotpath;
 
     // ino == 0 is invalid (would underflow in group/index calculation)
     if ino == 0 {
@@ -423,11 +423,11 @@ pub fn read_inode(
     let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
 
     // Read block containing inode
-    let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+    let bh = hotpath::bread(fs.device, inode_table_start + block_offset as u64)
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-    // SAFETY: bh is a valid BufferHead from bio::bread.
-    let data = bio::bh_data(&bh);
+    // SAFETY: bh is a valid BufferHead from hotpath::bread.
+    let data = hotpath::bh_data(&bh);
 
     // Bounds check (read-side twin of the write paths' R20-FS2 clamp):
     // the copy is clamped to the ON-DISK slot size (s_inode_size). With
@@ -440,7 +440,7 @@ pub fn read_inode(
     let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
     let copy_len = core::cmp::min(inode_size, fs.inode_size as usize);
     if in_block_offset + copy_len > data.len() {
-        bio::brelse(bh);
+        hotpath::brelse(bh);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
@@ -457,14 +457,14 @@ pub fn read_inode(
     if fs.metadata_csum {
         let full = (in_block_offset + fs.inode_size as usize).min(data.len());
         if !crate::ext4::csum::inode_csum_ok(fs.csum_seed, ino, &data[in_block_offset..full]) {
-            bio::brelse(bh);
+            hotpath::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32()); // EIO
         }
     }
 
     inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + copy_len]);
 
-    bio::brelse(bh);
+    hotpath::brelse(bh);
 
     Ok(inode_on_disk)
 }
@@ -503,7 +503,7 @@ pub fn write_inode(
     ino: u32,
     inode: &Ext4Inode,
 ) -> Result<(), i32> {
-    use rux::fs::bio;
+    use rux::fs::hotpath;
     crate::debug::fsw::note_write_inode();
 
     if ino == 0 {
@@ -547,11 +547,11 @@ pub fn write_inode(
     let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
 
     // Read block containing inode
-    let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+    let bh = hotpath::bread(fs.device, inode_table_start + block_offset as u64)
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-    // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes.
-    let data = bio::bh_data_mut(&bh);
+    // SAFETY: bh is a valid BufferHead from hotpath::bread; b_data is block_size bytes.
+    let data = hotpath::bh_data_mut(&bh);
 
     // Bounds check: copy length clamped to the on-disk slot size so the
     // 172-byte in-memory struct never spills into the next inode's slot
@@ -561,7 +561,7 @@ pub fn write_inode(
         fs.inode_size as usize,
     );
     if in_block_offset + copy_len > data.len() {
-        bio::brelse(bh);
+        hotpath::brelse(bh);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
@@ -613,9 +613,9 @@ pub fn write_inode(
     }
 
     // Mark buffer dirty and sync
-    // SAFETY: bh is a valid buffer head from bio::bread; set_state_bit modifies
+    // SAFETY: bh is a valid buffer head from hotpath::bread; set_state_bit modifies
     // the buffer state flags through an internal spinlock.
-    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
+    hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
 
     // Journal the inode table block if a transaction is active (the
     // typed handle view rides the framework's boxed_mut edge).
@@ -643,7 +643,7 @@ pub fn write_inode(
     // most), and the publication guards keep entry blocks from jumping
     // their prereqs.
     // SAFETY: bh valid; release the reference taken by bread above.
-    bio::brelse(bh);
+    hotpath::brelse(bh);
 
     Ok(())
 }
@@ -669,18 +669,18 @@ pub fn sync_inode_table_block(
     fs: &crate::ext4::Ext4FileSystem,
     ino: u32,
 ) -> Result<(), i32> {
-    use rux::fs::bio;
+    use rux::fs::hotpath;
     if let Some(tbl_blk) = inode_table_block_of(fs, ino) {
-        // SAFETY: bio::bread returns a valid BufferHead on success; the
+        // SAFETY: hotpath::bread returns a valid BufferHead on success; the
         // inode-table block is a plain metadata block.
         {
-            if let Some(bh) = bio::bread(fs.device, tbl_blk) {
-                let sync_res = if bio::bh_is_dirty(&bh) {
-                    bio::sync_dirty_buffer(bh)
+            if let Some(bh) = hotpath::bread(fs.device, tbl_blk) {
+                let sync_res = if hotpath::bh_is_dirty(&bh) {
+                    hotpath::sync_dirty_buffer(bh)
                 } else {
                     Ok(())
                 };
-                bio::brelse(bh);
+                hotpath::brelse(bh);
                 sync_res?;
             }
         }
@@ -745,7 +745,7 @@ pub fn write_inode_disk(
     ino: u32,
     inode: &Ext4InodeOnDisk,
 ) -> Result<(), i32> {
-    use rux::fs::bio;
+    use rux::fs::hotpath;
     crate::debug::fsw::note_write_inode();
 
     if ino == 0 {
@@ -789,12 +789,12 @@ pub fn write_inode_disk(
     let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
 
     // Read block containing inode
-    let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+    let bh = hotpath::bread(fs.device, inode_table_start + block_offset as u64)
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-    // SAFETY: bh is a valid BufferHead from bio::bread; b_data is a valid
+    // SAFETY: bh is a valid BufferHead from hotpath::bread; b_data is a valid
     // mutable slice of block_size bytes containing the inode table block.
-    let data = bio::bh_data_mut(&bh);
+    let data = hotpath::bh_data_mut(&bh);
 
     // Bounds check (R20-FS2): the copy is clamped to the ON-DISK inode slot
     // size (s_inode_size) AND to the block: with s_inode_size < 172 the full
@@ -806,7 +806,7 @@ pub fn write_inode_disk(
         fs.inode_size as usize,
     );
     if in_block_offset + copy_len > data.len() {
-        bio::brelse(bh);
+        hotpath::brelse(bh);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
@@ -827,9 +827,9 @@ pub fn write_inode_disk(
     }
 
     // Mark buffer dirty and sync
-    // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
+    // SAFETY: bh is a valid BufferHead from hotpath::bread; set_state_bit modifies
     // the buffer state flags through an internal spinlock.
-    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
+    hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
 
     // Journal the inode table block if a transaction is active (the
     // typed handle view rides the framework's boxed_mut edge).
@@ -840,8 +840,8 @@ pub fn write_inode_disk(
         );
     }
 
-    let sync_res = bio::sync_dirty_buffer(bh);
-    bio::brelse(bh);
+    let sync_res = hotpath::sync_dirty_buffer(bh);
+    hotpath::brelse(bh);
     sync_res?;
 
     Ok(())
@@ -897,9 +897,9 @@ pub mod perm {
 /// an icache eviction (the VFS copy is reseeded from disk at iget), and
 /// keep the VFS-cached Ext4Inode copy in sync. No-op for non-ext4 inodes
 /// (the ops-identity gate lives here, not at the ioctl call site).
-pub fn persist_ioc_flags(vfs_inode: &rux::fs::inode::Inode, merged: u32) {
+pub fn persist_ioc_flags(vfs_inode: &rux::fs::types::Inode, merged: u32) {
     use super::{EXT4_BIG_LOCK, EXT4_INODE_OPS};
-    use rux::fs::inode::FS_FL_USER_MODIFIABLE;
+    use rux::fs::hotpath::FS_FL_USER_MODIFIABLE;
 
     if !core::ptr::eq(
         vfs_inode.ops.unwrap_or(&EXT4_INODE_OPS) as *const _,

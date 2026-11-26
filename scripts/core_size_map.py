@@ -58,8 +58,10 @@ HOT_FILES = re.compile(
     # the scheduler's mechanism (hot-path code keeps its topic files;
     # the build gate, not a file name, keeps unsafe out of them)
     r"|sched/(sched|unsafe)\.rs"
-    # the VFS walk, the block layer, the page cache, the dcache
-    r"|fs/(vfs|bio|page_cache|dentry|buffer|file|unsafe)\.rs"
+    # the VFS walk, the block layer, the page cache, the dcache — sections
+    # of fs/hotpath.rs since seed-core pass 2 (the file holds all of the
+    # subsystem's code under the hot-path name until the shrink stage)
+    r"|fs/(hotpath|unsafe)\.rs"
     # the lock primitives and the per-CPU layer
     r"|sync/(spinlock|rwlock|percpu|seqlock|unsafe)\.rs"
     r"|interrupt/[^/]+\.rs"
