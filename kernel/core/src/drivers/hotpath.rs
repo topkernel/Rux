@@ -4253,6 +4253,7 @@ pub fn cached_wall_secs() -> u32 {
 // - `struct block_device`: Block device instance
 // - `struct request_queue`: Request queue
 // - `struct bio`: I/O descriptor
+
 unsafe impl Send for GenDisk {}
 unsafe impl Sync for GenDisk {}
 
@@ -5444,6 +5445,7 @@ pub fn enumerate_virtio_devices() -> usize {
 // VirtIO block device driver
 // SAFETY: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks
 // serialize all mutable access to shared fields.
+
 unsafe impl Send for VirtIOBlkDevice {}
 // SAFETY: All shared state is protected by Spinlocks (irqsafe where needed),
 // ensuring no data races across threads/CPUs.
@@ -9367,6 +9369,7 @@ pub fn virtio_blk_enable_device_interrupt(base_addr: u64) {
 // VirtIO virtual queue
 //
 // Queue implementation fully compliant with VirtIO specification
+
 unsafe impl Send for VirtQueue {}
 unsafe impl Sync for VirtQueue {}
 
@@ -12870,6 +12873,7 @@ pub use self::get_net_device as get_virtio_net_device_net;
 // ════════════════ net::space ══════════════════════════
 // (was net/space.rs)
 // Network device base class
+
 unsafe impl Send for NetDevice {}
 // SAFETY (round-5): NetDevice's cross-thread state (stats, flags) is
 // mutated under the NetRx softirq / syscall discipline each op
@@ -13033,6 +13037,7 @@ pub fn get_netdevice_count() -> usize {
 // VirtIO network device driver
 // SAFETY: All shared state is protected by Spinlocks (irqsave where needed),
 // ensuring no data races across threads/CPUs.
+
 unsafe impl Send for VirtIONetDevice {}
 
 impl VirtIONetDevice {
