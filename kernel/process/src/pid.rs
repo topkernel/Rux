@@ -18,7 +18,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::sync::spinlock::Spinlock;
+use rux::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Absolute maximum PID value (from config, kept for compatibility).

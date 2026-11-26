@@ -11,7 +11,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::sched;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 

@@ -61,7 +61,7 @@ use super::types::KstackBlocks;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::ptr;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::mm::types::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SigInfo, SigPending, Signal, SignalStruct};
@@ -73,7 +73,7 @@ use core::mem::offset_of;
 use crate::list::ListHead;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use crate::sync::rcu;
+use crate::sync::hotpath;
 /// Per-bucket chain head.  AtomicPtr would be ideal but we only have
 /// core::sync::atomic in no_std, so use a Spinlock-protected array.
 /// Actually, we do have AtomicPtr in core.  Let's use it.
@@ -1440,7 +1440,7 @@ impl Task {
     #[inline(never)]
     pub fn wake_up_in_futex_bucket<'a>(
         task: *mut Task,
-        proof: &'a crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+        proof: &'a crate::sync::types::NestProof<'a, crate::sync::types::FutexBucketKey>,
     ) -> bool {
         Self::wake_up_impl(task, Some(proof), false)
     }
@@ -1452,7 +1452,7 @@ impl Task {
     #[inline(never)]
     fn wake_up_impl(
         task: *mut Task,
-        bucket: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+        bucket: Option<&crate::sync::types::NestProof<'_, crate::sync::types::FutexBucketKey>>,
         sync: bool,
     ) -> bool {
         if task.is_null() {
@@ -4944,7 +4944,7 @@ impl TaskExt {
             tracer_pid: AtomicU32::new(0),
             ptrace_options: AtomicU64::new(0),
             ptrace_sigdeliver: AtomicU32::new(0),
-            ptrace_siginfo: crate::sync::spinlock::Spinlock::new(None),
+            ptrace_siginfo: crate::sync::types::Spinlock::new(None),
             ss_addr: AtomicU64::new(0),
             ss_active: AtomicBool::new(false),
             ss_saved_insn: AtomicU64::new(0),
@@ -5304,7 +5304,7 @@ pub fn pid_hash_lookup_pinned(pid: u32) -> *mut Task {
 }
 
 pub fn pid_hash_lookup(pid: u32) -> *mut Task {
-    rcu::rcu_read_lock();
+    hotpath::rcu_read_lock();
 
     let idx = bucket_index(pid);
     // We are in an RCU read-side critical section. The bucket head is
@@ -5325,7 +5325,7 @@ pub fn pid_hash_lookup(pid: u32) -> *mut Task {
         found
     };
 
-    rcu::rcu_read_unlock();
+    hotpath::rcu_read_unlock();
 
     result
 }
@@ -6334,8 +6334,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         if crate::trace::EVENT_FUXSTUCK.armed()
             && HWEXIT_N.fetch_add(1, Relaxed2) < 96
         {
-            let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID.load(Relaxed2);
-            let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
+            let owner_tid = crate::sync::hotpath::FUXWATCH_OWNER_TID.load(Relaxed2);
+            let park_tgid = crate::sync::hotpath::FUXPARK_TGID.load(Relaxed2);
             let my_tgid = cur.tgid() as u32;
             let is_leader = dying_pid == my_tgid;
             let frozen = crate::api::sync::rwfrz_tgid_frozen(my_tgid);
@@ -7122,10 +7122,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         cur.set_fdtable(None);
 
         // ===== Clean up futex waiters =====
-        crate::sync::futex::futex_cleanup(cur);
+        crate::sync::hotpath::futex_cleanup(cur);
         // PI futexes: release held locks (owner-died handoff to the top
         // waiter) and leave every PI wait queue.
-        crate::sync::futex_pi::futex_pi_exit_cleanup(cur);
+        crate::sync::hotpath::futex_pi_exit_cleanup(cur);
 
         // ===== Clean up POSIX MQ fd entries =====
         crate::api::ipc::mq_fds_cleanup(cur);

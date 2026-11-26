@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
 use crate::errno;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Global mount registry: (device, mount_point, fs_type, flags_str).
 /// U1c: still maintained (boot-time bookkeeping and init-ns seeding) but

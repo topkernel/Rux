@@ -10,7 +10,7 @@
 // (INV-TASKLET-1: the tasklet family — the intrusive list protocol is
 // F6-registered (safety-and-performance); the clone-to-claim rows
 // ride the per-CPU list lock and the count's Release publication.)
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 use crate::list::ListHead;

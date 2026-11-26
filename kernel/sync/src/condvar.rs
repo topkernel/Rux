@@ -96,7 +96,7 @@ impl ConditionVariable {
     /// mutex.unlock();
     /// # }
     /// ```
-    pub fn wait(&self, mutex: &rux::sync::Mutex) {
+    pub fn wait(&self, mutex: &rux::sync::types::Mutex) {
         let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return,
@@ -156,7 +156,7 @@ impl ConditionVariable {
     /// 3. Yield CPU, go to sleep
     /// 4. Re-acquire mutex after being woken or interrupted by signal
     /// 5. Return result
-    pub fn wait_interruptible(&self, mutex: &rux::sync::Mutex) -> Result<(), ()> {
+    pub fn wait_interruptible(&self, mutex: &rux::sync::types::Mutex) -> Result<(), ()> {
         let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return Ok(()),

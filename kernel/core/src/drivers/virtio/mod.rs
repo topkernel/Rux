@@ -4,7 +4,7 @@
 //!
 //! VirtIO block device driver
 
-use crate::sync::spinlock::{Spinlock, SpinlockIrqGuard};
+use crate::sync::types::{Spinlock, SpinlockIrqGuard};
 
 use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 

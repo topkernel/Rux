@@ -649,7 +649,7 @@ fn free_dead_member(claim: crate::sched::types::ReapClaim) -> Option<crate::sche
     }
     // BOUNDED (lb125 decode): monopolist windows stalled this wait for
     // tens of seconds, freezing the exit — and every parent behind it.
-    crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "thread-stack-free");
+    rux::sync::hotpath::synchronize_rcu_bounded_pollfirst(1500, "thread-stack-free");
 
     m.free_kernel_stack();
 
@@ -1140,7 +1140,7 @@ fn release_task_storage(claim: crate::sched::types::ReapClaim) {
     // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
     // and microseconds long; an unbounded wait here parked init's reaping
     // behind monopolist windows. 1.5 s is ~1000x any real reader.
-    crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "release-task");
+    rux::sync::hotpath::synchronize_rcu_bounded_pollfirst(1500, "release-task");
 
     // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
     // so a reaping parent could scan the early ZOMBIE and free this task's

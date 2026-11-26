@@ -21,3 +21,7 @@ riscv64 = ["rux/riscv64"]
 x86_64 = ["rux/x86_64"]
 aarch64 = ["rux/aarch64"]
 unit-test = []
+# Forwards the core's futex tracer feature: `debug_dump_futex_state` is
+# compiled there only with it, and the `futex` module below re-exports it
+# only with it as well (seed-core pass 2 spelled the old glob out).
+debug-futex-trace = ["rux/debug-futex-trace"]

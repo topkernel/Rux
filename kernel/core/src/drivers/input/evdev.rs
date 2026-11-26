@@ -20,7 +20,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::fs::file::{File, FileOps};
 use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
 
@@ -1715,8 +1715,8 @@ fn input_echo_budget(n: u64) -> bool {
 /// lines lost), so the verdict lines are now staged into a stack buffer
 /// and flushed as ONE critical section under a dedicated echo lock.
 /// irqsave: the wake-side echoes fire from the input tasklet (BH).
-static HUNT_ECHO_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+static HUNT_ECHO_LOCK: crate::sync::types::Spinlock<()> =
+    crate::sync::types::Spinlock::new(());
 
 pub struct HuntLine {
     buf: [u8; 192],
@@ -1779,9 +1779,9 @@ struct IttStage {
     n: usize,
 }
 
-static ITT_STAGES: [crate::sync::spinlock::Spinlock<IttStage>; crate::config::MAX_CPUS] =
+static ITT_STAGES: [crate::sync::types::Spinlock<IttStage>; crate::config::MAX_CPUS] =
     [const {
-        crate::sync::spinlock::Spinlock::new(IttStage { buf: [0; 128], n: 0 })
+        crate::sync::types::Spinlock::new(IttStage { buf: [0; 128], n: 0 })
     }; crate::config::MAX_CPUS];
 
 fn itt_msg(msg: &[u8]) {

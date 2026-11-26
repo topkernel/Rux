@@ -98,8 +98,8 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// binder_open trace ring: (seq, pid, jiffies). Filled by `note_proc_open`
 /// from the opener's context (spinlock push only — no I/O there); drained
 /// and printed by schbd so every byte of UART cost stays off racer paths.
-pub static PROC_RING: crate::sync::spinlock::Spinlock<[(u64, u32, u64); PROC_RING_LEN]> =
-    crate::sync::spinlock::Spinlock::new([(0, 0, 0); PROC_RING_LEN]);
+pub static PROC_RING: crate::sync::types::Spinlock<[(u64, u32, u64); PROC_RING_LEN]> =
+    crate::sync::types::Spinlock::new([(0, 0, 0); PROC_RING_LEN]);
 pub static PROC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Record a binder-proc creation (called from `binder_open`). No-op

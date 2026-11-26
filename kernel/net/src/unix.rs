@@ -50,7 +50,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::types::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Address family
 pub const AF_UNIX: i32 = 1;
@@ -1889,7 +1889,7 @@ pub fn err_field_offset() -> usize {
 /// RawSpinlock and data get reordered by the compiler — never assume +8.
 pub fn err_data_offset() -> usize {
     core::mem::offset_of!(UnixSocket, err) + core::mem::offset_of!(ErrLatch, inner)
-        + crate::sync::spinlock::Spinlock::<i32>::data_offset()
+        + crate::sync::types::Spinlock::<i32>::data_offset()
 }
 
 fn seg_charge(len: usize) -> usize {

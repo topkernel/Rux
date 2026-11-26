@@ -36,8 +36,8 @@ use core::cell::Cell;
 /// layer. Nested acquire by the SAME task is legal; the outermost
 /// guard releases. do_exit() force-drops via release_if_owner (R73)
 /// since RAII never runs through do_exit.
-pub static EXT4_BIG_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new_rt("EXT4-BIGLOCK", true);
+pub static EXT4_BIG_LOCK: crate::sync::types::SleepMutex =
+    crate::sync::types::SleepMutex::new_rt("EXT4-BIGLOCK", true);
 
 /// Capture window modes (`JournalCaptureState::mode`).
 pub const CAPTURE_OFF: u8 = 0;
@@ -64,7 +64,7 @@ pub struct JournalCaptureState {
     pub dev_key: Cell<(u32, u32)>,
     /// PRE-mode capture accumulator (task-local: only the owning
     /// task's syscalls append, via the dirty-mark hook).
-    pub pre_list: crate::sync::spinlock::Spinlock<alloc::vec::Vec<u64>>,
+    pub pre_list: crate::sync::types::Spinlock<alloc::vec::Vec<u64>>,
 }
 
 impl JournalCaptureState {
@@ -73,7 +73,7 @@ impl JournalCaptureState {
             mode: Cell::new(CAPTURE_OFF),
             post_id: Cell::new(0),
             dev_key: Cell::new((0, 0)),
-            pre_list: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
+            pre_list: crate::sync::types::Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 

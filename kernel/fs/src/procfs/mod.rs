@@ -43,7 +43,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use rux::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType};

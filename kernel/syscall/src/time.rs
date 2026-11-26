@@ -1757,8 +1757,8 @@ static SYS_TZ_MINUTESWEST: core::sync::atomic::AtomicI32 = core::sync::atomic::A
 /// status i32 @40; constant @48, precision @56, tolerance @64 (i64);
 /// time.tv_sec @72, time.tv_usec @80 (i64); tick @88; ppsfreq @96;
 /// jitter @104; shift i32 @112.
-static TIMEX_STATE: crate::sync::spinlock::Spinlock<[u8; 96]> =
-    crate::sync::spinlock::Spinlock::new([0u8; 96]);
+static TIMEX_STATE: rux::sync::types::Spinlock<[u8; 96]> =
+    rux::sync::types::Spinlock::new([0u8; 96]);
 
 /// Shared adjtimex/clock_adjtime core: copy the timex in, validate it,
 /// apply the settable fields, report TIME_OK.

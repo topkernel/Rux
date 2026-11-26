@@ -24,7 +24,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::process::types::WaitQueueHead;
 use crate::signal::Signal;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // termios constants (asm-generic ABI — RISC-V uses this ABI)

@@ -1547,7 +1547,7 @@ b852026b8f76	kernel/core/src/process/unsafe.rs	journal_handle	261		INV:INV-PROC-
 c8d205051f55	kernel/core/src/process/unsafe.rs	free_fork_pt_regs	294	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
 08a6d396020d	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	308		INV:INV-PROC-ROOTSWITCH-1
 6db2c60dcc19	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	313		INV:INV-PROC-ROOTSWITCH-1
-3e88f5f81d98	kernel/core/src/process/unsafe.rs	apppark_rets	327		INV:INV-PROC-APPPARK-1
+261d36511c92	kernel/core/src/process/unsafe.rs	apppark_rets	327		INV:INV-PROC-APPPARK-1
 12fb2eacd76a	kernel/core/src/process/unsafe.rs	freelist_next	343	ptr-ops	INV:INV-PROC-KSTACK-1
 66173bca9837	kernel/core/src/process/unsafe.rs	freelist_link	353	ptr-ops	INV:INV-PROC-KSTACK-1
 a1a98cb4767b	kernel/core/src/process/unsafe.rs	heap_alloc	366		INV:INV-PROC-KSTACK-2
@@ -1660,7 +1660,7 @@ d24f73957def	kernel/core/src/safety/slot.rs	get	93		INV:INV-SLOT-1
 13bd250ef78b	kernel/core/src/sbi.rs	sbi_system_reset	62	asm	INV:F16
 c330d3bb7877	kernel/core/src/sbi.rs	send_ipi	98	asm	INV:F16
 d0e3ad9d40cd	kernel/core/src/sched/hotpath.rs	task	3140		INV:INV-SCE-2
-4405781e4629	kernel/core/src/sched/hotpath.rs	<module>	3171		INV:INV-RD-CLAIM
+f5f80fc5288f	kernel/core/src/sched/hotpath.rs	<module>	3171		INV:INV-RD-CLAIM
 f87e25390061	kernel/core/src/sched/hotpath.rs	<module>	5620		INV:INV-SENDSYNC-1
 c79b33f13d4f	kernel/core/src/sched/hotpath.rs	grq_current_fp	6084	asm	INV:INV-SCE-3
 c2e2172c221f	kernel/core/src/sched/hotpath.rs	grq_current_fp	6089	asm	INV:INV-SCE-3
@@ -1789,101 +1789,101 @@ e9bbd6ca8b99	kernel/core/src/signal.rs	handle_default_signal	2816	ptr-ops	INV:IN
 91d0dc8004e9	kernel/core/src/signal.rs	signal_wake_up_state	3314		INV:INV-TASKREF-1
 f365a345a9f1	kernel/core/src/signal_unsafe.rs	abort_reason_dump	49		INV:INV-TASKREF-1
 8468f0b3dff5	kernel/core/src/signal_unsafe.rs	abort_reason_dump	82		INV:INV-TASKREF-1
-456a08794e59	kernel/core/src/sync/futex.rs	<module>	607		INV:INV-SCE-2
-e29db84d5944	kernel/core/src/sync/futex.rs	<module>	608		INV:INV-SCE-2
-7cf488c65f26	kernel/core/src/sync/futex_pi.rs	<module>	184		INV:INV-SENDSYNC-1
-785e2c24926a	kernel/core/src/sync/futex_pi.rs	<module>	185		INV:INV-SENDSYNC-1
-7ef0f0943681	kernel/core/src/sync/lockkey.rs	<module>	132		INV:INV-LOCK-6
-208ea472d828	kernel/core/src/sync/lockkey.rs	<module>	244		INV:INV-LOCK-6
-717deb42926d	kernel/core/src/sync/lockkey.rs	drop	334		INV:INV-LOCK-6
-fe0e8af6bcfd	kernel/core/src/sync/mutex.rs	locked_owner_alive_wait	84		INV:INV-LOCK-6
-7db39cc7bded	kernel/core/src/sync/mutex.rs	optimistic_probe	319		INV:INV-LOCK-6
-ffbc2b6306f7	kernel/core/src/sync/mutex.rs	release	813	ptr-ops	INV:INV-LOCK-6
-cf4cb643826a	kernel/core/src/sync/mutex.rs	release_if_owner	895	ptr-ops	INV:INV-LOCK-6
-de1097b9f056	kernel/core/src/sync/percpu.rs	<module>	111		INV:INV-PERCPU-1
-f0910b37f2b5	kernel/core/src/sync/percpu.rs	with	147		INV:INV-PERCPU-1
-0ea762e80eff	kernel/core/src/sync/percpu.rs	with	148		INV:INV-PERCPU-1
-5e34bc663028	kernel/core/src/sync/percpu.rs	with	154		INV:INV-PERCPU-1
-42411bfc3156	kernel/core/src/sync/percpu.rs	with	165		INV:INV-PERCPU-1
-f71e3a265bf4	kernel/core/src/sync/percpu.rs	with	167		INV:INV-PERCPU-1
-d38994d59160	kernel/core/src/sync/percpu.rs	with_preempt	217		INV:INV-PERCPU-1
-009533b78ef3	kernel/core/src/sync/percpu.rs	with_preempt	218		INV:INV-PERCPU-1
-8eba50ff66e3	kernel/core/src/sync/percpu.rs	with_preempt	224		INV:INV-PERCPU-1
-e8721bdac6fd	kernel/core/src/sync/percpu.rs	with_preempt	231		INV:INV-PERCPU-1
-c09a4f2e1118	kernel/core/src/sync/percpu.rs	with_preempt	233		INV:INV-PERCPU-1
-41f5c45c2eb8	kernel/core/src/sync/percpu.rs	drop	289		INV:INV-PERCPU-1
-b6d4272f83c8	kernel/core/src/sync/rcu.rs	call_rcu	137		INV:INV-RCU-1
-30e7787cdffc	kernel/core/src/sync/rcu.rs	wait_qs_sleepy	580		INV:INV-RCU-1
-92c6be47a5ca	kernel/core/src/sync/rcu.rs	wait_qs_sleepy	609	volatile	INV:INV-RCU-1
-1862ad012189	kernel/core/src/sync/rcu.rs	wait_qs_sleepy	695		INV:INV-RCU-1
-04a2fdc3d14a	kernel/core/src/sync/rcu.rs	wait_qs_sleepy	748		INV:INV-RCU-1
-7e5007765ecf	kernel/core/src/sync/rcu.rs	wait_qs_sleepy	763		INV:INV-RCU-1
-782e873951cd	kernel/core/src/sync/rcu.rs	wait_qs_sleepy	776		INV:INV-RCU-1
-89fca89ec25f	kernel/core/src/sync/rcu.rs	rcu_softirq_handler	901		INV:INV-RCU-1
-a4f26d336c69	kernel/core/src/sync/rcu.rs	rcu_softirq_handler	918	ptr-ops	INV:INV-RCU-1
-452f418351b9	kernel/core/src/sync/rcu.rs	init	943		INV:INV-RCU-1
-81fd71781d81	kernel/core/src/sync/rwlock.rs	<module>	214		INV:INV-RWLOCK-1
-120f14fb6830	kernel/core/src/sync/rwlock.rs	<module>	215		INV:INV-RWLOCK-1
-0eda8fc9ad7f	kernel/core/src/sync/rwlock.rs	<module>	343		INV:INV-RWLOCK-1
-c9240e1cc8cf	kernel/core/src/sync/rwlock.rs	<module>	356		INV:INV-RWLOCK-1
-94b4c9ce0c25	kernel/core/src/sync/rwlock.rs	deref	363		INV:INV-RWLOCK-1
-a00d2e3b1084	kernel/core/src/sync/rwlock.rs	<module>	383		INV:INV-RWLOCK-1
-0c137ffa2d48	kernel/core/src/sync/rwlock.rs	deref	390		INV:INV-RWLOCK-1
-5c77468d4acf	kernel/core/src/sync/rwlock.rs	deref_mut	398		INV:INV-RWLOCK-1
-cff835463498	kernel/core/src/sync/rwlock.rs	<module>	419		INV:INV-RWLOCK-1
-af8891e4889f	kernel/core/src/sync/rwlock.rs	deref	426		INV:INV-RWLOCK-1
-48211e9d950d	kernel/core/src/sync/rwlock.rs	<module>	448		INV:INV-RWLOCK-1
-ab96debfbcc9	kernel/core/src/sync/rwlock.rs	deref	455		INV:INV-RWLOCK-1
-17fa3cd6ce44	kernel/core/src/sync/rwlock.rs	deref_mut	463		INV:INV-RWLOCK-1
-c361d22d85b9	kernel/core/src/sync/rwlock.rs	<module>	484		INV:INV-RWLOCK-1
-291a8f3f0649	kernel/core/src/sync/rwlock.rs	deref	491		INV:INV-RWLOCK-1
-79f1e29b71f1	kernel/core/src/sync/rwlock.rs	<module>	511		INV:INV-RWLOCK-1
-a8ddffcc9920	kernel/core/src/sync/rwlock.rs	deref	518		INV:INV-RWLOCK-1
-696250d931fa	kernel/core/src/sync/rwlock.rs	deref_mut	526		INV:INV-RWLOCK-1
-ab58a88fe7c4	kernel/core/src/sync/rwsem.rs	<module>	217		INV:INV-RWSEM-1
-02cdfa8d5880	kernel/core/src/sync/rwsem.rs	<module>	218		INV:INV-RWSEM-1
-8c0a4849d08c	kernel/core/src/sync/rwsem.rs	<module>	1146		INV:INV-RWSEM-1
-5ed1f14c83cd	kernel/core/src/sync/rwsem.rs	<module>	1147		INV:INV-RWSEM-1
-e1486033d20d	kernel/core/src/sync/rwsem.rs	<module>	1233		INV:INV-RWSEM-1
-5a7fd345d2a1	kernel/core/src/sync/rwsem.rs	deref	1240		INV:INV-RWSEM-1
-12a1e8eb1a06	kernel/core/src/sync/rwsem.rs	<module>	1256		INV:INV-RWSEM-1
-3d302ed80724	kernel/core/src/sync/rwsem.rs	deref	1263		INV:INV-RWSEM-1
-58725185dcde	kernel/core/src/sync/rwsem.rs	deref_mut	1271		INV:INV-RWSEM-1
-ea6f390bac14	kernel/core/src/sync/seqlock.rs	<module>	121		INV:INV-SEQLOCK-1
-6586eafc6a8f	kernel/core/src/sync/seqlock.rs	<module>	122		INV:INV-SEQLOCK-1
-194a30b23af7	kernel/core/src/sync/seqlock.rs	<module>	187		INV:INV-SEQLOCK-1
-1acbe0cbff00	kernel/core/src/sync/seqlock.rs	read_inner	207	volatile	INV:INV-SEQLOCK-1
-b71e0c023b76	kernel/core/src/sync/seqlock.rs	<module>	231		INV:INV-SEQLOCK-1
-cb061c367765	kernel/core/src/sync/seqlock.rs	deref	237		INV:INV-SEQLOCK-1
-44de6d4655a6	kernel/core/src/sync/seqlock.rs	deref_mut	244		INV:INV-SEQLOCK-1
-6609545698eb	kernel/core/src/sync/spinlock.rs	caller_return_address	180	asm	INV:INV-SPIN-1
-18c6f8017495	kernel/core/src/sync/spinlock.rs	caller_return_address	186	asm	INV:INV-SPIN-1
-4129a8e40be3	kernel/core/src/sync/spinlock.rs	deadlock_warn	531		INV:INV-SPIN-1
-52be73333847	kernel/core/src/sync/spinlock.rs	deadlock_warn	561		INV:INV-SPIN-1
-b03fabb0d205	kernel/core/src/sync/spinlock.rs	deadlock_warn	581		INV:INV-SPIN-1
-d1fa26daed5e	kernel/core/src/sync/spinlock.rs	deadlock_warn	584		INV:INV-SPIN-1
-293fb6233756	kernel/core/src/sync/spinlock.rs	deadlock_warn	591		INV:INV-SPIN-1
-face59f815a2	kernel/core/src/sync/spinlock.rs	deadlock_warn	606		INV:INV-SPIN-1
-4ef0b2e4ae9e	kernel/core/src/sync/spinlock.rs	deadlock_warn	621		INV:INV-SPIN-1
-7ac32a1140f2	kernel/core/src/sync/spinlock.rs	deadlock_warn	677	ptr-ops	INV:INV-SPIN-1
-5ba6c700fe65	kernel/core/src/sync/spinlock.rs	deadlock_warn	715	ptr-ops	INV:INV-SPIN-1
-f0dd4f8fba16	kernel/core/src/sync/spinlock.rs	puthex	802		INV:INV-SPIN-1
-fceabc9a81d7	kernel/core/src/sync/spinlock.rs	putdec	820		INV:INV-SPIN-1
-f0deab76280e	kernel/core/src/sync/spinlock.rs	<module>	894		INV:INV-SPIN-1
-622dbb1f9697	kernel/core/src/sync/spinlock.rs	<module>	920		INV:INV-SPIN-1
-b6f4045aa744	kernel/core/src/sync/spinlock.rs	<module>	921		INV:INV-SPIN-1
-994b8e7ca9ee	kernel/core/src/sync/spinlock.rs	<module>	1033		INV:INV-SPIN-1
-1e97ed0d692b	kernel/core/src/sync/spinlock.rs	<module>	1042		INV:INV-SPIN-1
-ecafe411bff5	kernel/core/src/sync/spinlock.rs	<module>	1051		INV:INV-SPIN-1
-390d8c39d80a	kernel/core/src/sync/spinlock.rs	<module>	1062		INV:INV-SPIN-1
-6cf015ec57e9	kernel/core/src/sync/spinlock.rs	deref	1069		INV:INV-SPIN-1
-a466b6602f25	kernel/core/src/sync/spinlock.rs	deref_mut	1077		INV:INV-SPIN-1
-4436ae88477f	kernel/core/src/sync/spinlock.rs	<module>	1115		INV:INV-SPIN-1
-cf47fc6bebad	kernel/core/src/sync/spinlock.rs	deref	1122		INV:INV-SPIN-1
-bb838d65c878	kernel/core/src/sync/spinlock.rs	deref_mut	1130		INV:INV-SPIN-1
-3d3abfd9cc5a	kernel/core/src/sync/spinlock.rs	<module>	1182		INV:INV-SPIN-1
-23dc876e3228	kernel/core/src/sync/spinlock.rs	deref	1189		INV:INV-SPIN-1
-6442a20779f5	kernel/core/src/sync/spinlock.rs	deref_mut	1197		INV:INV-SPIN-1
+c51a134133e9	kernel/core/src/sync/hotpath.rs	<module>	1071		INV:INV-SCE-2
+e14092022968	kernel/core/src/sync/hotpath.rs	<module>	1072		INV:INV-SCE-2
+fdb1c45f1396	kernel/core/src/sync/hotpath.rs	<module>	7249		INV:INV-SENDSYNC-1
+b7a5e97a2c04	kernel/core/src/sync/hotpath.rs	<module>	7250		INV:INV-SENDSYNC-1
+a63bfb1399dd	kernel/core/src/sync/hotpath.rs	locked_owner_alive_wait	8621		INV:INV-LOCK-6
+2cadc50595a5	kernel/core/src/sync/hotpath.rs	optimistic_probe	8787		INV:INV-LOCK-6
+4a9679f7d16a	kernel/core/src/sync/hotpath.rs	release	9281	ptr-ops	INV:INV-LOCK-6
+58092e607ef0	kernel/core/src/sync/hotpath.rs	release_if_owner	9363	ptr-ops	INV:INV-LOCK-6
+0f3c563fd222	kernel/core/src/sync/hotpath.rs	caller_return_address	9586	asm	INV:INV-SPIN-1
+13d223c12ba0	kernel/core/src/sync/hotpath.rs	caller_return_address	9592	asm	INV:INV-SPIN-1
+9bc19f892bc9	kernel/core/src/sync/hotpath.rs	deadlock_warn	9898		INV:INV-SPIN-1
+93dc79bcc2f4	kernel/core/src/sync/hotpath.rs	deadlock_warn	9928		INV:INV-SPIN-1
+338470fb1346	kernel/core/src/sync/hotpath.rs	deadlock_warn	9948		INV:INV-SPIN-1
+78d9e50ae96a	kernel/core/src/sync/hotpath.rs	deadlock_warn	9951		INV:INV-SPIN-1
+8cdd355a0677	kernel/core/src/sync/hotpath.rs	deadlock_warn	9958		INV:INV-SPIN-1
+9b729298ec5c	kernel/core/src/sync/hotpath.rs	deadlock_warn	9973		INV:INV-SPIN-1
+4784c31ce917	kernel/core/src/sync/hotpath.rs	deadlock_warn	9988		INV:INV-SPIN-1
+c09cdfbebe22	kernel/core/src/sync/hotpath.rs	deadlock_warn	10044	ptr-ops	INV:INV-SPIN-1
+75bab6ca491c	kernel/core/src/sync/hotpath.rs	deadlock_warn	10082	ptr-ops	INV:INV-SPIN-1
+2f97bd7a7255	kernel/core/src/sync/hotpath.rs	puthex	10169		INV:INV-SPIN-1
+ef57c087d6d0	kernel/core/src/sync/hotpath.rs	putdec	10187		INV:INV-SPIN-1
+f532063d9fb0	kernel/core/src/sync/hotpath.rs	<module>	10261		INV:INV-SPIN-1
+fcf71ead0f5a	kernel/core/src/sync/hotpath.rs	<module>	10282		INV:INV-SPIN-1
+26575ba9ed9b	kernel/core/src/sync/hotpath.rs	<module>	10283		INV:INV-SPIN-1
+f72d9e7a4991	kernel/core/src/sync/hotpath.rs	<module>	10395		INV:INV-SPIN-1
+bd6f5b05fd7e	kernel/core/src/sync/hotpath.rs	<module>	10404		INV:INV-SPIN-1
+aada99d51f73	kernel/core/src/sync/hotpath.rs	<module>	10413		INV:INV-SPIN-1
+2a86e44467c5	kernel/core/src/sync/hotpath.rs	<module>	10420		INV:INV-SPIN-1
+5786a00e1720	kernel/core/src/sync/hotpath.rs	deref	10427		INV:INV-SPIN-1
+de83d563339d	kernel/core/src/sync/hotpath.rs	deref_mut	10435		INV:INV-SPIN-1
+f34a544e66e4	kernel/core/src/sync/hotpath.rs	<module>	10468		INV:INV-SPIN-1
+45f9e92c75a6	kernel/core/src/sync/hotpath.rs	deref	10475		INV:INV-SPIN-1
+4fa2a8703449	kernel/core/src/sync/hotpath.rs	deref_mut	10483		INV:INV-SPIN-1
+98ab728be5ed	kernel/core/src/sync/hotpath.rs	<module>	10531		INV:INV-SPIN-1
+8103bfeda72b	kernel/core/src/sync/hotpath.rs	deref	10538		INV:INV-SPIN-1
+636dfc2c1b7d	kernel/core/src/sync/hotpath.rs	deref_mut	10546		INV:INV-SPIN-1
+3a36e7d455c9	kernel/core/src/sync/hotpath.rs	<module>	10817		INV:INV-RWLOCK-1
+e5e250247b8f	kernel/core/src/sync/hotpath.rs	<module>	10818		INV:INV-RWLOCK-1
+4823a8841fc4	kernel/core/src/sync/hotpath.rs	<module>	10946		INV:INV-RWLOCK-1
+33ffc1ef00b0	kernel/core/src/sync/hotpath.rs	<module>	10955		INV:INV-RWLOCK-1
+88146ceb1fa4	kernel/core/src/sync/hotpath.rs	deref	10962		INV:INV-RWLOCK-1
+6852f571917c	kernel/core/src/sync/hotpath.rs	<module>	10978		INV:INV-RWLOCK-1
+8561456db746	kernel/core/src/sync/hotpath.rs	deref	10985		INV:INV-RWLOCK-1
+dea3ad90da97	kernel/core/src/sync/hotpath.rs	deref_mut	10993		INV:INV-RWLOCK-1
+d96ae750b71a	kernel/core/src/sync/hotpath.rs	<module>	11009		INV:INV-RWLOCK-1
+c643e81f84b7	kernel/core/src/sync/hotpath.rs	deref	11016		INV:INV-RWLOCK-1
+db3d3e886994	kernel/core/src/sync/hotpath.rs	<module>	11033		INV:INV-RWLOCK-1
+c9e7d28112e7	kernel/core/src/sync/hotpath.rs	deref	11040		GAP
+587ec217794b	kernel/core/src/sync/hotpath.rs	deref_mut	11048		INV:INV-RWLOCK-1
+92bc8da88bd6	kernel/core/src/sync/hotpath.rs	<module>	11065		INV:INV-RWLOCK-1
+40edb763fa64	kernel/core/src/sync/hotpath.rs	deref	11072		GAP
+ed361615617c	kernel/core/src/sync/hotpath.rs	<module>	11088		INV:INV-RWLOCK-1
+04bb3d8a9103	kernel/core/src/sync/hotpath.rs	deref	11095		GAP
+b3d3ff97fa27	kernel/core/src/sync/hotpath.rs	deref_mut	11103		INV:INV-RWLOCK-1
+1e56c0297a2d	kernel/core/src/sync/hotpath.rs	<module>	11336		INV:INV-RWSEM-1
+98be574a740e	kernel/core/src/sync/hotpath.rs	<module>	11337		INV:INV-RWSEM-1
+c5185307af0c	kernel/core/src/sync/hotpath.rs	<module>	12255		INV:INV-RWSEM-1
+cc9b83eddc13	kernel/core/src/sync/hotpath.rs	<module>	12256		INV:INV-RWSEM-1
+c50cd9060322	kernel/core/src/sync/hotpath.rs	<module>	12338		INV:INV-RWSEM-1
+378c1039d4a4	kernel/core/src/sync/hotpath.rs	deref	12345		INV:INV-RWSEM-1
+72ee9b0fd7c5	kernel/core/src/sync/hotpath.rs	<module>	12357		INV:INV-RWSEM-1
+373e3bd5edb7	kernel/core/src/sync/hotpath.rs	deref	12364		INV:INV-RWSEM-1
+fda757abf57f	kernel/core/src/sync/hotpath.rs	deref_mut	12372		INV:INV-RWSEM-1
+b780608c6b70	kernel/core/src/sync/hotpath.rs	<module>	12480		INV:INV-SEQLOCK-1
+5bb88bbbb463	kernel/core/src/sync/hotpath.rs	<module>	12481		INV:INV-SEQLOCK-1
+907690427b63	kernel/core/src/sync/hotpath.rs	<module>	12546		INV:INV-SEQLOCK-1
+e5c67fdd6ddd	kernel/core/src/sync/hotpath.rs	read_inner	12566	volatile	INV:INV-SEQLOCK-1
+f20bf214d6cd	kernel/core/src/sync/hotpath.rs	<module>	12580		INV:INV-SEQLOCK-1
+bab001c10b1c	kernel/core/src/sync/hotpath.rs	deref	12586		INV:INV-SEQLOCK-1
+4927a83001d1	kernel/core/src/sync/hotpath.rs	deref_mut	12593		INV:INV-SEQLOCK-1
+528d1fa32d73	kernel/core/src/sync/hotpath.rs	call_rcu	12748		INV:INV-RCU-1
+e5eeba83683a	kernel/core/src/sync/hotpath.rs	wait_qs_sleepy	13191		INV:INV-RCU-1
+023e5ca167a3	kernel/core/src/sync/hotpath.rs	wait_qs_sleepy	13220	volatile	INV:INV-RCU-1
+59a5cef4a83e	kernel/core/src/sync/hotpath.rs	wait_qs_sleepy	13306		INV:INV-RCU-1
+06215d6a742d	kernel/core/src/sync/hotpath.rs	wait_qs_sleepy	13359		INV:INV-RCU-1
+45f4d1c7bd27	kernel/core/src/sync/hotpath.rs	wait_qs_sleepy	13374		INV:INV-RCU-1
+c01498ccaaab	kernel/core/src/sync/hotpath.rs	wait_qs_sleepy	13387		INV:INV-RCU-1
+39034810c476	kernel/core/src/sync/hotpath.rs	rcu_softirq_handler	13512		INV:INV-RCU-1
+bd87764ae24a	kernel/core/src/sync/hotpath.rs	rcu_softirq_handler	13529	ptr-ops	INV:INV-RCU-1
+66213f6ae149	kernel/core/src/sync/hotpath.rs	init	13554		INV:INV-RCU-1
+b50b54df0abe	kernel/core/src/sync/hotpath.rs	<module>	13646		INV:INV-PERCPU-1
+a0c67d270d5f	kernel/core/src/sync/hotpath.rs	with	13682		INV:INV-PERCPU-1
+332c72b0064e	kernel/core/src/sync/hotpath.rs	with	13683		INV:INV-PERCPU-1
+4405239fa102	kernel/core/src/sync/hotpath.rs	with	13689		INV:INV-PERCPU-1
+c102e4f2e3f5	kernel/core/src/sync/hotpath.rs	with	13700		INV:INV-PERCPU-1
+cd4802268f7c	kernel/core/src/sync/hotpath.rs	with	13702		INV:INV-PERCPU-1
+5628b3f6bb63	kernel/core/src/sync/hotpath.rs	with_preempt	13752		INV:INV-PERCPU-1
+4dd6ac7f8e4a	kernel/core/src/sync/hotpath.rs	with_preempt	13753		INV:INV-PERCPU-1
+210140aad84d	kernel/core/src/sync/hotpath.rs	with_preempt	13759		INV:INV-PERCPU-1
+8c24122f43d7	kernel/core/src/sync/hotpath.rs	with_preempt	13766		INV:INV-PERCPU-1
+699e4db053db	kernel/core/src/sync/hotpath.rs	with_preempt	13768		INV:INV-PERCPU-1
+a03d2b77268e	kernel/core/src/sync/hotpath.rs	drop	13808		INV:INV-PERCPU-1
+6ad72e3b8977	kernel/core/src/sync/hotpath.rs	<module>	13912		INV:INV-LOCK-6
+8b0eb434180c	kernel/core/src/sync/hotpath.rs	<module>	14002		INV:INV-LOCK-6
+c8407c6e0087	kernel/core/src/sync/hotpath.rs	drop	14063		INV:INV-LOCK-6
 33dacb332203	kernel/core/src/sync/unsafe.rs	read_bytes_via_task	49		INV:INV-SY-1
 cbdf42b73402	kernel/core/src/sync/unsafe.rs	read_bytes_via_task	63	volatile,ptr-ops	INV:INV-SY-1
 73644758e966	kernel/core/src/sync/unsafe.rs	read_u32_via_task	96		INV:INV-SY-1

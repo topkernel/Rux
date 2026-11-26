@@ -35,7 +35,7 @@ use crate::fs::FdTable;
 use crate::list::ListHead;
 use crate::mm::types::AddressSpace;
 use crate::signal::{SignalStruct, SigPending};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ---------------------------------------------------------------------------
 // the task control block: Task with its state, policy, flags, pid and
@@ -1075,7 +1075,7 @@ pub struct TaskExt {
 
     /// The dequeued signal held for the tracer (PTRACE_GETSIGINFO /
     /// CONT(0) swallows it).
-    pub ptrace_siginfo: crate::sync::spinlock::Spinlock<
+    pub ptrace_siginfo: crate::sync::types::Spinlock<
         Option<crate::signal::SigInfo>,
     >,
 

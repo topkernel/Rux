@@ -31,7 +31,7 @@
 //! timer ID during expiry.
 
 use core::sync::atomic::{AtomicU64, Ordering, AtomicUsize, AtomicU8, AtomicU32};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::drivers::timer;
 
 pub mod nohz;
@@ -736,7 +736,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // 17th successor: futex-stuck census (rux:fuxstuck (retired debug=fuxstuck), self-gated
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.
-            crate::sync::futex::futex_stuck_census();
+            crate::sync::hotpath::futex_stuck_census();
             // 53rd (52nd §6a): early-cadence S-state sleep snapshot
             // (rux:sleepsnap (retired debug=sleepsnap) inside): every ~5 s for the first minute, so
             // a 7.4 s park (hilogd main) is captured with its parked
@@ -1082,10 +1082,10 @@ pub fn timer_softirq_handler(_nr: usize) {
     // `expire_hres_inline` runs the identical sequence at the top of
     // the timer IRQ; the diagnostics above this point stay
     // softirq-side only.
-    static EXPIRED_BUF: crate::sync::percpu::CpuLocal<
+    static EXPIRED_BUF: crate::sync::types::CpuLocal<
         [FiredToken; wheel::EXPIRY_BUDGET],
         { crate::config::MAX_CPUS },
-    > = crate::sync::percpu::CpuLocal::new([FiredToken {
+    > = crate::sync::types::CpuLocal::new([FiredToken {
         id: 0,
         action: Action::None,
         late_ticks: 0,
@@ -1168,10 +1168,10 @@ pub fn expire_hres_inline() -> bool {
     // the OH-campaign "wake TRUE, task unlinked" signature. Per-CPU
     // rows close it (the reference runs hrtimer expiry on per-CPU
     // bases; a shared expiry buffer is unrepresentable there).
-    static HRES_FAST_BUF: crate::sync::percpu::CpuLocal<
+    static HRES_FAST_BUF: crate::sync::types::CpuLocal<
         [FiredToken; wheel::EXPIRY_BUDGET],
         { crate::config::MAX_CPUS },
-    > = crate::sync::percpu::CpuLocal::new(
+    > = crate::sync::types::CpuLocal::new(
         [FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET],
     );
     let current = timer::get_jiffies();
@@ -1196,7 +1196,7 @@ fn run_wheel_sweep(
     current: u64,
     now_time: u64,
     hres_due: bool,
-    buf: &crate::sync::percpu::CpuLocal<[FiredToken; wheel::EXPIRY_BUDGET], { crate::config::MAX_CPUS }>,
+    buf: &crate::sync::types::CpuLocal<[FiredToken; wheel::EXPIRY_BUDGET], { crate::config::MAX_CPUS }>,
 ) {
     // Per-CPU expiry row via CpuLocal (D-7): the softirq path's
     // SOFTIRQ_IN_PROGRESS guard and the hardirq fast path's own CPU

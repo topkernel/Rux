@@ -19,7 +19,7 @@ use core::sync::atomic::Ordering;
 
 use rux::process::{types::Task, types::TaskState, hotpath::TIF_MEMDIE};
 use rux::mm::types::MmFlags;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ==================== Constants ====================
 

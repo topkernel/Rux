@@ -177,7 +177,7 @@ static mut ROUTE_TABLE: RouteTable = RouteTable::new();
 /// W3 (RACE): ROUTE_TABLE is read from the TX data path (every CPU) and
 /// written from route management — irqsave spinlock, mirroring the
 /// TCP/UDP table locks (the softirq side can run inline at irq_exit).
-static ROUTE_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlock::new(());
+static ROUTE_LOCK: crate::sync::types::Spinlock<()> = crate::sync::types::Spinlock::new(());
 
 /// Look up route
 ///

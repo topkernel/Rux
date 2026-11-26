@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use crate::sync::spinlock::Spinlock;
+use rux::sync::types::Spinlock;
 
 use rux::process::types::Task;
 use crate::sched;

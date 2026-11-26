@@ -159,7 +159,7 @@ impl EpollEntryList {
 
 /// Epoll file structure (stored as File private_data)
 struct EpollFile {
-    entries: crate::sync::spinlock::Spinlock<EpollEntryList>,
+    entries: rux::sync::types::Spinlock<EpollEntryList>,
     /// Waiters blocked in epoll_wait (P1: busy-yield elimination). Woken by
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
@@ -2006,7 +2006,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     };
 
     let epoll = alloc::boxed::Box::new(EpollFile {
-        entries: crate::sync::spinlock::Spinlock::new(EpollEntryList {
+        entries: rux::sync::types::Spinlock::new(EpollEntryList {
             head: crate::list::ListHead::new(),
         }),
         wait_queue: rux::process::types::WaitQueueHead::new(),
@@ -4677,7 +4677,7 @@ const SIGNALFD_SIGINFO_SIZE: usize = 128;
 /// polarity). Signals are NOT hijacked from the handler path.
 struct SignalFd {
     /// Signals readable through this fd (bit i-1 = signal i).
-    mask: crate::sync::spinlock::Spinlock<u64>,
+    mask: rux::sync::types::Spinlock<u64>,
     /// Readers blocked waiting for a masked signal to arrive.
     wait_queue: rux::process::types::WaitQueueHead,
 }
@@ -4899,7 +4899,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
         None => return -(errno::EPERM as i64),
     };
     let sfd = alloc::boxed::Box::new(SignalFd {
-        mask: crate::sync::spinlock::Spinlock::new(mask),
+        mask: rux::sync::types::Spinlock::new(mask),
         wait_queue: rux::process::types::WaitQueueHead::new(),
     });
     let sfd_ptr = alloc::boxed::Box::into_raw(sfd) as *mut u8;
@@ -5777,8 +5777,8 @@ impl ChaCha20Crng {
 }
 
 /// Global getrandom CRNG state (lazily seeded on first use).
-static GETRANDOM_CRNG: crate::sync::spinlock::Spinlock<Option<ChaCha20Crng>> =
-    crate::sync::spinlock::Spinlock::new(None);
+static GETRANDOM_CRNG: rux::sync::types::Spinlock<Option<ChaCha20Crng>> =
+    rux::sync::types::Spinlock::new(None);
 
 
 /// Best-effort eventpoll_release: when a file description is closed, purge

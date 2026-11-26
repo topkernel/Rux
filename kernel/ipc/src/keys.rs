@@ -52,7 +52,7 @@
 
 use crate::arch::uaccess::{access_ok, strncpy_from_user};
 use crate::process::types::Cred;
-use crate::sync::spinlock::Spinlock;
+use rux::sync::types::Spinlock;
 use crate::syscall::errno;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

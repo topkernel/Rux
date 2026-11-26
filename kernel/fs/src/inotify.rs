@@ -36,7 +36,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use rux::fs::file::{File, FileOps, FileFlags, get_file_fd_install};
 use rux::fs::inode::Inode;
 use crate::process::types::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // UAPI constants

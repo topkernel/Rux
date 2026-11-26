@@ -12,7 +12,7 @@
 // crate boundary is the only and testable guard).
 use crate::println;
 use crate::config::ENABLE_VIRTIO_NET_PROBE;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use alloc::vec::Vec;
 
 /// VirtIO device IDs

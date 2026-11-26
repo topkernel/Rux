@@ -24,7 +24,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
-use crate::sync::seqlock::SeqLock;
+use crate::sync::types::SeqLock;
 
 use rux::mm::types::PAGE_SIZE;
 use rux::mm::types::{GfpFlags, MAX_ORDER};

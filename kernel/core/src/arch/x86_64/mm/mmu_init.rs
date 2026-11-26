@@ -536,8 +536,8 @@ pub struct PtPendingFree {
 
 const PT_PENDING_CAP: usize = 96;
 
-static PT_PENDING: crate::sync::spinlock::Spinlock<[Option<PtPendingFree>; PT_PENDING_CAP]> =
-    crate::sync::spinlock::Spinlock::new([const { None }; PT_PENDING_CAP]);
+static PT_PENDING: crate::sync::types::Spinlock<[Option<PtPendingFree>; PT_PENDING_CAP]> =
+    crate::sync::types::Spinlock::new([const { None }; PT_PENDING_CAP]);
 
 /// Unlink and defer-free ONE emptied leaf table. Runs under the caller's
 /// mm PTE lock (INV-LOCK-7), so the PMD entry cannot race a same-mm

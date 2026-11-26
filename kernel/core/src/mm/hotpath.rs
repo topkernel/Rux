@@ -126,11 +126,11 @@ use core::sync::atomic::{
     AtomicUsize,
     Ordering,
 };
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::mem::MaybeUninit;
 use alloc::collections::BTreeMap;
-use crate::sync::rwlock::RwSpinlock;
-use crate::sync::rwsem::Rwsem;
+use crate::sync::types::RwSpinlock;
+use crate::sync::types::Rwsem;
 use alloc::vec::Vec;
 use alloc::string::ToString;
 use core::ptr;
@@ -5546,13 +5546,13 @@ impl GlobalPteLock {
 
     /// Whole-domain exclusive PTE section (the old global lock).
     #[inline]
-    pub fn lock(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, ()> {
+    pub fn lock(&self) -> crate::sync::types::RwSpinlockWriteGuard<'_, ()> {
         self.raw.write()
     }
 
     /// Whole-domain exclusive PTE section, IRQs saved.
     #[inline]
-    pub fn lock_irqsave(&self) -> crate::sync::rwlock::RwSpinlockIrqWriteGuard<'_, ()> {
+    pub fn lock_irqsave(&self) -> crate::sync::types::RwSpinlockIrqWriteGuard<'_, ()> {
         self.raw.write_irqsave()
     }
 }
@@ -5903,7 +5903,7 @@ impl MmStruct {
     /// vma_manager already uses inside a Box'd MmStruct.
     pub fn mm_surgery_guard(
         &self,
-    ) -> crate::sync::rwsem::RwsemWriteGuard<'_, ()> {
+    ) -> crate::sync::types::RwsemWriteGuard<'_, ()> {
         self.mm_surgery.write()
     }
 
@@ -6361,7 +6361,7 @@ impl MmStruct {
     /// preempt-disabled; a held section is preemptible. Task/syscall
     /// context only.
     #[inline]
-    pub fn vma_read(&self) -> crate::sync::rwsem::RwsemReadGuard<'_, VmaManager> {
+    pub fn vma_read(&self) -> crate::sync::types::RwsemReadGuard<'_, VmaManager> {
         self.vma_manager.read()
     }
 
@@ -6371,7 +6371,7 @@ impl MmStruct {
     /// writer. Refuses while any waiter is queued or handoff is
     /// pending (down_read_trylock semantics).
     #[inline]
-    pub fn vma_try_read(&self) -> Option<crate::sync::rwsem::RwsemReadGuard<'_, VmaManager>> {
+    pub fn vma_try_read(&self) -> Option<crate::sync::types::RwsemReadGuard<'_, VmaManager>> {
         self.vma_manager.try_read()
     }
 
@@ -6419,7 +6419,7 @@ impl MmStruct {
     /// spinning (only while the owner is on-CPU) and then parks
     /// uninterruptibly — it never spins the CPU away. Task/syscall
     /// context only.
-    pub fn vma_write(&self) -> crate::sync::rwsem::RwsemWriteGuard<'_, VmaManager> {
+    pub fn vma_write(&self) -> crate::sync::types::RwsemWriteGuard<'_, VmaManager> {
         self.vma_manager.write()
     }
 
@@ -6661,7 +6661,7 @@ impl Drop for MmStruct {
                 // monopolist windows; see synchronize_rcu_bounded. The
                 // bound matches the deferred_free wall-clock discipline
                 // (1.5 s) that still holds the struct free afterwards.
-                crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "mm-drop");
+                crate::sync::hotpath::synchronize_rcu_bounded_pollfirst(1500, "mm-drop");
             }
             if fp {
                 crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_RCU, fp_t_rcu);
@@ -11321,7 +11321,7 @@ static POOL_DRAINED: AtomicUsize = AtomicUsize::new(0); // oldest live entry
 /// Earliest deadline currently in the pool — relaxed peek for the alloc
 /// path so the common case costs one load, no lock.
 static EARLIEST_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
-static POOL_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlock::new(());
+static POOL_LOCK: crate::sync::types::Spinlock<()> = crate::sync::types::Spinlock::new(());
 
 /// Register the size class whose frees are deferred (first writer wins;
 /// call from the type's constructor). Only ONE size class is supported —
@@ -11728,8 +11728,8 @@ static CACHES: [SmallCache; 8] = [
 // restores the saved IRQ state at drop. The r8final len/MAG_DEPTH
 // guards stay — they defend against row CORRUPTION, which the type
 // cannot prevent — but the aliasing-by-construction hazard is gone.
-static MAGAZINES: crate::sync::percpu::CpuLocal<[Magazine; 8], { crate::config::MAX_CPUS }> =
-    crate::sync::percpu::CpuLocal::new([Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]);
+static MAGAZINES: crate::sync::types::CpuLocal<[Magazine; 8], { crate::config::MAX_CPUS }> =
+    crate::sync::types::CpuLocal::new([Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]);
 
 /// r8final forensics: times a magazine row was found with len >
 /// MAG_DEPTH (transient two-CPU entry via a cpu_id()/ti_cpu divergence,
@@ -14071,7 +14071,7 @@ static RING: [UnEvent; RING_LEN] = [const {
 }; RING_LEN];
 
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
-static LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlock::new(());
+static LOCK: crate::sync::types::Spinlock<()> = crate::sync::types::Spinlock::new(());
 
 /// Record one PTE-clearing event. Cheap (one short spinlock section);
 /// never prints.

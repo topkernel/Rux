@@ -88,7 +88,7 @@ use crate::api::sched::{
 use crate::config::{CFS_LATENCY_NS, CFS_MIN_GRANULARITY_NS, KERNEL_HZ, MAX_TASKS};
 use crate::list::ListHead;
 use crate::process::{hotpath::PICK_LIVE, hotpath::PICK_PICKED, types::Pid, types::SchedPolicy, types::Task, types::TaskState};
-use crate::sync::spinlock::{RawSpinlock, Spinlock};
+use crate::sync::types::{RawSpinlock, Spinlock};
 
 use super::r#unsafe::{RbNode, RbTimeline, VruntimeKey, node_key, node_of_task, task_of_node};
 
@@ -3170,8 +3170,8 @@ impl ReapClaim {
 // the reap lock; ownership is exclusive (no concurrent access).
 unsafe impl Send for ReapClaim {}
 
-static PENDING: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
-    crate::sync::spinlock::Spinlock::new(Vec::new());
+static PENDING: crate::sync::types::Spinlock<Vec<PendingReap>> =
+    crate::sync::types::Spinlock::new(Vec::new());
 
 /// One drainer per tick (the harvest's CAS pattern).
 static DRAIN_ACTIVE: core::sync::atomic::AtomicBool =
@@ -3192,8 +3192,8 @@ static DRAIN_ACTIVE: core::sync::atomic::AtomicBool =
 // synchronize_rcu_expedited shape) when a round stalls.
 
 /// The in-flight grace batch (switch-stage graduates awaiting grace).
-static GRACE_BATCH: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
-    crate::sync::spinlock::Spinlock::new(Vec::new());
+static GRACE_BATCH: crate::sync::types::Spinlock<Vec<PendingReap>> =
+    crate::sync::types::Spinlock::new(Vec::new());
 /// The batch's target generation (0 = none open).
 static GRACE_TARGET: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
@@ -3239,7 +3239,7 @@ pub fn defer_reap_storage(task: *mut Task, parent_pid: u32) -> bool {
         parent_pid,
         r85_ticks: 0,
         grace: false,
-        needs: crate::sync::rcu::rcu_gen_now().wrapping_add(1),
+        needs: crate::sync::hotpath::rcu_gen_now().wrapping_add(1),
     });
     true
 }
@@ -3396,13 +3396,13 @@ pub fn reap_drain_tick() {
     // (the boot-63 latch root cause).
     let cur_target = GRACE_TARGET.load(Ordering::Acquire);
     let target = if cur_target == 0 {
-        let t = crate::sync::rcu::shared_grace_target_pub();
+        let t = crate::sync::hotpath::shared_grace_target_pub();
         GRACE_TARGET.store(t, Ordering::Release);
         if GRACE_WAITER_HELD
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            crate::sync::rcu::grace_waiter_hold();
+            crate::sync::hotpath::grace_waiter_hold();
         }
         GRACE_STALL_RUNS.store(0, Ordering::Release);
         t
@@ -3415,7 +3415,7 @@ pub fn reap_drain_tick() {
     // whose needs it covers are safe to free NOW; the rest wait for
     // the next round (the round handle advances generations until it
     // passes the oldest outstanding needs).
-    let watermark = crate::sync::rcu::rcu_grace_watermark();
+    let watermark = crate::sync::hotpath::rcu_grace_watermark();
     {
         let mut gb = GRACE_BATCH.lock();
         let mut i = 0;
@@ -3431,7 +3431,7 @@ pub fn reap_drain_tick() {
     }
     let batch_empty = GRACE_BATCH.try_lock().map(|b| b.is_empty()).unwrap_or(false);
 
-    if batch_empty || crate::sync::rcu::all_online_cpus_reported_pub(target) {
+    if batch_empty || crate::sync::hotpath::all_online_cpus_reported_pub(target) {
         // Close the round handle so the next tick opens a FRESH
         // generation for any newer needs — never reuse a target that
         // predates outstanding removals. Releasing the shared latch on
@@ -3439,7 +3439,7 @@ pub fn reap_drain_tick() {
         // who OPENS the next round; a waiter that latched this target
         // polls all-reported(target) on its own, and reports at later
         // generations still satisfy it.
-        crate::sync::rcu::shared_grace_done_pub();
+        crate::sync::hotpath::shared_grace_done_pub();
         GRACE_TARGET.store(0, Ordering::Release);
         GRACE_STALL_RUNS.store(0, Ordering::Release);
         if batch_empty
@@ -3447,7 +3447,7 @@ pub fn reap_drain_tick() {
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            crate::sync::rcu::grace_waiter_release();
+            crate::sync::hotpath::grace_waiter_release();
         }
     } else {
         // The drainer's own tick context is outside every RCU
@@ -3456,14 +3456,14 @@ pub fn reap_drain_tick() {
         // cpu was one that reported via switches alone, and long
         // user-mode stretches between switches stalled the round while
         // generations climbed around it).
-        crate::sync::rcu::report_self_quiescent();
+        crate::sync::hotpath::report_self_quiescent();
         // Stall watch: expedite by poking the lagging CPUs (the
         // reference's synchronize_rcu_expedited shape — a resched IPI
         // on a kernel-preempt host forces the IRQ-exit switch that
         // stores the QS report the round is waiting on).
         let runs = GRACE_STALL_RUNS.fetch_add(1, Ordering::Relaxed) + 1;
         if runs >= GRACE_NUDGE_RUNS {
-            let mut laggards = crate::sync::rcu::grace_lagging_cpus(target);
+            let mut laggards = crate::sync::hotpath::grace_lagging_cpus(target);
             let me = crate::arch::cpu_id() as usize;
             // Self-only stall (the drainer's own CPU between context
             // switches — the p4 storm's shape: the tick that opened
@@ -3779,7 +3779,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
 /// comment is now a compile fact.
 pub fn wake_up_enqueue_nested<'a>(
     task: *mut Task,
-    proof: &crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+    proof: &crate::sync::types::NestProof<'a, crate::sync::types::FutexBucketKey>,
 ) -> bool {
     wake_up_enqueue_opt(task, Some(proof))
 }
@@ -3790,7 +3790,7 @@ pub fn wake_up_enqueue_nested<'a>(
 /// (task.rs).
 pub fn wake_up_enqueue_opt(
     task: *mut Task,
-    nested: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+    nested: Option<&crate::sync::types::NestProof<'_, crate::sync::types::FutexBucketKey>>,
 ) -> bool {
     if task.is_null() {
         return false;
@@ -5623,7 +5623,7 @@ impl GlobalRunQueue {
     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
     pub     fn new() -> Self {
         Self {
-            lock: crate::sync::spinlock::RawSpinlock::new(),
+            lock: crate::sync::types::RawSpinlock::new(),
             dl_rq: super::types::DlRunQueue::new(),
             rt_rq: {
                 let mut rt = super::types::RtRunQueue::new();
@@ -5684,12 +5684,12 @@ impl GlobalRunQueue {
     /// is identical to lock_irqsave.
     #[inline]
     #[track_caller]
-    pub fn lock_irqsave_nested<'a, Outer: crate::sync::lockkey::NestKey>(
+    pub fn lock_irqsave_nested<'a, Outer: crate::sync::hotpath::NestKey>(
         &self,
-        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+        _proof: &crate::sync::types::NestProof<'a, Outer>,
     ) -> GrqGuard<'_>
     where
-        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+        crate::sync::types::GrqKey: crate::sync::hotpath::CanNestInside<Outer>,
     {
         self.lock_irqsave()
     }
@@ -5698,13 +5698,13 @@ impl GlobalRunQueue {
     /// holder-naming rig (grq-lock-1st) — see [`lock_irqsave_site`].
     #[inline]
     #[track_caller]
-    pub fn lock_irqsave_nested_site<'a, Outer: crate::sync::lockkey::NestKey>(
+    pub fn lock_irqsave_nested_site<'a, Outer: crate::sync::hotpath::NestKey>(
         &self,
-        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+        _proof: &crate::sync::types::NestProof<'a, Outer>,
         site: u32,
     ) -> GrqGuard<'_>
     where
-        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+        crate::sync::types::GrqKey: crate::sync::hotpath::CanNestInside<Outer>,
     {
         self.lock_irqsave_site(site)
     }
@@ -8502,7 +8502,7 @@ fn __schedule() {
     clear_need_resched();
 
     // Context switch is an RCU quiescent state.
-    crate::sync::rcu::rcu_note_context_switch();
+    crate::sync::hotpath::rcu_note_context_switch();
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     // PER_CPU scribble heal (b81 GDB capture): the wild-write engine that
@@ -10114,7 +10114,7 @@ pub fn scheduler_tick() {
                         // or was never spinning), the next tick heals a
                         // still-stuck count normally.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        let acq_live = crate::sync::spinlock::acquire_evidence_fresh(
+                        let acq_live = crate::sync::hotpath::acquire_evidence_fresh(
                             cpu_id,
                             cur as usize,
                             now,
@@ -10205,7 +10205,7 @@ pub fn scheduler_tick() {
                                 // evidence age (jiffies since this CPU's
                                 // last contended-loop stamp by cur)
                                 ph(now.wrapping_sub(
-                                    crate::sync::spinlock::ACQUIRE_EVIDENCE[cpu_id]
+                                    crate::sync::hotpath::ACQUIRE_EVIDENCE[cpu_id]
                                         .jiffies
                                         .load(core::sync::atomic::Ordering::Relaxed),
                                 ));
@@ -11487,11 +11487,11 @@ pub fn find_task_by_pid(pid: Pid) -> *mut Task {
 
 
 /// Compatibility stubs — no longer meaningful with global RQ
-pub fn this_cpu_rq() -> Option<&'static crate::sync::spinlock::Spinlock<RunQueue>> {
+pub fn this_cpu_rq() -> Option<&'static crate::sync::types::Spinlock<RunQueue>> {
     None
 }
 
-pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::spinlock::Spinlock<RunQueue>> {
+pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::types::Spinlock<RunQueue>> {
     None
 }
 
@@ -12720,7 +12720,7 @@ pub fn cpu_idle_loop() -> ! {
 
         if is_idle {
             grq().mark_idle(cpu_id);
-            crate::sync::rcu::rcu_note_context_switch();
+            crate::sync::hotpath::rcu_note_context_switch();
             // WW_IDLE_PHASE 2: idle-marked, inside the R20-2 recheck window.
             ww_idle_phase_set(cpu_id, 2);
 

@@ -64,7 +64,7 @@ use crate::errno;
 use rux::fs::superblock::{FileSystemType, SuperBlock};
 use rux::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
 use rux::fs::mount::{MntFlags, VfsMount};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// SysFS magic number (STATFS_SYSFS_MAGIC).
 const SYSFS_MAGIC: u32 = 0x62656572;

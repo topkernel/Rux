@@ -12,7 +12,7 @@
 
 use crate::println;
 use alloc::sync::Arc;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 pub mod event;
 pub mod ps2;

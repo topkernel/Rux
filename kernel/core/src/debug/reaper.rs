@@ -94,11 +94,11 @@ pub struct ExitRec {
     pub last_report: u64,
 }
 
-pub static NAME_MAP: crate::sync::spinlock::Spinlock<[NameRec; NAME_MAP_LEN]> =
-    crate::sync::spinlock::Spinlock::new([NameRec { pid: 0, t_set: 0 }; NAME_MAP_LEN]);
+pub static NAME_MAP: crate::sync::types::Spinlock<[NameRec; NAME_MAP_LEN]> =
+    crate::sync::types::Spinlock::new([NameRec { pid: 0, t_set: 0 }; NAME_MAP_LEN]);
 
-pub static EXIT_MAP: crate::sync::spinlock::Spinlock<[ExitRec; EXIT_MAP_LEN]> =
-    crate::sync::spinlock::Spinlock::new([ExitRec { pid: 0, t_exit: 0, code: 0, last_report: 0 }; EXIT_MAP_LEN]);
+pub static EXIT_MAP: crate::sync::types::Spinlock<[ExitRec; EXIT_MAP_LEN]> =
+    crate::sync::types::Spinlock::new([ExitRec { pid: 0, t_exit: 0, code: 0, last_report: 0 }; EXIT_MAP_LEN]);
 
 /// The gate for every arm here (rux:schedtrace (retired debug=schedtrace)).
 #[inline]

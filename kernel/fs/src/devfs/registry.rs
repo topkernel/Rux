@@ -13,7 +13,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use rux::fs::file::FileOps;
 use super::dev_t::DevNo;
 

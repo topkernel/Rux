@@ -2,7 +2,7 @@
 //
 // Verifies: no lost wakeup, no spurious sleep
 //
-// Abstracted from: kernel/core/src/sync/futex.rs
+// Abstracted from: kernel/core/src/sync/hotpath.rs
 //
 // Key invariant (INV-FUTEX-1):
 //   The waiter sets INTERRUPTIBLE state under bucket_lock before dropping it.
@@ -34,7 +34,7 @@ proctype Waiter()
     // Lock bucket
     atomic { (bucket_lock == 0) -> bucket_lock = 1 };
 
-    // Re-check under lock (kernel/core/src/sync/futex.rs:261)
+    // Re-check under lock (kernel/core/src/sync/hotpath.rs:261)
     if
     :: futex_val != my_expected ->
         // Value changed before we could sleep

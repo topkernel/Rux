@@ -36,7 +36,7 @@ use alloc::collections::BTreeMap;
 
 use crate::fs::dev_t::DevNo;
 use crate::fs::FileOps;
-use crate::sync::spinlock::Spinlock;
+use rux::sync::types::Spinlock;
 
 // ioctl numbers — _IOR/_IOW('A', nr, ...) with the exact sizes from
 // OH's drivers/accesstokenid/access_tokenid.h.

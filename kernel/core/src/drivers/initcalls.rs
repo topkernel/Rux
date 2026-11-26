@@ -28,7 +28,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Initcall levels, drained in this order (the reference's ladder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

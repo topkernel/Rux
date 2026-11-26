@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::sync::rwlock::RwSpinlock;
+use crate::sync::types::RwSpinlock;
 use crate::fs::dentry::Dentry;
 use alloc::sync::Arc;
 

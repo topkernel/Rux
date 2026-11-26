@@ -15,7 +15,7 @@
 
 #![forbid(unsafe_code)]
 use super::{IpHdr, IPHDR_LEN, ip_frag_flags};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Concurrently reassembling datagrams (flooding bound).
 const IP_FRAG_MAX_ENTRIES: usize = 8;

@@ -9,7 +9,7 @@
 // bread-pinned RMW blocks (INV-BIO-BH's pin) under EXT4_BIG_LOCK;
 // the bg descriptor refreshes ride the same pin.)
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Byte offset of `bg_free_blocks_count_lo` within ext4 group descriptor (32-bit desc):
 /// bg_block_bitmap_lo(u32) + bg_inode_bitmap_lo(u32) + bg_inode_table_lo(u32) = 12

@@ -4,14 +4,14 @@
 //!
 //! SeqLock protocol invariant tests.
 //!
-//! Types copied from: kernel/core/src/sync/seqlock.rs
+//! Types copied from: kernel/core/src/sync/types.rs
 
 use proptest::prelude::*;
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ============================================================================
-// Copied types from kernel/core/src/sync/seqlock.rs
+// Copied types from kernel/core/src/sync/types.rs
 // ============================================================================
 
 pub struct RawSeqLock {

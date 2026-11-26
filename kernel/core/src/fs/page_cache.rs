@@ -66,7 +66,7 @@ use crate::mm::{hotpath::page_desc, hotpath::pfn_to_page_mut, types::Page, types
 use crate::mm::{hotpath::first_online_node, types::LRU_INACTIVE_FILE};
 use crate::mm::types::{GfpFlags, ZoneType};
 use crate::mm::{hotpath::pfn_to_phys, types::PAGE_SIZE};
-use crate::sync::spinlock::{Spinlock, SpinlockGuard};
+use crate::sync::types::{Spinlock, SpinlockGuard};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};

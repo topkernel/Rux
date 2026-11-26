@@ -8,7 +8,7 @@
 
 use crate::arch::uaccess::access_ok;
 use crate::process::types::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use rux::sync::types::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 

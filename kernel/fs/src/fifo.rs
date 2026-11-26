@@ -28,7 +28,7 @@ use crate::errno;
 use rux::fs::file::{File, FileFlags, FileOps};
 use crate::pipe::Pipe;
 use crate::process::types::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Live state of one FIFO inode.
 pub struct FifoPeer {

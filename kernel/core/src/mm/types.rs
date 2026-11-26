@@ -30,9 +30,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, AtomicUsize};
 
-use crate::sync::rwlock::RwSpinlock;
-use crate::sync::rwsem::Rwsem;
-use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
+use crate::sync::types::RwSpinlock;
+use crate::sync::types::Rwsem;
+use crate::sync::types::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 
 // ---------------------------------------------------------------------------
@@ -845,13 +845,13 @@ pub struct PteLock {
 /// Split mode on all architectures (see PteLock::lock).
 pub struct PteGuard<'a> {
     pub(super) _spin: SpinlockGuard<'a, ()>,
-    pub(super) _epoch: crate::sync::rwlock::RwSpinlockReadGuard<'a, ()>,
+    pub(super) _epoch: crate::sync::types::RwSpinlockReadGuard<'a, ()>,
 }
 
 /// Guard of a `PteLock::lock_irqsave()` section.
 pub struct PteIrqGuard<'a> {
     pub(super) _spin: SpinlockIrqGuard<'a, ()>,
-    pub(super) _epoch: crate::sync::rwlock::RwSpinlockIrqReadGuard<'a, ()>,
+    pub(super) _epoch: crate::sync::types::RwSpinlockIrqReadGuard<'a, ()>,
 }
 
 /// Memory Descriptor

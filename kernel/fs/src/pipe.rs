@@ -23,7 +23,7 @@
 // pair drops exactly the two ends' references.)
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use alloc::sync::Arc;
 use crate::process::types::WaitQueueHead;
@@ -1158,8 +1158,8 @@ struct OAsyncEntry {
     owner_fd: i32,
 }
 
-static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
-    crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
+static PIPE_OASYNC: crate::sync::types::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
+    crate::sync::types::Spinlock::new(alloc::vec::Vec::new());
 /// Live-entry mirror of PIPE_OASYNC (the RECORD_LOCK_COUNT pattern;
 /// sysmm-2x lane, 2026-11-17). File::drop's unregister reads this first
 /// and skips the lock + retain scan when 0 — O_ASYNC is off on default

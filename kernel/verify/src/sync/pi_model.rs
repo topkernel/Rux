@@ -1,5 +1,5 @@
 //! PI chain engine model — R6 extraction of the futex_pi boost
-//! propagation semantics (kernel/core/src/sync/futex_pi.rs) for host-side
+//! propagation semantics (kernel/core/src/sync/hotpath.rs) for host-side
 //! invariant checking.
 //!
 //! # What this file is

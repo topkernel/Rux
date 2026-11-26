@@ -16,7 +16,7 @@
 // registration rides this one audited ABI edge.)
 use crate::errno;
 use alloc::sync::Arc;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]

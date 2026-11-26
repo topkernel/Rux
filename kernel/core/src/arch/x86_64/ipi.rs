@@ -16,7 +16,7 @@
 //! - IRQ_WORK (0xE5): reserved (no users yet)
 
 use crate::list::ListHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 

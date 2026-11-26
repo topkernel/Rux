@@ -72,7 +72,7 @@ use alloc::vec::Vec;
 use crate::errno::constants::{EBADF, EBUSY, EFAULT, EAGAIN, EINTR, EINVAL, ESRCH};
 use crate::fs::dev_t::{DevNo, MISC_MAJOR};
 use crate::process::types::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // UAPI (include/uapi/linux/android/binder.h; LP64/riscv64 _IOC encoding)
@@ -2469,7 +2469,7 @@ unsafe impl Sync for BinderProc {}
 /// span against the CALLER's Location (world_lock is #[track_caller]),
 /// and the syscost dump prints the top rows.
 pub struct WorldGuard<'a> {
-    inner: crate::sync::spinlock::SpinlockIrqGuard<'a, Option<World>>,
+    inner: crate::sync::types::SpinlockIrqGuard<'a, Option<World>>,
     t0: u64,
     loc: &'static core::panic::Location<'static>,
     /// LAST FIELD ON PURPOSE: fields drop in declaration order, so this
@@ -2679,7 +2679,7 @@ pub fn world_lock() -> WorldGuard<'static> {
 /// called re-entrantly from fault handlers (see binder_mmap_owner_of).
 /// Returns None when the lock is contended OR the world is not
 /// initialized yet — both mean "no attribution available".
-pub fn world_lock_try() -> Option<crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>>> {
+pub fn world_lock_try() -> Option<crate::sync::types::SpinlockIrqGuard<'static, Option<World>>> {
     let mut g = WORLD.try_lock_irqsave()?;
     if g.is_none() {
         // Initializing the world from a diagnostic path is harmless but

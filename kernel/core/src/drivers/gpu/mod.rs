@@ -17,7 +17,7 @@ pub mod virtio_gpu;
 
 pub use framebuffer::{FrameBuffer, FrameBufferInfo};
 pub use virtio_gpu::{VirtioGpuDevice, probe_virtio_gpu};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Global GPU device storage
 /// Used for flushing framebuffer

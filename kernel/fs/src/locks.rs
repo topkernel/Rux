@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use rux::fs::file::File;
 use rux::fs::inode::Inode;
 use crate::process::types::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // The framework half's shared vocabulary + count mirrors (the merged
 // view's `crate::locks` is THIS module — the explicit `pub mod`

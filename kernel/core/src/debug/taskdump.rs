@@ -61,9 +61,9 @@ struct DumpStage {
     n: usize,
 }
 
-static DUMP_STAGES: [crate::sync::spinlock::Spinlock<DumpStage>; crate::config::MAX_CPUS] =
+static DUMP_STAGES: [crate::sync::types::Spinlock<DumpStage>; crate::config::MAX_CPUS] =
     [const {
-        crate::sync::spinlock::Spinlock::new(DumpStage { buf: [0; 512], n: 0 })
+        crate::sync::types::Spinlock::new(DumpStage { buf: [0; 512], n: 0 })
     }; crate::config::MAX_CPUS];
 
 /// ONE atomic console burst for pre-staged bytes: bounded acquire of
@@ -776,7 +776,7 @@ pub fn dump_all_tasks(reason: &str) {
                                     // walk inside FTX-STATE is kernel-global
                                     // and stays valid there.
                                     if (a0 & !0xfffu64) == 0x7fffffffc000 {
-                                        crate::sync::futex::debug_dump_futex_state(
+                                        crate::sync::hotpath::debug_dump_futex_state(
                                             a0 as usize,
                                             t.pid(),
                                         );
@@ -1316,8 +1316,8 @@ struct DeferredEmit {
     dropped: u64,
 }
 
-static DEFER_Q: crate::sync::spinlock::Spinlock<DeferredEmit> =
-    crate::sync::spinlock::Spinlock::new(DeferredEmit {
+static DEFER_Q: crate::sync::types::Spinlock<DeferredEmit> =
+    crate::sync::types::Spinlock::new(DeferredEmit {
         ring: [const { None }; DEFER_LINE_MAX],
         head: 0,
         tail: 0,
@@ -1337,8 +1337,8 @@ struct DeferredFocus {
     dropped: u64,
 }
 
-static DEFER_FOCUS_Q: crate::sync::spinlock::Spinlock<DeferredFocus> =
-    crate::sync::spinlock::Spinlock::new(DeferredFocus {
+static DEFER_FOCUS_Q: crate::sync::types::Spinlock<DeferredFocus> =
+    crate::sync::types::Spinlock::new(DeferredFocus {
         ring: [const { None }; DEFER_FOCUS_MAX],
         head: 0,
         tail: 0,
@@ -1352,8 +1352,8 @@ static DEFER_FOCUS_Q: crate::sync::spinlock::Spinlock<DeferredFocus> =
 // lines (drop-oldest within one class — the ohw13 uvma trap again,
 // now self-inflicted). Its own ring, drained before everything.
 const DEFER_FOCUS_A_MAX: usize = DEFER_FOCUS_MAX;
-static DEFER_FOCUS_A_Q: crate::sync::spinlock::Spinlock<DeferredFocus> =
-    crate::sync::spinlock::Spinlock::new(DeferredFocus {
+static DEFER_FOCUS_A_Q: crate::sync::types::Spinlock<DeferredFocus> =
+    crate::sync::types::Spinlock::new(DeferredFocus {
         ring: [const { None }; DEFER_FOCUS_A_MAX],
         head: 0,
         tail: 0,
@@ -1463,7 +1463,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // sc57 (57th): fuxwatch arm round — clears W on the watched
         // word's page in every mapping mm (kthread context; TLB
         // shootdown via flush_tlb_all is safe here).
-        crate::sync::futex::fuxwatch_arm_round();
+        crate::sync::hotpath::fuxwatch_arm_round();
         // 83rd: drive the OPEN sqwalk pass (frozen-rwlock reader
         // naming) — kthread context ONLY: ohw151's 594 MB-window bursts
         // in the timer softirq held softirq-context locks across
@@ -1480,13 +1480,13 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         {
             static HM_TRIES: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            let arm = crate::sync::futex::HEAPMAP_ARM.load(core::sync::atomic::Ordering::Relaxed);
+            let arm = crate::sync::hotpath::HEAPMAP_ARM.load(core::sync::atomic::Ordering::Relaxed);
             if arm != 0 {
                 let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
                 if samgr != 0 {
                     let out = crate::api::sync::ffrt_mutex_heap_map(samgr, arm);
                     if !out.is_empty() {
-                        crate::sync::futex::HEAPMAP_ARM.store(
+                        crate::sync::hotpath::HEAPMAP_ARM.store(
                             0,
                             core::sync::atomic::Ordering::Relaxed,
                         );
@@ -1499,7 +1499,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
                         if HM_TRIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
                             crate::api::sync::ffrt_mutex_heap_map_rearm();
                         } else {
-                            crate::sync::futex::HEAPMAP_ARM.store(
+                            crate::sync::hotpath::HEAPMAP_ARM.store(
                                 0,
                                 core::sync::atomic::Ordering::Relaxed,
                             );

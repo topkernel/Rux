@@ -47,7 +47,7 @@ BASELINE = os.path.join(ROOT, "scripts", "hotpath_print_baseline.txt")
 
 # Files whose print sites sit on syscall/fault/sched/IPC/alloc hot paths.
 HOT_FILES = [
-    "kernel/core/src/sync/futex.rs",
+    "kernel/core/src/sync/hotpath.rs",
     "kernel/core/src/ipc/binder.rs",
     "kernel/core/src/syscall/process.rs",
     "kernel/core/src/syscall/file.rs",

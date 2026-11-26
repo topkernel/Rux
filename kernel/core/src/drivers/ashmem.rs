@@ -39,7 +39,7 @@ use crate::mm::{hotpath::PAGE_MASK, types::PAGE_SIZE};
 use crate::mm::hotpath::{free_pages, get_zeroed_page};
 use crate::mm::types::{Vma, VmaFlags, VmaType};
 use crate::mm::types::GfpFlags;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// ASHMEM_NAME_LEN (UAPI).
 pub const ASHMEM_NAME_LEN: usize = 256;

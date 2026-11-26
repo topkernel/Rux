@@ -17,7 +17,7 @@
 pub mod icmpv6;
 
 use crate::buffer::SkBuff;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::drivers::timer::HZ;
 
 /// IPv6 address (wire/network byte order)

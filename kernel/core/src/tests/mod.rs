@@ -15,7 +15,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Direct UART output for test results.
 /// println! routes through printk (ring buffer only, no UART output).

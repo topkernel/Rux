@@ -14,7 +14,7 @@
 //! - STOP:        Halt target CPU
 //! - IRQ_WORK:    Deferred IRQ work (placeholder)
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::config::MAX_CPUS;

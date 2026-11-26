@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 use alloc::collections::VecDeque;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::process::types::WaitQueueHead;
 use core::cell::UnsafeCell;
 
@@ -1985,7 +1985,7 @@ fn socket_table_alloc(socket: Arc<Socket>) -> Result<usize, ()> {
 }
 
 /// Lock the global socket table for a caller-provided critical section.
-pub fn socket_table_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, SocketTable> {
+pub fn socket_table_lock() -> crate::sync::types::SpinlockIrqGuard<'static, SocketTable> {
     // SAFETY: static-mut access; the Spinlock serializes all users.
     SOCKET_TABLE.lock_irqsave()
 }

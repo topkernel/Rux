@@ -45,7 +45,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Linux TMPFS_MAGIC.
 pub const TMPFS_MAGIC: u32 = 0x0102_1994;

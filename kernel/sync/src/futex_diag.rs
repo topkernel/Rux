@@ -33,7 +33,7 @@
 //!
 //! Reaching THIS file:
 //! - sibling service crates (ipc's binder_diag, process) call
-//!   the moved fns DIRECTLY at their historical crate::futex::X
+//!   the moved fns DIRECTLY at their historical rux::sync::hotpath::X
 //!   paths (the union module in this crate's lib.rs; the allowed
 //!   downward service edge — the binder_diag precedent);
 //! - framework cold sites (exit, pid_hash, signal kill dumps, taskdump,
@@ -45,19 +45,19 @@
 // watch statics, the waiter pool + hash heads, and the walker helpers
 // that stayed framework-side.
 #[allow(unused_imports)]
-use crate::futex::{
-    FUXPARK_J, FUXPARK_TGID, FUXPARK_TID, FUXPARK_WORD, FUXWATCH1_TGID,
-    FUXWATCH2_TGID, FUXWATCH_ADDR, FUXWATCH2_ADDR, FUXWATCH_DELAY_S,
-    FUXWATCH_MM_DONE, FUXWATCH_OWNER_TASK, FUXW_RING_SZ, FUXW_RINGS,
-    FXDV_PID, FXRS_TGID, HASH_HEADS, HASH_SIZE, HEAPMAP_ARM, OH68_KEY,
-    OH68_OWNER_CTX, RWFRZ_EXIT_WATCH_TGID, RWFRZ_OPLOG, RWFRZ_UADDR,
-    RWFRZ_WATCH,
-    RWFRZ_WATCH_BUDGET, WAITER_POOL, Waiter, apppark_rets,
-    fuxwatch_log_write, fuxwatch_retire_page,
-    oh68_ctx_of, oh68_fs_base, rd_word, rwfz_emit_prio, rwfz_stack_frames,
+use rux::sync::{
+    hotpath::FUXPARK_J, hotpath::FUXPARK_TGID, hotpath::FUXPARK_TID, hotpath::FUXPARK_WORD, hotpath::FUXWATCH1_TGID,
+    hotpath::FUXWATCH2_TGID, hotpath::FUXWATCH_ADDR, hotpath::FUXWATCH2_ADDR, hotpath::FUXWATCH_DELAY_S,
+    hotpath::FUXWATCH_MM_DONE, hotpath::FUXWATCH_OWNER_TASK, hotpath::FUXW_RING_SZ, hotpath::FUXW_RINGS,
+    hotpath::FXDV_PID, hotpath::FXRS_TGID, hotpath::HASH_HEADS, hotpath::HASH_SIZE, hotpath::HEAPMAP_ARM, hotpath::OH68_KEY,
+    hotpath::OH68_OWNER_CTX, hotpath::RWFRZ_EXIT_WATCH_TGID, hotpath::RWFRZ_OPLOG, hotpath::RWFRZ_UADDR,
+    hotpath::RWFRZ_WATCH,
+    hotpath::RWFRZ_WATCH_BUDGET, hotpath::WAITER_POOL, types::Waiter, hotpath::apppark_rets,
+    hotpath::fuxwatch_log_write, hotpath::fuxwatch_retire_page,
+    hotpath::oh68_ctx_of, hotpath::oh68_fs_base, hotpath::rd_word, hotpath::rwfz_emit_prio, hotpath::rwfz_stack_frames,
 };
 #[allow(unused_imports)]
-use rux::sync::Spinlock;
+use rux::sync::types::Spinlock;
 #[allow(unused_imports)]
 use crate::process::types::Task;
 #[allow(unused_imports)]

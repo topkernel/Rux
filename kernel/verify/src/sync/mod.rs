@@ -12,7 +12,7 @@ pub mod semaphore_test;
 pub mod mutex_test;
 
 // S-1 model-checking pilot: faithful extraction of the SleepMutex
-// handoff state machine (sync-checked against kernel/core/src/sync/mutex.rs)
+// handoff state machine (sync-checked against kernel/core/src/sync/hotpath.rs)
 // and its fast unit tests. The loom interleaving harness compiles only
 // under `--cfg loom` + `--features loom` (see mutex_loom.rs header for
 // the exact command); the kani proof harnesses compile only under
@@ -23,7 +23,7 @@ pub mod mutex_model_test;
 pub mod mutex_loom;
 
 // R6: PI chain engine model — the boost-propagation layer of
-// kernel/core/src/sync/futex_pi.rs with the chain invariant table
+// kernel/core/src/sync/hotpath.rs with the chain invariant table
 // (INV-C1..C5). Same extraction philosophy as mutex_model: pools and
 // bucket locks are environment; the transitions and invariants are
 // the pinned logic.

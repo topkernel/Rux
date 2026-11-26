@@ -32,7 +32,7 @@ use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64};
 
 use crate::list::ListHead;
 use crate::process::types::Task;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // The trait the two class iterators name is code: it stays in hotpath.rs.
 use super::hotpath::SchedClass;
@@ -425,7 +425,7 @@ pub(super) struct PendingReap {
 /// RawSpinlock until that lands.
 pub struct GlobalRunQueue {
     /// Protects dl_rq, rt_rq, cfs_rq, nr_running
-    pub(super) lock: crate::sync::spinlock::RawSpinlock,
+    pub(super) lock: crate::sync::types::RawSpinlock,
     /// Deadline queue (EDF sorted by deadline)
     pub dl_rq: crate::sched::types::DlRunQueue,
     /// Real-time queue (bitmap + per-priority lists)

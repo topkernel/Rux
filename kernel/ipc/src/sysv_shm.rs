@@ -13,7 +13,7 @@ use crate::mm::{types::PAGE_SIZE, hotpath::PAGE_MASK, types::VirtAddr};
 use crate::mm::hotpath::{free_pages, get_zeroed_page};
 use crate::mm::types::GfpFlags;
 use crate::mm::types::{Vma, VmaFlags, VmaType};
-use crate::sync::spinlock::Spinlock;
+use rux::sync::types::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 

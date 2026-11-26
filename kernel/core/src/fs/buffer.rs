@@ -18,7 +18,7 @@
 // chunk-table stores under the buffer's own lock.)
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PAGE_SIZE: usize = 4096;

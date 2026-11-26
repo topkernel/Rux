@@ -17,7 +17,7 @@
 //! in-flight sends (a second raise while a bit is already set is a
 //! no-op — the receiver drains both).
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::arch::aarch64::MAX_CPUS;

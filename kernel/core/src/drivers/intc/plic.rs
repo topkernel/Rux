@@ -194,8 +194,8 @@ impl Plic {
 /// R14-15 (MED-11): PLIC enable-word read-modify-writes from different
 /// CPUs lose updates (one IRQ silently left enabled/disabled). All RMW
 /// on enable words goes through this lock.
-static ENABLE_RMW_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+static ENABLE_RMW_LOCK: crate::sync::types::Spinlock<()> =
+    crate::sync::types::Spinlock::new(());
 
 static PLIC: Plic = Plic::new(PLIC_BASE, crate::config::MAX_CPUS);
 
