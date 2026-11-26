@@ -118,3 +118,4 @@ kernel/core/src/debug/slowtask.rs	1	0	regions moved to debug/hotpath.rs by the p
 kernel/core/src/debug/taskdump.rs	5	0	regions moved to debug/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/debug/wildwatch.rs	10	0	regions moved to debug/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/sched/hotpath.rs	16	0	seed-core pass 3 pilot (p23-p3sched): all 16 regions collected into sched/unsafe.rs with annotations carried; hotpath.rs holds zero unsafe keyword(s) (core_unsafe_gate strict rc=0)
+kernel/core/src/fs/hotpath.rs	258	0	seed-core pass 3 (p23-p3fs): all 258 regions collected into fs/unsafe.rs with annotations carried; hotpath.rs holds zero unsafe keyword(s) and carries #![forbid(unsafe_code)] again (core_unsafe_gate strict rc=0)
