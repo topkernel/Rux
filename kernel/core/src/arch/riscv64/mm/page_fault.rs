@@ -49,7 +49,7 @@ pub use crate::api::mm::{FaultFlags, MmFaultResult};
 /// the descriptor `get_page` the map path takes) is owned by the PTE for
 /// its mapping lifetime — see `cow_flags::PCACHE`.
 pub fn filemap_pin_cache_page(
-    file: &crate::fs::file::File,
+    file: &crate::fs::types::File,
     file_offset: usize,
     effective_size: usize,
     hole_as_zero: bool,
@@ -67,7 +67,7 @@ pub fn filemap_pin_cache_page(
     let inode = unsafe { &*file.inode.get() }.as_ref()?;
     let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
     let page_index = (file_offset / PAGE_SIZE_USIZE) as u64;
-    let cache = crate::fs::page_cache::get_page_cache();
+    let cache = crate::fs::hotpath::get_page_cache();
     if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
         return Some(phys);
     }

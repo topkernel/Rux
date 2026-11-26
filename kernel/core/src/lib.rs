@@ -675,7 +675,7 @@ pub fn rust_main_tail() -> ! {
         // Initialize file system
         {
             // Initialize block I/O layer
-            fs::bio::init();
+            fs::hotpath::bio_init();
             print_status("bio", "buffer cache layer", true);
 
             // Initialize ext4 file system (the crate's init row —
@@ -684,12 +684,12 @@ pub fn rust_main_tail() -> ! {
             print_status("fs", "ext4 driver loaded", true);
 
             // Initialize RootFS
-            let rootfs_result = fs::leaf_glue::rootfs::init_rootfs();
+            let rootfs_result = fs::hotpath::rootfs::init_rootfs();
             print_status("fs", "ramfs mounted /", rootfs_result.is_ok());
             if rootfs_result.is_ok() {
                 // Build dentry tree for rootfs
-                fs::vfs::vfs_mount("/", fs::leaf_glue::rootfs::create_root_inode(),
-                    fs::mount::MntFlags::new(0));
+                fs::hotpath::vfs_mount("/", fs::hotpath::rootfs::create_root_inode(),
+                    fs::types::MntFlags::new(0));
 
                 // OH Phase 1 prereq: unpack the boot initrd (gzip cpio
                 // newc) into the ramfs root. root=/dev/ram0 boots run
@@ -714,16 +714,16 @@ pub fn rust_main_tail() -> ! {
 
             // Initialize ProcFS and mount to /proc (if configured to enable)
             if crate::config::AUTO_MOUNT_PROCFS {
-                let procfs_result = fs::leaf_glue::procfs::init_procfs();
+                let procfs_result = fs::hotpath::procfs::init_procfs();
                 print_status("fs", "procfs initialized", procfs_result.is_ok());
                 if procfs_result.is_ok() {
-                    let mount_result = fs::leaf_glue::procfs::mount_procfs();
+                    let mount_result = fs::hotpath::procfs::mount_procfs();
                     print_status("fs", "procfs mounted /proc", mount_result.is_ok());
                     if mount_result.is_ok() {
-                        if fs::leaf_glue::procfs::sb_present() {
+                        if fs::hotpath::procfs::sb_present() {
                             // Build dentry tree for procfs
-                            fs::vfs::vfs_mount("/proc", fs::leaf_glue::procfs::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
+                            fs::hotpath::vfs_mount("/proc", fs::hotpath::procfs::create_root_inode(),
+                                fs::types::MntFlags::new(0));
                         }
                     }
                 }
@@ -739,17 +739,17 @@ pub fn rust_main_tail() -> ! {
                 // before any mount(2) can arrive (the boot chain mounts
                 // sysfs directly below; user mounts go through do_mount
                 // -> mount_table::lookup).
-                fs::mount_table::register_builtin_handlers();
-                let sysfs_init = fs::leaf_glue::sysfs::init_sysfs();
-                let sysfs_mount = sysfs_init.and_then(|_| fs::leaf_glue::sysfs::mount_sysfs());
+                fs::hotpath::register_builtin_handlers();
+                let sysfs_init = fs::hotpath::sysfs::init_sysfs();
+                let sysfs_mount = sysfs_init.and_then(|_| fs::hotpath::sysfs::mount_sysfs());
                 let ok = sysfs_mount
                     .map(|_| {
-                        fs::vfs::vfs_mount(
+                        fs::hotpath::vfs_mount(
                             "/sys",
-                            fs::leaf_glue::sysfs::create_root_inode(),
-                            fs::mount::MntFlags::new(0),
+                            fs::hotpath::sysfs::create_root_inode(),
+                            fs::types::MntFlags::new(0),
                         );
-                        fs::mount::register_mount("sysfs", "/sys", "sysfs", "rw");
+                        fs::hotpath::register_mount("sysfs", "/sys", "sysfs", "rw");
                     })
                     .is_ok();
                 print_status("fs", "sysfs mounted /sys", ok);
@@ -760,8 +760,8 @@ pub fn rust_main_tail() -> ! {
             // not part of the stable userspace ABI — Rux uses it for the
             // DEBUG instrument switches (see debug/mod.rs).
             {
-                let debugfs_init = fs::leaf_glue::debugfs::init_debugfs();
-                let debugfs_mount = debugfs_init.and_then(|_| fs::leaf_glue::debugfs::mount_debugfs());
+                let debugfs_init = fs::hotpath::debugfs::init_debugfs();
+                let debugfs_mount = debugfs_init.and_then(|_| fs::hotpath::debugfs::mount_debugfs());
                 let ok = debugfs_mount
                     .map(|_| {
                         // The mount point must already exist in the dentry
@@ -770,13 +770,13 @@ pub fn rust_main_tail() -> ! {
                         // which would shadow sysfs's /sys/kernel
                         // directory (uevent, uevent_seqnum). Resolving
                         // the path first populates the chain properly.
-                        let _ = fs::vfs::path_lookup("/sys/kernel/debug", 0);
-                        fs::vfs::vfs_mount(
+                        let _ = fs::hotpath::path_lookup("/sys/kernel/debug", 0);
+                        fs::hotpath::vfs_mount(
                             "/sys/kernel/debug",
-                            fs::leaf_glue::debugfs::create_root_inode(),
-                            fs::mount::MntFlags::new(0),
+                            fs::hotpath::debugfs::create_root_inode(),
+                            fs::types::MntFlags::new(0),
                         );
-                        fs::mount::register_mount(
+                        fs::hotpath::register_mount(
                             "debugfs",
                             "/sys/kernel/debug",
                             "debugfs",
@@ -801,10 +801,10 @@ pub fn rust_main_tail() -> ! {
             // 259-row ours-only error family vs the reference, whose
             // kernel automounts tracefs under its debugfs).
             {
-                fs::leaf_glue::debugfs::create_dir("tracing");
-                let ok = fs::leaf_glue::tracefs::init_tracefs()
-                    .and_then(|_| fs::leaf_glue::tracefs::mount_at("/sys/kernel/tracing"))
-                    .and_then(|_| fs::leaf_glue::tracefs::mount_at("/sys/kernel/debug/tracing"))
+                fs::hotpath::debugfs::create_dir("tracing");
+                let ok = fs::hotpath::tracefs::init_tracefs()
+                    .and_then(|_| fs::hotpath::tracefs::mount_at("/sys/kernel/tracing"))
+                    .and_then(|_| fs::hotpath::tracefs::mount_at("/sys/kernel/debug/tracing"))
                     .is_ok();
                 print_status("fs", "tracefs mounted /sys/kernel/tracing", ok);
             }
@@ -823,7 +823,7 @@ pub fn rust_main_tail() -> ! {
             // cg_pid_get_path() answers -ENOMEDIUM — udevd records no
             // cgroup and never sweeps.
             {
-                let cg_init = fs::leaf_glue::cgroup::init_cgroupfs();
+                let cg_init = fs::hotpath::cgroup::init_cgroupfs();
                 print_status("cgroup", "v2 unified hierarchy init", cg_init.is_ok());
                 if cg_init.is_ok() && crate::cmdline::has_param("cgroup2pre") {
                     // The mount point chain must already exist in the
@@ -836,8 +836,8 @@ pub fn rust_main_tail() -> ! {
                     // the children: readdir reads the inode, lookup the
                     // dentry). Resolving the path first populates the
                     // chain through sysfs_lookup.
-                    let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
-                    let cg_mount = fs::leaf_glue::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+                    let _ = fs::hotpath::path_lookup("/sys/fs/cgroup", 0);
+                    let cg_mount = fs::hotpath::cgroup::mount_cgroupfs("/sys/fs/cgroup");
                     print_status("cgroup", "cgroup2 mounted /sys/fs/cgroup", cg_mount.is_ok());
                 }
             }
@@ -1084,7 +1084,7 @@ pub fn rust_main_tail() -> ! {
         // before the first userspace close (until then parks take the
         // inline bounded-grace fallback).
         {
-            crate::fs::fdreap::init();
+            crate::fs::hotpath::fdreap_init();
             print_status("fs", "fdreapd fd retire reaper", true);
         }
 
@@ -1128,7 +1128,7 @@ pub fn rust_main_tail() -> ! {
             drivers::input::init();
 
             // Initialize devfs (must be before evdev initialization)
-            fs::leaf_glue::devfs::init();
+            fs::hotpath::devfs::init();
             printk::init_kmsg_device();
             print_status("fs", "devfs mounted /dev", true);
             // /dev/fb0 — framebuffer char device (registered when the GPU
@@ -1148,9 +1148,9 @@ pub fn rust_main_tail() -> ! {
             }
 
             // Build dentry tree for devfs
-            if let Some(dev_root) = fs::leaf_glue::devfs::create_root_inode() {
-                fs::vfs::vfs_mount("/dev", dev_root,
-                    fs::mount::MntFlags::new(0));
+            if let Some(dev_root) = fs::hotpath::devfs::create_root_inode() {
+                fs::hotpath::vfs_mount("/dev", dev_root,
+                    fs::types::MntFlags::new(0));
             }
 
             // Mount tmpfs at /dev/shm (P0-6): backing store for POSIX
@@ -1158,7 +1158,7 @@ pub fn rust_main_tail() -> ! {
             // /dev/shm/name, so a working tmpfs there is all the kernel
             // needs to provide. Independent instance per do_mount.
             {
-                let shm_result = fs::mount::do_mount("none", "/dev/shm", "tmpfs", 0, None);
+                let shm_result = fs::hotpath::do_mount("none", "/dev/shm", "tmpfs", 0, None);
                 print_status("fs", "tmpfs mounted /dev/shm", shm_result.is_ok());
             }
 
@@ -1168,7 +1168,7 @@ pub fn rust_main_tail() -> ! {
             // degrades to emergency mode. Mirrors the /dev/shm approach
             // (independent tmpfs instance via do_mount).
             {
-                let run_result = fs::mount::do_mount("none", "/run", "tmpfs", 0, None);
+                let run_result = fs::hotpath::do_mount("none", "/run", "tmpfs", 0, None);
                 print_status("fs", "tmpfs mounted /run", run_result.is_ok());
             }
 
@@ -1922,22 +1922,22 @@ fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
     }
     if crate::api::ext4::mounted() {
         // Build dentry tree for ext4 (overlays root)
-        fs::vfs::vfs_mount(
+        fs::hotpath::vfs_mount(
             "/",
             crate::api::ext4::root_inode(),
-            fs::mount::MntFlags::new(0),
+            fs::types::MntFlags::new(0),
         );
     }
 
     // Remount procfs after ext4 mount (ext4 overwrites the root directory).
     if crate::config::AUTO_MOUNT_PROCFS {
-        let procfs_mount_result = fs::leaf_glue::procfs::mount_procfs();
+        let procfs_mount_result = fs::hotpath::procfs::mount_procfs();
         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
         if procfs_mount_result.is_ok() {
-            fs::vfs::vfs_mount(
+            fs::hotpath::vfs_mount(
                 "/proc",
-                fs::leaf_glue::procfs::create_root_inode(),
-                fs::mount::MntFlags::new(0),
+                fs::hotpath::procfs::create_root_inode(),
+                fs::types::MntFlags::new(0),
             );
         }
     }
@@ -1949,8 +1949,8 @@ fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
     // already populated the chain, but this re-mount must not fabricate
     // bare dentries if the overlay reset it.
     if crate::cmdline::has_param("cgroup2pre") {
-        let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
-        let _ = fs::leaf_glue::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+        let _ = fs::hotpath::path_lookup("/sys/fs/cgroup", 0);
+        let _ = fs::hotpath::cgroup::mount_cgroupfs("/sys/fs/cgroup");
     }
 }
 

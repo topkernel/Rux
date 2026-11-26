@@ -35,10 +35,10 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1934**
+- artifacts kept by id: **1935**
 - recovered from reference versions: **0**
 - references consulted: HEAD, MERGE_HEAD, e764797a8
-- annotated regions, baseline -> this bank: **2107 -> 1936**
+- annotated regions, baseline -> this bank: **2353 -> 1936**
 
 ## Per-subsystem
 
@@ -1055,304 +1055,268 @@ FILE` owns one), and the gate fails on a drop that
 
 ## fs
 
-### kernel/core/src/fs/bio.rs (51)
+### kernel/core/src/fs/hotpath.rs (258)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 91 | <module> | unsafe-impl | - | INV:INV-BLKDEV-1 | `585ef5710007` |
-| 94 | <module> | unsafe-impl | - | INV:INV-BLKDEV-1 | `3bbef2174a07` |
-| 123 | new_uninit | block | - | INV:INV-BLKDEV-1 | `4eb3fd298473` |
-| 281 | bh | block | - | INV:F11 | `e412427f5a5a` |
-| 298 | bh_mut | block | - | INV:F11 | `18ee766bd8dd` |
-| 313 | entry_ref | block | - | INV:F11 | `7c0da350cd03` |
-| 321 | drop | block | - | INV:F11 | `976b366d743c` |
-| 373 | <module> | unsafe-impl | - | INV:F11 | `52ddcb826843` |
-| 376 | <module> | unsafe-impl | - | INV:F11 | `0b408f418d15` |
-| 447 | move_to_lru_head | block | - | INV:F11 | `b55a2aa2af04` |
-| 497 | push_lru_head | block | - | INV:F11 | `65b0f980f800` |
-| 516 | remove_from_lru | block | - | INV:F11 | `3d550668accd` |
-| 597 | evict_one | block | - | INV:F11 | `245e8cebcf14` |
-| 622 | evict_one | block | - | INV:F11 | `49d177b3538e` |
-| 629 | evict_one | block | - | INV:F11 | `bb4a8bb47fdc` |
-| 686 | evict_one | block | - | INV:F11 | `746da1832b20` |
-| 757 | drop_block | block | - | INV:F11 | `8d577e60e199` |
-| 775 | drop_block | block | - | INV:F11 | `43a9d6f3ea1d` |
-| 901 | get | block | - | INV:F11 | `305456bc5c76` |
-| 989 | get | block | - | INV:F11 | `81d69bd3c1da` |
-| 998 | get | block | - | INV:F11 | `d66ebbc257fb` |
-| 1010 | get | block | - | INV:F11 | `35568eaacd65` |
-| 1137 | get_zero_impl | block | - | INV:F11 | `6fdf3c2d6201` |
-| 1144 | get_zero_impl | block | - | INV:F11 | `af9b12e2b444` |
-| 1154 | get_zero_impl | block | - | INV:F11 | `686753bbed21` |
-| 1162 | put | block | - | INV:F11 | `b3e75c84a4e1` |
-| 1287 | invalidate | block | - | INV:F11 | `a107ffddccd5` |
-| 1339 | invalidate_device | block | - | INV:F11 | `961ca01ee17e` |
-| 1354 | invalidate_device | block | - | INV:F11 | `c8b85d6f63bd` |
-| 1442 | bh_pinned | block | - | INV:INV-SLOT-1 | `fd1520357a2b` |
-| 1457 | bh_data_mut | block | - | INV:INV-SLOT-1 | `8a8feb7a7177` |
-| 1569 | wait_buffer_io_done | block | - | INV:INV-SLOT-1 | `d425a9f2d636` |
-| 1655 | bread_async | block | - | INV:F11 | `8e8fe5cf8eeb` |
-| 1678 | bread_async | block | - | INV:F11 | `2b65076ce625` |
-| 1701 | bread_async | block | - | GAP | `2705314c022f` |
-| 1808 | bread_async | block | - | INV:INV-LOCK-6 | `321044685672` |
-| 1830 | bread_async | block | - | INV:INV-LOCK-6 | `d891e55917a2` |
-| 1841 | bread_async | block | - | INV:INV-LOCK-6 | `cf20693eff89` |
-| 1864 | bread_wait | block | - | INV:INV-LOCK-6 | `e9f4bbe02293` |
-| 2095 | bfree_multi | block | - | INV:F11 | `86669631aa16` |
-| 2241 | as_slice | block | raw-construct | INV:F11 | `cd680b4e60d1` |
-| 2808 | sync_dirty_blocks_batched | block | - | INV:F11 | `a2ad193e03b4` |
-| 2877 | sync_dirty_buffer | block | - | INV:F11 | `159ba0dffe12` |
-| 2887 | sync_dirty_buffer | block | - | INV:F11 | `2452ece1a23a` |
-| 3261 | publication_capture_note_dirty | block | ptr-ops | GAP | `51ad7328a624` |
-| 3757 | sync_block_ordered | block | - | INV:F11 | `418cdc82a1f0` |
-| 3806 | with_block_mut | block | - | INV:F11 | `23b096689c22` |
-| 3809 | with_block_mut | block | - | INV:F11 | `5a96d95edc5c` |
-| 3834 | with_block_deferred_mut | block | - | INV:F11 | `015731bb8b8f` |
-| 3837 | with_block_deferred_mut | block | - | INV:F11 | `89747a7019cf` |
-| 3858 | with_block | block | - | INV:F11 | `9e03ad88b06b` |
-
-### kernel/core/src/fs/buffer.rs (7)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 40 | new | block | ptr-ops | INV:INV-BUFCHUNK-1 | `e04e7aec976e` |
-| 54 | from_bytes | block | - | INV:INV-BUFCHUNK-1 | `d2c364adcfff` |
-| 306 | new | block | ptr-ops | INV:INV-BUFCHUNK-1 | `d96aa68b8f8a` |
-| 354 | new_chunk | block | ptr-ops | INV:INV-BUFCHUNK-1 | `6c702aec1e28` |
-| 391 | read | block | raw-construct,ptr-ops | INV:INV-BUFCHUNK-1 | `d255880699ea` |
-| 427 | write | block | - | INV:INV-BUFCHUNK-1 | `53d25622db1d` |
-| 466 | resize | block | ptr-ops | GAP | `647b129071f0` |
-
-### kernel/core/src/fs/dentry.rs (22)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 100 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `eed61bd29315` |
-| 101 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `a41dfe614545` |
-| 322 | <module> | unsafe-fn | - | INV:INV-DENTRY-MEMO-1 | `ed33466d9631` |
-| 331 | <module> | unsafe-fn | - | INV:INV-DENTRY-MEMO-1 | `25df9764e1cd` |
-| 392 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `779ab6c4dc7f` |
-| 393 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `725a1aa5d650` |
-| 455 | memo_slot_read | block | - | INV:INV-DENTRY-MEMO-1 | `b89a110d2856` |
-| 555 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `baede792467f` |
-| 556 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `f78edd655762` |
-| 718 | get_inode_fast | block | - | INV:INV-DENTRY-MEMO-1 | `e856f4c30fd4` |
-| 911 | lookup_child_walk | block | - | INV:INV-DENTRY-ADOPT-1 | `f2827eb10b09` |
-| 938 | lookup_child_fast | block | - | INV:INV-DENTRY-ADOPT-1 | `5d13f4a4c0d2` |
-| 962 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `6a24caed4678` |
-| 972 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `ea993ba117c0` |
-| 989 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `4233bd8bf5d9` |
-| 995 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `b4a2a5aef4c9` |
-| 1004 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `b05951fc49d3` |
-| 1043 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `dce5bfe264c6` |
-| 1058 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `d9ea4c709588` |
-| 1059 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `3fa32725ad7c` |
-| 1403 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `a3e8584fe16c` |
-| 1404 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `44b29b2e8634` |
-
-### kernel/core/src/fs/elf.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 638 | load_segment | block | ptr-ops | INV:INV-CBYTES-2 | `8820edbb494b` |
-
-### kernel/core/src/fs/event_notify.rs (11)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 80 | list_first | block | - | INV:INV-SYSC-1 | `e988a6092c65` |
-| 86 | list_next | block | - | INV:INV-SYSC-1 | `77de1a4cf4d5` |
-| 94 | list_link_tail | block | - | INV:INV-SYSC-1 | `709f6ec3dba3` |
-| 101 | list_unlink | block | - | INV:INV-SYSC-1 | `51206f685ad6` |
-| 107 | boxed_mut | block | - | INV:INV-SYSC-2 | `79cf29cc19c9` |
-| 114 | boxed_drop | block | - | INV:INV-SYSC-2 | `f954ce75088f` |
-| 121 | list_entry_mut | block | ptr-ops | INV:INV-SYSC-1 | `823a5f502dd9` |
-| 133 | list_entry | block | ptr-ops | INV:INV-SYSC-1 | `4d2b93cf38be` |
-| 155 | boxed_ref | block | - | INV:INV-SYSC-2 | `c48bca762eff` |
-| 634 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `e183529b2589` |
-| 635 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `fcc6bf15b70a` |
-
-### kernel/core/src/fs/file.rs (54)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 305 | <module> | unsafe-fn | ptr-ops | INV:INV-FILE-CELL-1 | `a82227c4b37d` |
-| 313 | file_arc_try_clone | block | - | INV:INV-FILE-ARC-1 | `1b5664c77f84` |
-| 318 | file_arc_try_clone | block | - | INV:INV-FILE-ARC-1 | `2cafacd4b1d2` |
-| 326 | file_arc_try_clone | block | - | INV:INV-FILE-ARC-1 | `4b1852ff318e` |
-| 345 | verify_arc_inner_layout | block | ptr-ops | INV:INV-FILE-ARC-1 | `f480b3a7c6d5` |
-| 351 | verify_arc_inner_layout | block | - | INV:INV-FILE-ARC-1 | `53078dbfdfd3` |
-| 356 | verify_arc_inner_layout | block | - | INV:INV-FILE-ARC-1 | `f684fbbbbb02` |
-| 358 | verify_arc_inner_layout | block | - | INV:INV-FILE-ARC-1 | `835a76c26146` |
-| 470 | <module> | unsafe-impl | - | INV:INV-FILE-SEND-1 | `f91db3538017` |
-| 471 | <module> | unsafe-impl | - | INV:INV-FILE-SEND-1 | `43c55e27ef08` |
-| 532 | set_inode | block | - | INV:INV-FILE-CELL-1 | `0a1a12aaf08e` |
-| 537 | set_dentry | block | - | INV:INV-FILE-CELL-1 | `b9d41617940e` |
-| 548 | get_dentry | block | - | INV:INV-FILE-CELL-1 | `5b27cd118270` |
-| 553 | set_ops | block | - | INV:INV-FILE-CELL-1 | `ee9276c86313` |
-| 560 | get_ops | block | - | INV:INV-FILE-CELL-1 | `bae2e83c427b` |
-| 571 | get_inode | block | - | INV:INV-FILE-CELL-1 | `f478cb0c3fd0` |
-| 576 | set_private_data | block | - | INV:INV-FILE-CELL-1 | `48f9d26cd7e1` |
-| 590 | private_data_ptr | block | - | INV:INV-FS-FILEPRIV-1 | `5e4bd17fa7ff` |
-| 604 | clear_private_data | block | - | INV:INV-FS-FILEPRIV-1 | `42af7874444d` |
-| 613 | take_private_data | block | - | INV:INV-FS-FILEPRIV-1 | `aca7bf3f1823` |
-| 689 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `f6539af76694` |
-| 717 | <module> | unsafe-fn | raw-construct | INV:INV-FILE-CELL-1 | `09f03e69b56c` |
-| 744 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `652b18d41d56` |
-| 766 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `07368ef30675` |
-| 846 | positional_capable | block | - | INV:INV-FILE-CELL-1 | `860da53ef076` |
-| 859 | <module> | unsafe-fn | raw-construct | INV:INV-FILE-CELL-1 | `60857934527e` |
-| 952 | read_slice | block | - | INV:INV-FILE-CELL-1 | `bdf20c8cf7e9` |
-| 959 | write_slice | block | - | INV:INV-FILE-CELL-1 | `bcdfd160d636` |
-| 965 | read_at_slice | block | - | INV:INV-FILE-CELL-1 | `421c04cf63d5` |
-| 971 | write_at_slice | block | - | INV:INV-FILE-CELL-1 | `69fe7a6bdfd0` |
-| 980 | lseek_op | block | - | INV:INV-FILE-CELL-1 | `30470b06d415` |
-| 984 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `23f63963d1ab` |
-| 1010 | path | block | - | INV:INV-FILE-CELL-1 | `7b4d0e7d7396` |
-| 1015 | path | block | - | INV:INV-FILE-CELL-1 | `1c3daff29311` |
-| 1064 | drop | block | - | INV:INV-FILE-CELL-1 | `a343765582ec` |
-| 1180 | fork_from | block | - | INV:INV-FILE-CELL-1 | `63fd03d13ba6` |
-| 1357 | get_file_borrow | block | ptr-ops | INV:INV-FILE-CELL-1 | `40098d0a8e93` |
-| 1385 | get_file | block | - | INV:INV-FILE-CELL-1 | `f56d0439afca` |
-| 1417 | for_each_file | block | - | INV:INV-FILE-CELL-1 | `ad228e21a9f2` |
-| 1475 | close_fd | block | - | INV:INV-FILE-CELL-1 | `af934a21ba54` |
-| 1520 | close_fd_report | block | - | INV:INV-FILE-CELL-1 | `7acc92354775` |
-| 1607 | dup2_fd | block | - | INV:INV-FILE-CELL-1 | `a9a9da54d8ec` |
-| 1608 | dup2_fd | block | - | INV:INV-FILE-CELL-1 | `95f5842225a8` |
-| 1619 | dup2_fd | block | - | INV:INV-FILE-CELL-1 | `b5ac54826b9d` |
-| 1700 | drop | block | - | INV:INV-FILE-CELL-1 | `97b99bd7079b` |
-| 1736 | alloc_staging_buf | block | - | INV:INV-FILE-CELL-1 | `70756b4dc952` |
-| 1753 | gather_append_user | block | ptr-ops | INV:INV-FILE-CELL-1 | `cd7050d39a8e` |
-| 1797 | get_file_fd_fast | block | transmute | INV:INV-FILE-CELL-1 | `6c246fd066cd` |
-| 1807 | get_file_fd_fast | block | transmute | INV:INV-FILE-CELL-1 | `d7b479ca10d6` |
-| 1820 | get_file_fd_safe | block | - | INV:INV-FILE-CELL-1 | `1a1489dfe5fe` |
-| 1866 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `75ac9b43892a` |
-| 1875 | reg_file_read | block | - | INV:INV-FILE-CELL-1 | `eb308d4ba27d` |
-| 1923 | reg_file_write | block | - | INV:INV-FILE-CELL-1 | `0581cdfb5e88` |
-| 1994 | reg_file_lseek | block | - | INV:INV-FILE-CELL-1 | `512ec9133b83` |
-
-### kernel/core/src/fs/fs_struct.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 254 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `4f028c7daccc` |
-| 255 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `5d7adfd64444` |
-
-### kernel/core/src/fs/fsctx.rs (14)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 394 | fsctx_close | block | - | INV:INV-FSCTX-1 | `5d8e19b796a7` |
-| 395 | fsctx_close | block | ptr-ops | INV:INV-FSCTX-1 | `baba1a3c61cb` |
-| 396 | fsctx_close | block | - | INV:INV-FSCTX-1 | `d402a93b1fe2` |
-| 413 | fsctx_of | block | - | INV:INV-FSCTX-1 | `02b6b2f73f61` |
-| 414 | fsctx_of | block | ptr-ops | INV:INV-FSCTX-1 | `27ed3cf9c7d4` |
-| 426 | fsctx_of_mut | block | - | INV:INV-FSCTX-1 | `43e720b0bd23` |
-| 427 | fsctx_of_mut | block | ptr-ops | INV:INV-FSCTX-1 | `9d802e344b9c` |
-| 438 | mountfd_close | block | - | INV:INV-FSCTX-1 | `4be78c6710a3` |
-| 439 | mountfd_close | block | ptr-ops | INV:INV-FSCTX-1 | `54c262c97419` |
-| 440 | mountfd_close | block | - | INV:INV-FSCTX-1 | `31e0798ae835` |
-| 456 | mountfd_of | block | - | INV:INV-FSCTX-1 | `2dae3eb20c3f` |
-| 457 | mountfd_of | block | ptr-ops | INV:INV-FSCTX-1 | `ec2e9d8e5ca0` |
-| 473 | treepath_dentry | block | - | INV:INV-FSCTX-1 | `e7d1af26dc2c` |
-| 504 | make_detached_mount | block | ptr-ops | INV:INV-FSCTX-1 | `aa2756f8de08` |
-
-### kernel/core/src/fs/inode.rs (8)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 610 | stat_dev_for_fs | block | - | INV:INV-INODE-STATDEV-1 | `e689d22b8aad` |
-| 619 | stat_dev_for_fs | block | - | INV:INV-INODE-STATDEV-1 | `21d9484b4da9` |
-| 627 | stat_dev_for_fs | block | - | INV:INV-INODE-STATDEV-1 | `bee49664ae23` |
-| 739 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `00c0895113ba` |
-| 740 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `1d8575474779` |
-| 792 | update_cached_mode | block | volatile | INV:INV-INODE-STATDEV-1 | `8ad8cb51e8c9` |
-| 1225 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `46ba020f8556` |
-| 1226 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `dcf74f75d490` |
-
-### kernel/core/src/fs/journal_seam.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 156 | <module> | unsafe-impl | - | GAP | `a04452de8ec5` |
-| 158 | <module> | unsafe-impl | - | GAP | `ae7d2a8f7264` |
-
-### kernel/core/src/fs/mount.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 152 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `a386ef30dbb6` |
-| 153 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `993ebee4e417` |
-
-### kernel/core/src/fs/page_cache.rs (24)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 313 | pcache_dirty_histogram | block | - | INV:F13 | `c39bfa3b7230` |
-| 538 | claim_entry_arc | block | - | INV:INV-PC-CLAIM | `6e9b0d4f8c60` |
-| 583 | fill_from | block | ptr-ops | INV:INV-PC-WIN | `f68aada9ca34` |
-| 597 | copy_frame_from | block | ptr-ops | INV:INV-PC-WIN | `7181de2f36b5` |
-| 636 | copy_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `5a27e36177d6` |
-| 649 | copy_user_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `723b6d90f96a` |
-| 759 | probe_slot_ptr | block | - | INV:INV-PC-CLAIM | `37800dc81aba` |
-| 783 | table_find | block | - | INV:INV-PC-CLAIM | `72318bd8f71e` |
-| 841 | table_publish | block | - | INV:INV-PC-CLAIM | `127a190d2434` |
-| 843 | table_publish | block | - | INV:INV-PC-CLAIM | `6f3d0e94dded` |
-| 852 | table_publish | block | - | INV:INV-PC-CLAIM | `ee1b2e88faa8` |
-| 855 | table_publish | block | - | INV:INV-PC-CLAIM | `da0e4bcddffe` |
-| 856 | table_publish | block | - | INV:INV-PC-CLAIM | `9ff8e827dbe3` |
-| 885 | remove_entry | block | - | INV:INV-PC-CLAIM | `efdfc93ffe66` |
-| 2046 | flush_all_dirty | block | - | INV:F13 | `be85616dbb69` |
-| 3284 | collect_wb_work | block | - | INV:INV-FRAME-1 | `f6b835f7e8d7` |
-| 3687 | evict_one_locked | block | - | INV:F13 | `d9b2e57b836e` |
-| 3742 | evict_one_locked | block | - | INV:F13 | `315ac9f1e530` |
-| 3817 | evict_one_locked | block | - | INV:F13 | `8ed25877af53` |
-| 3850 | evict_one_locked | block | - | INV:F13 | `7fe7a4b28edf` |
-| 3993 | shared_file_fault_page | block | - | INV:F13 | `e359747d2b06` |
-| 4013 | shared_file_fault_page | block | ptr-ops,addr-arith | INV:F13 | `9a29c902009a` |
-| 4023 | shared_file_fault_page | block | - | INV:F13 | `c888a1acb791` |
-| 4029 | shared_file_fault_page | block | raw-construct | INV:F13 | `c24d1533c38e` |
-
-### kernel/core/src/fs/permission.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 108 | inode_permission | block | - | INV:INV-KTASK-1 | `f34fb75febaa` |
-
-### kernel/core/src/fs/pidfd.rs (14)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 71 | pin_leader | block | - | INV:INV-PIDFD-PIN-1 | `71eb457339ef` |
-| 76 | pin_leader | block | - | INV:INV-PIDFD-PIN-1 | `6f6a6289fcb5` |
-| 81 | pin_leader | block | - | INV:INV-PIDFD-PIN-1 | `b5705a242155` |
-| 105 | free_pidfd_data | block | - | INV:INV-PIDFD-PIN-1 | `c60b3e488d04` |
-| 123 | data_of | block | - | INV:INV-FS-FILEPRIV-1 | `a67a50b7629e` |
-| 128 | data_of | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `aceb64575f5e` |
-| 147 | fdinfo_pid_of | block | - | INV:INV-FS-FILEPRIV-1 | `2311f445b542` |
-| 157 | resolve_alive | block | - | INV:INV-PIDFD-PIN-1 | `1cfa2ba641ae` |
-| 163 | resolve_alive | block | ptr-ops | INV:INV-PIDFD-PIN-1 | `ba30278d1472` |
-| 170 | target_exited | block | - | INV:INV-PIDFD-PIN-1 | `5ebe09451cf0` |
-| 175 | target_exited | block | - | INV:INV-PIDFD-PIN-1 | `dd88f7029413` |
-| 185 | pidfd_poll | block | - | INV:INV-PIDFD-PIN-1 | `3d063e2391da` |
-| 193 | pidfd_close | block | - | INV:INV-PIDFD-PIN-1 | `a7d087650732` |
-| 196 | pidfd_close | block | - | INV:INV-PIDFD-PIN-1 | `718ab5f0086b` |
-
-### kernel/core/src/fs/stat.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 279 | copy_stat_to_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `9b20107b15fe` |
-| 289 | copy_stat_to_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `e2b33d00b39f` |
-
-### kernel/core/src/fs/superblock.rs (4)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 84 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `6a254e02c5c5` |
-| 85 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `38e0b0788a27` |
-| 219 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `cf242b096c16` |
-| 220 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `ae1fd0567aa4` |
+| 439 | <module> | unsafe-fn | ptr-ops | INV:INV-FILE-CELL-1 | `14ab24c4b2fb` |
+| 447 | file_arc_try_clone | block | - | INV:INV-FILE-ARC-1 | `6f8ab4956f41` |
+| 452 | file_arc_try_clone | block | - | INV:INV-FILE-ARC-1 | `a4b17d788b40` |
+| 460 | file_arc_try_clone | block | - | INV:INV-FILE-ARC-1 | `0f6d8d76df61` |
+| 479 | verify_arc_inner_layout | block | ptr-ops | INV:INV-FILE-ARC-1 | `8ebe7b7de9bf` |
+| 485 | verify_arc_inner_layout | block | - | INV:INV-FILE-ARC-1 | `ac9decd507ba` |
+| 490 | verify_arc_inner_layout | block | - | INV:INV-FILE-ARC-1 | `01ddd0ae210c` |
+| 492 | verify_arc_inner_layout | block | - | INV:INV-FILE-ARC-1 | `b225c9a96368` |
+| 515 | <module> | unsafe-impl | - | INV:INV-FILE-SEND-1 | `3bcbe77a533f` |
+| 516 | <module> | unsafe-impl | - | INV:INV-FILE-SEND-1 | `a3db3c4685a5` |
+| 577 | set_inode | block | - | INV:INV-FILE-CELL-1 | `894b65acf84d` |
+| 582 | set_dentry | block | - | INV:INV-FILE-CELL-1 | `ee945cbbbf1b` |
+| 593 | get_dentry | block | - | INV:INV-FILE-CELL-1 | `8673a155cfa6` |
+| 598 | set_ops | block | - | INV:INV-FILE-CELL-1 | `87c5ecb7005c` |
+| 605 | get_ops | block | - | INV:INV-FILE-CELL-1 | `d8754067cc32` |
+| 616 | get_inode | block | - | INV:INV-FILE-CELL-1 | `61ca11146be2` |
+| 621 | set_private_data | block | - | INV:INV-FILE-CELL-1 | `a5b3a3973510` |
+| 635 | private_data_ptr | block | - | INV:INV-FS-FILEPRIV-1 | `6d34f32f64f6` |
+| 649 | clear_private_data | block | - | INV:INV-FS-FILEPRIV-1 | `3cc56efcb989` |
+| 658 | take_private_data | block | - | INV:INV-FS-FILEPRIV-1 | `ef5fed5781ff` |
+| 734 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `73e7a25607fa` |
+| 762 | <module> | unsafe-fn | raw-construct | INV:INV-FILE-CELL-1 | `84395df6813f` |
+| 789 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `2fe076dc3b1f` |
+| 811 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `ad36aadf642c` |
+| 891 | positional_capable | block | - | INV:INV-FILE-CELL-1 | `87eaa59b4183` |
+| 904 | <module> | unsafe-fn | raw-construct | INV:INV-FILE-CELL-1 | `49288e72f577` |
+| 997 | read_slice | block | - | INV:INV-FILE-CELL-1 | `75747cedfe90` |
+| 1004 | write_slice | block | - | INV:INV-FILE-CELL-1 | `8b1b331570ea` |
+| 1010 | read_at_slice | block | - | INV:INV-FILE-CELL-1 | `81f3edf7605e` |
+| 1016 | write_at_slice | block | - | INV:INV-FILE-CELL-1 | `0127a83efdb9` |
+| 1025 | lseek_op | block | - | INV:INV-FILE-CELL-1 | `3b08ba879450` |
+| 1029 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `315a24530e93` |
+| 1055 | path | block | - | INV:INV-FILE-CELL-1 | `a6c8afc1b203` |
+| 1060 | path | block | - | INV:INV-FILE-CELL-1 | `515b5e7e2646` |
+| 1109 | drop | block | - | INV:INV-FILE-CELL-1 | `2819ba2318c6` |
+| 1170 | fork_from | block | - | INV:INV-FILE-CELL-1 | `619b08c1d56c` |
+| 1347 | get_file_borrow | block | ptr-ops | INV:INV-FILE-CELL-1 | `41dfd4eac7d4` |
+| 1375 | get_file | block | - | INV:INV-FILE-CELL-1 | `1ae10ca878d6` |
+| 1407 | for_each_file | block | - | INV:INV-FILE-CELL-1 | `583ca92ceb5a` |
+| 1465 | close_fd | block | - | INV:INV-FILE-CELL-1 | `e405b081b20f` |
+| 1510 | close_fd_report | block | - | INV:INV-FILE-CELL-1 | `afd048ad0a4d` |
+| 1597 | dup2_fd | block | - | INV:INV-FILE-CELL-1 | `79eb91dea123` |
+| 1598 | dup2_fd | block | - | INV:INV-FILE-CELL-1 | `59120f50e806` |
+| 1609 | dup2_fd | block | - | INV:INV-FILE-CELL-1 | `342d8414f8b4` |
+| 1690 | drop | block | - | INV:INV-FILE-CELL-1 | `03544289ac36` |
+| 1726 | alloc_staging_buf | block | - | INV:INV-FILE-CELL-1 | `501d0e8c7e30` |
+| 1743 | gather_append_user | block | ptr-ops | INV:INV-FILE-CELL-1 | `9971bd4cf28d` |
+| 1779 | get_file_fd_fast | block | transmute | INV:INV-FILE-CELL-1 | `96a8f6e1f3fb` |
+| 1789 | get_file_fd_fast | block | transmute | INV:INV-FILE-CELL-1 | `f07351461082` |
+| 1802 | get_file_fd_safe | block | - | INV:INV-FILE-CELL-1 | `869456ba31c1` |
+| 1848 | <module> | unsafe-fn | - | INV:INV-FILE-CELL-1 | `e5985705a160` |
+| 1857 | reg_file_read | block | - | INV:INV-FILE-CELL-1 | `bbb42c62ad03` |
+| 1905 | reg_file_write | block | - | INV:INV-FILE-CELL-1 | `27178a33937a` |
+| 1976 | reg_file_lseek | block | - | INV:INV-FILE-CELL-1 | `a3519591bb32` |
+| 2117 | list_first | block | - | INV:INV-SYSC-1 | `5a2b41107c08` |
+| 2123 | list_next | block | - | INV:INV-SYSC-1 | `a079a30d0cf3` |
+| 2131 | list_link_tail | block | - | INV:INV-SYSC-1 | `972e6053e23c` |
+| 2138 | list_unlink | block | - | INV:INV-SYSC-1 | `fc9641fc2181` |
+| 2144 | boxed_mut | block | - | INV:INV-SYSC-2 | `be641cf7ee71` |
+| 2151 | boxed_drop | block | - | INV:INV-SYSC-2 | `5b2fee092f70` |
+| 2158 | list_entry_mut | block | ptr-ops | INV:INV-SYSC-1 | `81b717c7265d` |
+| 2170 | list_entry | block | ptr-ops | INV:INV-SYSC-1 | `78f39f3b01ba` |
+| 2192 | boxed_ref | block | - | INV:INV-SYSC-2 | `fc18a482ef6f` |
+| 2622 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `f0412eb8959c` |
+| 2623 | <module> | unsafe-impl | - | INV:INV-SYSC-2 | `574100e96e9b` |
+| 3306 | stat_dev_for_fs | block | - | INV:INV-INODE-STATDEV-1 | `2cc8d4fbe26e` |
+| 3315 | stat_dev_for_fs | block | - | INV:INV-INODE-STATDEV-1 | `53fbc4b2f635` |
+| 3323 | stat_dev_for_fs | block | - | INV:INV-INODE-STATDEV-1 | `54e1247af400` |
+| 3339 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `ae78ec57c72e` |
+| 3340 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `5b96b369f5ce` |
+| 3392 | update_cached_mode | block | volatile | INV:INV-INODE-STATDEV-1 | `6fc795bf7135` |
+| 3790 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `e04ee565291d` |
+| 3791 | <module> | unsafe-impl | - | INV:INV-INODE-STATDEV-1 | `2e73f8e2f522` |
+| 4135 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `651a0c7a4bdd` |
+| 4136 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `7406e3f60cfd` |
+| 4339 | <module> | unsafe-fn | - | INV:INV-DENTRY-MEMO-1 | `35f2d48f17a1` |
+| 4348 | <module> | unsafe-fn | - | INV:INV-DENTRY-MEMO-1 | `5229dfe5fa52` |
+| 4391 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `bbcf131174af` |
+| 4392 | <module> | unsafe-impl | - | INV:INV-DENTRY-SEND-1 | `6cdf8959a942` |
+| 4429 | memo_slot_read | block | - | INV:INV-DENTRY-MEMO-1 | `7d2702669025` |
+| 4447 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `6bf73e6475db` |
+| 4448 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `5e86bddae225` |
+| 4610 | get_inode_fast | block | - | INV:INV-DENTRY-MEMO-1 | `92fbee71f72e` |
+| 4803 | lookup_child_walk | block | - | INV:INV-DENTRY-ADOPT-1 | `e64303dea7b0` |
+| 4830 | lookup_child_fast | block | - | INV:INV-DENTRY-ADOPT-1 | `a83da41553ef` |
+| 4854 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `ea8c056f25d7` |
+| 4864 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `b08fb56fcffb` |
+| 4881 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `98270912defd` |
+| 4887 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `dd5ab39bdff6` |
+| 4896 | refill_memo_locked | block | - | INV:INV-DENTRY-MEMO-1 | `567a65052dda` |
+| 4935 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `35fd0ec250c2` |
+| 4950 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `451d100a014b` |
+| 4951 | big_memo_ensure_locked | block | - | INV:INV-DENTRY-MEMO-1 | `191cb9c23e65` |
+| 5260 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `148b06c760b2` |
+| 5261 | <module> | unsafe-impl | - | INV:INV-DENTRY-MEMO-1 | `414611919c94` |
+| 5812 | load_segment | block | ptr-ops | INV:INV-CBYTES-2 | `bd5a4e288881` |
+| 5887 | new | block | ptr-ops | INV:INV-BUFCHUNK-1 | `02e76da6c87e` |
+| 5901 | from_bytes | block | - | INV:INV-BUFCHUNK-1 | `761a3b1432bf` |
+| 6137 | new | block | ptr-ops | INV:INV-BUFCHUNK-1 | `afd0000f9388` |
+| 6176 | new_chunk | block | ptr-ops | INV:INV-BUFCHUNK-1 | `791b1ab2c4bc` |
+| 6213 | read | block | raw-construct,ptr-ops | INV:INV-BUFCHUNK-1 | `c4fb1dc3dbb3` |
+| 6249 | write | block | - | INV:INV-BUFCHUNK-1 | `3265d245f652` |
+| 6288 | resize | block | ptr-ops | GAP | `64705f1b5260` |
+| 6381 | <module> | unsafe-impl | - | INV:INV-BLKDEV-1 | `eab1b05a6111` |
+| 6384 | <module> | unsafe-impl | - | INV:INV-BLKDEV-1 | `8500361fb919` |
+| 6413 | new_uninit | block | - | INV:INV-BLKDEV-1 | `e7d7ec5f739e` |
+| 6550 | bh | block | - | INV:F11 | `0399fb42ab0e` |
+| 6567 | bh_mut | block | - | INV:F11 | `df8bc5582596` |
+| 6582 | entry_ref | block | - | INV:F11 | `3bfaa9ad3b08` |
+| 6590 | drop | block | - | INV:F11 | `04144c8d7d3c` |
+| 6604 | <module> | unsafe-impl | - | INV:F11 | `66201cfce6b9` |
+| 6607 | <module> | unsafe-impl | - | INV:F11 | `245276a2d584` |
+| 6678 | move_to_lru_head | block | - | INV:F11 | `0d9fc2a28b12` |
+| 6728 | push_lru_head | block | - | INV:F11 | `40686264e2e2` |
+| 6747 | remove_from_lru | block | - | INV:F11 | `c4197351be51` |
+| 6828 | evict_one | block | - | INV:F11 | `c06492e0e886` |
+| 6853 | evict_one | block | - | INV:F11 | `5d609aca9f88` |
+| 6860 | evict_one | block | - | INV:F11 | `96ba42d6c292` |
+| 6917 | evict_one | block | - | INV:F11 | `82f6b8409895` |
+| 6988 | drop_block | block | - | INV:F11 | `0adac05d8cd1` |
+| 7006 | drop_block | block | - | INV:F11 | `d5c43730992c` |
+| 7132 | get | block | - | INV:F11 | `cee1e90da981` |
+| 7220 | get | block | - | INV:F11 | `ec43dacec8b0` |
+| 7229 | get | block | - | INV:F11 | `5b857fb90e39` |
+| 7241 | get | block | - | INV:F11 | `14b5425aa18b` |
+| 7368 | get_zero_impl | block | - | INV:F11 | `fc9fdd2a5d75` |
+| 7375 | get_zero_impl | block | - | INV:F11 | `5531cb335921` |
+| 7385 | get_zero_impl | block | - | INV:F11 | `9070415b08ae` |
+| 7393 | put | block | - | INV:F11 | `a5e3d699e5ed` |
+| 7518 | invalidate | block | - | INV:F11 | `84f199d2c7e4` |
+| 7570 | invalidate_device | block | - | INV:F11 | `5975627c44ee` |
+| 7585 | invalidate_device | block | - | INV:F11 | `643a21499280` |
+| 7672 | bh_pinned | block | - | INV:INV-SLOT-1 | `75f7f8b1e169` |
+| 7687 | bh_data_mut | block | - | INV:INV-SLOT-1 | `4339a072cd76` |
+| 7799 | wait_buffer_io_done | block | - | INV:INV-SLOT-1 | `3f8baeda7c9e` |
+| 7885 | bread_async | block | - | INV:F11 | `db7daacd1fa8` |
+| 7908 | bread_async | block | - | INV:F11 | `46e8317d43ff` |
+| 7931 | bread_async | block | - | GAP | `167ca601f6cc` |
+| 8038 | bread_async | block | - | INV:INV-LOCK-6 | `425b8feec472` |
+| 8060 | bread_async | block | - | INV:INV-LOCK-6 | `36cfc096fb7e` |
+| 8071 | bread_async | block | - | INV:INV-LOCK-6 | `8d579c35af25` |
+| 8094 | bread_wait | block | - | INV:INV-LOCK-6 | `9bc31144007b` |
+| 8325 | bfree_multi | block | - | INV:F11 | `0f7969d6ef59` |
+| 8389 | as_slice | block | raw-construct | INV:F11 | `0ce715fee7ab` |
+| 8956 | sync_dirty_blocks_batched | block | - | INV:F11 | `e93af702e9d2` |
+| 9025 | sync_dirty_buffer | block | - | INV:F11 | `0a755092004d` |
+| 9035 | sync_dirty_buffer | block | - | INV:F11 | `8fa932102c52` |
+| 9367 | publication_capture_note_dirty | block | ptr-ops | GAP | `3af81f805fa2` |
+| 9847 | sync_block_ordered | block | - | INV:F11 | `1978cabbf2b3` |
+| 9896 | with_block_mut | block | - | INV:F11 | `7ccb614eed85` |
+| 9899 | with_block_mut | block | - | INV:F11 | `940fd744cde3` |
+| 9924 | with_block_deferred_mut | block | - | INV:F11 | `0b2baeff2da4` |
+| 9927 | with_block_deferred_mut | block | - | INV:F11 | `7a8c4abd5f3d` |
+| 9948 | with_block | block | - | INV:F11 | `2670b909257f` |
+| 10133 | get_vfs_root | block | ptr-ops | INV:INV-VFS-WALK-1 | `8f49d7c05831` |
+| 10649 | mount_is_busy | block | - | INV:INV-VFS-WALK-1 | `9310346a2945` |
+| 12792 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `11a86cffafb6` |
+| 12810 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `40ac638ca0d2` |
+| 12883 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `0aafca240335` |
+| 12888 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `ddcb98bdef8f` |
+| 12895 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `cb4c8f02ebf7` |
+| 12928 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `bbc29cb27b5a` |
+| 12936 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `d7686b108559` |
+| 12962 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `f062ea4bce79` |
+| 13120 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `7902c2771117` |
+| 13181 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `fdaf4efc5248` |
+| 13210 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `fd046d03742d` |
+| 13227 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `5d3d5be182a4` |
+| 13237 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `fd4d3c59f4c8` |
+| 13243 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `1949ea37d1d7` |
+| 13248 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `533ce1db954a` |
+| 13277 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `574fd2f29783` |
+| 13301 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `d3ea1c6c367e` |
+| 13306 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `e036e26573d3` |
+| 15325 | file_open_tmpfile | block | - | GAP | `213095e851da` |
+| 17013 | mem_file_content | block | - | GAP | `73e5a929f7f0` |
+| 17014 | mem_file_content | block | ptr-ops | GAP | `9f06e9fb66c2` |
+| 17020 | mem_file_content_mut | block | - | GAP | `7b3e9296d9ce` |
+| 17021 | mem_file_content_mut | block | ptr-ops | GAP | `3ddb97a5b651` |
+| 17027 | mem_file_take_owned | block | - | GAP | `857ca05bf7a6` |
+| 17028 | mem_file_take_owned | block | ptr-ops | GAP | `6cb9e597db73` |
+| 17688 | inode_permission | block | - | INV:INV-KTASK-1 | `a6bd58adaee4` |
+| 17753 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `ed627cc13369` |
+| 17754 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `8bafbce38b42` |
+| 17855 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `f8bd9f9e2b8f` |
+| 17856 | <module> | unsafe-impl | - | INV:INV-SBTYPE-1 | `232eae157d86` |
+| 18093 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `03a9a7c40904` |
+| 18094 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `73e5e5f61520` |
+| 19481 | copy_stat_to_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `64095419e50b` |
+| 19491 | copy_stat_to_user | block | ptr-ops | INV:INV-UACCESS-SAFE-1 | `cf821c48f7b8` |
+| 19873 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `389e242130c0` |
+| 19874 | <module> | unsafe-impl | - | INV:INV-SENDSYNC-1 | `3103b10b1eef` |
+| 20151 | pcache_dirty_histogram | block | - | INV:F13 | `b86648c3e838` |
+| 20267 | claim_entry_arc | block | - | INV:INV-PC-CLAIM | `1ae110fcfd5a` |
+| 20302 | fill_from | block | ptr-ops | INV:INV-PC-WIN | `3b865116824e` |
+| 20316 | copy_frame_from | block | ptr-ops | INV:INV-PC-WIN | `01dee2fc2c99` |
+| 20355 | copy_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `3abae6142fc1` |
+| 20368 | copy_user_into_page | block | ptr-ops,addr-arith | INV:INV-PC-PAGECOPY | `ba5b538b96f4` |
+| 20478 | probe_slot_ptr | block | - | INV:INV-PC-CLAIM | `64508ceeef72` |
+| 20502 | table_find | block | - | INV:INV-PC-CLAIM | `6eebb6a30fd0` |
+| 20560 | table_publish | block | - | INV:INV-PC-CLAIM | `496f73e39660` |
+| 20562 | table_publish | block | - | INV:INV-PC-CLAIM | `354cb1845402` |
+| 20571 | table_publish | block | - | INV:INV-PC-CLAIM | `0e6660e772a1` |
+| 20574 | table_publish | block | - | INV:INV-PC-CLAIM | `bbab29856efd` |
+| 20575 | table_publish | block | - | INV:INV-PC-CLAIM | `bb1e4d1f0dbe` |
+| 20604 | remove_entry | block | - | INV:INV-PC-CLAIM | `507027f25fab` |
+| 21765 | flush_all_dirty | block | - | INV:F13 | `662af6e736ac` |
+| 23003 | collect_wb_work | block | - | INV:INV-FRAME-1 | `c3eac736b5ba` |
+| 23406 | evict_one_locked | block | - | INV:F13 | `284d5223eebc` |
+| 23461 | evict_one_locked | block | - | INV:F13 | `aa80af0e5182` |
+| 23536 | evict_one_locked | block | - | INV:F13 | `cb5c4126462f` |
+| 23569 | evict_one_locked | block | - | INV:F13 | `f0fe5b79c3ec` |
+| 23712 | shared_file_fault_page | block | - | INV:F13 | `260cfe3d54f7` |
+| 23732 | shared_file_fault_page | block | ptr-ops,addr-arith | INV:F13 | `b592a34ec828` |
+| 23742 | shared_file_fault_page | block | - | INV:F13 | `78a5dd12db90` |
+| 23748 | shared_file_fault_page | block | raw-construct | INV:F13 | `d2b34f6ad4e0` |
+| 24736 | vtdev_close | block | - | INV:INV-VT-PRIV-1 | `2ada8ec2503b` |
+| 24740 | vtdev_close | block | ptr-ops | INV:INV-VT-PRIV-1 | `c85a8fa8a712` |
+| 24742 | vtdev_close | block | - | INV:INV-VT-PRIV-1 | `84c19c1af05a` |
+| 24771 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `75c214c53a06` |
+| 24804 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `10b0e3fdf737` |
+| 24823 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `374560b3a96c` |
+| 24834 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `c9deb8767cde` |
+| 24870 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `977c13b6082b` |
+| 24927 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `14e4a23aead1` |
+| 24938 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `749e778df23a` |
+| 24955 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `3ea72adfd807` |
+| 24965 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `07a57cbcf475` |
+| 25041 | pin_leader | block | - | INV:INV-PIDFD-PIN-1 | `4da022e942ea` |
+| 25046 | pin_leader | block | - | INV:INV-PIDFD-PIN-1 | `ff70587e329c` |
+| 25051 | pin_leader | block | - | INV:INV-PIDFD-PIN-1 | `b7adab751b40` |
+| 25075 | free_pidfd_data | block | - | INV:INV-PIDFD-PIN-1 | `ec4fca878496` |
+| 25093 | data_of | block | - | INV:INV-FS-FILEPRIV-1 | `2d6d0b7789ea` |
+| 25098 | data_of | block | ptr-ops | INV:INV-FS-FILEPRIV-1 | `5d5fb2c76f81` |
+| 25117 | fdinfo_pid_of | block | - | INV:INV-FS-FILEPRIV-1 | `63d706e85e01` |
+| 25127 | resolve_alive | block | - | INV:INV-PIDFD-PIN-1 | `65d3fd12b199` |
+| 25133 | resolve_alive | block | ptr-ops | INV:INV-PIDFD-PIN-1 | `4b681de4402f` |
+| 25140 | target_exited | block | - | INV:INV-PIDFD-PIN-1 | `d4c78c481d9d` |
+| 25145 | target_exited | block | - | INV:INV-PIDFD-PIN-1 | `c05ddd1b3d6e` |
+| 25155 | pidfd_poll | block | - | INV:INV-PIDFD-PIN-1 | `6512ffc2ba85` |
+| 25163 | pidfd_close | block | - | INV:INV-PIDFD-PIN-1 | `d019a6b70bee` |
+| 25166 | pidfd_close | block | - | INV:INV-PIDFD-PIN-1 | `b484d4f23845` |
+| 25538 | fsctx_close | block | - | INV:INV-FSCTX-1 | `dd61d32c6179` |
+| 25539 | fsctx_close | block | ptr-ops | INV:INV-FSCTX-1 | `9cb54150a33f` |
+| 25540 | fsctx_close | block | - | INV:INV-FSCTX-1 | `87bf2b5efdb1` |
+| 25557 | fsctx_of | block | - | INV:INV-FSCTX-1 | `6c6782b7dc3d` |
+| 25558 | fsctx_of | block | ptr-ops | INV:INV-FSCTX-1 | `a4a5332d3d47` |
+| 25570 | fsctx_of_mut | block | - | INV:INV-FSCTX-1 | `01357a3af606` |
+| 25571 | fsctx_of_mut | block | ptr-ops | INV:INV-FSCTX-1 | `e983f3d913df` |
+| 25582 | mountfd_close | block | - | INV:INV-FSCTX-1 | `f394354da5da` |
+| 25583 | mountfd_close | block | ptr-ops | INV:INV-FSCTX-1 | `17483455685e` |
+| 25584 | mountfd_close | block | - | INV:INV-FSCTX-1 | `ddb95979be3c` |
+| 25600 | mountfd_of | block | - | INV:INV-FSCTX-1 | `243550667964` |
+| 25601 | mountfd_of | block | ptr-ops | INV:INV-FSCTX-1 | `537a672885ab` |
+| 25617 | treepath_dentry | block | - | INV:INV-FSCTX-1 | `21c489fdca18` |
+| 25648 | make_detached_mount | block | ptr-ops | INV:INV-FSCTX-1 | `263421a2e880` |
+| 25904 | <module> | unsafe-impl | - | GAP | `4e018c14cf1b` |
+| 25906 | <module> | unsafe-impl | - | GAP | `a2f9c23cf1d2` |
 
 ### kernel/core/src/fs/unsafe.rs (46)
 
@@ -1404,55 +1368,6 @@ FILE` owns one), and the gate fails on a drop that
 | 545 | u32_array_ref | block | ptr-ops | GAP | `ed14947737ce` |
 | 556 | u32_array_ref_mut | block | ptr-ops | GAP | `c69b2ab55728` |
 | 569 | zeroed_on_disk | block | - | GAP | `90d6a45e738b` |
-
-### kernel/core/src/fs/vfs.rs (27)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 220 | get_vfs_root | block | ptr-ops | INV:INV-VFS-WALK-1 | `2bc35d5ccaf9` |
-| 736 | mount_is_busy | block | - | INV:INV-VFS-WALK-1 | `0be8f6f0d8b6` |
-| 2893 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `4b5de49c68c2` |
-| 2911 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `d69936ebb8d5` |
-| 2984 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `301e47184480` |
-| 2989 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `475542e7e1d1` |
-| 2996 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `6486d0e5452c` |
-| 3029 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `5ac3d04a4dbc` |
-| 3037 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `e297394be76a` |
-| 3063 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `29a6fd1a94e6` |
-| 3221 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `61ce98418591` |
-| 3282 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `35742e14c840` |
-| 3311 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `cf9c942667e7` |
-| 3328 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `10035d673cb5` |
-| 3338 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `2e945c606497` |
-| 3344 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `6d0a5c18e3fa` |
-| 3349 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `0f3831052e13` |
-| 3378 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `d80ed5632faf` |
-| 3402 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `a49da779d009` |
-| 3407 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `a5b641e8cd80` |
-| 5428 | file_open_tmpfile | block | - | GAP | `f85dbabb2ed7` |
-| 7129 | mem_file_content | block | - | GAP | `2fdad553ac82` |
-| 7130 | mem_file_content | block | ptr-ops | GAP | `e591f9634d40` |
-| 7136 | mem_file_content_mut | block | - | GAP | `49ee10fc2b34` |
-| 7137 | mem_file_content_mut | block | ptr-ops | GAP | `59a87985e2b3` |
-| 7143 | mem_file_take_owned | block | - | GAP | `b57d7f356ca0` |
-| 7144 | mem_file_take_owned | block | ptr-ops | GAP | `d563f4e311c6` |
-
-### kernel/core/src/fs/vt.rs (12)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 193 | vtdev_close | block | - | INV:INV-VT-PRIV-1 | `afc33abe15b0` |
-| 197 | vtdev_close | block | ptr-ops | INV:INV-VT-PRIV-1 | `ef75f9e3b93e` |
-| 199 | vtdev_close | block | - | INV:INV-VT-PRIV-1 | `2a9711846cb5` |
-| 228 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `c35d81399fa3` |
-| 261 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `26903ca658b7` |
-| 280 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `bd050559097c` |
-| 291 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `f0f679ce0367` |
-| 327 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `c3f66e697648` |
-| 384 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `47f777cec439` |
-| 395 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `687c52468577` |
-| 412 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `d60d5828f9e6` |
-| 422 | vt_file_ioctl | block | ptr-ops | INV:INV-VT-PRIV-1 | `8e42d4425c35` |
 
 ## drivers
 
@@ -2266,7 +2181,7 @@ FILE` owns one), and the gate fails on a drop that
 | 577 | exec_copy_user_image | block | - | INV:INV-PROC-EXEC-COPY-1 | `280b0eff250f` |
 | 588 | exec_copy_user_image | block | ptr-ops | INV:INV-PROC-EXEC-COPY-1 | `7b93271d03b0` |
 | 609 | exec_phdr_at | block | - | INV:INV-PROC-EXEC-ELF-1 | `dfe061b528c1` |
-| 619 | exec_ehdr_from | block | - | INV:INV-PROC-EXEC-ELF-1 | `17ca6f06592b` |
+| 619 | exec_ehdr_from | block | - | INV:INV-PROC-EXEC-ELF-1 | `44afe162206b` |
 | 631 | exec_map_user_range | block | - | INV:INV-PROC-EXEC-MAP-1 | `f5e6af510611` |
 | 650 | exec_map_user_region_static | block | - | INV:INV-PROC-EXEC-VDSO-1 | `3d70a9ef0432` |
 | 661 | exec_probe_read_u64 | block | - | INV:INV-PROC-EXEC-PROBE-1 | `71bca7da2c26` |
@@ -2331,11 +2246,11 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 83 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `cc39c0250a86` |
+| 83 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `84308b2420ab` |
 | 85 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `2edb2250edaa` |
-| 95 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `fe068ce65117` |
+| 95 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `9c78e44dd7b8` |
 | 97 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `7c3ed316f55e` |
-| 111 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `bfa0a4a3b7c9` |
+| 111 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `3c9ce02f7ad8` |
 | 113 | test_loop_flags | block | - | INV:INV-TESTHARNESS-1 | `3a810e5c0c5f` |
 
 ### kernel/core/src/tests/mod.rs (1)
@@ -2419,10 +2334,10 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 100 | test_sys_read_write | block | - | INV:INV-TESTHARNESS-1 | `69725ebfcc5a` |
-| 176 | test_sys_read_write | block | - | INV:INV-TESTHARNESS-1 | `7ec4c7a97f78` |
-| 480 | test_sys_dup | block | - | INV:INV-TESTHARNESS-1 | `eed00f9c552f` |
-| 519 | test_sys_dup | block | - | INV:INV-TESTHARNESS-1 | `94abf952e2a8` |
+| 100 | test_sys_read_write | block | - | INV:INV-TESTHARNESS-1 | `dd031b92f188` |
+| 176 | test_sys_read_write | block | - | INV:INV-TESTHARNESS-1 | `ca07cb1e849b` |
+| 480 | test_sys_dup | block | - | INV:INV-TESTHARNESS-1 | `002404439271` |
+| 519 | test_sys_dup | block | - | INV:INV-TESTHARNESS-1 | `128bdeb36867` |
 
 ### kernel/core/src/tests/syscall_memory.rs (1)
 
@@ -2886,7 +2801,7 @@ FILE` owns one), and the gate fails on a drop that
 | 148 | boxed_ref | block | - | INV:INV-SYSC-2 | `3ec545cb84e2` |
 | 160 | boxed_mut | block | - | INV:INV-SYSC-2 | `cce4a383f3dc` |
 | 172 | boxed_drop | block | - | INV:INV-SYSC-2 | `e5d1a4766322` |
-| 221 | pidfd_data_of | block | - | INV:INV-SYSC-5 | `45c764d8a745` |
+| 221 | pidfd_data_of | block | - | INV:INV-SYSC-5 | `606717553b2c` |
 | 241 | file_inode_set_pre_publish | block | - | INV:INV-SYSC-7 | `72b64a01f336` |
 | 269 | arch_map_page | block | - | INV:INV-SYSC-8 | `c706f361b757` |
 | 289 | unmap_user_leaf_locked | block | - | INV:INV-SYSC-8 | `58ce3ddd6031` |

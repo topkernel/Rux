@@ -38,9 +38,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errno;
-use rux::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
-use rux::fs::mount::{MntFlags, VfsMount};
-use rux::fs::superblock::{FileSystemType, SuperBlock};
+use rux::fs::{hotpath::file_type, types::Ino, types::Inode, types::InodeMode, types::INodeOps, types::VfsDirEntry};
+use rux::fs::types::{MntFlags, VfsMount};
+use rux::fs::types::{FileSystemType, SuperBlock};
 use crate::sync::types::Spinlock;
 
 /// debugfs magic number (Linux: STATFS_DEBUGFS_MAGIC).
@@ -242,7 +242,7 @@ static GLOBAL_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
 /// like sysfs and procfs do.
 /// SAFETY: FsContext is a valid VFS mount callback argument.
 fn debugfs_mount_cb(
-    _fs_context: &rux::fs::superblock::FsContext<'_>,
+    _fs_context: &rux::fs::types::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let root = debugfs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
     let sb = Box::new(DebugFsSuperBlock {
@@ -265,7 +265,7 @@ pub static DEBUGFS_FS_TYPE: FileSystemType = FileSystemType::new(
 
 /// Build the debugfs tree and register the filesystem type.
 pub fn init_debugfs() -> Result<(), i32> {
-    use rux::fs::superblock::register_filesystem;
+    use rux::fs::hotpath::register_filesystem;
 
     {
         let guard = ROOT.lock();
@@ -396,7 +396,7 @@ fn debugfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, err
 
 /// debugfs getattr.
 /// SAFETY: VFS callback contract.
-fn debugfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn debugfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     let entry = match entry_of(inode) {
         Some(e) => e,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -430,7 +430,7 @@ fn debugfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
 /// fail); everything else is EPERM — the tree is kernel-owned.
 /// SAFETY: VFS callback contract.
 fn debugfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
-    if attr == rux::fs::inode::setattr_attr::ATTR_SIZE {
+    if attr == rux::fs::hotpath::setattr_attr::ATTR_SIZE {
         return 0;
     }
     errno::Errno::OperationNotPermitted.as_neg_i32()
@@ -463,7 +463,7 @@ fn debugfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 /// debugfs open: snapshot the file content into file-private storage
 /// (the generator runs here, so every open sees the live value).
 /// SAFETY: VFS callback contract.
-fn debugfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
+fn debugfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -482,11 +482,11 @@ fn debugfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
 
 /// debugfs get_file_ops.
 /// SAFETY: VFS callback contract.
-fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn debugfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&DEBUGFS_FILE_OPS)
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -534,7 +534,7 @@ pub struct DebugFsFileContent {
 }
 
 /// read: serve from the open-time snapshot at the file position.
-fn debugfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn debugfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // The snapshot box is this description's private data
     // (INV-FS-FILEPRIV-1, the framework edge).
     let content = match rux::fs::r#unsafe::file_privdata_ref::<DebugFsFileContent>(file) {
@@ -554,7 +554,7 @@ fn debugfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// write: dispatch to the file's store handler.
-fn debugfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn debugfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // The inode cell is write-once at open (File::get_inode).
     let inode = match file.get_inode().cloned() {
         Some(i) => i,
@@ -579,7 +579,7 @@ fn debugfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 }
 
 /// lseek within the snapshot.
-fn debugfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn debugfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     // See the read op above (INV-FS-FILEPRIV-1).
     let content = match rux::fs::r#unsafe::file_privdata_ref::<DebugFsFileContent>(file) {
         Some(c) => c,
@@ -600,7 +600,7 @@ fn debugfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize
 }
 
 /// close: free the content snapshot.
-fn debugfs_file_close(file: &rux::fs::File) -> i32 {
+fn debugfs_file_close(file: &rux::fs::types::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
     drop(rux::fs::r#unsafe::file_privdata_take::<DebugFsFileContent>(file));
@@ -608,7 +608,7 @@ fn debugfs_file_close(file: &rux::fs::File) -> i32 {
 }
 
 /// debugfs file operations.
-pub static DEBUGFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static DEBUGFS_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(debugfs_file_read)
     .write(debugfs_file_write)
     .lseek(debugfs_file_lseek)
@@ -623,20 +623,20 @@ pub static DEBUGFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
 
 /// The debugfs mount entry (old mount.rs arm, verbatim: single-instance
 /// semantics — an existing canonical mount answers EBUSY).
-pub fn mount_debugfs_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_debugfs_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data, fs_type);
-    if rux::fs::mount::mounted_as("debugfs", target) {
+    if rux::fs::hotpath::mounted_as("debugfs", target) {
         return Err(crate::errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
     if debugfs_root().is_none() {
         init_debugfs()?;
     }
-    let _ = rux::fs::vfs::path_lookup(target, 0);
-    rux::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
-    rux::fs::mount::register_mount("debugfs", target, "debugfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    let _ = rux::fs::hotpath::path_lookup(target, 0);
+    rux::fs::hotpath::vfs_mount(target, create_root_inode(), mnt_flags);
+    rux::fs::hotpath::register_mount("debugfs", target, "debugfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["debugfs"], mount_debugfs_instance);
+    rux::fs::hotpath::register(&["debugfs"], mount_debugfs_instance);
 }

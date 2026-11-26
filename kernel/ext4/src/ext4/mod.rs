@@ -38,8 +38,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use crate::errno;
 use crate::drivers::blkdev;
-use rux::fs::bio;
-use rux::fs::superblock::{FileSystemType, FsContext, SuperBlock};
+use rux::fs::hotpath;
+use rux::fs::types::{FileSystemType, FsContext, SuperBlock};
 
 pub const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 
@@ -168,7 +168,7 @@ pub struct Ext4FileSystem {
     pub journal_ino: u32,
     /// JBD2 journal (initialized during mount). The asserting wrapper
     /// keeps the Sync derivation framework-side (INV-JSEAM-4).
-    pub journal: rux::fs::journal_seam::AssertingSyncArc<
+    pub journal: rux::fs::types::AssertingSyncArc<
         crate::jbd2::journal::Journal,
     >,
     /// Block preallocation state (for mballoc)
@@ -217,7 +217,7 @@ impl Ext4FileSystem {
             total_blocks: 0,
             total_inodes: 0,
             journal_ino: 0,
-            journal: rux::fs::journal_seam::AssertingSyncArc::empty(),
+            journal: rux::fs::types::AssertingSyncArc::empty(),
             prealloc: Spinlock::new(None),
             metadata_csum: false,
             csum_seed: 0,
@@ -284,7 +284,7 @@ impl Ext4FileSystem {
     /// Read superblock and block group descriptors
     pub fn init(&mut self) -> Result<(), i32> {
         // SAFETY: self.device is a valid GenDisk pointer set during filesystem creation;
-        // bio::bread reads a block and returns a valid BufferHead, and the superblock
+        // hotpath::bread reads a block and returns a valid BufferHead, and the superblock
         // is at a known fixed offset (1024 bytes into block 0).
         {
             // Read superblock
@@ -292,10 +292,10 @@ impl Ext4FileSystem {
             // - For 1KB blocks: superblock at start of block 1
             // - For 2KB+ blocks: superblock at offset 1024 within block 0
             // Since we use 4KB block cache, read block 0 and access offset 1024
-            let sb_bh = bio::bread(self.device, 0)
+            let sb_bh = hotpath::bread(self.device, 0)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let sb_data = bio::bh_data(&sb_bh);
+            let sb_data = hotpath::bh_data(&sb_bh);
             // Superblock is at 1024 byte offset within block
             // (unsafe-slim r3) typed view via superblock_on_disk below
             // (bounds-guarded; same INV-EXT-VIEW discipline as extent.rs).
@@ -303,7 +303,7 @@ impl Ext4FileSystem {
 
             // Verify magic number
             if ext4_sb.s_magic != EXT4_SUPER_MAGIC {
-                bio::brelse(sb_bh);
+                hotpath::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
 
@@ -321,13 +321,13 @@ impl Ext4FileSystem {
                 let unknown_incompat = incompat & !(features::KNOWN_INCOMPAT | features::REJECTED_INCOMPAT);
                 if unknown_incompat != 0 {
                     crate::pr_err!("ext4: unknown incompat features {:#x} — refusing mount", unknown_incompat);
-                    bio::brelse(sb_bh);
+                    hotpath::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
                 let rejected = incompat & features::REJECTED_INCOMPAT;
                 if rejected != 0 {
                     crate::pr_err!("ext4: unsupported incompat features {:#x} (inline_data/meta_bg/encrypt/...) — refusing mount", rejected);
-                    bio::brelse(sb_bh);
+                    hotpath::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
 
@@ -342,7 +342,7 @@ impl Ext4FileSystem {
                         | 0x10000);
                 if unknown_ro != 0 {
                     crate::pr_err!("ext4: unknown ro_compat features {:#x} — refusing mount", unknown_ro);
-                    bio::brelse(sb_bh);
+                    hotpath::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
                 // We mount read-write and maintain ALL metadata checksum
@@ -364,7 +364,7 @@ impl Ext4FileSystem {
                 // on every boot.
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
-                    bio::brelse(sb_bh);
+                    hotpath::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
 
@@ -380,7 +380,7 @@ impl Ext4FileSystem {
                     let sb_raw = &sb_data[1024..1024 + 1024];
                     if !csum::superblock_csum_ok(sb_raw) {
                         crate::pr_err!("ext4: superblock checksum invalid — refusing mount");
-                        bio::brelse(sb_bh);
+                        hotpath::brelse(sb_bh);
                         return Err(errno::Errno::IOError.as_neg_i32()); // EIO
                     }
                 }
@@ -388,7 +388,7 @@ impl Ext4FileSystem {
 
             // Parse superblock
             if ext4_sb.s_log_block_size >= 32 {
-                bio::brelse(sb_bh);
+                hotpath::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
             let block_size = 1024 << ext4_sb.s_log_block_size;
@@ -403,7 +403,7 @@ impl Ext4FileSystem {
             // 4096-byte filesystems can be mounted correctly; other legal
             // ext4 geometries would read/write the wrong disk locations.
             if block_size != 4096 {
-                bio::brelse(sb_bh);
+                hotpath::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
             let blocks_per_group = ext4_sb.s_blocks_per_group;
@@ -414,7 +414,7 @@ impl Ext4FileSystem {
                 || ext4_sb.s_inode_size < 128
                 || ext4_sb.s_inode_size as u32 > block_size
             {
-                bio::brelse(sb_bh);
+                hotpath::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
 
@@ -434,7 +434,7 @@ impl Ext4FileSystem {
                 || (device_blocks > 0 && total_blocks > device_blocks)
                 || (device_blocks == 0 && total_blocks > u32::MAX as u64)
             {
-                bio::brelse(sb_bh);
+                hotpath::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
 
@@ -446,7 +446,7 @@ impl Ext4FileSystem {
             // Default is 32 bytes, but with 64-bit feature it's 64 bytes
             let desc_size = if ext4_sb.s_desc_size < 32 { 32 } else { ext4_sb.s_desc_size as usize };
             if desc_size > block_size as usize {
-                bio::brelse(sb_bh);
+                hotpath::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
 
@@ -461,10 +461,10 @@ impl Ext4FileSystem {
                 let gd_block = gd_start_block + (i as usize / gds_per_block) as u32;
                 let gd_index = i as usize % gds_per_block;
 
-                let gd_bh = bio::bread(self.device, gd_block as u64)
+                let gd_bh = hotpath::bread(self.device, gd_block as u64)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let gd_data = bio::bh_data(&gd_bh);
+                let gd_data = hotpath::bh_data(&gd_bh);
                 // Use actual descriptor size for offset calculation
                 let gd_offset = gd_index * desc_size;
 
@@ -483,8 +483,8 @@ impl Ext4FileSystem {
                         "ext4: group {} descriptor checksum invalid — refusing mount",
                         i
                     );
-                    bio::brelse(gd_bh);
-                    bio::brelse(sb_bh);
+                    hotpath::brelse(gd_bh);
+                    hotpath::brelse(sb_bh);
                     return Err(errno::Errno::IOError.as_neg_i32()); // EIO
                 }
 
@@ -505,10 +505,10 @@ impl Ext4FileSystem {
                 }
 
                 group_descs.push(Box::new(gd));
-                bio::brelse(gd_bh);
+                hotpath::brelse(gd_bh);
             }
 
-            bio::brelse(sb_bh);
+            hotpath::brelse(sb_bh);
 
             // Update filesystem information
             self.sb_info = Some(Box::new(superblock::Ext4SuperBlockInfo {
@@ -604,10 +604,10 @@ impl Ext4FileSystem {
         let inode_offset = ((index % inodes_per_block) * (self.inode_size as u32)) as usize;
 
         // Read block containing inode
-        let bh = bio::bread(self.device, inode_block as u64)
+        let bh = hotpath::bread(self.device, inode_block as u64)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-        let data = bio::bh_data(&bh);
+        let data = hotpath::bh_data(&bh);
 
         // Bounds check (read-side twin of the write paths' R20-FS2 clamp,
         // review EXT4-M1 refined): the parse is clamped to the ON-DISK
@@ -622,7 +622,7 @@ impl Ext4FileSystem {
             self.inode_size as usize,
         );
         if inode_offset + copy_len > data.len() {
-            bio::brelse(bh);
+            hotpath::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
 
@@ -636,7 +636,7 @@ impl Ext4FileSystem {
                 ino,
                 &data[inode_offset..full],
             ) {
-                bio::brelse(bh);
+                hotpath::brelse(bh);
                 return Err(errno::Errno::IOError.as_neg_i32()); // EIO
             }
         }
@@ -653,7 +653,7 @@ impl Ext4FileSystem {
         }
         let result = inode::Ext4Inode::from_disk(&on_disk, ino);
 
-        bio::brelse(bh);
+        hotpath::brelse(bh);
         Ok(result)
     }
 
@@ -717,7 +717,7 @@ impl Ext4FileSystem {
             None => {}
         }
         // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
-        // valid block numbers; bio::bread returns a valid BufferHead for each block.
+        // valid block numbers; hotpath::bread returns a valid BufferHead for each block.
         // Traverse directory's data blocks — through the block-list
         // memo when warm (22nd): the per-block extent walk train
         // (Vec + one extent lookup per block) ran on EVERY lookup;
@@ -754,10 +754,10 @@ impl Ext4FileSystem {
             if *block == 0 {
                 continue;
             }
-            let bh = bio::bread(self.device, *block)
+            let bh = hotpath::bread(self.device, *block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let data = bio::bh_data(&bh);
+            let data = hotpath::bh_data(&bh);
             let mut offset = 0;
 
             while offset < self.block_size as usize {
@@ -790,14 +790,14 @@ impl Ext4FileSystem {
                 };
 
                 if entry_name == name {
-                    bio::brelse(bh);
+                    hotpath::brelse(bh);
                     return Ok(entry);
                 }
 
                 offset += entry.rec_len as usize;
             }
 
-            bio::brelse(bh);
+            hotpath::brelse(bh);
         }
 
         Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
@@ -812,7 +812,7 @@ impl Ext4FileSystem {
     /// List of directory entries
     pub fn list_dir(&self, dir: &inode::Ext4Inode) -> Result<Vec<dir::Ext4DirEntry>, i32> {
         // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
-        // valid block numbers; bio::bread returns valid BufferHeads for directory blocks.
+        // valid block numbers; hotpath::bread returns valid BufferHeads for directory blocks.
         let mut entries = Vec::new();
 
         // Traverse directory's data blocks (block-list memo, 22nd —
@@ -841,10 +841,10 @@ impl Ext4FileSystem {
             if *block == 0 {
                 continue;
             }
-            let bh = bio::bread(self.device, *block)
+            let bh = hotpath::bread(self.device, *block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let data = bio::bh_data(&bh);
+            let data = hotpath::bh_data(&bh);
             let mut offset = 0;
 
             while offset < self.block_size as usize {
@@ -897,7 +897,7 @@ impl Ext4FileSystem {
                 offset += entry.rec_len as usize;
             }
 
-            bio::brelse(bh);
+            hotpath::brelse(bh);
         }
 
         Ok(entries)
@@ -925,11 +925,11 @@ impl Ext4FileSystem {
 
         for block in blocks {
             // SAFETY: self.device is a valid GenDisk pointer; block numbers come from
-            // get_data_blocks; bio::bread returns a valid BufferHead.
+            // get_data_blocks; hotpath::bread returns a valid BufferHead.
             {
-                let bh = bio::bread(self.device, block)
+                let bh = hotpath::bread(self.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                let data = bio::bh_data(&bh);
+                let data = hotpath::bh_data(&bh);
 
                 let remaining = size - target.len();
                 let to_read = core::cmp::min(remaining, self.block_size as usize);
@@ -937,7 +937,7 @@ impl Ext4FileSystem {
                 let bytes = &data[..to_read];
                 target.push_str(&String::from_utf8_lossy(bytes));
 
-                bio::brelse(bh);
+                hotpath::brelse(bh);
 
                 if target.len() >= size {
                     break;
@@ -1272,7 +1272,7 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
 
 pub fn init() {
     // Register filesystem type
-    let _ = rux::fs::superblock::register_filesystem(&EXT4_FS_TYPE);
+    let _ = rux::fs::hotpath::register_filesystem(&EXT4_FS_TYPE);
     // The rung-5 seam: fill the framework's Ext4Hooks table (in-tree
     // interim; the ext4 crate's register_all owns this at the
     // flip). Idempotent.
@@ -1380,8 +1380,8 @@ pub fn ext4_instance_from_id(fs_id: u64) -> Option<&'static Ext4FileSystem> {
 pub fn resolve_writeback_inode(
     fs_id: u64,
     ino: u64,
-) -> Option<alloc::sync::Arc<rux::fs::inode::Inode>> {
-    if let Some(inode) = rux::fs::inode::icache_lookup(ino, fs_id) {
+) -> Option<alloc::sync::Arc<rux::fs::types::Inode>> {
+    if let Some(inode) = rux::fs::hotpath::icache_lookup(ino, fs_id) {
         return Some(inode);
     }
     let fs = ext4_instance_from_id(fs_id)?;
@@ -1415,14 +1415,14 @@ pub fn sync_inode_tables(targets: &[(u64, u64)]) -> usize {
         };
         // INV-BIO-BHREF: bread pins until brelse; the dirty query rides
         // the safe accessor.
-        if let Some(bh) = rux::fs::bio::bread(fs.device, tbl_blk) {
-            let dirty = rux::fs::bio::bh_is_dirty(&bh);
+        if let Some(bh) = rux::fs::hotpath::bread(fs.device, tbl_blk) {
+            let dirty = rux::fs::hotpath::bh_is_dirty(&bh);
             let res = if dirty {
-                rux::fs::bio::sync_dirty_buffer(bh)
+                rux::fs::hotpath::sync_dirty_buffer(bh)
             } else {
                 Ok(())
             };
-            rux::fs::bio::brelse(bh);
+            rux::fs::hotpath::brelse(bh);
             if res.is_ok() && dirty {
                 n += 1;
             }
@@ -1433,7 +1433,7 @@ pub fn sync_inode_tables(targets: &[(u64, u64)]) -> usize {
 
 /// Persist the DATA blocks of the given writeback targets (ordered data).
 ///
-/// The plain buffer-cache drain (`bio::sync_buffers`) writes every dirty
+/// The plain buffer-cache drain (`hotpath::sync_buffers`) writes every dirty
 /// buffer in HASH ORDER: the inode-table block (the file's new size) can
 /// reach the device BEFORE the data blocks it describes. A crash in
 /// between leaves a file that CLAIMS 8 MB of data the device never
@@ -1470,17 +1470,17 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
             // at its eviction, so the ordered-data obligation for it is
             // already met — re-reading it paid one synchronous 4 KiB read
             // per absent block (the sync(2) wall after a large flush).
-            if { rux::fs::bio::block_absent_durable(fs.device, block) } {
+            if { rux::fs::hotpath::block_absent_durable(fs.device, block) } {
                 continue;
             }
             // INV-BIO-BHREF: as sync_inode_tables.
-            if let Some(bh) = rux::fs::bio::bread(fs.device, block) {
-                let dirty = rux::fs::bio::bh_is_dirty(&bh);
+            if let Some(bh) = rux::fs::hotpath::bread(fs.device, block) {
+                let dirty = rux::fs::hotpath::bh_is_dirty(&bh);
                 if dirty {
-                    let _ = rux::fs::bio::sync_dirty_buffer(bh);
+                    let _ = rux::fs::hotpath::sync_dirty_buffer(bh);
                     n += 1;
                 }
-                rux::fs::bio::brelse(bh);
+                rux::fs::hotpath::brelse(bh);
             }
         }
     }
@@ -1640,14 +1640,14 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
     // The drain returns the (fs, inode) targets it flushed — their data
     // blocks sync first and their inode-table blocks last (ordered data,
     // see sys_sync).
-    let flushed_targets = rux::fs::page_cache::get_page_cache().flush_all_dirty();
+    let flushed_targets = rux::fs::hotpath::get_page_cache().flush_all_dirty();
 
     // 1. The flushed files' DATA blocks (ordered data: data before the
     // metadata that describes it — see sync_flushed_data).
     let _ = sync_flushed_data(&flushed_targets);
 
     // 1a. All dirty data/metadata buffers.
-    rux::fs::bio::sync_buffers()?;
+    rux::fs::hotpath::sync_buffers()?;
 
     // 1b. The flushed files' inode-table blocks (their new size) — AFTER
     // the data (ordered data), the same discipline fsync/sync(2) use.
@@ -1659,7 +1659,7 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
         Some(fs) => fs.device,
         None => return Ok(()),
     };
-    if let Some(bh) = rux::fs::bio::bread(device, 0) {
+    if let Some(bh) = rux::fs::hotpath::bread(device, 0) {
         // s_state offset within the on-disk superblock: 13 u32 fields
         // (52) + s_mnt_count(2) + s_max_mnt_count(2) + s_magic(2) = 58.
         const SB_OFF: usize = 1024;
@@ -1667,10 +1667,10 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
         const EXT4_VALID_FS: u16 = 1;
         // INV-BIO-BHREF: the s_state store goes through the exclusive
         // data view (BufferHead::write's body is this slice store).
-        rux::fs::bio::bh_data_mut(&bh)[S_STATE_OFF..S_STATE_OFF + 2]
+        rux::fs::hotpath::bh_data_mut(&bh)[S_STATE_OFF..S_STATE_OFF + 2]
             .copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
-        let r = rux::fs::bio::sync_dirty_buffer(bh);
-        rux::fs::bio::brelse(bh);
+        let r = rux::fs::hotpath::sync_dirty_buffer(bh);
+        rux::fs::hotpath::brelse(bh);
         r?;
     }
 
@@ -2005,11 +2005,11 @@ pub fn ext4_fallocate_on(
                 } else {
                     let ind = ext4_inode.block[12] as u64;
                     if ind == 0 { return None; }
-                    let bh = rux::fs::bio::bread(fs.device, ind)?;
+                    let bh = rux::fs::hotpath::bread(fs.device, ind)?;
                     let o = ((blk - 12) * 4) as usize;
-                    let d = bio::bh_data(&bh);
+                    let d = hotpath::bh_data(&bh);
                     let b = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
-                    rux::fs::bio::brelse(bh);
+                    rux::fs::hotpath::brelse(bh);
                     if b != 0 { Some(b as u64) } else { None }
                 }
             };
@@ -2021,12 +2021,12 @@ pub fn ext4_fallocate_on(
                     let n = core::cmp::min(zto - off, block_size - in_blk);
                     if let Some(phys) = resolve(blk) {
                         if phys != 0 {
-                            if let Some(bh) = rux::fs::bio::bread(fs.device, phys) {
-                                let d = bio::bh_data_mut(&bh);
+                            if let Some(bh) = rux::fs::hotpath::bread(fs.device, phys) {
+                                let d = hotpath::bh_data_mut(&bh);
                                 d[(in_blk as usize)..(in_blk + n) as usize].fill(0);
-                                bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                                let _ = rux::fs::bio::sync_dirty_buffer(bh);
-                                rux::fs::bio::brelse(bh);
+                                hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                                let _ = rux::fs::hotpath::sync_dirty_buffer(bh);
+                                rux::fs::hotpath::brelse(bh);
                             }
                         }
                     }
@@ -2177,8 +2177,8 @@ pub fn ext4_fallocate_on(
                 let ent_first = first.saturating_sub(12);
                 let ent_last_excl = core::cmp::min(last.saturating_sub(12) + 1, ents_per_blk);
                 if ent_first < ent_last_excl {
-                    if let Some(bh) = rux::fs::bio::bread(fs.device, ind_blk) {
-                        let data = bio::bh_data_mut(&bh);
+                    if let Some(bh) = rux::fs::hotpath::bread(fs.device, ind_blk) {
+                        let data = hotpath::bh_data_mut(&bh);
                         for ei in ent_first..ent_last_excl {
                             let o = ei * 4;
                             let b = u32::from_le_bytes([
@@ -2190,9 +2190,9 @@ pub fn ext4_fallocate_on(
                                 data[o..o + 4].fill(0);
                             }
                         }
-                        bio::bh_set_state_bit(&bh, rux::fs::bio::BufferState::BH_Dirty);
-                        let _ = rux::fs::bio::sync_dirty_buffer(bh);
-                        rux::fs::bio::brelse(bh);
+                        hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                        let _ = rux::fs::hotpath::sync_dirty_buffer(bh);
+                        rux::fs::hotpath::brelse(bh);
                     }
                 }
             }
@@ -2221,7 +2221,7 @@ pub fn ext4_fallocate_on(
         // after a failed flush inside the punched range dies with the
         // punch — its data is deleted by definition.
         {
-            let cache = rux::fs::page_cache::get_page_cache();
+            let cache = rux::fs::hotpath::get_page_cache();
             let fs_id = fs as *const Ext4FileSystem as u64;
             let ps = crate::mm::types::PAGE_SIZE as u64;
             let first_full = offset.div_ceil(ps);
@@ -2399,7 +2399,6 @@ fn add_dir_entry(
     ino: u32,
     file_type: u8,
 ) -> Result<(), i32> {
-    use rux::fs::bio;
 
     // htree-indexed directories (EXT4_INDEX_FL / dx_root magic): our
     // directory writer is linear-only — inserting into an indexed
@@ -2427,11 +2426,11 @@ fn add_dir_entry(
         }
 
         // SAFETY: fs.device is a valid GenDisk pointer; *block_num is a non-zero
-        // block number from get_data_blocks; bio::bread returns a valid BufferHead.
+        // block number from get_data_blocks; hotpath::bread returns a valid BufferHead.
         {
-            let bh = bio::bread(fs.device, *block_num)
+            let bh = hotpath::bread(fs.device, *block_num)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let data = bio::bh_data_mut(&bh);
+            let data = hotpath::bh_data_mut(&bh);
 
             // Try to find space in this block
             let mut offset = 0;
@@ -2456,9 +2455,9 @@ fn add_dir_entry(
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
                     // metadata_csum: refresh the block's dir tail.
                     super::ext4::namei::dir_block_seal(fs, parent.ino, data);
-                    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
-                    let sync_res = bio::sync_dirty_buffer(bh);
-                    bio::brelse(bh);
+                    hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                    let sync_res = hotpath::sync_dirty_buffer(bh);
+                    hotpath::brelse(bh);
                     sync_res?;
                     return Ok(());
                 }
@@ -2477,12 +2476,12 @@ fn add_dir_entry(
                     let prev_actual_size = ((8 + prev_name_len as usize + 3) / 4) * 4;
                     if prev_actual_size >= prev_rec_len {
                         // Previous entry has no spare space; cannot split
-                        bio::brelse(bh);
+                        hotpath::brelse(bh);
                         continue;
                     }
                     // Validate no overlap: actual size must leave room for new entry
                     if offset + entry_size > prev_offset + prev_rec_len {
-                        bio::brelse(bh);
+                        hotpath::brelse(bh);
                         continue;
                     }
                     data[prev_offset + 4] = (prev_actual_size & 0xFF) as u8;
@@ -2496,14 +2495,14 @@ fn add_dir_entry(
 
                 // metadata_csum: refresh the block's dir tail.
                 super::ext4::namei::dir_block_seal(fs, parent.ino, data);
-                bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
-                let sync_res = bio::sync_dirty_buffer(bh);
-                bio::brelse(bh);
+                hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+                let sync_res = hotpath::sync_dirty_buffer(bh);
+                hotpath::brelse(bh);
                 sync_res?;
                 return Ok(());
             }
 
-            bio::brelse(bh);
+            hotpath::brelse(bh);
         }
     }
 
@@ -2521,7 +2520,6 @@ fn append_dir_block(
     entry_size: usize,
     block_size: usize,
 ) -> Result<(), i32> {
-    use rux::fs::bio;
 
     // Read parent inode from disk first
     let parent_ino = parent.ino;
@@ -2540,26 +2538,26 @@ fn append_dir_block(
 
     // Zero the new block and create the directory entry
     // SAFETY: fs.device is a valid GenDisk pointer; new_block is a freshly allocated
-    // block number; bio::bread returns a valid BufferHead.
+    // block number; hotpath::bread returns a valid BufferHead.
     {
-        let bh = bio::bread(fs.device, new_block)
+        let bh = hotpath::bread(fs.device, new_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
         // Zero the block
-        for byte in bio::bh_data_mut(&bh).iter_mut() {
+        for byte in hotpath::bh_data_mut(&bh).iter_mut() {
             *byte = 0;
         }
 
         // Create a single entry spanning the whole block
         // Since we don't have checksum, use full block size
-        let data = bio::bh_data_mut(&bh);
+        let data = hotpath::bh_data_mut(&bh);
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
         // metadata_csum: refresh the block's dir tail.
         super::ext4::namei::dir_block_seal(fs, parent_ino, data);
-        bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
+        hotpath::bh_set_state_bit(&bh, rux::fs::types::BufferState::BH_Dirty);
+        let sync_res = hotpath::sync_dirty_buffer(bh);
+        hotpath::brelse(bh);
         sync_res?;
     }
 
@@ -2591,8 +2589,8 @@ fn create_dir_entry(data: &mut [u8], ino: u32, name: &str, file_type: u8, rec_le
 // Ext4 Inode Operations
 // ============================================================================
 
-use rux::fs::inode::{Inode, InodeMode, INodeOps, Ino};
-use rux::fs::Stat;
+use rux::fs::types::{Inode, InodeMode, INodeOps, Ino};
+use rux::fs::types::Stat;
 
 /// Ext4 inode lookup operation (pub: the path walk's negative-memo gate
 /// compares this fn pointer — only filesystems whose content changes
@@ -2703,7 +2701,7 @@ fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 /// Handles chmod (ATTR_MODE), chown (ATTR_UID_GID), and ftruncate (ATTR_SIZE)
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
 
     // Session 25 (MAP_SHARED writeback): on a size change, flush dirty
     // page-cache frames BEFORE the big lock and the new size commit. The
@@ -2808,7 +2806,7 @@ fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // Inode.mode directly while stat() goes through getattr — a
             // stale cache made retyped nodes (mkfifo/socket) and chmod
             // results invisible to the VFS (LTP open06/read03).
-            inode.update_cached_mode(rux::fs::inode::InodeMode::new(new_mode));
+            inode.update_cached_mode(rux::fs::types::InodeMode::new(new_mode));
         }
         setattr_attr::ATTR_UID_GID => {
             // arg1 = uid, arg2 = gid. Keep the VFS-cached owner in sync —
@@ -3011,14 +3009,14 @@ fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     if let Ok(block_nr) = ext4_inode.get_data_block(fs, last_block) {
                         if block_nr != 0 {
                             let tail_start = (new_size % block_size) as usize;
-                            if let Some(bh) = rux::fs::bio::bread(fs.device, block_nr) {
+                            if let Some(bh) = rux::fs::hotpath::bread(fs.device, block_nr) {
                                 // INV-BIO-BHREF: bh is a one-block buffer
                                 // from bread; the tail range is in-bounds
                                 // and the buffer is released after sync.
-                                let data = rux::fs::bio::bh_data_mut(&bh);
+                                let data = rux::fs::hotpath::bh_data_mut(&bh);
                                 data[tail_start..block_size as usize].fill(0);
-                                let _ = rux::fs::bio::sync_dirty_buffer(bh);
-                                rux::fs::bio::brelse(bh);
+                                let _ = rux::fs::hotpath::sync_dirty_buffer(bh);
+                                rux::fs::hotpath::brelse(bh);
                             }
                         }
                     }
@@ -3069,7 +3067,7 @@ fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // attribute changes) and needlessly killed the buffer-cache
             // hit rate on the atime path.
             if attr == setattr_attr::ATTR_SIZE {
-                rux::fs::page_cache::get_page_cache().invalidate_inode(
+                rux::fs::hotpath::get_page_cache().invalidate_inode(
                     fs as *const Ext4FileSystem as u64,
                     inode.ino,
                 );
@@ -3156,7 +3154,7 @@ fn flush_pending_reaps() {
 /// file that means the last descriptor just closed (unlink keeps the
 /// number/blocks until then; see ext4_unlink_inner). The reap itself is
 /// deferred to the next ext4 entry point (PENDING_REAPS note above).
-fn ext4_destroy_inode(inode: &mut rux::fs::inode::Inode) {
+fn ext4_destroy_inode(inode: &mut rux::fs::types::Inode) {
     if let Some(ptr) = inode.sb {
         // ptr was created by Box::into_raw(Box::new(ext4_inode.clone()))
         // SAFETY: sb holds the Box leaked by into_raw in create_vfs_inode
@@ -3203,7 +3201,7 @@ fn ext4_destroy_inode(inode: &mut rux::fs::inode::Inode) {
 /// virtio VW watchdog and debug taskdump reach it without a hook row.
 /// This re-export keeps the historical path working for ext4/jbd2
 /// bodies (which consume it as their serialization primitive).
-pub use rux::fs::journal_seam::EXT4_BIG_LOCK;
+pub use rux::fs::hotpath::EXT4_BIG_LOCK;
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module
@@ -3246,7 +3244,7 @@ fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<
         .map_err(|_| errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
     let vfs_inode = create_vfs_inode_in(fs, ino as u32, &ext4_inode);
-    rux::fs::inode::icache_add(vfs_inode.clone());
+    rux::fs::hotpath::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
@@ -3280,7 +3278,7 @@ fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
-    rux::fs::inode::icache_add(vfs_inode.clone());
+    rux::fs::hotpath::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
@@ -3309,7 +3307,7 @@ fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
             // the exact final size once the frames are gone.
             if updated.is_reg() {
                 let fs_id = fs as *const Ext4FileSystem as u64;
-                if let Some(tail_eof) = rux::fs::page_cache::get_page_cache()
+                if let Some(tail_eof) = rux::fs::hotpath::get_page_cache()
                     .dirty_tail_eof(fs_id, inode.ino as u64)
                 {
                     if tail_eof > updated.size {
@@ -3362,7 +3360,7 @@ fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<allo
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
-    rux::fs::inode::icache_add(vfs_inode.clone());
+    rux::fs::hotpath::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
@@ -3379,7 +3377,7 @@ fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Re
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
-    rux::fs::inode::icache_add(vfs_inode.clone());
+    rux::fs::hotpath::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
@@ -3396,7 +3394,7 @@ fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     let vfs_inode = create_vfs_inode_in(fs, new_ino, &ext4_inode);
-    rux::fs::inode::icache_add(vfs_inode.clone());
+    rux::fs::hotpath::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
 
@@ -3423,7 +3421,7 @@ fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
                     // published size must survive the disk-fresh reload.
                     if fresh.is_reg() {
                         let fs_id = fs as *const Ext4FileSystem as u64;
-                        if let Some(tail_eof) = rux::fs::page_cache::get_page_cache()
+                        if let Some(tail_eof) = rux::fs::hotpath::get_page_cache()
                             .dirty_tail_eof(fs_id, target.ino as u64)
                         {
                             if tail_eof > fresh.size {
@@ -3542,11 +3540,11 @@ pub(super) fn sb_inode_of_mut(inode: &Inode) -> Result<&mut inode::Ext4Inode, i3
 
 /// Get file operations for ext4 regular files and directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn ext4_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn ext4_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&file::EXT4_FILE_OPS)
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -3554,7 +3552,7 @@ fn ext4_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
 
 /// Ext4 readdir: list directory entries via inode.ops
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
+fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::types::VfsDirEntry>> {
     let fs_ptr = get_ext4_fs_from_inode(inode).ok()?;
     let ext4_inode = sb_inode_of(inode).ok()?;
 
@@ -3576,7 +3574,7 @@ fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirE
             );
             break;
         }
-        entries.push(rux::fs::inode::VfsDirEntry {
+        entries.push(rux::fs::types::VfsDirEntry {
             ino: entry.inode as u64,
             name: name_bytes.to_vec(),
             file_type: dt,
@@ -3588,14 +3586,14 @@ fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirE
 /// Map an on-disk ext4 dirent file_type to the getdents DT_* value.
 fn ext4_dirent_file_type(ft: u8) -> u8 {
     match ft {
-        1 => rux::fs::inode::file_type::DT_REG,
-        2 => rux::fs::inode::file_type::DT_DIR,
-        3 => rux::fs::inode::file_type::DT_CHR,
-        4 => rux::fs::inode::file_type::DT_BLK,
-        5 => rux::fs::inode::file_type::DT_FIFO,
-        6 => rux::fs::inode::file_type::DT_SOCK,
-        7 => rux::fs::inode::file_type::DT_LNK,
-        _ => rux::fs::inode::file_type::DT_UNKNOWN,
+        1 => rux::fs::hotpath::file_type::DT_REG,
+        2 => rux::fs::hotpath::file_type::DT_DIR,
+        3 => rux::fs::hotpath::file_type::DT_CHR,
+        4 => rux::fs::hotpath::file_type::DT_BLK,
+        5 => rux::fs::hotpath::file_type::DT_FIFO,
+        6 => rux::fs::hotpath::file_type::DT_SOCK,
+        7 => rux::fs::hotpath::file_type::DT_LNK,
+        _ => rux::fs::hotpath::file_type::DT_UNKNOWN,
     }
 }
 
@@ -3674,14 +3672,14 @@ fn ext4_readdir_fill(
             cur = (bidx as u64 + 1) * block_size;
             continue;
         }
-        let bh = match bio::bread(fs.device, blk) {
+        let bh = match hotpath::bread(fs.device, blk) {
             Some(bh) => bh,
             None => return Err(errno::Errno::IOError.as_neg_i32()),
         };
         // SAFETY: bread returns a valid, pinned BufferHead whose b_data
         // covers one full block; we only read it and brelse before any
         // early exit below.
-        let data = bio::bh_data(&bh);
+        let data = hotpath::bh_data(&bh);
         while off + 8 <= block_size as usize {
             let rec = &data[off..];
             let entry_ino = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
@@ -3719,7 +3717,7 @@ fn ext4_readdir_fill(
                 saw_unfittable = true;
                 // Release the pinned block BEFORE leaving the walk
                 // (break 'outer skips the brelse below the loop).
-                bio::brelse(bh);
+                hotpath::brelse(bh);
                 break 'outer;
             }
             let dst = &mut buf[filled..filled + reclen64];
@@ -3738,7 +3736,7 @@ fn ext4_readdir_fill(
             off += rec_len;
             cur += rec_len as u64;
         }
-        bio::brelse(bh);
+        hotpath::brelse(bh);
         if off + 8 > block_size as usize && cur % block_size != 0 {
             // Block scan ended mid-block (corrupt tail): advance to the
             // next block so the walk cannot wedge on the same offset.
@@ -3810,7 +3808,7 @@ pub fn create_vfs_inode_in(
     // ...). Mask to the user-visible set so internal bits (EXTENTS etc.)
     // never leak through FS_IOC_GETFLAGS.
     inode.ioc_flags.store(
-        ext4_inode.flags & rux::fs::inode::FS_FL_USER_VISIBLE,
+        ext4_inode.flags & rux::fs::hotpath::FS_FL_USER_VISIBLE,
         core::sync::atomic::Ordering::Relaxed,
     );
     inode.ops = Some(&EXT4_INODE_OPS);
@@ -3836,7 +3834,7 @@ pub fn create_vfs_inode_in(
     // contract, different mechanism).
     if inode.mode.is_regular_file() {
         let fs_id = fs_ptr as u64;
-        if let Some(tail_eof) = rux::fs::page_cache::get_page_cache()
+        if let Some(tail_eof) = rux::fs::hotpath::get_page_cache()
             .dirty_tail_eof(fs_id, ino as u64)
         {
             if tail_eof > inode.size.load(core::sync::atomic::Ordering::Relaxed) {
@@ -3900,15 +3898,15 @@ fn sb_uuid_of(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<(u64, u6
     // INV-BIO-BHREF: bread on a live GenDisk returns a pinned BufferHead
     // whose b_data covers the full block; the UUID fields are read as
     // little-endian byte slices (equivalent to the old unaligned loads).
-    let bh = rux::fs::bio::bread(disk, 0)?;
-    let data = rux::fs::bio::bh_data(&bh);
+    let bh = rux::fs::hotpath::bread(disk, 0)?;
+    let data = rux::fs::hotpath::bh_data(&bh);
     let lo = u64::from_le_bytes(
         data[1024 + 0x68..1024 + 0x68 + 8].try_into().expect("uuid lo"),
     );
     let hi = u64::from_le_bytes(
         data[1024 + 0x70..1024 + 0x70 + 8].try_into().expect("uuid hi"),
     );
-    rux::fs::bio::brelse(bh);
+    rux::fs::hotpath::brelse(bh);
     Some((lo, hi))
 }
 

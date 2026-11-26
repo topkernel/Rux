@@ -2,7 +2,7 @@
 //! rung 2): the raw adoption edge lives framework-side because the crate
 //! is forbid-enforced. The type claim is the caller's ops-identity check.
 
-use crate::fs::file::File;
+use crate::fs::types::File;
 
 /// Adopt the File's private-data Arc (INV-FS-FILEPRIV pattern: the
 /// caller checked the ops-table identity first — the type proof).

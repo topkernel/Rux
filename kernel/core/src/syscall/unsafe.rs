@@ -215,10 +215,10 @@ pub fn task_park_unwind(task: *mut Task) {
 /// file for its lifetime, so the returned reference is valid while the
 /// caller holds its fd-table Arc.
 #[inline]
-pub fn pidfd_data_of(file: &crate::fs::File) -> Option<&'static crate::fs::pidfd::PidFdData> {
+pub fn pidfd_data_of(file: &crate::fs::types::File) -> Option<&'static crate::fs::types::PidFdData> {
     // SAFETY: INV-SYSC-5 — identity-checked private_data downcast; the
     // box lives as long as the File.
-    unsafe { crate::fs::pidfd::data_of(file) }
+    unsafe { crate::fs::hotpath::data_of(file) }
 }
 
 /// Write a FRESH File's inode cell before the File is published to any
@@ -233,8 +233,8 @@ pub fn pidfd_data_of(file: &crate::fs::File) -> Option<&'static crate::fs::pidfd
 /// install.
 #[inline]
 pub fn file_inode_set_pre_publish(
-    file: &crate::fs::File,
-    inode: alloc::sync::Arc<crate::fs::inode::Inode>,
+    file: &crate::fs::types::File,
+    inode: alloc::sync::Arc<crate::fs::types::Inode>,
 ) {
     // SAFETY: INV-SYSC-7 — fresh, unpublished File; the plain cell
     // store races nothing and skips lease bookkeeping on purpose.
@@ -419,7 +419,7 @@ pub fn mprotect_rewrite_leaf_sv39(root_ppn: u64, virt: u64, new_flags: u64) {
         flags |= pcache_bit;
         if flags & PageTableEntry::W != 0 {
             if cow_flags::pte_is_shared_cache(pte0.bits()) {
-                crate::fs::page_cache::get_page_cache().mark_dirty_pfn(ppn as usize);
+                crate::fs::hotpath::get_page_cache().mark_dirty_pfn(ppn as usize);
             } else {
                 flags |= cow_flags::COW;
                 flags &= !PageTableEntry::W;
@@ -494,7 +494,7 @@ pub fn pt_walk_writable_phys(root_ppn: u64, va: u64) -> Option<u64> {
 /// source pointer — `File::write_at`'s safe slice twin cannot describe
 /// a page we do not own as a Rust slice.
 pub fn file_write_page(
-    file: &crate::fs::File,
+    file: &crate::fs::types::File,
     file_off: u64,
     page_phys: u64,
     n: usize,

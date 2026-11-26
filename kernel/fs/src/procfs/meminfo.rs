@@ -34,7 +34,7 @@ fn mem_used_kb() -> u64 {
 
 /// Page-cache pages in kB (4 KiB pages).
 fn cached_kb() -> u64 {
-    (rux::fs::page_cache::page_cache_total_pages() as u64).saturating_mul(4)
+    (rux::fs::hotpath::page_cache_total_pages() as u64).saturating_mul(4)
 }
 
 /// LRU class sizes in kB: (active_file, inactive_file, active_anon,
@@ -88,14 +88,14 @@ fn heap_kb() -> (u64, u64, u64) {
 /// still thrashes the cache (a miss pays the ext4 big-lock + I/O path
 /// on the fault). Cap is dynamic: half of managed RAM, min 32MB.
 fn page_cache_ops_line() -> String {
-    let (hits, misses, evictions, demotions) = rux::fs::page_cache::page_cache_stats();
+    let (hits, misses, evictions, demotions) = rux::fs::hotpath::page_cache_stats();
     format!(
         "hits={} misses={} evictions={} demotions={} cap_pages={}",
         hits,
         misses,
         evictions,
         demotions,
-        rux::fs::page_cache::page_cache_cap_pages()
+        rux::fs::hotpath::page_cache_cap_pages()
     )
 }
 

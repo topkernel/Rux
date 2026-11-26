@@ -96,7 +96,7 @@ pub struct PosixMq {
     /// SIGEV_THREAD target: the netlink socket musl/glibc's helper
     /// registered (sigev_signo carries its fd). Linux delivers the
     /// notification by pushing a 32-byte message onto that socket.
-    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::fs::file::File>>>,
+    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::fs::types::File>>>,
 }
 
 impl PosixMq {

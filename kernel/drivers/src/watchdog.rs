@@ -22,7 +22,7 @@
 //! Device number: misc 10:130 (Linux WATCHDOG_MINOR).
 
 #![forbid(unsafe_code)]
-use crate::fs::dev_t::{DevNo, MISC_MAJOR};
+use crate::fs::{types::DevNo, hotpath::MISC_MAJOR};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// /dev/watchdog device number (misc 10:130, Linux WATCHDOG_MINOR).
@@ -65,7 +65,7 @@ static PRETIMEOUT_S: AtomicU32 = AtomicU32::new(0);
 // ---- file ops ------------------------------------------------------------
 
 /// write() is the classic watchdog keepalive ping (any byte).
-fn watchdog_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+fn watchdog_write(_file: &crate::fs::types::File, buf: &[u8]) -> isize {
     if buf.is_empty() {
         return -22; // EINVAL (Linux checks the count)
     }
@@ -74,18 +74,18 @@ fn watchdog_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 
 /// read(): no card status to report — EOF. (Linux watchdog_dev has no
 /// mandatory read; the OH consumer never reads.)
-fn watchdog_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
+fn watchdog_read(_file: &crate::fs::types::File, _buf: &mut [u8]) -> isize {
     0
 }
 
 /// /dev/watchdog file operations.
-pub static WATCHDOG_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static WATCHDOG_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(watchdog_read)
     .write(watchdog_write)
     .build();
 
 /// True when `file` is an open /dev/watchdog description.
-pub fn is_watchdog_file(file: &crate::fs::file::File) -> bool {
+pub fn is_watchdog_file(file: &crate::fs::types::File) -> bool {
     match file.get_ops() {
         Some(ops) => core::ptr::eq(ops as *const _, &WATCHDOG_OPS as *const _),
         None => false,
@@ -95,7 +95,7 @@ pub fn is_watchdog_file(file: &crate::fs::file::File) -> bool {
 /// Per-fd ioctl dispatch (ops identity). Returns Some(ret) when the file
 /// is the watchdog device, None otherwise.
 pub fn watchdog_file_ioctl(
-    file: &crate::fs::file::File,
+    file: &crate::fs::types::File,
     request: u32,
     arg: usize,
 ) -> Option<i64> {

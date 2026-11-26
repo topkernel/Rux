@@ -10,7 +10,7 @@
 
 use crate::syscall::{EPollEvent, epoll_events, epoll_ctl_ops, SyscallNo};
 use crate::syscall::misc::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
-use crate::fs::file_close;
+use crate::fs::hotpath::file_close;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_epoll() {

@@ -45,9 +45,9 @@ const DRM_MAJOR: u32 = 226;
 /// Same, exposed for the sysfs class registration (dev/char link names).
 pub const DRM_MAJOR_NUM: u32 = DRM_MAJOR;
 /// /dev/dri/card0 (primary node, opened by the composer).
-pub const DEV_DRM_CARD0: crate::fs::dev_t::DevNo = crate::fs::dev_t::DevNo::new(DRM_MAJOR, 0);
+pub const DEV_DRM_CARD0: crate::fs::types::DevNo = crate::fs::types::DevNo::new(DRM_MAJOR, 0);
 /// /dev/dri/renderD128 (render node, opened by the gbm gralloc).
-pub const DEV_DRM_RENDER: crate::fs::dev_t::DevNo = crate::fs::dev_t::DevNo::new(DRM_MAJOR, 128);
+pub const DEV_DRM_RENDER: crate::fs::types::DevNo = crate::fs::types::DevNo::new(DRM_MAJOR, 128);
 
 // ============================================================================
 // KMS object IDs (single fixed pipeline)
@@ -645,22 +645,22 @@ fn virtio_format_for(fourcc: u32) -> Option<u32> {
 // File operations (both DRM nodes share one ops table)
 // ============================================================================
 
-fn drmdev_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
+fn drmdev_read(_file: &crate::fs::types::File, _buf: &mut [u8]) -> isize {
     0 // EOF (no readable event stream yet)
 }
 
-fn drmdev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+fn drmdev_write(_file: &crate::fs::types::File, buf: &[u8]) -> isize {
     buf.len() as isize
 }
 
 /// File ops for /dev/dri/card0 and /dev/dri/renderD128.
-pub static DRM_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static DRM_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(drmdev_read)
     .write(drmdev_write)
     .build();
 
 /// True when the File is one of the /dev/dri nodes.
-pub fn is_drm_file(file: &crate::fs::file::File) -> bool {
+pub fn is_drm_file(file: &crate::fs::types::File) -> bool {
     match file.get_ops() {
         Some(ops) => core::ptr::eq(ops as *const _, &DRM_OPS as *const _),
         None => false,
@@ -669,16 +669,16 @@ pub fn is_drm_file(file: &crate::fs::file::File) -> bool {
 
 // --- prime (dma-buf style) file ------------------------------------------------
 
-fn prime_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
+fn prime_read(_file: &crate::fs::types::File, _buf: &mut [u8]) -> isize {
     -25 // ENOTTY: dma-buf is mmap/DMABUF_IOCTL_SYNC only
 }
 
-fn prime_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
+fn prime_write(_file: &crate::fs::types::File, _buf: &[u8]) -> isize {
     -25
 }
 
 /// Close: drop the Arc<GemObject> the export stashed in private_data.
-fn prime_close(file: &crate::fs::file::File) -> i32 {
+fn prime_close(file: &crate::fs::types::File) -> i32 {
     // private_data was installed by prime_handle_to_fd as
     // Box<Arc<GemObject>>; reconstruct and drop it once here.
     if let Some(ptr) = file.private_data_ptr() {
@@ -697,7 +697,7 @@ fn prime_close(file: &crate::fs::file::File) -> i32 {
 /// with no error ("eglCreateImageKHR failed, error EGL_SUCCESS"), RS
 /// rendered into a shadow target, and every flipped GEM stayed zeroed
 /// (the black-screen root cause).
-fn prime_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+fn prime_lseek(file: &crate::fs::types::File, offset: isize, whence: i32) -> isize {
     let Some(gem) = prime_file_gem(file) else { return -9 };
     let size = gem.size as i64;
     let cur = file.get_pos() as i64;
@@ -715,7 +715,7 @@ fn prime_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isiz
     target as isize
 }
 
-pub static PRIME_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static PRIME_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(prime_read)
     .write(prime_write)
     .lseek(prime_lseek)
@@ -723,7 +723,7 @@ pub static PRIME_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::build
     .build();
 
 /// True when the File is an exported DRM prime fd.
-pub fn is_prime_file(file: &crate::fs::file::File) -> bool {
+pub fn is_prime_file(file: &crate::fs::types::File) -> bool {
     match file.get_ops() {
         Some(ops) => core::ptr::eq(ops as *const _, &PRIME_OPS as *const _),
         None => false,
@@ -740,7 +740,7 @@ pub fn is_prime_file(file: &crate::fs::file::File) -> bool {
 /// software EGLImage import of gralloc buffers bailed silently
 /// ("eglCreateImageKHR failed, error EGL_SUCCESS" — RS renders into a
 /// shadow target and the flipped GEMs stay zeroed/black).
-pub fn drm_file_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -> Option<i32> {
+pub fn drm_file_stat(file: &crate::fs::types::File, stat: &mut crate::fs::types::Stat) -> Option<i32> {
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
         stat.st_dev = 0;
@@ -776,7 +776,7 @@ pub fn drm_file_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -
 }
 
 /// GEM object backing a prime fd.
-fn prime_file_gem(file: &crate::fs::file::File) -> Option<Arc<GemObject>> {
+fn prime_file_gem(file: &crate::fs::types::File) -> Option<Arc<GemObject>> {
     // private_data holds a Box<Arc<GemObject>> installed at export (the
     // one audited deref is the clone).
     let ptr = file.private_data_ptr()?;
@@ -1746,12 +1746,12 @@ fn prime_handle_to_fd(arg: usize, size: usize) -> i64 {
         None => return -9,
     };
     let Some(fd) = fdt.alloc_fd() else { return -24 }; // EMFILE
-    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    let mut file_flags = crate::fs::types::FileFlags::O_RDWR;
     if flags & 0x80000 != 0 {
         // DRM_CLOEXEC
-        file_flags |= crate::fs::file::FileFlags::O_CLOEXEC;
+        file_flags |= crate::fs::types::FileFlags::O_CLOEXEC;
     }
-    let file = Arc::new(crate::fs::file::File::new(crate::fs::file::FileFlags::new(
+    let file = Arc::new(crate::fs::types::File::new(crate::fs::types::FileFlags::new(
         file_flags,
     )));
     file.set_ops(&PRIME_OPS);
@@ -1781,7 +1781,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
     if prime_fd < 0 {
         return -22;
     }
-    let Some(file) = (crate::fs::file::get_file_fd(prime_fd as usize)) else {
+    let Some(file) = (crate::fs::hotpath::get_file_fd(prime_fd as usize)) else {
         static DEAD_N: AtomicU32 = AtomicU32::new(0);
         let n = DEAD_N.fetch_add(1, Ordering::Relaxed);
         if n < 20 {
@@ -1882,7 +1882,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
 }
 
 /// Ioctls on a prime fd (dma-buf file).
-pub fn prime_file_ioctl(_file: &crate::fs::file::File, request: u32, _arg: usize) -> Option<i64> {
+pub fn prime_file_ioctl(_file: &crate::fs::types::File, request: u32, _arg: usize) -> Option<i64> {
     match request {
         DMA_BUF_IOCTL_SYNC => Some(0), // cache coherent: nothing to do
         _ => Some(-25),                // ENOTTY
@@ -2429,7 +2429,7 @@ fn wait_vblank(arg: usize) -> i64 {
 /// path can map. `offset` is 0 for prime fds (their private GEM) or the
 /// fake offset from MAP_DUMB for /dev/dri nodes.
 pub fn gem_mmap_resolve(
-    file: &crate::fs::file::File,
+    file: &crate::fs::types::File,
     offset: u64,
     len: usize,
 ) -> Option<(u64, usize)> {
@@ -2486,25 +2486,25 @@ pub fn gem_mmap_resolve(
 /// Called after the GPU framebuffer came up (the flip path needs the
 /// virtio-gpu device).
 pub fn init_drm() -> Result<(), ()> {
-    crate::fs::leaf_glue::devfs::register_char_device(DEV_DRM_CARD0, &DRM_OPS)?;
-    crate::fs::leaf_glue::devfs::register_char_device(DEV_DRM_RENDER, &DRM_OPS)?;
+    crate::fs::hotpath::devfs::register_char_device(DEV_DRM_CARD0, &DRM_OPS)?;
+    crate::fs::hotpath::devfs::register_char_device(DEV_DRM_RENDER, &DRM_OPS)?;
 
-    crate::fs::leaf_glue::devfs::mkdir("dri")?;
-    crate::fs::leaf_glue::devfs::mknod("dri/card0", DEV_DRM_CARD0, 0o666)?;
-    crate::fs::leaf_glue::devfs::mknod("dri/renderD128", DEV_DRM_RENDER, 0o666)?;
+    crate::fs::hotpath::devfs::mkdir("dri")?;
+    crate::fs::hotpath::devfs::mknod("dri/card0", DEV_DRM_CARD0, 0o666)?;
+    crate::fs::hotpath::devfs::mknod("dri/renderD128", DEV_DRM_RENDER, 0o666)?;
 
     // DrmDisplay::SetDisplayPowerStatus opens /dev/graphics/fb0 and
     // FBIOBLANKs it; alias the existing fb0 node (the OH power-state
     // path reports NOT_SUPPORT when it is missing).
-    crate::fs::leaf_glue::devfs::mkdir("graphics")?;
-    crate::fs::leaf_glue::devfs::mknod("graphics/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
+    crate::fs::hotpath::devfs::mkdir("graphics")?;
+    crate::fs::hotpath::devfs::mknod("graphics/fb0", crate::fs::hotpath::DEV_FB0, 0o666)?;
 
     // sysfs class entries for the DRM nodes, rooted at the virtio-gpu
     // PCI function: /sys/class/drm/{card0,renderD128} +
     // /sys/dev/char/226:{0,128} + the PCI device dir libdrm's
     // drmGetDevice(fd) walk needs (see register_drm_device).
     let slot_name = gpu_pci_slot_name();
-    crate::fs::leaf_glue::sysfs::register_drm_device(&slot_name);
+    crate::fs::hotpath::sysfs::register_drm_device(&slot_name);
 
     crate::pr_info!(
         "drm: /dev/dri/card0 + renderD128 registered (crtc={} conn={} enc={} plane={})",

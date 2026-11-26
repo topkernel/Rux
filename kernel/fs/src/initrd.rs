@@ -35,7 +35,7 @@
 //! verification) — small, allocation-light, and sufficient for the
 //! one-shot boot unpack. (zstd/xz/lz4 initrds are not supported yet.)
 
-use rux::fs::leaf_glue::RamfsView;
+use rux::fs::hotpath::RamfsView;
 use rux::initrd::CpioStats;
 use alloc::vec::Vec;
 

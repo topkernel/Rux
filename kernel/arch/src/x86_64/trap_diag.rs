@@ -536,7 +536,7 @@ fn dump_mm_ops(tag: &str, t: &crate::process::types::Task) {
             if fd >= 0 {
                 // SAFETY: current task's fd table is alive for the
                 // duration of the fault report.
-                let path = crate::fs::file::get_file_fd(fd as usize)
+                let path = crate::fs::hotpath::get_file_fd(fd as usize)
                     .map(|f| f.path())
                     .unwrap_or_else(|| alloc::string::String::from("?"));
                 // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report

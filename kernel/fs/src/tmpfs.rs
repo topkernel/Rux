@@ -37,8 +37,8 @@
 // the name cells are parent-children-lock serialized (set_name's
 // contract); read_at/reserve_page rows ride the page's own lock.)
 use crate::errno;
-use rux::fs::inode::{file_type, setattr_attr, Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
-use rux::fs::superblock::{FileSystemType, FsContext, SuperBlock, SuperBlockFlags};
+use rux::fs::{hotpath::file_type, hotpath::setattr_attr, types::Inode, types::InodeMode, types::Ino, types::INodeOps, types::VfsDirEntry};
+use rux::fs::types::{FileSystemType, FsContext, SuperBlock, SuperBlockFlags};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -309,7 +309,7 @@ impl TmpfsNode {
         let avail = size - offset;
         let total = buf.len().min(avail);
 
-        let cache = rux::fs::page_cache::get_page_cache();
+        let cache = rux::fs::hotpath::get_page_cache();
         let mut done = 0usize;
         while done < total {
             let off = offset + done;
@@ -448,7 +448,7 @@ impl TmpfsNode {
             // still-live alias of an invalidated frame keeps serving its
             // PTE — skipping it here made fd writes invisible to old
             // mappers (FXW MAP-MISMATCH family).
-            rux::fs::page_cache::get_page_cache().writeback_update_range_stale(
+            rux::fs::hotpath::get_page_cache().writeback_update_range_stale(
                 self.fs_id,
                 self.ino,
                 offset as u64,
@@ -532,7 +532,7 @@ impl TmpfsNode {
         // is the required content, and die by eviction or final put.
         {
             const ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
-            let cache = rux::fs::page_cache::get_page_cache();
+            let cache = rux::fs::hotpath::get_page_cache();
             let mut off = offset as u64;
             let end64 = end as u64;
             while off < end64 {
@@ -592,7 +592,7 @@ impl TmpfsNode {
         // byte-granular truncates). ZERO_PAGE lives in .rodata — a 4 KiB
         // stack array on the syscall path is avoidable weight.
         const ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
-        let cache = rux::fs::page_cache::get_page_cache();
+        let cache = rux::fs::hotpath::get_page_cache();
         if new_size < old_size {
             // Zero EVERY live frame byte in [new_size, old_size) — not
             // just the partial tail: fully-dropped pages' frames can
@@ -824,7 +824,7 @@ static TMPFS_INSTANCES: Spinlock<TmpfsInstances> =
     Spinlock::new(TmpfsInstances { list: Vec::new() });
 
 /// Create a new independent tmpfs instance and return its root VFS inode.
-/// Called by `mount::do_mount("tmpfs")`. `data` is the mount(2) options
+/// Called by `rux::fs::hotpath::do_mount("tmpfs")`. `data` is the mount(2) options
 /// string ("size=32M,mode=700,..."); None = defaults (unlimited).
 pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
     let instance = TMPFS_INSTANCE_COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -845,14 +845,14 @@ pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
 /// logic lives crate-side; the framework passes a plain enum).
 pub fn create_tagged_mount_instance(
     data: Option<&str>,
-    tag: rux::fs::leaf_glue::TmpfsTagKind,
+    tag: rux::fs::types::TmpfsTagKind,
 ) -> Arc<Inode> {
     let mut root = create_mount_instance(data);
     let ops: &'static INodeOps = match tag {
-        rux::fs::leaf_glue::TmpfsTagKind::None => return root,
-        rux::fs::leaf_glue::TmpfsTagKind::Devpts => &DEVPTS_INODE_OPS,
-        rux::fs::leaf_glue::TmpfsTagKind::Securityfs => &SECURITYFS_INODE_OPS,
-        rux::fs::leaf_glue::TmpfsTagKind::Mqueue => &MQUEUE_INODE_OPS,
+        rux::fs::types::TmpfsTagKind::None => return root,
+        rux::fs::types::TmpfsTagKind::Devpts => &DEVPTS_INODE_OPS,
+        rux::fs::types::TmpfsTagKind::Securityfs => &SECURITYFS_INODE_OPS,
+        rux::fs::types::TmpfsTagKind::Mqueue => &MQUEUE_INODE_OPS,
     };
     tag_mount_instance_type(&mut root, ops);
     root
@@ -892,7 +892,7 @@ fn tmpfs_make_inode(node: &Arc<TmpfsNode>) -> Arc<Inode> {
 /// tmpfs mount callback (FsRegistry path). The registry path never wires a
 /// dentry tree — it only validates the type name — so a plain SuperBlock is
 /// returned. Real instances (with their trees) come from
-/// `create_mount_instance()` via `mount::do_mount`.
+/// `create_mount_instance()` via `rux::fs::hotpath::do_mount`.
 // SAFETY: FsContext is a valid reference from the registry mount path.
 fn tmpfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     Ok(Box::into_raw(Box::new(SuperBlock::new(PAGE_SIZE, TMPFS_MAGIC))))
@@ -909,11 +909,11 @@ static TMPFS_REGISTERED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Register the "tmpfs" filesystem type in the FsRegistry (idempotent).
-/// Needed so the registry-based mount path (superblock::do_mount) accepts
-/// the type name; sys_mount dispatches by string via mount::do_mount.
+/// Needed so the registry-based mount path (rux::fs::hotpath::superblock_do_mount) accepts
+/// the type name; sys_mount dispatches by string via rux::fs::hotpath::do_mount.
 pub fn ensure_registered() {
     if !TMPFS_REGISTERED.swap(true, Ordering::AcqRel) {
-        let _ = rux::fs::superblock::register_filesystem(&TMPFS_FS_TYPE);
+        let _ = rux::fs::hotpath::register_filesystem(&TMPFS_FS_TYPE);
     }
 }
 
@@ -1247,7 +1247,7 @@ fn tmpfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-fn tmpfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn tmpfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     let node = match node_of(inode) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1410,7 +1410,7 @@ fn tmpfs_destroy_inode(inode: &mut Inode) {
     // stay alive while user PTEs pin them; the ENTRIES must not survive
     // the inode — a recycled (fs_id, ino) pair would otherwise observe
     // the dead file's frames).
-    rux::fs::page_cache::get_page_cache()
+    rux::fs::hotpath::get_page_cache()
         .invalidate_inode(inode.fs_id, inode.ino as u64);
     // Reclaim the leaked Arc reference (idempotent; INV-FS-PRIVDATA-1
     // through the framework edge — the Drop-time single reclaim).
@@ -1422,7 +1422,7 @@ fn tmpfs_destroy_inode(inode: &mut Inode) {
 // ============================================================================
 
 /// tmpfs regular-file read: page-granular, zero-fill holes, update f_pos.
-fn tmpfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn tmpfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // SAFETY: inode/private_data installed by tmpfs_make_inode; the File
     // holds an Arc<Inode> keeping the node reference alive.
     {
@@ -1476,7 +1476,7 @@ fn tmpfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 /// (POSIX: "if some bytes can be written, the write shall return the
 /// number ... otherwise -1 with ENOSPC"). Short counts are returned as
 /// written and the caller retries — the next call hits ENOSPC.
-fn tmpfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn tmpfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // SAFETY: see tmpfs_file_read.
     {
 
@@ -1489,7 +1489,7 @@ fn tmpfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
         Err(_) => return -9,
     };
     let _write_guard = file.io_lock.guard();
-    let offset = if file.flags_bits() & rux::fs::FileFlags::O_APPEND != 0 {
+    let offset = if file.flags_bits() & rux::fs::types::FileFlags::O_APPEND != 0 {
         let end = node.file_size();
         file.set_pos(end);
         end as usize
@@ -1527,7 +1527,7 @@ fn tmpfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
     }
 }
 
-fn tmpfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn tmpfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     let file_size = match rux::fs::r#unsafe::file_inode(file) {
         Some(inode) => match node_of(inode) {
             Ok(node) => node.file_size() as isize,
@@ -1549,12 +1549,12 @@ fn tmpfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
     new_pos
 }
 
-fn tmpfs_file_close(_file: &rux::fs::File) -> i32 {
+fn tmpfs_file_close(_file: &rux::fs::types::File) -> i32 {
     0
 }
 
 /// tmpfs file operations table (directories use the shared DIR_FILE_OPS).
-pub static TMPFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static TMPFS_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(tmpfs_file_read)
     .write(tmpfs_file_write)
     .lseek(tmpfs_file_lseek)
@@ -1568,7 +1568,7 @@ pub static TMPFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
 /// shared results/checkpoint page (setup_ipc), so coherent cross-process
 /// mmap of tmpfs files is load-bearing for the whole checkpoint-based
 /// test family (execl01..execveat02, waitid08, ...).
-pub fn is_tmpfs_file(file: &rux::fs::File) -> bool {
+pub fn is_tmpfs_file(file: &rux::fs::types::File) -> bool {
     file.get_ops()
         .is_some_and(|ops| core::ptr::eq(ops as *const _, &TMPFS_FILE_OPS as *const _))
 }
@@ -1581,7 +1581,7 @@ pub fn is_tmpfs_file(file: &rux::fs::File) -> bool {
 ///
 /// SAFETY: inode/private_data installed by tmpfs_make_inode; the File
 /// holds an Arc<Inode> keeping the node reference alive.
-fn tmpfs_file_read_at(file: &rux::fs::File, offset: u64, buf: &mut [u8]) -> isize {
+fn tmpfs_file_read_at(file: &rux::fs::types::File, offset: u64, buf: &mut [u8]) -> isize {
     {
 
     let inode = match rux::fs::r#unsafe::file_inode(file) {
@@ -1606,9 +1606,9 @@ fn tmpfs_file_read_at(file: &rux::fs::File, offset: u64, buf: &mut [u8]) -> isiz
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else if inode.mode.is_regular_file() {
         Some(&TMPFS_FILE_OPS)
     } else if inode.mode.is_char_device() {
@@ -1618,7 +1618,7 @@ fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> 
         // exactly like devfs.
         let node = node_of(inode).ok()?;
         let rdev = node.rdev.load(Ordering::Relaxed);
-        let devno = rux::fs::dev_t::DevNo::from_user_dev(rdev);
+        let devno = rux::fs::types::DevNo::from_user_dev(rdev);
         crate::devfs::registry::get_char_device_ops(devno)
     } else {
         // Block devices (and anything else): no block-driver open path —
@@ -1770,63 +1770,63 @@ pub static DEVPTS_INODE_OPS: INodeOps = INodeOps {
 /// securityfs, configfs, mqueue — all tmpfs instances, differing only
 /// in the type tag and pre-population). Bodies are the old mount.rs
 /// arms, verbatim.
-pub fn mount_tmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_tmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = source;
     // P0-6: each mount creates an INDEPENDENT tmpfs instance (own inode
     // number space + icache fs_id). Register the fs type so the
     // registry-based mount path also accepts "tmpfs".
     ensure_registered();
     let root_inode = create_mount_instance(data);
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
-pub fn mount_ramfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_ramfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = source;
     // ramfs/rootfs: tmpfs-instance alias (systemd's /run/credentials).
     ensure_registered();
     let root_inode = create_mount_instance(data);
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount(fs_type, target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount(fs_type, target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
-pub fn mount_devpts(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_devpts(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, target);
     // devpts: an isolated tmpfs instance typed DEVPTS (the pty node
     // source stays devfs's /dev/pts; options tolerated and ignored).
     ensure_registered();
     let mut root_inode = create_mount_instance(data);
     tag_mount_instance_type(&mut root_inode, &DEVPTS_INODE_OPS);
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
-pub fn mount_securityfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_securityfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, fs_type);
     // securityfs: the empty-instance treatment (sys-kernel-security.mount).
     ensure_registered();
     let mut root_inode = create_mount_instance(data);
     tag_mount_instance_type(&mut root_inode, &SECURITYFS_INODE_OPS);
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
-pub fn mount_mqueue(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_mqueue(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, fs_type);
     // POSIX mqueue: empty tmpfs instance typed MQUEUE_MAGIC (statfs).
     ensure_registered();
     let mut root_inode = create_mount_instance(data);
     tag_mount_instance_type(&mut root_inode, &MQUEUE_INODE_OPS);
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount("mqueue", target, "mqueue", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount("mqueue", target, "mqueue", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
-pub fn mount_configfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_configfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, fs_type);
     // configfs: tmpfs instance tagged CONFIGFS_MAGIC, pre-populated with
     // the hmdfs/sharefs subsystem dirs (the reference's driver-registered
@@ -1839,31 +1839,31 @@ pub fn mount_configfs(source: &str, target: &str, fs_type: &str, data: Option<&s
             let _ = ops.call_mkdir(
                 &root_inode,
                 b"hmdfs",
-                rux::fs::inode::InodeMode::new(0o755),
+                rux::fs::types::InodeMode::new(0o755),
                 Err(crate::errno::Errno::ReadOnlyFileSystem),
             );
             let _ = ops.call_mkdir(
                 &root_inode,
                 b"sharefs",
-                rux::fs::inode::InodeMode::new(0o755),
+                rux::fs::types::InodeMode::new(0o755),
                 Err(crate::errno::Errno::ReadOnlyFileSystem),
             );
         }
     }
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount("configfs", target, "configfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount("configfs", target, "configfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 /// Register the whole tmpfs family's mount names (the mount seam's
-/// tmpfs-family row; called from mount_table::register_builtin_handlers).
+/// tmpfs-family row; called from rux::fs::hotpath::register_builtin_handlers).
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["tmpfs", "shm"], mount_tmpfs);
-    rux::fs::mount_table::register(&["ramfs", "rootfs"], mount_ramfs);
-    rux::fs::mount_table::register(&["devpts"], mount_devpts);
-    rux::fs::mount_table::register(&["securityfs"], mount_securityfs);
-    rux::fs::mount_table::register(&["mqueue"], mount_mqueue);
-    rux::fs::mount_table::register(&["configfs"], mount_configfs);
+    rux::fs::hotpath::register(&["tmpfs", "shm"], mount_tmpfs);
+    rux::fs::hotpath::register(&["ramfs", "rootfs"], mount_ramfs);
+    rux::fs::hotpath::register(&["devpts"], mount_devpts);
+    rux::fs::hotpath::register(&["securityfs"], mount_securityfs);
+    rux::fs::hotpath::register(&["mqueue"], mount_mqueue);
+    rux::fs::hotpath::register(&["configfs"], mount_configfs);
 }
 
 // ============================================================================

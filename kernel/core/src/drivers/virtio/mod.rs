@@ -749,7 +749,7 @@ impl VirtIOBlkDevice {
         &self,
         sector: u64,
         buf: &mut [u8],
-        completion: &crate::fs::io_completion::IoCompletion,
+        completion: &crate::fs::types::IoCompletion,
     ) -> Result<(), i32> {
         if !*self.initialized.lock_irqsave() {
             return Err(-5);  // EIO
@@ -886,7 +886,7 @@ impl VirtIOBlkDevice {
         &self,
         sector: u64,
         buf: &[u8],
-        completion: &crate::fs::io_completion::IoCompletion,
+        completion: &crate::fs::types::IoCompletion,
     ) -> Result<(), i32> {
         if !*self.initialized.lock_irqsave() {
             return Err(-5);  // EIO
@@ -1006,7 +1006,7 @@ impl VirtIOBlkDevice {
         disk: &crate::drivers::blkdev::GenDisk,
         sector: u64,
         buf: &mut [u8],
-        completion: &crate::fs::io_completion::IoCompletion,
+        completion: &crate::fs::types::IoCompletion,
     ) -> i32 {
         let Some(device) = disk.private::<VirtIOBlkDevice>() else { return -5 };
         match device.submit_read_async(sector, buf, completion) {
@@ -1023,7 +1023,7 @@ impl VirtIOBlkDevice {
         disk: &crate::drivers::blkdev::GenDisk,
         sector: u64,
         buf: &[u8],
-        completion: &crate::fs::io_completion::IoCompletion,
+        completion: &crate::fs::types::IoCompletion,
     ) -> i32 {
         let Some(device) = disk.private::<VirtIOBlkDevice>() else { return -5 };
         match device.submit_write_async(sector, buf, completion) {
@@ -1181,14 +1181,14 @@ pub(crate) fn io_buf_release(ptr: *mut u8, layout: alloc::alloc::Layout) {
 /// across the call).
 /// Mark a pending's completion as under delivery (the walker-vs-abandon
 /// handshake; same audited-deref discipline as [`deliver_completion`]).
-pub(crate) fn begin_delivery(completion: *mut crate::fs::io_completion::IoCompletion) {
+pub(crate) fn begin_delivery(completion: *mut crate::fs::types::IoCompletion) {
     // SAFETY: the count protocol keeps the IoCompletion alive; callers
     // hold the pending-table lock that serializes the handshake.
     unsafe { (*completion).begin_delivery(); }
 }
 
 pub(crate) fn deliver_completion(
-    completion: *mut crate::fs::io_completion::IoCompletion,
+    completion: *mut crate::fs::types::IoCompletion,
     status: i32,
     token: usize,
 ) {
@@ -1590,7 +1590,7 @@ struct PendingIo {
     /// waiter has unwound (the io_buf is deliberately leaked — the device
     /// may still DMA its status byte — and the completion must never be
     /// fired into memory its owner stopped owning).
-    completion: *mut crate::fs::io_completion::IoCompletion,
+    completion: *mut crate::fs::types::IoCompletion,
     /// Pointer to response buffer (allocated during submit, freed on
     /// completion). NULL in tombstones (nothing to free or read).
     resp_ptr: *mut u8,
@@ -2143,7 +2143,7 @@ pub fn pci_flag_sync_tombstone_timed_out(disk: usize, ordinal: u16) {
 ///
 /// Returns the number of entries abandoned.
 pub fn abandon_pending_completion(
-    comp: *mut crate::fs::io_completion::IoCompletion,
+    comp: *mut crate::fs::types::IoCompletion,
 ) -> usize {
     let mut abandoned = 0usize;
     // Per-disk tally so the admission-guard decrements land on the OWNING
@@ -2273,7 +2273,7 @@ fn pci_submit_data_async(
     data_ptr: *mut u8,
     data_len: usize,
     is_write: bool,
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     pci_submit_data_async_sg(
         disk,
@@ -2314,7 +2314,7 @@ fn pci_submit_data_async_sg(
     sector: u64,
     segs: &[crate::drivers::blkdev::DmaSeg],
     is_write: bool,
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
@@ -2566,7 +2566,7 @@ fn pci_async_read_fn(
     disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &mut [u8],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> i32 {
     match pci_submit_data_async(disk, sector, buf.as_mut_ptr(), buf.len(), false, completion) {
         Ok(()) => 0,
@@ -2589,7 +2589,7 @@ fn pci_submit_write_async(
     disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &[u8],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> Result<(), i32> {
     pci_submit_data_async(disk, sector, buf.as_ptr() as *mut u8, buf.len(), true, completion)
 }
@@ -2601,7 +2601,7 @@ fn pci_async_write_fn(
     disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &[u8],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> i32 {
     match pci_submit_write_async(disk, sector, buf, completion) {
         Ok(()) => 0,
@@ -2617,7 +2617,7 @@ fn pci_async_read_sg_fn(
     disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     segs: &[crate::drivers::blkdev::DmaSeg],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> i32 {
     match pci_submit_data_async_sg(disk, sector, segs, false, completion) {
         Ok(()) => 0,
@@ -2633,7 +2633,7 @@ fn pci_async_write_sg_fn(
     disk: &crate::drivers::blkdev::GenDisk,
     sector: u64,
     segs: &[crate::drivers::blkdev::DmaSeg],
-    completion: &crate::fs::io_completion::IoCompletion,
+    completion: &crate::fs::types::IoCompletion,
 ) -> i32 {
     match pci_submit_data_async_sg(disk, sector, segs, true, completion) {
         Ok(()) => 0,
@@ -2705,7 +2705,7 @@ pub fn vw_report(tag: &str) {
     // children D-sleeping while the virtio rings are fully drained.
     {
         let (locked, owner, depth, queued, woken) =
-            crate::fs::journal_seam::EXT4_BIG_LOCK.vw_state();
+            crate::fs::hotpath::EXT4_BIG_LOCK.vw_state();
         crate::pr_err!(
             "VW-EXT4LOCK {} locked={} owner={} depth={} queued={} wokenflag={}",
             tag,

@@ -133,8 +133,8 @@ pub fn uart_write(buf: &[u8]) -> isize {
 }
 
 /// UART character device file operations (public access)
-fn uart_file_poll(_file: &rux::fs::File, events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+fn uart_file_poll(_file: &rux::fs::types::File, events: u16) -> u16 {
+    use rux::fs::hotpath::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::console::uart_data_ready() {
         ready |= POLLIN | POLLRDNORM;
@@ -146,7 +146,7 @@ fn uart_file_poll(_file: &rux::fs::File, events: u16) -> u16 {
 }
 
 /// UART character device file operations (public access)
-pub static UART_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static UART_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(uart_file_read)
     .write(uart_file_write)
     .poll(uart_file_poll)
@@ -166,7 +166,7 @@ const CHAR_DEV_STAT_DEV: u64 = 0x636f_6e73_6f6c_6501;
 /// to a pipe or a regular file.
 ///
 /// Returns `Some(0)` when `file` is a UART File, `None` otherwise.
-pub fn char_dev_file_stat(file: &rux::fs::File, stat: &mut rux::fs::Stat) -> Option<i32> {
+pub fn char_dev_file_stat(file: &rux::fs::types::File, stat: &mut rux::fs::types::Stat) -> Option<i32> {
     let ops = file.get_ops()?;
     if !core::ptr::eq(ops as *const _, &UART_OPS as *const _) {
         return None;
@@ -191,9 +191,9 @@ pub fn char_dev_file_stat(file: &rux::fs::File, stat: &mut rux::fs::Stat) -> Opt
     Some(0)
 }
 
-fn uart_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn uart_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // Check O_NONBLOCK flag
-    let nonblock = (file.flags().bits() & rux::fs::file::FileFlags::O_NONBLOCK) != 0;
+    let nonblock = (file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0;
 
     if nonblock {
         // Non-blocking: check once and return if no data
@@ -208,7 +208,7 @@ fn uart_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-fn uart_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn uart_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     match rux::fs::r#unsafe::file_privdata_ref::<CharDev>(file) {
         Some(char_dev) => char_dev.write(buf),
         None => -9,  // EBADF
@@ -218,12 +218,12 @@ fn uart_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 /// Check if file is a character device and fill stat structure
 ///
 /// Returns Some(()) if it's a character device, None if not
-pub fn char_dev_stat(file: &rux::fs::File, stat: &mut rux::fs::Stat) -> Option<()> {
+pub fn char_dev_stat(file: &rux::fs::types::File, stat: &mut rux::fs::types::Stat) -> Option<()> {
     {
         if let Some(ops) = file.get_ops() {
             // Check if it's a UART character device (by comparing ops pointer)
-            let ops_ptr = ops as *const _ as *const rux::fs::FileOps;
-            let uart_ops_ptr = &UART_OPS as *const rux::fs::FileOps;
+            let ops_ptr = ops as *const _ as *const rux::fs::types::FileOps;
+            let uart_ops_ptr = &UART_OPS as *const rux::fs::types::FileOps;
 
             if ops_ptr == uart_ops_ptr {
                 // This is a UART character device
@@ -258,8 +258,8 @@ pub fn char_dev_stat(file: &rux::fs::File, stat: &mut rux::fs::Stat) -> Option<(
 
 /// Initialize standard file descriptors for a task (stdin/stdout/stderr,
 /// all wired to the UART console device).
-pub fn init_std_fds_for_task(fdtable: &rux::fs::FdTable) {
-    use rux::fs::{File, FileFlags};
+pub fn init_std_fds_for_task(fdtable: &rux::fs::types::FdTable) {
+    use rux::fs::{types::File, types::FileFlags};
     use alloc::sync::Arc;
 
     // Create UART character device (use static to avoid dangling pointer)

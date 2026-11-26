@@ -34,7 +34,7 @@
 use crate::arch::mm::map_user_page;
 use crate::arch::mm::memory_layout::{PhysAddr as MmPhysAddr, VirtAddr as MmVirtAddr};
 use crate::arch::mm::PageTableEntry;
-use crate::fs::dev_t::{DevNo, MISC_MAJOR};
+use crate::fs::{types::DevNo, hotpath::MISC_MAJOR};
 use crate::mm::{hotpath::PAGE_MASK, types::PAGE_SIZE};
 use crate::mm::hotpath::{free_pages, get_zeroed_page};
 use crate::mm::types::{Vma, VmaFlags, VmaType};
@@ -294,13 +294,13 @@ fn any_unpinned(unpinned: &[UnpinRange], pgstart: usize, pgend: usize) -> bool {
 // and is freed by ashmem_file_close (ops.close, exactly once per open
 // file description). Callers hold an Arc<File> from the fd table, so the
 // close op cannot have run yet.
-fn area_of<'a>(file: &'a crate::fs::file::File) -> Option<&'a AshmemArea> {
+fn area_of<'a>(file: &'a crate::fs::types::File) -> Option<&'a AshmemArea> {
     // The area box is the description's private data (INV-FS-FILEPRIV-1,
     // the framework edge); the Arc<File> callers hold pins it.
     crate::fs::r#unsafe::file_privdata_ref::<AshmemArea>(file)
 }
 
-fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+fn ashmem_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
     // (area_of: the INV-FS-FILEPRIV-1 framework edge — safe fn.)
     let area = match area_of(file) {
         Some(a) => a,
@@ -341,7 +341,7 @@ fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     done as isize
 }
 
-fn ashmem_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+fn ashmem_file_lseek(file: &crate::fs::types::File, offset: isize, whence: i32) -> isize {
     // (area_of: the INV-FS-FILEPRIV-1 framework edge — safe fn.)
     let area = match area_of(file) {
         Some(a) => a,
@@ -369,7 +369,7 @@ fn ashmem_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -
     new_pos as isize
 }
 
-fn ashmem_file_close(file: &crate::fs::file::File) -> i32 {
+fn ashmem_file_close(file: &crate::fs::types::File) -> i32 {
     // Linux ashmem_release: mappings do NOT pin the area — it dies on
     // close. Mapped pages survive on their own refcounts (AshmemPages
     // drop only releases the pool's owner references).
@@ -382,14 +382,14 @@ fn ashmem_file_close(file: &crate::fs::file::File) -> i32 {
 
 /// /dev/ashmem file operations. Write is a declared absence (the
 /// Linux driver has no .write_iter either).
-pub static ASHMEM_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub static ASHMEM_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
     .read(ashmem_file_read)
     .lseek(ashmem_file_lseek)
     .close(ashmem_file_close)
     .build();
 
 /// True when `file` is an open /dev/ashmem description.
-pub fn is_ashmem_file(file: &crate::fs::file::File) -> bool {
+pub fn is_ashmem_file(file: &crate::fs::types::File) -> bool {
     match file.get_ops() {
         Some(ops) => core::ptr::eq(ops as *const _, &ASHMEM_OPS as *const _),
         None => false,
@@ -397,7 +397,7 @@ pub fn is_ashmem_file(file: &crate::fs::file::File) -> bool {
 }
 
 /// devfs_open hook: allocate the per-open area.
-pub fn ashmem_open(file: &crate::fs::file::File) -> i32 {
+pub fn ashmem_open(file: &crate::fs::types::File) -> i32 {
     file.set_private_data(
         alloc::boxed::Box::into_raw(alloc::boxed::Box::new(AshmemArea::new())) as *mut u8,
     );
@@ -411,7 +411,7 @@ pub fn ashmem_open(file: &crate::fs::file::File) -> i32 {
 /// Per-fd ioctl dispatch (ops identity, the loop/evdev pattern).
 /// Returns Some(ret) when the file is ashmem, None otherwise.
 pub fn ashmem_file_ioctl(
-    file: &crate::fs::file::File,
+    file: &crate::fs::types::File,
     request: u32,
     arg: usize,
 ) -> Option<i64> {
@@ -423,7 +423,7 @@ pub fn ashmem_file_ioctl(
 
 /// `arg` is the raw syscall argument; every user-pointer use rides the
 /// exception-table uaccess paths (validated before dereference).
-fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> i64 {
+fn ashmem_ioctl(file: &crate::fs::types::File, request: u32, arg: usize) -> i64 {
     use crate::arch::uaccess::{access_ok, copy_to_user, strncpy_from_user};
 
     const EINVAL: i64 = 22;
@@ -584,7 +584,7 @@ fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> i64 {
 ///
 /// Returns the mapping address or negative errno.
 pub fn ashmem_mmap(
-    file: &crate::fs::file::File,
+    file: &crate::fs::types::File,
     addr: usize,
     length: usize,
     offset: u64,

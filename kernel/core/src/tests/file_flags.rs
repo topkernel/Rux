@@ -9,7 +9,7 @@
 
 // Test: FileFlags file flags
 use crate::println;
-use crate::fs::file::FileFlags;
+use crate::fs::types::FileFlags;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_file_flags() {

@@ -570,7 +570,7 @@ fn register_hooks() {
         deadline_ns_to_hres_ticks: misc::deadline_ns_to_hres_ticks,
         timerfd_expire_notify: misc::timerfd_expire_notify,
         param_stall_dump: misc::param_stall_dump,
-        is_eventfd_ops: |ops: &'static rux::fs::FileOps| core::ptr::eq(ops, &misc::EVENTFD_OPS),
+        is_eventfd_ops: |ops: &'static rux::fs::types::FileOps| core::ptr::eq(ops, &misc::EVENTFD_OPS),
         syscall_eio_line: |nr, args| io::syscall_eio_line(nr as usize, *args),
         epoll_dump_for_file: |fid| misc::epoll_dump_for_file(fid),
         seccomp_run: diag_seccomp_run::seccomp_run,

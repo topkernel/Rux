@@ -34,7 +34,7 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
     if len == 0 { return 0; }
     if !access_ok(buf, len) { return -14; } // EFAULT
 
-    let file = match crate::fs::file::get_file_fd(fd) {
+    let file = match crate::fs::hotpath::get_file_fd(fd) {
         Some(f) => f,
         None => return -9, // EBADF
     };
@@ -114,7 +114,7 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
     if len == 0 { return 0; }
     if !access_ok(buf, len) { return -14; } // EFAULT
 
-    let file = match crate::fs::file::get_file_fd(fd) {
+    let file = match crate::fs::hotpath::get_file_fd(fd) {
         Some(f) => f,
         None => return -9, // EBADF
     };
@@ -186,7 +186,7 @@ fn io_uring_op_close(sqe: &IoUringSqe) -> i32 {
     // Guard: refuse to close a file whose ops match IO_URING_OPS, as that
     // would be the ring fd itself. Closing it would leave the ring mapped
     // in user memory but with freed kernel structures — a UAF.
-    if let Some(file) = crate::fs::file::get_file_fd(fd) {
+    if let Some(file) = crate::fs::hotpath::get_file_fd(fd) {
         if let Some(ops) = file.get_ops() {
             if core::ptr::eq(ops, &IO_URING_OPS as *const FileOps) {
                 return -22; // EINVAL
@@ -194,7 +194,7 @@ fn io_uring_op_close(sqe: &IoUringSqe) -> i32 {
         }
     }
 
-    match crate::fs::file::close_file_fd(fd) {
+    match crate::fs::hotpath::close_file_fd(fd) {
         Ok(()) => 0,
         Err(e) => e,
     }

@@ -42,7 +42,7 @@ pub mod syscall_api;
 // framework mod.rs's own imports — the ipc recipe's glob-surface
 // contract).
 #[allow(unused_imports)]
-use crate::fs::{File, FileOps, FileFlags};
+use crate::fs::{types::File, types::FileOps, types::FileFlags};
 #[allow(unused_imports)]
 use crate::alloc::sync::Arc;
 

@@ -383,7 +383,7 @@ pub fn handle_mm_fault(
     let effective_size = vm_file
         .as_ref()
         .and_then(|f| {
-            if let Some(live) = crate::fs::leaf_glue::devfs::reg_current_size(f.as_ref()) {
+            if let Some(live) = crate::fs::hotpath::devfs::reg_current_size(f.as_ref()) {
                 return Some(live as usize);
             }
             // SAFETY: inode cell written at open time; read-only.
@@ -453,7 +453,7 @@ pub fn handle_mm_fault(
                     let file = vm_file.clone().or_else(|| {
                         if vma_file_fd >= 0 {
                             // SAFETY: fd-table lookup.
-                            crate::fs::get_file_fd(vma_file_fd as usize)
+                            crate::fs::hotpath::get_file_fd(vma_file_fd as usize)
                         } else {
                             None
                         }

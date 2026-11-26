@@ -12,7 +12,7 @@ use alloc::string::String;
 use core::mem::size_of;
 
 use crate::errno;
-use rux::fs::bio::{self, BufferHead, BufferState};
+use rux::fs::{hotpath, types::BufferHead, types::BufferState};
 use crate::ext4::superblock::Ext4GroupDesc;
 use crate::ext4::inode::{Ext4Inode, Ext4InodeOnDisk};
 use crate::ext4::dir::file_type;
@@ -84,10 +84,10 @@ pub const S_IRWXO: u16 = 0o0007;
 
 /// Read a block into a Vec<u8>
 fn read_block_to_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
-    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
+    let bh = hotpath::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: bh is pinned by bread; the clone reads block_size bytes.
-    let data = bio::bh_data(&bh).to_vec();
-    bio::brelse(bh);
+    let data = hotpath::bh_data(&bh).to_vec();
+    hotpath::brelse(bh);
     Ok(data)
 }
 
@@ -101,15 +101,15 @@ fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blockn
     // reference kernel never reads a block it is about to fully rewrite).
     // Partial writes still take the read path — they splice into existing
     // content. The buffer cache's block size is fixed at 4 KiB
-    // (bio::get_block_cache), so >=4096 is full coverage.
+    // (hotpath::get_block_cache), so >=4096 is full coverage.
     // SAFETY: getblk_overwrite returns a valid BufferHead (cached or
     // freshly created zeroed+dirty); the full-block copy below overwrites
     // every byte, so the never-read content never becomes observable.
     let full_block = data.len() >= 4096;
     let bh = if full_block {
-        bio::getblk_overwrite(device, blocknr)
+        hotpath::getblk_overwrite(device, blocknr)
     } else {
-        bio::bread(device, blocknr)
+        hotpath::bread(device, blocknr)
     }
     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
@@ -117,12 +117,12 @@ fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blockn
     // window as before (bucket lock + pin) — the views ride the safe
     // accessors.
     {
-        let buf = bio::bh_data_mut(&bh);
+        let buf = hotpath::bh_data_mut(&bh);
         let buf_len = buf.len().min(data.len());
         buf[0..buf_len].copy_from_slice(&data[0..buf_len]);
 
         // Mark dirty and sync
-        bio::bh_set_state_bit(&bh, BufferState::BH_Dirty);
+        hotpath::bh_set_state_bit(&bh, BufferState::BH_Dirty);
 
         // If a journal handle is active, register this buffer
         // (INV-EXT4-JHANDLE-1).
@@ -134,8 +134,8 @@ fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blockn
         }
     }
 
-    let sync_res = bio::sync_dirty_buffer(bh);
-    bio::brelse(bh);
+    let sync_res = hotpath::sync_dirty_buffer(bh);
+    hotpath::brelse(bh);
     sync_res?;
 
     Ok(())
@@ -436,10 +436,10 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
     // read-modify-write span at sb_start+16, in bounds of the block).
     {
         let sb_block = if fs.block_size == 1024 { 1u64 } else { 0u64 };
-        let bh = bio::bread(fs.device, sb_block)
+        let bh = hotpath::bread(fs.device, sb_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-        let data = bio::bh_data_mut(&bh);
+        let data = hotpath::bh_data_mut(&bh);
         let sb_start = if fs.block_size == 1024 { 0usize } else { 1024usize };
         // The counter RMW (LE u32 at sb_start+16; volatile pair — the
         // durability-deferred discipline below relies on the committed
@@ -462,10 +462,10 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         // metadata_csum: re-seal the superblock checksum (see the
         // allocator's update_superblock_free_blocks).
         if fs.metadata_csum {
-            let data: &mut [u8] = bio::bh_data_mut(&bh);
+            let data: &mut [u8] = hotpath::bh_data_mut(&bh);
             super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
         }
-        bio::bh_set_state_bit(&bh, BufferState::BH_Dirty);
+        hotpath::bh_set_state_bit(&bh, BufferState::BH_Dirty);
         // Family b (ext4-corrupt lane): register with the current handle so
         // the free-inode counter persists at this op's commit together with
         // the inode bitmap / inode table it describes (see the allocator's
@@ -476,7 +476,7 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
                 bh,
             );
         }
-        bio::brelse(bh);
+        hotpath::brelse(bh);
     }
 
     Ok(())
@@ -682,11 +682,11 @@ fn ext4_add_entry_locked(
         // stay short of it. (Declared before the loop — the fresh-block path
         // below shares it.)
         let found = {
-            let bh = bio::bread(fs.device, block_nr)
+            let bh = hotpath::bread(fs.device, block_nr)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let hit = find_entry_space(bio::bh_data(&bh), name.len(), block_size, tail_reserve)
-                .map(|off| (off, bio::bh_data(&bh).to_vec()));
-            bio::brelse(bh);
+            let hit = find_entry_space(hotpath::bh_data(&bh), name.len(), block_size, tail_reserve)
+                .map(|off| (off, hotpath::bh_data(&bh).to_vec()));
+            hotpath::brelse(bh);
             hit
         };
         if let Some((offset, block_data)) = found {
@@ -1084,7 +1084,7 @@ fn add_entry_to_block(
 /// Crash-safe ordering for directory-entry writes (deferred form).
 ///
 /// ROOT CAUSE CONTEXT (the "ghost empty file" after non-clean shutdown):
-/// while a journal handle is active, bio::sync_dirty_buffer defers EVERY
+/// while a journal handle is active, hotpath::sync_dirty_buffer defers EVERY
 /// write into the buffer cache. Op-level durability points (hash-order
 /// sync_buffers, cache eviction, the commit fast path) then drain those
 /// buffers in orders unrelated to the operation's logic, and a crash
@@ -1132,7 +1132,7 @@ fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u64 {
     // operation dirtied since the window was armed.
     let pre: alloc::vec::Vec<u64> =
         crate::syscall::r#unsafe::boxed_mut(handle_ptr).take_pre_capture();
-    bio::publication_defer(fs.device, &pre, entry_blocknr)
+    hotpath::publication_defer(fs.device, &pre, entry_blocknr)
 }
 
 /// Write a directory-entry block with crash-safe ordering (deferred):
@@ -1409,7 +1409,7 @@ fn ext4_mkdir_no_journal(
     // records stay queued with their H1/H2 guards enforced at every
     // out-of-band write (sync_dirty_buffer, eviction Phase 4, journal
     // write-through), and the queue is kept short by the op-boundary
-    // batch drain (bio::publication_batch_drain, PUB_BATCH=64) that
+    // batch drain (hotpath::publication_batch_drain, PUB_BATCH=64) that
     // every entry op pays amortized instead of per-op — the fab0e029
     // lesson: deleting this drain WITHOUT the batch bound pushed the
     // deferred bill onto the next constrained writer (unlink 100x).
@@ -1435,7 +1435,7 @@ fn ext4_mkdir_inner(
     set_current_handle(&mut handle);
     // PRE-capture window: record this operation's own metadata dirtied
     // before the entry publication (see defer_entry_publication).
-    handle.begin_pre_capture(rux::fs::bio::dev_key_of(fs.device));
+    handle.begin_pre_capture(rux::fs::hotpath::dev_key_of(fs.device));
 
     let result = ext4_mkdir_no_journal(fs, dir_ino, name, mode);
 
@@ -1500,7 +1500,7 @@ pub fn ext4_create(
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
-    handle.begin_pre_capture(rux::fs::bio::dev_key_of(fs.device));
+    handle.begin_pre_capture(rux::fs::hotpath::dev_key_of(fs.device));
     let result = ext4_create_inner(fs, dir_ino, name, mode);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
@@ -1571,7 +1571,7 @@ pub fn ext4_mknod(
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     set_current_handle(&mut handle);
-    handle.begin_pre_capture(rux::fs::bio::dev_key_of(fs.device));
+    handle.begin_pre_capture(rux::fs::hotpath::dev_key_of(fs.device));
     let result = ext4_mknod_inner(fs, dir_ino, name, mode, dev);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
@@ -1646,7 +1646,7 @@ pub fn ext4_symlink(
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
-    handle.begin_pre_capture(rux::fs::bio::dev_key_of(fs.device));
+    handle.begin_pre_capture(rux::fs::hotpath::dev_key_of(fs.device));
     let result = ext4_symlink_inner(fs, dir_ino, name, target);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
@@ -1741,7 +1741,7 @@ pub fn ext4_link(
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
-    handle.begin_pre_capture(rux::fs::bio::dev_key_of(fs.device));
+    handle.begin_pre_capture(rux::fs::hotpath::dev_key_of(fs.device));
     let result = ext4_link_inner(fs, dir_ino, target_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();
@@ -2003,12 +2003,12 @@ fn find_dir_entry(
         // block_size-byte Vec; brelse releases the cache reference after
         // the scan (the hit path copies nothing — it returns positions).
         let scan = {
-            let bh = match bio::bread(fs.device, block_nr) {
+            let bh = match hotpath::bread(fs.device, block_nr) {
                 Some(b) => b,
                 None => return Err(errno::Errno::IOError.as_neg_i32()),
             };
-            let r = scan_dir_block_for_name(bio::bh_data(&bh), name, block_size);
-            bio::brelse(bh);
+            let r = scan_dir_block_for_name(hotpath::bh_data(&bh), name, block_size);
+            hotpath::brelse(bh);
             r
         };
         if let Some((offset, ino)) = scan {
@@ -2229,11 +2229,11 @@ impl PostCaptureGuard {
         if let Some(blk) = dir_block {
             // SAFETY: get_current_handle is task-local and null-safe.
             if get_current_handle().is_some() {
-                let id = bio::publication_defer_entry_only(fs.device, blk);
+                let id = hotpath::publication_defer_entry_only(fs.device, blk);
                 // The handle is alive for this syscall and mutable from
                 // its owning task (us; INV-EXT4-JHANDLE-1).
                 if let Some(h) = get_current_handle() {
-                    let (mj, mi) = bio::dev_key_of(fs.device);
+                    let (mj, mi) = hotpath::dev_key_of(fs.device);
                     crate::syscall::r#unsafe::boxed_mut(h).begin_post_capture((mj, mi), id);
                 }
                 return PostCaptureGuard { armed: true };
@@ -2473,8 +2473,8 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     // - VFS icache: path_lookup resurrects cached VFS Inodes, and the
     //   stale sb block map made the new file read/write through the OLD
     //   file's blocks (reproduced via `ln -s x; rm x` + file readback).
-    rux::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
-    rux::fs::inode::icache_remove(ino as u64, fs as *const Ext4FileSystem as u64);
+    rux::fs::hotpath::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
+    rux::fs::hotpath::icache_remove(ino as u64, fs as *const Ext4FileSystem as u64);
     // Dir-blocks memo (23rd): same reuse class — a reallocated dir ino
     // must never be served the old directory's block list.
     fs.dir_blocks_purge(ino);
@@ -2782,7 +2782,7 @@ pub fn ext4_rename(
     // defer_entry_publication). A replace of an existing target
     // separately arms the POST window (PostCaptureGuard) after this
     // pre record has been published — the two never overlap.
-    handle.begin_pre_capture(rux::fs::bio::dev_key_of(fs.device));
+    handle.begin_pre_capture(rux::fs::hotpath::dev_key_of(fs.device));
     let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     clear_current_handle();

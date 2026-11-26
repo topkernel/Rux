@@ -1002,7 +1002,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                 // INV-FS-FILEDENTRY-1 edge).
                 if let Some(dentry) = rux::fs::r#unsafe::file_dentry(&file) {
                     // d_path()-style: relative to the READING task's root.
-                    let path = rux::fs::vfs::dentry_user_path(dentry);
+                    let path = rux::fs::hotpath::dentry_user_path(dentry);
                     let ino = dentry
                         .get_inode()
                         .map(|inode| inode.ino)
@@ -1026,7 +1026,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                             // /proc/<pid>/maps paths are d_path()-style:
                             // relative to the READING task's root.
                             let path =
-                                rux::fs::vfs::dentry_user_path(dentry);
+                                rux::fs::hotpath::dentry_user_path(dentry);
                             let ino = dentry.get_inode()
                                 .map(|inode| inode.ino)
                                 .unwrap_or(0);
@@ -1073,7 +1073,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
 /// content (generate_fd_link), fd-dir lookup existence checks, and the
 /// VFS magic-link redirect (follow_symlink) all resolve through here so
 /// they can never disagree about whether a descriptor exists.
-pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<rux::fs::File>> {
+pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<rux::fs::types::File>> {
     use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let task = if current_pid() as u64 == pid {
@@ -1111,7 +1111,7 @@ pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
     };
 
     let mut fds = Vec::new();
-    for fd in 0..rux::fs::file::MAX_FDS {
+    for fd in 0..rux::fs::types::MAX_FDS {
         if let Some(file) = fdtable.get_file(fd) {
             let path = get_fd_path(&file);
             fds.push((fd as u32, path));
@@ -1122,12 +1122,12 @@ pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
 }
 
 /// Get the path string for a file descriptor's File object
-fn get_fd_path(file: &alloc::sync::Arc<rux::fs::File>) -> alloc::string::String {
+fn get_fd_path(file: &alloc::sync::Arc<rux::fs::types::File>) -> alloc::string::String {
     match rux::fs::r#unsafe::file_dentry(file) {
         // /proc/<pid>/fd/N links are d_path()-style: relative to the
         // READING task's root (Linux readlink on these uses the reader's
         // fs->root), so a chrooted reader sees jail-relative names.
-        Some(dentry) => rux::fs::vfs::dentry_user_path(dentry),
+        Some(dentry) => rux::fs::hotpath::dentry_user_path(dentry),
         None => {
             // No dentry (pipe, socket, epoll, etc.)
             // Try to get inode number for display
@@ -1402,7 +1402,7 @@ pub fn generate_fdinfo(pid: u64, fd: u32) -> Vec<u8> {
     // systemd's pidfd_get_pid() treats their absence as ENOTTY and
     // disowns the process the fd names (serial-getty@ttyS0 restart
     // loop, ub2404 2026-11-16).
-    if let Some(pid) = rux::fs::pidfd::fdinfo_pid_of(&file) {
+    if let Some(pid) = rux::fs::hotpath::fdinfo_pid_of(&file) {
         out.push_str(&alloc::format!("Pid:\t{}\nNSpid:\t{}\n", pid, pid));
     }
 

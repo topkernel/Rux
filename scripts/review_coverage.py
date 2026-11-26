@@ -99,13 +99,9 @@ STATUS = {
     "kernel/core/src/drivers/virtio/probe.rs": ("todo", ""),
     "kernel/core/src/drivers/virtio/queue.rs": ("part", "s2c: wait_for_used_interruptible + wait_for_desc_completion (prepare/recheck/deadline/dequeue-compensation discipline, poll_only for early boot and lock holders), submit_quiet publish via avail_shadow"),
     "kernel/core/src/drivers/virtio/virtio_pci.rs": ("part", "device-ID match arms + per-arch BAR self-assignment windows (riscv 0x40000000, aarch64 DTB 0x10000000, x86 firmware values) reviewed"),
-    "kernel/core/src/fs/bio.rs": ("part", "sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS; r3b: bread/get eviction + publication queue re-read in the D-13/ENOSPC context — PASS (dirty-storm wedge filed F-r3b-1/2)"),
-    "kernel/core/src/fs/buffer.rs": ("part", "FileBuffer chunked read/write"),
     "kernel/core/src/fs/cgroup.rs": ("todo", ""),
     "kernel/core/src/fs/char_dev.rs": ("todo", ""),
-    "kernel/core/src/fs/vt.rs": ("todo", ""),
     "kernel/core/src/fs/debugfs.rs": ("done", "written by this review (debugfs)"),
-    "kernel/core/src/fs/dentry.rs": ("fixed", "r3b: read end to end — reader banks + deferred retirement (692e7623) writer side audited: SeqCst claim/fence pairing re-derived sound, all child/inode mutators retire+bump, drain lock order consistent, DENTRY_DRAIN_DEFERS safety-neutral; BUG FIXED: drain dropped retired vecs under DENTRY_SLOW_READ irqsave and the cascade runs ext4_destroy_inode disk I/O with IRQs+preempt off (virtio poll-only = cli bounded only by device latency) — drops moved outside the lock scope (f62a4df6)"),
     "kernel/core/src/fs/devfs/mod.rs": ("fixed", "s2b: read end to end — entry model, devtmpfs populate, mknod/remove/mkdir/lookup walkers, inode ops (lookup/iget/getattr/setattr/open/get_file_ops), reg-file read/write/read_at, SharedFilePages coherent MAP_SHARED backing, null/zero/full/random/con devices. DEFECT FIXED (d1275bce): getattr/lseek sized regular files from the stale entry.data while a shared backing is active — now the authoritative entry.size; A/B devfsmap probe 5->110 both cases. S_IFMT-vs-S_IFCHR classification and cross-open size coherence verified sound"),
     "kernel/core/src/fs/ext4/dir.rs": ("part", "directory ops"),
     "kernel/core/src/fs/ext4/extent.rs": ("fixed", "read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb)"),
@@ -115,18 +111,13 @@ STATUS = {
     "kernel/core/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites; r3b: ext4_destroy_inode + PENDING_REAPS/flush_pending_reaps re-read (read_inode in Drop context is the irqsave-drain hazard fixed on the dentry side; comment drift filed F-r3b-4)"),
     "kernel/core/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS; r3b: tail_reserve 12-byte tail threading re-verified (deleted-slot + split arms bounded by usable_end; legacy chains fall through on Err) + D-13 publication ordering — PASS"),
     "kernel/core/src/fs/fifo.rs": ("todo", ""),
-    "kernel/core/src/fs/file.rs": ("part", "reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）；cr3: arch-gated O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE bit positions (aarch64 uapi vs asm-generic) verified against both reference tables; raw literals replaced with the shared constants — PASS"),
-    "kernel/core/src/fs/inode.rs": ("part", "read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）"),
     "kernel/core/src/fs/inotify.rs": ("part", "event notification"),
     "kernel/core/src/fs/jbd2/checkpoint.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/commit.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/mod.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/recovery.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/transaction.rs": ("todo", ""),
-    "kernel/core/src/fs/locks.rs": ("part", "flock/POSIX record locks"),
     "kernel/core/src/fs/memfd.rs": ("fixed", "memfd_create 的参数校验与 seal 语义（参数校验已对齐 879328f3）"),
-    "kernel/core/src/fs/page_cache.rs": ("done", "end to end (pcache Option B assumption audit; no defect)"),
-    "kernel/core/src/fs/path.rs": ("todo", ""),
     "kernel/core/src/fs/pipe.rs": ("todo", ""),
     "kernel/core/src/fs/procfs/cmdline.rs": ("todo", ""),
     "kernel/core/src/fs/procfs/configgz.rs": ("todo", ""),
@@ -154,10 +145,8 @@ STATUS = {
     "kernel/core/src/fs/pty.rs": ("todo", ""),
     "kernel/core/src/fs/rootfs.rs": ("part", "symlink resolution, MAX_SYMLINKS"),
     "kernel/core/src/fs/selinuxfs.rs": ("todo", ""),
-    "kernel/core/src/fs/stat.rs": ("todo", ""),
     "kernel/core/src/fs/sysfs.rs": ("part", "sysfs tree, writable attributes"),
     "kernel/core/src/fs/tmpfs.rs": ("part", "tmpfs read/write; read_at op reviewed (IN_ACCESS self-notify removed, wrapper owns it)"),
-    "kernel/core/src/fs/vfs.rs": ("part", "file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化"),
     "kernel/core/src/fs/xattr.rs": ("fixed", "sec-r1 L3: namespace gates read end to end; security.capability now CAP_SETFCAP (commoncap parity), other security.* keep CAP_SYS_ADMIN - deliberate divergence for SELinux-label-carrying images; check_name/size/immutable-flag paths re-read"),
     "kernel/core/src/interrupt/domain.rs": ("todo", ""),
     "kernel/core/src/interrupt/irqchip.rs": ("todo", ""),
@@ -351,25 +340,52 @@ STATUS = {
     "kernel/core/src/drivers/timer/hpet.rs": ("todo", ""),
     "kernel/core/src/drivers/watchdog.rs": ("todo", ""),
     "kernel/core/src/errno.rs": ("todo", ""),
-    "kernel/core/src/fs/dev_t.rs": ("todo", ""),
     "kernel/core/src/fs/devfs/registry.rs": ("todo", ""),
-    "kernel/core/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1); this review: machine-check cfg hole on x86_64 fixed (validate now checks e_machine on every platform)"),
     "kernel/core/src/fs/ext4/allocator.rs": ("part", "geometry/addressing sites + alloc/free paths around them (EXT4-64BIT hi-half fix, 070770d6); full read pending"),
     "kernel/core/src/fs/ext4/csum.rs": ("fixed", "read end to end (cr2): crc32c + all six checksum classes; 3 write-path divergences vs e2fsprogs fixed (a6b01fd9) — sb le32 full-crc seal, 12-byte dir tail with markers + generation-chained seed + blocksize-12 span, extent seed contract; proven with the run/cr2-csum-harness e2fsck oracle (reseal bit-identical, dirfix clean)"),
     "kernel/core/src/fs/ext4/indirect.rs": ("todo", ""),
     "kernel/core/src/fs/ext4/superblock.rs": ("part", "cr2: Ext4GroupDesc/Ext4SuperBlock field layout vs on-disk offsets (write_group_descriptor RMW fix)"),
-    "kernel/core/src/fs/fs_struct.rs": ("todo", ""),
-    "kernel/core/src/fs/io_completion.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/journal.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/revoke.rs": ("todo", ""),
     "kernel/core/src/fs/jbd2/types.rs": ("todo", ""),
     "kernel/core/src/fs/mod.rs": ("todo", ""),
-    "kernel/core/src/fs/mount.rs": ("todo", ""),
-    "kernel/core/src/fs/permission.rs": ("fixed", "sec-r1 L3: generic_permission re-read against the reference shape; CAP_DAC_READ_SEARCH branch added (dirs, no-write masks); fsuid/fsgid comparison and DAC_OVERRIDE exec-bit rule verified"),
+    "kernel/core/src/fs/types.rs": ("todo",
+        "seed-core pass 2, step 1: the type definitions of the fs topic files, one section per "
+        "file (25 files). Each section carries the status of the file it came from — listed in "
+        "the hotpath.rs entry, which holds the impl blocks."),
+    "kernel/core/src/fs/hotpath.rs": ("todo",
+        "seed-core pass 2: the fs topic files are sections of this file (one per banner, in the "
+        "old module declaration order). The file carries the LOWEST status its sections had: "
+        "todo. Status of each section before the merge, with the note its file carried in this "
+        "map: file part (reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）；cr3: "
+        "arch-gated O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE bit positions (aarch64 uapi vs "
+        "asm-generic) verified against both reference tables; raw literals replaced with the "
+        "shared constants — PASS); inode part (read_data/write_data/append_data；O_APPEND "
+        "原子性已修（327b4a52）); dentry fixed (r3b: read end to end — reader banks + deferred "
+        "retirement (692e7623) writer side audited: SeqCst claim/fence pairing re-derived "
+        "sound, all child/inode mutators retire+bump, drain lock order consistent, "
+        "DENTRY_DRAIN_DEFERS safety-neutral; BUG FIXED: drain dropped retired vecs under "
+        "DENTRY_SLOW_READ irqsave and the cascade runs ext4_destroy_inode disk I/O with "
+        "IRQs+preempt off (virtio poll-only = cli bounded only by device latency) — drops moved "
+        "outside the lock scope (f62a4df6)); elf fixed (read end to end (abi-review s1); this "
+        "review: machine-check cfg hole on x86_64 fixed (validate now checks e_machine on every "
+        "platform)); buffer part (FileBuffer chunked read/write); bio part (sync_buffers, "
+        "ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop "
+        "boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), "
+        "drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean "
+        "left), cache 8192/2048 sizing — all three gates PASS; r3b: bread/get eviction + "
+        "publication queue re-read in the D-13/ENOSPC context — PASS (dirty-storm wedge filed "
+        "F-r3b-1/2)); vfs part (file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化); path "
+        "todo; permission fixed (sec-r1 L3: generic_permission re-read against the reference "
+        "shape; CAP_DAC_READ_SEARCH branch added (dirs, no-write masks); fsuid/fsgid comparison "
+        "and DAC_OVERRIDE exec-bit rule verified); superblock todo; mount todo; stat todo; "
+        "dev_t todo; fs_struct todo; page_cache done (end to end (pcache Option B assumption "
+        "audit; no defect)); readahead todo; io_completion todo; locks part (flock/POSIX record "
+        "locks); vt todo. Sections whose file had no entry here (todo): event_notify, fdreap, "
+        "mount_table, notify_hooks, file_hooks, leaf_glue, perf_ctr, lock_hooks, notify_events, "
+        "pidfd, fsctx, journal_seam."),
     "kernel/core/src/fs/procfs/timer_list.rs": ("todo", ""),
     "kernel/core/src/fs/procfs/version.rs": ("todo", ""),
-    "kernel/core/src/fs/readahead.rs": ("todo", ""),
-    "kernel/core/src/fs/superblock.rs": ("todo", ""),
     "kernel/core/src/fs/tty.rs": ("todo", ""),
     "kernel/core/src/init.rs": ("todo", ""),
     "kernel/core/src/initrd.rs": ("todo", ""),

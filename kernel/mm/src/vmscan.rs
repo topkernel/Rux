@@ -399,7 +399,7 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
 
     DEEP_PASS_RUNS.fetch_add(1, Ordering::Relaxed);
 
-    let cache = crate::fs::page_cache::get_page_cache();
+    let cache = crate::fs::hotpath::get_page_cache();
     let mut freed_total = 0usize;
     let mut demoted_total = 0usize;
     let mut passes = 0usize;
@@ -547,7 +547,7 @@ fn shrink_inactive_list(
         // PT-alloc retry must NOT use this variant (per-mm PteLock held).
         rux::mm::hotpath::gate_note_phase(rux::mm::hotpath::GATE_PHASE_SHRINK);
         let cache_reclaimed =
-            crate::fs::page_cache::get_page_cache().shrink_reclaim(nr_to_scan);
+            crate::fs::hotpath::get_page_cache().shrink_reclaim(nr_to_scan);
         sc.nr_reclaimed += cache_reclaimed;
     } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
         // Reclaim anonymous pages via swap

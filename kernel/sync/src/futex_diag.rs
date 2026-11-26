@@ -3537,13 +3537,13 @@ pub fn kill_dump_tgid(tgid: u32) {
 
 /// sc97: type name for a File by fops identity (the kernel-image symbol
 /// at the ops address names any not listed here, offline via nm).
-fn kd_fd_type(file: &crate::fs::File) -> &'static str {
+fn kd_fd_type(file: &crate::fs::types::File) -> &'static str {
     let ops_ref = match file.get_ops() {
         Some(o) => o,
         None => return "no-ops",
     };
-    let ops = ops_ref as *const crate::fs::FileOps as *const ();
-    let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
+    let ops = ops_ref as *const crate::fs::types::FileOps as *const ();
+    let is = |p: &crate::fs::types::FileOps| ops == (p as *const _ as *const ());
     if rux::api::fs::is_pipe_ops(ops_ref) {
         return "pipe";
     }

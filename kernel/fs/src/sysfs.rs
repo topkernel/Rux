@@ -61,9 +61,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::errno;
-use rux::fs::superblock::{FileSystemType, SuperBlock};
-use rux::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
-use rux::fs::mount::{MntFlags, VfsMount};
+use rux::fs::types::{FileSystemType, SuperBlock};
+use rux::fs::{hotpath::file_type, types::Ino, types::Inode, types::InodeMode, types::INodeOps, types::VfsDirEntry};
+use rux::fs::types::{MntFlags, VfsMount};
 use crate::sync::types::Spinlock;
 
 /// SysFS magic number (STATFS_SYSFS_MAGIC).
@@ -889,7 +889,7 @@ pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
 // The registration DTO is framework-owned (fs::leaf_glue::InputEventReg)
 // so the evdev driver stays framework-typed; this alias keeps the
 // historical path working crate-side.
-pub use rux::fs::leaf_glue::InputEventReg;
+pub use rux::fs::types::InputEventReg;
 
 
 /// A uevent attribute whose environment is a fixed key=value set (the
@@ -1339,7 +1339,7 @@ fn build_tree() -> Arc<KObject> {
         *dev.devname.lock() = Some(String::from("tty0"));
         attr_ro(&dev, "dev", || b"4:0\n".to_vec());
         attr_ro(&dev, "active", || {
-            format!("tty{}\n", rux::fs::vt::active_vt()).into_bytes()
+            format!("tty{}\n", rux::fs::hotpath::active_vt()).into_bytes()
         });
         add_uevent_attr(&dev);
     }
@@ -1674,7 +1674,7 @@ fn build_tree() -> Arc<KObject> {
 
         let tty_dir = mk_dir(&serial8250, "tty", KType::Generic);
         let ttys0 = mk_dir(&tty_dir, "ttyS0", KType::Tty);
-        *ttys0.devno.lock() = Some((rux::fs::dev_t::TTY_MAJOR, 64));
+        *ttys0.devno.lock() = Some((rux::fs::hotpath::TTY_MAJOR, 64));
         *ttys0.devname.lock() = Some(String::from("ttyS0"));
         // 4:64 == (TTY_MAJOR, 64)
         attr_ro(&ttys0, "dev", || b"4:64\n".to_vec());
@@ -1895,7 +1895,7 @@ static GLOBAL_SYSFS_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
 
 // SAFETY: FsContext is a valid VFS mount callback argument.
 fn sysfs_mount_cb(
-    _fs_context: &rux::fs::superblock::FsContext<'_>,
+    _fs_context: &rux::fs::types::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let root = sysfs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
     let sb = Box::new(SysfsSuperBlock {
@@ -1918,7 +1918,7 @@ pub fn get_sysfs_sb() -> Option<&'static SysfsSuperBlock> {
 /// Initialize sysfs: register the filesystem type and build the KObject
 /// tree. Idempotent — safe to call from do_mount and boot paths.
 pub fn init_sysfs() -> Result<(), i32> {
-    use rux::fs::superblock::register_filesystem;
+    use rux::fs::hotpath::register_filesystem;
 
     // Register fs type (ignore "already registered" duplicates — the
     // registry has no lookup-by-name dedup error, so tolerate the push).
@@ -2101,7 +2101,7 @@ fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno
 
 /// sysfs getattr.
 /// SAFETY: VFS callback contract.
-fn sysfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn sysfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     let entry = match entry_of(inode) {
         Some(e) => e,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -2149,7 +2149,7 @@ fn sysfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
 /// tree CONTENT stays kernel-owned; only the metadata words move.
 /// SAFETY: VFS callback contract.
 fn sysfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
@@ -2240,7 +2240,7 @@ fn sysfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 /// sysfs open: snapshot the attribute content into file-private storage
 /// (same discipline as procfs — read side never re-enters the tree).
 /// SAFETY: VFS callback contract.
-fn sysfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
+fn sysfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -2264,11 +2264,11 @@ fn sysfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
 
 /// sysfs get_file_ops.
 /// SAFETY: VFS callback contract.
-fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&SYSFS_FILE_OPS)
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -2290,15 +2290,15 @@ fn sysfs_destroy_inode(inode: &mut Inode) {
 fn sysfs_mkdir(
     _parent: &Inode,
     name: &[u8],
-    mode: rux::fs::inode::InodeMode,
+    mode: rux::fs::types::InodeMode,
 ) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     // systemd needs mkdir to succeed on /sys/fs/cgroup/{systemd,unified,...}
     // so it can mount cgroup2 there. The mount that follows replaces the
     // subtree entirely, so a phantom directory node is sufficient.
     let mut inode = Inode::new(
         crate::sysfs::alloc_ino(),
-        rux::fs::inode::InodeMode::new(
-            rux::fs::inode::InodeMode::S_IFDIR | (mode.bits() & 0o7777),
+        rux::fs::types::InodeMode::new(
+            rux::fs::types::InodeMode::S_IFDIR | (mode.bits() & 0o7777),
         ),
     );
     inode.ops = Some(&SYSFS_INODE_OPS);
@@ -2340,7 +2340,7 @@ pub struct SysfsFileContent {
 }
 
 /// read: serve from the open-time snapshot at the file position.
-fn sysfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn sysfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by sysfs_open under this File.
     let content = match rux::fs::r#unsafe::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
@@ -2359,7 +2359,7 @@ fn sysfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// write: dispatch to the attribute store handler.
-fn sysfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn sysfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
     let inode = match rux::fs::r#unsafe::file_inode_arc(file) {
         Some(i) => i,
@@ -2388,7 +2388,7 @@ fn sysfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 }
 
 /// lseek within the snapshot.
-fn sysfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn sysfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see sysfs_file_read.
     let content = match rux::fs::r#unsafe::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
@@ -2409,7 +2409,7 @@ fn sysfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
 }
 
 /// close: free the content snapshot.
-fn sysfs_file_close(file: &rux::fs::File) -> i32 {
+fn sysfs_file_close(file: &rux::fs::types::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
     drop(rux::fs::r#unsafe::file_privdata_take::<SysfsFileContent>(file));
@@ -2424,12 +2424,12 @@ fn sysfs_file_close(file: &rux::fs::File) -> i32 {
 /// Operation not permitted"). Change notification is not implemented:
 /// the resting state is simply never-ready (0 events), which is also
 /// what an unchanged attribute reports on Linux.
-fn sysfs_file_poll(_file: &rux::fs::File, _events: u16) -> u16 {
+fn sysfs_file_poll(_file: &rux::fs::types::File, _events: u16) -> u16 {
     0
 }
 
 /// SysFS attribute file operations.
-pub static SYSFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static SYSFS_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(sysfs_file_read)
     .write(sysfs_file_write)
     .lseek(sysfs_file_lseek)
@@ -2445,34 +2445,34 @@ pub static SYSFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
 
 /// The sysfs mount entry (old mount.rs arm, verbatim: build the KObject
 /// tree, prepare the mountpoint, link the dentry tree).
-pub fn mount_sys_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_sys_instance(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data, fs_type);
     init_sysfs().map_err(|e| e as i32)?;
     mount_sysfs().map_err(|e| e as i32)?;
-    rux::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
-    rux::fs::mount::register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, create_root_inode(), mnt_flags);
+    rux::fs::hotpath::register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 /// The pstore mount entry (old mount.rs "pstore" arm: mount the sysfs
 /// pstore subtree; fall back to an empty sysfs root).
-pub fn mount_pstore(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_pstore(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data);
-    let inode = match rux::fs::vfs::path_lookup("/sys/fs/pstore", 0) {
+    let inode = match rux::fs::hotpath::path_lookup("/sys/fs/pstore", 0) {
         Ok(p) => match p.inode {
             Some(i) => i,
             None => create_root_inode(),
         },
         Err(_) => create_root_inode(),
     };
-    rux::fs::vfs::vfs_mount(target, inode, mnt_flags);
-    rux::fs::mount::register_mount(fs_type, target, "pstore", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, inode, mnt_flags);
+    rux::fs::hotpath::register_mount(fs_type, target, "pstore", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["sysfs"], mount_sys_instance);
-    rux::fs::mount_table::register(&["pstore"], mount_pstore);
+    rux::fs::hotpath::register(&["sysfs"], mount_sys_instance);
+    rux::fs::hotpath::register(&["pstore"], mount_pstore);
 }
 
 // ============================================================================

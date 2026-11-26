@@ -12,7 +12,7 @@
 
 #![forbid(unsafe_code)]
 use rux::process::types::{Task, TaskState, Pid};
-use crate::fs::FdTable;
+use crate::fs::types::FdTable;
 use crate::arch::pt_regs::PtRegs;
 
 // ============================================================================
@@ -1186,7 +1186,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         }
 
         // /proc/stat "processes": the number of forks since boot.
-        crate::fs::perf_ctr::note_fork();
+        crate::fs::hotpath::note_fork();
         // perf FORK sideband (hiperf process tracking; no-op unless a
         // perf event is armed).
         if let Some(cur) = crate::sched::hotpath::current() {

@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::fs::buffer::FileBuffer;
+use crate::fs::types::FileBuffer;
 use super::test_group_start;
 
 /// ftruncate(2): "the extended portion [of the file] reads as null bytes".

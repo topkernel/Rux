@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::fs::bio::BufferState;
+use crate::fs::types::BufferState;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_buffer_state() {

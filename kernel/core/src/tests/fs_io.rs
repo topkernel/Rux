@@ -18,7 +18,7 @@
 //! the first test group; removal best-effort at the end — the scratch
 //! image is disposable).
 
-use crate::fs::vfs::{
+use crate::fs::hotpath::{
     file_close, file_getdents64, file_mkdir, file_open, file_opendir, file_read, file_stat,
     file_unlink, file_write,
 };
@@ -93,7 +93,7 @@ pub fn test_fs_io() {
                 _ => crate::tests::test_fail("eof at size", "non-zero past EOF"),
             }
             // Stat pin: size and regular file.
-            let mut st = crate::fs::stat::Stat::new();
+            let mut st = crate::fs::types::Stat::new();
             match file_stat(fd, &mut st) {
                 Ok(()) if st.st_size == payload.len() as i64 => {
                     crate::tests::test_pass("stat size")
@@ -249,6 +249,6 @@ pub fn test_fs_io() {
     let _ = file_unlink(mp);
     let _ = file_unlink("/rux-cov/wr.bin");
     let _ = file_unlink(pa);
-    let _ = crate::fs::vfs::file_rmdir(sub);
-    let _ = crate::fs::vfs::file_rmdir(DIR);
+    let _ = crate::fs::hotpath::file_rmdir(sub);
+    let _ = crate::fs::hotpath::file_rmdir(DIR);
 }

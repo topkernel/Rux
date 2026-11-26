@@ -207,7 +207,7 @@ impl MmStruct {
         macro_rules! flush_pin_batch {
             () => {
                 if pin_n > 0 {
-                    crate::fs::page_cache::get_page_cache()
+                    crate::fs::hotpath::get_page_cache()
                         .put_range_by_key(pin_key, &pin_batch[..pin_n]);
                     pin_n = 0;
                 }
@@ -1477,7 +1477,7 @@ pub(super) fn release_cache_mapping_pin(ppn: usize) {
     let key = page.mapping() as u64;
     let index = page.index() as u64;
     if key != 0 {
-        crate::fs::page_cache::get_page_cache().put_by_key(key, index);
+        crate::fs::hotpath::get_page_cache().put_by_key(key, index);
     }
 }
 
@@ -1801,7 +1801,7 @@ pub fn copy_page_table_cow(
                             if !leaf_is_ro && pte1.bits() & cow_flags::PCACHE != 0 {
                                 let key = page.mapping() as u64;
                                 let index = page.index() as u64;
-                                if !crate::fs::page_cache::get_page_cache()
+                                if !crate::fs::hotpath::get_page_cache()
                                     .pin_by_key(key, index)
                                 {
                                     // Entry vanished while a pin existed —
@@ -2341,7 +2341,7 @@ pub fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: 
                 // persists stores made through it — fault-path installs
                 // only mark dirty for leaves that faulted under a W VMA.
                 if new_bits & PageTableEntry::W != 0 && raw & PageTableEntry::W == 0 {
-                    crate::fs::page_cache::get_page_cache()
+                    crate::fs::hotpath::get_page_cache()
                         .mark_dirty_pfn(e1.ppn() as usize);
                 }
             } else {

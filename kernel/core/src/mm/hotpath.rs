@@ -5751,7 +5751,7 @@ impl MmStruct {
     /// so the write denial lives until the last fork descendant exits.
     pub fn inherit_exe_text(&self, parent: &MmStruct) {
         if let Some(key) = *parent.exe_text_key.lock() {
-            crate::fs::locks::inode_text_hold_acquire_key(key);
+            crate::fs::hotpath::inode_text_hold_acquire_key(key);
             *self.exe_text_key.lock() = Some(key);
         }
     }
@@ -6388,7 +6388,7 @@ impl MmStruct {
     /// Acquire VMA write lock
     #[inline]
     /// Pin a file reference for a file-backed VMA (Linux vm_file hold).
-    pub fn pin_vma_file(&self, vma_start: usize, file: alloc::sync::Arc<crate::fs::file::File>) {
+    pub fn pin_vma_file(&self, vma_start: usize, file: alloc::sync::Arc<crate::fs::types::File>) {
         self.vma_files.write().insert(vma_start, file);
     }
 
@@ -6399,7 +6399,7 @@ impl MmStruct {
 
     /// Fetch the pinned file for a VMA (demand-fault fill source). The pin
     /// keeps the file alive even after the mapping fd was closed.
-    pub fn get_vma_file(&self, vma_start: usize) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    pub fn get_vma_file(&self, vma_start: usize) -> Option<alloc::sync::Arc<crate::fs::types::File>> {
         self.vma_files.read().get(&vma_start).cloned()
     }
 
@@ -6409,7 +6409,7 @@ impl MmStruct {
     pub fn try_get_vma_file(
         &self,
         vma_start: usize,
-    ) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    ) -> Option<alloc::sync::Arc<crate::fs::types::File>> {
         let m = self.vma_files.try_read()?;
         m.get(&vma_start).cloned()
     }
@@ -6556,7 +6556,7 @@ impl Drop for MmStruct {
         // this mm dying releases its share of the write denial on the
         // exec'd image — the last drop re-enables write opens of the file.
         if let Some(key) = self.exe_text_key.lock().take() {
-            crate::fs::locks::inode_text_hold_release(key);
+            crate::fs::hotpath::inode_text_hold_release(key);
         }
 
         // Free ASID
@@ -9627,7 +9627,7 @@ pub fn oom_forensic_dump(site: &str) {
     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)
     crate::println!(
         "OOM-FORENSIC: {}",
-        crate::fs::page_cache::pcache_reclaim_census_line()
+        crate::fs::hotpath::pcache_reclaim_census_line()
     );
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
@@ -13979,11 +13979,11 @@ fn build_code_page() -> [u8; 4096] {
         // their own arch before trusting the vDSO image. Mirrors
         // fs::elf::Elf64Ehdr::check_machine.
         #[cfg(feature = "aarch64")]
-        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_AARCH64 as u16;
+        let e_machine: u16 = crate::fs::types::ElfMachine::EM_AARCH64 as u16;
         #[cfg(feature = "riscv64")]
-        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_RISCV as u16;
+        let e_machine: u16 = crate::fs::types::ElfMachine::EM_RISCV as u16;
         #[cfg(feature = "x86_64")]
-        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_X86_64 as u16;
+        let e_machine: u16 = crate::fs::types::ElfMachine::EM_X86_64 as u16;
         e[18..20].copy_from_slice(&e_machine.to_le_bytes());
         e[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
         e[24..32].copy_from_slice(&(F_CLOCK_GETTIME as u64).to_le_bytes()); // entry

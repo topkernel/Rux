@@ -21,8 +21,8 @@ use alloc::string::String;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::sync::types::Spinlock;
-use crate::fs::file::{File, FileOps};
-use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
+use crate::fs::types::{File, FileOps};
+use crate::fs::{types::DevNo, hotpath::DEV_EVDEV_KEYBOARD, hotpath::DEV_EVDEV_POINTER};
 
 // ============================================================================
 // evdev ioctl command decoding
@@ -333,7 +333,7 @@ pub fn push_event(&self, event: InputEvent) {
             let ids = self.open_file_ids.lock_irqsave();
             for &fid in ids.iter().take(n.min(ids.len())) {
                 if fid != 0 {
-                    crate::fs::event_notify::epoll_notify_file(fid);
+                    crate::fs::hotpath::epoll_notify_file(fid);
                 }
             }
         }
@@ -572,7 +572,7 @@ pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
         evdev_keyboard()
     } else if devno == DEV_EVDEV_POINTER {
         evdev_pointer()
-    } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
+    } else if devno == crate::fs::hotpath::DEV_EVDEV_TOUCHSCREEN {
         evdev_touchscreen()
     } else {
         None
@@ -593,7 +593,7 @@ fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
         evdev_keyboard()
     } else if devno == DEV_EVDEV_POINTER {
         evdev_pointer()
-    } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
+    } else if devno == crate::fs::hotpath::DEV_EVDEV_TOUCHSCREEN {
         evdev_touchscreen()
     } else {
         None
@@ -673,7 +673,7 @@ fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
         evdev_keyboard().map(|d| (d, devno.minor))
     } else if devno == DEV_EVDEV_POINTER {
         evdev_pointer().map(|d| (d, devno.minor))
-    } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
+    } else if devno == crate::fs::hotpath::DEV_EVDEV_TOUCHSCREEN {
         evdev_touchscreen().map(|d| (d, devno.minor))
     } else {
         None
@@ -701,7 +701,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
         return -22; // EINVAL
     }
 
-    let nonblock = file.flags_bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+    let nonblock = file.flags_bits() & crate::fs::types::FileFlags::O_NONBLOCK != 0;
 
     loop {
         // Poll for new events
@@ -869,7 +869,7 @@ fn evdev_file_close(file: &File) -> i32 {
 /// drained first so events that raced the tasklet BH still count (and so
 /// a poll-only client — no blocking read — keeps receiving).
 fn evdev_file_poll(file: &File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+    use crate::fs::hotpath::poll_events::*;
 
     // SAFETY: private_data contains a valid DevNo pointer set during open;
     // the EVDEV_* statics are initialized by init_evdev() before any file
@@ -1361,7 +1361,7 @@ fn sysfs_registration(
     event_name: &str,
     devno: DevNo,
     device: &EvdevDevice,
-) -> crate::fs::leaf_glue::InputEventReg {
+) -> crate::fs::types::InputEventReg {
     let name_len = device.name.iter().position(|&c| c == 0).unwrap_or(31);
     let dev_name = String::from(core::str::from_utf8(&device.name[..name_len]).unwrap_or("virtio input"));
 
@@ -1388,7 +1388,7 @@ fn sysfs_registration(
         String::new()
     };
 
-    crate::fs::leaf_glue::InputEventReg {
+    crate::fs::types::InputEventReg {
         input_name: String::from(input_name),
         event_name: String::from(event_name),
         major: devno.major,
@@ -1457,22 +1457,22 @@ pub fn init_evdev() {
     });
 
     // Register device operations
-    crate::fs::leaf_glue::devfs::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
+    crate::fs::hotpath::devfs::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
         .expect("Failed to register keyboard evdev");
-    crate::fs::leaf_glue::devfs::register_char_device(DEV_EVDEV_POINTER, &EVDEV_OPS)
+    crate::fs::hotpath::devfs::register_char_device(DEV_EVDEV_POINTER, &EVDEV_OPS)
         .expect("Failed to register pointer evdev");
-    crate::fs::leaf_glue::devfs::register_char_device(
-        crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN,
+    crate::fs::hotpath::devfs::register_char_device(
+        crate::fs::hotpath::DEV_EVDEV_TOUCHSCREEN,
         &EVDEV_OPS,
     )
     .expect("Failed to register touchscreen evdev");
 
     // Create device nodes
-    crate::fs::leaf_glue::devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
+    crate::fs::hotpath::devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
         .expect("Failed to create /dev/input/event0");
-    crate::fs::leaf_glue::devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
+    crate::fs::hotpath::devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
-    crate::fs::leaf_glue::devfs::mknod("/input/event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, 0o666)
+    crate::fs::hotpath::devfs::mknod("/input/event2", crate::fs::hotpath::DEV_EVDEV_TOUCHSCREEN, 0o666)
         .expect("Failed to create /dev/input/event2");
 
     // U3: registration-time sysfs entries + "add" uevents. The
@@ -1487,10 +1487,10 @@ pub fn init_evdev() {
         .get()
         .map(|d| sysfs_registration("input1", "event1", DEV_EVDEV_POINTER, d));
     if let Some(reg) = kbd_reg {
-        crate::fs::leaf_glue::sysfs::register_input_event(&reg);
+        crate::fs::hotpath::sysfs::register_input_event(&reg);
     }
     if let Some(reg) = ptr_reg {
-        crate::fs::leaf_glue::sysfs::register_input_event(&reg);
+        crate::fs::hotpath::sysfs::register_input_event(&reg);
     }
     // The touchscreen needs the same sysfs presence: OH's input stack
     // enumerates devices through /sys/class/input (ID_INPUT_TOUCHSCREEN +
@@ -1498,9 +1498,9 @@ pub fn init_evdev() {
     // is invisible to multimodalinput — the swipe gesture never starts.
     let ts_reg = EVDEV_TOUCHSCREEN
         .get()
-        .map(|d| sysfs_registration("input2", "event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, d));
+        .map(|d| sysfs_registration("input2", "event2", crate::fs::hotpath::DEV_EVDEV_TOUCHSCREEN, d));
     if let Some(reg) = ts_reg {
-        crate::fs::leaf_glue::sysfs::register_input_event(&reg);
+        crate::fs::hotpath::sysfs::register_input_event(&reg);
     }
 }
 

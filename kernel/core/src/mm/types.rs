@@ -907,7 +907,7 @@ pub struct MmStruct {
     /// its fd, every later demand fill silently produced ZERO pages (the
     /// get_file_fd lookup failed) and ld.so died parsing zero ELF data.
     /// This pin table is the vm_file equivalent.
-    pub(super) vma_files: RwSpinlock<alloc::collections::BTreeMap<usize, alloc::sync::Arc<crate::fs::file::File>>>,
+    pub(super) vma_files: RwSpinlock<alloc::collections::BTreeMap<usize, alloc::sync::Arc<crate::fs::types::File>>>,
 
     /// Address space type
     pub(super) space_type: PageTableType,

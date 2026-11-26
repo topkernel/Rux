@@ -11,8 +11,8 @@
 //! - Starting system services
 //! - Running shell
 
-use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
-use crate::fs::FdTable;
+use crate::fs::types::{ElfLoader, ElfError, Elf64Ehdr};
+use crate::fs::types::FdTable;
 use crate::sched;
 use crate::process::types::{Task, SchedPolicy};
 use crate::println;
@@ -163,12 +163,12 @@ fn load_init_program(path: &str, rootfs_first: bool) -> Option<Vec<u8>> {
     };
 
     if rootfs_first {
-        if let Some(data) = crate::fs::read_file_from_rootfs(path) {
+        if let Some(data) = crate::fs::hotpath::read_file_from_rootfs(path) {
             return Some(data);
         }
         read_ext4(path)
     } else {
-        read_ext4(path).or_else(|| crate::fs::read_file_from_rootfs(path))
+        read_ext4(path).or_else(|| crate::fs::hotpath::read_file_from_rootfs(path))
     }
 }
 
@@ -214,7 +214,7 @@ fn create_and_start_init_process(
         (*task_ptr).signal = Some(signal_struct);
 
         // Create and initialize filesystem info (cwd, root, umask)
-        let fs_struct = alloc::sync::Arc::new(crate::fs::FsStruct::new());
+        let fs_struct = alloc::sync::Arc::new(crate::fs::types::FsStruct::new());
         (*task_ptr).set_fs(Some(fs_struct));
 
         // Initialize standard file descriptors
@@ -380,10 +380,10 @@ fn load_and_setup_elf(
     // Pinned vm_file identities for the PID-1 segment VMAs (vm_file
     // semantics — same as sys_execve): best-effort VFS opens; a None
     // only drops the /proc/<pid>/maps path column.
-    let init_file_arc = crate::fs::vfs::open_file_arc_nofd(init_path);
+    let init_file_arc = crate::fs::hotpath::open_file_arc_nofd(init_path);
     let interp_file_arc = ElfLoader::get_interpreter(program_data)
         .and_then(|p| core::str::from_utf8(p).ok())
-        .and_then(crate::fs::vfs::open_file_arc_nofd);
+        .and_then(crate::fs::hotpath::open_file_arc_nofd);
 
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
     // INIT_TASK_STORAGE) — one typed-borrow edge for the loader call; the
@@ -462,10 +462,10 @@ fn load_and_setup_elf(
 /// Initialize standard file descriptors for task (stdin/stdout/stderr)
 ///
 /// This function is public and can be reused by fork and other operations
-pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
+pub fn init_std_fds_for_task(fdtable: &crate::fs::types::FdTable) {
     // The body lives in the fs crate now (char_dev leaf); this
     // forwarding call keeps the historical name for the fork/exec paths.
-    crate::fs::leaf_glue::char_dev::init_std_fds_for_task(fdtable);
+    crate::fs::hotpath::char_dev::init_std_fds_for_task(fdtable);
 }
 
 /// Halt the system

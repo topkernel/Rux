@@ -33,12 +33,12 @@ pub fn do_execve_elf(
     envp: &[String],
     entry: u64,
     phdr_count: usize,
-    ehdr: &crate::fs::elf::Elf64Ehdr,
+    ehdr: &crate::fs::types::Elf64Ehdr,
     pathname: &str,
     interp_data: Option<&[u8]>,
     secure_exec: bool,
-    exe_file: Option<&alloc::sync::Arc<crate::fs::file::File>>,
-    interp_file: Option<&alloc::sync::Arc<crate::fs::file::File>>,
+    exe_file: Option<&alloc::sync::Arc<crate::fs::types::File>>,
+    interp_file: Option<&alloc::sync::Arc<crate::fs::types::File>>,
 ) -> Result<(), i32> {
     use crate::arch::mm::{
         create_user_address_space,
@@ -147,8 +147,8 @@ pub fn do_execve_elf(
         // elf_read_implies_exec == 0 fallback), so absence keeps the
         // secure default. Only the MAIN exe's PT_GNU_STACK counts — the
         // reference reads it from elf_phdata, not the interpreter's phdrs.
-        if phdr.p_type == crate::fs::elf::PT_GNU_STACK {
-            exec_stack_exec = phdr.p_flags & crate::fs::elf::PF_X != 0;
+        if phdr.p_type == crate::fs::hotpath::PT_GNU_STACK {
+            exec_stack_exec = phdr.p_flags & crate::fs::hotpath::PF_X != 0;
         }
 
         if phdr.is_load() {
@@ -184,7 +184,7 @@ pub fn do_execve_elf(
     // family that killed first pixels). ET_EXEC keeps absolute p_vaddr
     // (bias 0). The base is clear of the fixed INTERP_BASE (0x3FBF000000
     // = 17GB) and of MMAP_START (TASK_SIZE-64GB) on both arches.
-    let exec_load_bias: u64 = if ehdr.e_type == crate::fs::elf::ElfType::ET_DYN as u16 {
+    let exec_load_bias: u64 = if ehdr.e_type == crate::fs::types::ElfType::ET_DYN as u16 {
         let task_size = crate::arch::mm::user_addr::TASK_SIZE as u64;
         (task_size / 3 * 2) & !(PAGE_SIZE - 1)
     } else {
@@ -746,7 +746,7 @@ pub fn do_execve_elf(
             // SAFETY: get_program_header bounds-checks e_phoff/idx against
             // program_data (Wave 1 central check).
             if let Some(ph) = crate::r#unsafe::exec_phdr_at(ehdr, program_data, i) {
-                if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
+                if ph.p_type == crate::fs::types::ElfPtType::PT_PHDR as u32 {
                     found = Some(exec_load_bias + ph.p_vaddr);
                     break;
                 }

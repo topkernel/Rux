@@ -543,7 +543,7 @@ fn get_user_usize(addr: usize) -> usize {
 /// EBADF for unknown fds, EFAULT/EINVAL on malformed control data.
 fn parse_unix_cmsgs(
     msg_ptr: *const u8,
-) -> Result<(alloc::vec::Vec<alloc::sync::Arc<crate::fs::file::File>>, bool), i64> {
+) -> Result<(alloc::vec::Vec<alloc::sync::Arc<rux::fs::types::File>>, bool), i64> {
     use crate::arch::uaccess::access_ok;
 
     // msghdr layout (64-bit): msg_control @32, msg_controllen @40.
@@ -622,7 +622,7 @@ fn parse_unix_cmsgs(
 /// drop-on-no-control-buffer), or EFAULT/EMFILE.
 fn deliver_unix_cmsgs(
     msg_ptr: *mut u8,
-    files: &[alloc::sync::Arc<crate::fs::file::File>],
+    files: &[alloc::sync::Arc<rux::fs::types::File>],
     cred: Option<crate::net::unix::UnixCred>,
 ) -> Result<usize, i64> {
     // Contract: msg_ptr was access_ok(64)-validated by the recvmsg entry;
@@ -842,8 +842,8 @@ fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Soc
 
 /// Leg-52 lever A: the file-resolved arm of `socket_file_of` (one lookup
 /// at the ladder head, none inside).
-fn socket_file_ref(file: &alloc::sync::Arc<crate::fs::file::File>) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
-    let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
+fn socket_file_ref(file: &alloc::sync::Arc<rux::fs::types::File>) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
+    let nonblock = (file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0;
     let socket = crate::net::socket::socket_of_arc(file)?;
     Some((socket, nonblock))
 }
@@ -895,7 +895,7 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                 None => return -(errno::EBADF as i64),
             };
             match fdtable.get_file(fd) {
-                Some(f) => (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0,
+                Some(f) => (f.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0,
                 None => return -(errno::EBADF as i64),
             }
         };
@@ -961,9 +961,9 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                     // open_tree(no-clone) fds ARE path fds and keep EBADF.
                     Some(f) => {
                         if f.flags().bits()
-                            & crate::fs::file::FileFlags::O_PATH
+                            & rux::fs::types::FileFlags::O_PATH
                             != 0
-                            && crate::fs::fsctx::fsctx_of(&f).is_none()
+                            && rux::fs::hotpath::fsctx_of(&f).is_none()
                         {
                             return -(errno::EBADF as i64);
                         }
@@ -1212,7 +1212,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
         // an in-flight handshake (same file-flags source as recv/send).
         let nonblock = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(fd as usize))
-            .map(|f| (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0)
+            .map(|f| (f.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0)
             .unwrap_or(false);
         let result = match parsed {
             ParsedSockAddr::V6 { addr, port } => {
@@ -1567,7 +1567,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
             None => return -(errno::EBADF as i64),
         };
         match fdtable.get_file(fd) {
-            Some(f) => (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0,
+            Some(f) => (f.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0,
             None => return -(errno::EBADF as i64),
         }
     };
@@ -4731,7 +4731,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
             None => return -(errno::EBADF as i64),
         };
         match fdtable.get_file(fd) {
-            Some(f) => (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0,
+            Some(f) => (f.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0,
             None => return -(errno::EBADF as i64),
         }
     };

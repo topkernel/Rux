@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::fs::mount::MntFlags;
+use crate::fs::types::MntFlags;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_mount_flags() {

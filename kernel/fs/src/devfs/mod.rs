@@ -22,11 +22,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::types::Spinlock;
-use rux::fs::file::FileOps;
-use super::dev_t::DevNo;
-
-// Re-export device number definitions
-pub use super::dev_t;
+use rux::fs::types::FileOps;
+use rux::fs::types::DevNo;
 
 // ============================================================================
 // devfs directory entries
@@ -263,11 +260,11 @@ static DEVFS_ROOT: Spinlock<Option<Arc<DevfsEntry>>> = Spinlock::new(None);
 /// __init_libc opens /dev/null when a stdio fd is missing (POLLNVAL) and
 /// DELIBERATELY crashes (NULL store) if the open fails — without this
 /// node any process with a closed stdio fd dies at startup.
-fn nulldev_read(_file: &rux::fs::file::File, _buf: &mut [u8]) -> isize {
+fn nulldev_read(_file: &rux::fs::types::File, _buf: &mut [u8]) -> isize {
     0 // immediate EOF
 }
 
-fn nulldev_write(file: &rux::fs::file::File, buf: &[u8]) -> isize {
+fn nulldev_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     let _ = file;
     buf.len() as isize // pretend everything was swallowed
 }
@@ -275,12 +272,12 @@ fn nulldev_write(file: &rux::fs::file::File, buf: &[u8]) -> isize {
 /// /dev/null is ALWAYS readable (immediate EOF) and writable (discard).
 /// Explicit poll op (review 5.2 low: relied on the generic "no handler =
 /// ready" fallback, which a future default change would silently break).
-fn nulldev_poll(_file: &rux::fs::file::File, _events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+fn nulldev_poll(_file: &rux::fs::types::File, _events: u16) -> u16 {
+    use rux::fs::hotpath::poll_events::*;
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-pub(crate) static NULLDEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub(crate) static NULLDEV_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(nulldev_read)
     .write(nulldev_write)
     .poll(nulldev_poll)
@@ -297,8 +294,8 @@ pub(crate) static NULLDEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::
 /// read goes through the shared console TtyDevice (canonical-mode line
 /// discipline, termios settings shared with the pty layer); write does
 /// OPOST/ONLCR translation then hits the UART atomically per chunk.
-pub fn condev_read(file: &rux::fs::file::File, buf: &mut [u8]) -> isize {
-    let nonblock = (file.flags().bits() & rux::fs::file::FileFlags::O_NONBLOCK) != 0;
+pub fn condev_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
+    let nonblock = (file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK) != 0;
     // Feed the tty queue from the UART RX ring first (see
     // console::uart_rx_bridge_to_tty): the IRQ only fills the ring that
     // exec-provided stdin drains.
@@ -306,7 +303,7 @@ pub fn condev_read(file: &rux::fs::file::File, buf: &mut [u8]) -> isize {
     crate::tty::console().read_input(buf, nonblock)
 }
 
-pub fn condev_write(_file: &rux::fs::file::File, buf: &[u8]) -> isize {
+pub fn condev_write(_file: &rux::fs::types::File, buf: &[u8]) -> isize {
     let onlcr = crate::tty::console().output_translates_nl();
     // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
     // console write stays atomic per chunk (R20-4 discipline).
@@ -349,8 +346,8 @@ pub fn condev_write(_file: &rux::fs::file::File, buf: &[u8]) -> isize {
     buf.len() as isize
 }
 
-pub fn condev_poll(_file: &rux::fs::file::File, events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+pub fn condev_poll(_file: &rux::fs::types::File, events: u16) -> u16 {
+    use rux::fs::hotpath::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::tty::console().input_poll_ready() {
         ready |= POLLIN | POLLRDNORM;
@@ -361,40 +358,40 @@ pub fn condev_poll(_file: &rux::fs::file::File, events: u16) -> u16 {
     ready
 }
 
-pub static CONDEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub static CONDEV_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(condev_read)
     .write(condev_write)
     .poll(condev_poll)
     .build();
 
 /// /dev/zero — reads return zeros, writes discard.
-fn zerodev_read(_file: &rux::fs::file::File, buf: &mut [u8]) -> isize {
+fn zerodev_read(_file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     buf.fill(0);
     buf.len() as isize
 }
 
-fn zerodev_write(file: &rux::fs::file::File, buf: &[u8]) -> isize {
+fn zerodev_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     let _ = file;
     buf.len() as isize
 }
 
-fn zerodev_poll(_file: &rux::fs::file::File, _events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+fn zerodev_poll(_file: &rux::fs::types::File, _events: u16) -> u16 {
+    use rux::fs::hotpath::poll_events::*;
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-pub(crate) static ZERODEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub(crate) static ZERODEV_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(zerodev_read)
     .write(zerodev_write)
     .poll(zerodev_poll)
     .build();
 
 /// /dev/full — reads return zeros, writes fail with ENOSPC.
-fn fulldev_write(_file: &rux::fs::file::File, _buf: &[u8]) -> isize {
+fn fulldev_write(_file: &rux::fs::types::File, _buf: &[u8]) -> isize {
     -(crate::errno::constants::ENOSPC as isize)
 }
 
-pub(crate) static FULLDEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub(crate) static FULLDEV_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(zerodev_read)
     .write(fulldev_write)
     .poll(zerodev_poll)
@@ -422,17 +419,17 @@ fn rng_fill(buf: &mut [u8]) {
     }
 }
 
-fn randdev_read(_file: &rux::fs::file::File, buf: &mut [u8]) -> isize {
+fn randdev_read(_file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     rng_fill(buf);
     buf.len() as isize
 }
 
-fn randdev_poll(_file: &rux::fs::file::File, _events: u16) -> u16 {
-    use rux::fs::event_notify::poll_events::*;
+fn randdev_poll(_file: &rux::fs::types::File, _events: u16) -> u16 {
+    use rux::fs::hotpath::poll_events::*;
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-pub(crate) static RANDDEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub(crate) static RANDDEV_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(randdev_read)
     .write(zerodev_write)
     .poll(randdev_poll)
@@ -453,7 +450,7 @@ pub(crate) static RANDDEV_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::
 /// and gives userspace actual kernel-log ingestion.
 
 /// virtio-blk major on this platform (matches sysfs /sys/class/block/vda).
-pub use rux::fs::dev_t::VIRTIO_BLK_MAJOR;
+pub use rux::fs::hotpath::VIRTIO_BLK_MAJOR;
 
 /// virtio-blk root disk name.
 const ROOT_DISK_NAME: &str = "vda";
@@ -478,7 +475,7 @@ fn root_disk_present() -> bool {
 ///
 /// Network interfaces correctly have NO /dev node (socket-only).
 fn devtmpfs_populate() {
-    use rux::fs::dev_t::{DevNo, MEM_MAJOR, TTYAUX_MAJOR, TTY_MAJOR};
+    use rux::fs::{types::DevNo, hotpath::MEM_MAJOR, hotpath::TTYAUX_MAJOR, hotpath::TTY_MAJOR};
 
     // --- terminal devices ---
     // Linux dev_t layout: /dev/tty0../dev/ttyN are (4, 0..N) — tty0 is
@@ -489,19 +486,19 @@ fn devtmpfs_populate() {
     let _ = registry::register_char_device(DevNo::new(TTYAUX_MAJOR, 1), &CONDEV_OPS); // console
     let _ = registry::register_char_device(DevNo::new(TTYAUX_MAJOR, 0), &CONDEV_OPS); // tty
     let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 64), &CONDEV_OPS); // ttyS0
-    for minor in 0..=rux::fs::vt::NR_VT {
+    for minor in 0..=rux::fs::hotpath::NR_VT {
         let _ = registry::register_char_device(
             DevNo::new(TTY_MAJOR, minor),
-            &rux::fs::vt::VTDEV_OPS,
+            &rux::fs::hotpath::VTDEV_OPS,
         );
     }
 
     // --- mem devices ---
-    let _ = registry::register_char_device(rux::fs::dev_t::DEV_ZERO, &ZERODEV_OPS);
+    let _ = registry::register_char_device(rux::fs::hotpath::DEV_ZERO, &ZERODEV_OPS);
     let _ = registry::register_char_device(DevNo::new(MEM_MAJOR, 7), &FULLDEV_OPS);
-    let _ = registry::register_char_device(rux::fs::dev_t::DEV_RANDOM, &RANDDEV_OPS);
-    let _ = registry::register_char_device(rux::fs::dev_t::DEV_URANDOM, &RANDDEV_OPS);
-    let _ = registry::register_char_device(rux::fs::dev_t::DEV_KMSG, &crate::printk::KMSG_OPS);
+    let _ = registry::register_char_device(rux::fs::hotpath::DEV_RANDOM, &RANDDEV_OPS);
+    let _ = registry::register_char_device(rux::fs::hotpath::DEV_URANDOM, &RANDDEV_OPS);
+    let _ = registry::register_char_device(rux::fs::hotpath::DEV_KMSG, &crate::printk::KMSG_OPS);
 
     // --- OpenHarmony Phase 2 device nodes (port plan §6 items 2/3):
     // /dev/ashmem and /dev/access_token_id. Registered here (NOT via
@@ -536,11 +533,11 @@ fn devtmpfs_populate() {
         ("console", DevNo::new(TTYAUX_MAJOR, 1), 0o600),
         ("tty", DevNo::new(TTYAUX_MAJOR, 0), 0o666),
         ("ttyS0", DevNo::new(TTY_MAJOR, 64), 0o600),
-        ("zero", rux::fs::dev_t::DEV_ZERO, 0o666),
+        ("zero", rux::fs::hotpath::DEV_ZERO, 0o666),
         ("full", DevNo::new(MEM_MAJOR, 7), 0o666),
-        ("random", rux::fs::dev_t::DEV_RANDOM, 0o666),
-        ("urandom", rux::fs::dev_t::DEV_URANDOM, 0o666),
-        ("kmsg", rux::fs::dev_t::DEV_KMSG, 0o600),
+        ("random", rux::fs::hotpath::DEV_RANDOM, 0o666),
+        ("urandom", rux::fs::hotpath::DEV_URANDOM, 0o666),
+        ("kmsg", rux::fs::hotpath::DEV_KMSG, 0o600),
         ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
         // "watchdog" joins via the driver service seam's node rows below.
         // NOTE: no "access_token_id" here — the node is registered below
@@ -568,7 +565,7 @@ fn devtmpfs_populate() {
     // EXITGRP code=-5). logind's VT-controller startup that this node
     // also gates is disabled via the missing
     // /sys/class/tty/tty0/active attribute instead (see sysfs).
-    for minor in 0..=rux::fs::vt::NR_VT {
+    for minor in 0..=rux::fs::hotpath::NR_VT {
         let name = alloc::format!("tty{}", minor);
         children.insert(
             name.clone(),
@@ -594,7 +591,7 @@ fn devtmpfs_populate() {
         String::from("loop-control"),
         Arc::new(DevfsEntry::new_char_device_with_mode(
             "loop-control",
-            rux::fs::dev_t::DevNo::new(rux::fs::dev_t::MISC_MAJOR, crate::drivers::loop_dev::LOOP_CONTROL_MINOR),
+            rux::fs::types::DevNo::new(rux::fs::hotpath::MISC_MAJOR, crate::drivers::loop_dev::LOOP_CONTROL_MINOR),
             0o666,
         )),
     );
@@ -604,7 +601,7 @@ fn devtmpfs_populate() {
             name.clone(),
             Arc::new(DevfsEntry::new_block_device(
                 &name,
-                rux::fs::dev_t::DevNo::new(rux::fs::dev_t::LOOP_MAJOR, i as u32),
+                rux::fs::types::DevNo::new(rux::fs::hotpath::LOOP_MAJOR, i as u32),
                 0o660,
             )),
         );
@@ -731,7 +728,7 @@ fn evict_dev_dentry(rel_path: &str) {
     // Shallow walk: root → dev (mount point → devfs root) → parents...
     let mut walk: Vec<&str> = alloc::vec!["dev"];
     walk.extend_from_slice(&components);
-    if let Some(parent_dentry) = rux::fs::vfs::shallow_dentry_walk(&walk) {
+    if let Some(parent_dentry) = rux::fs::hotpath::shallow_dentry_walk(&walk) {
         parent_dentry.remove_child(name);
     }
 }
@@ -800,7 +797,7 @@ pub fn devtmpfs_unregister_device(path: &str, devno: DevNo, is_block: bool) -> R
 
 pub fn init() {
     // Register /dev/null before creating the tree
-    let _ = registry::register_char_device(rux::fs::dev_t::DEV_NULL, &NULLDEV_OPS);
+    let _ = registry::register_char_device(rux::fs::hotpath::DEV_NULL, &NULLDEV_OPS);
 
     let mut root = DEVFS_ROOT.lock_irqsave();
 
@@ -810,7 +807,7 @@ pub fn init() {
     // /dev/null node
     let null_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
         "null",
-        rux::fs::dev_t::DEV_NULL,
+        rux::fs::hotpath::DEV_NULL,
         0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
     ));
     root_entry
@@ -833,7 +830,7 @@ pub fn init() {
     // present, XPM is exonerated; if they proceed, the driver needs a
     // real implementation.
     for (name, minor) in [("xpm", 240u32), ("dec", 241u32)] {
-        let dev = rux::fs::dev_t::DevNo::new(rux::fs::dev_t::MISC_MAJOR, minor);
+        let dev = rux::fs::types::DevNo::new(rux::fs::hotpath::MISC_MAJOR, minor);
         let _ = registry::register_char_device(dev, &NULLDEV_OPS);
         let entry = Arc::new(DevfsEntry::new_char_device_with_mode(
             name,
@@ -862,7 +859,7 @@ pub fn init() {
         ("bbox", 242u32),
         ("sched_rtg_ctrl", 243u32),
     ] {
-        let dev = rux::fs::dev_t::DevNo::new(rux::fs::dev_t::MISC_MAJOR, minor);
+        let dev = rux::fs::types::DevNo::new(rux::fs::hotpath::MISC_MAJOR, minor);
         let _ = registry::register_char_device(dev, &NULLDEV_OPS);
         let entry = Arc::new(DevfsEntry::new_char_device_with_mode(
             name,
@@ -1264,7 +1261,7 @@ pub fn parse_dev_path(path: &str) -> Option<&str> {
 // DevFS Inode Operations (for VFS dentry tree integration)
 // ============================================================================
 
-use rux::fs::inode::{Inode, InodeMode, Ino, INodeOps};
+use rux::fs::types::{Inode, InodeMode, Ino, INodeOps};
 use crate::errno;
 
 /// Devfs lookup: given a parent directory inode and a child name, return child's ino.
@@ -1327,7 +1324,7 @@ fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc
     // getattr's st_rdev): mmap(2) identifies /dev/zero through it to
     // apply the anonymous map_zero semantics.
     inode.rdev = child.devno.to_user_dev();
-    inode.fs_id = rux::fs::inode::FS_ID_DEVFS;  // icache isolation (VFS-H8)
+    inode.fs_id = rux::fs::hotpath::FS_ID_DEVFS;  // icache isolation (VFS-H8)
     inode.ops = Some(&DEVFS_INODE_OPS);
     // Clone the Arc and convert to raw pointer to keep the DevfsEntry alive
     // independently of the BTreeMap entry. The refcount is incremented by
@@ -1348,7 +1345,7 @@ fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc
 
 /// Devfs getattr: fill stat for a devfs entry.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn devfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn devfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -1414,14 +1411,14 @@ fn devfs_ino_hash(name: &str) -> u64 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 /// Loop-family file ops: everything routes through the devno stashed on
 /// the open file (open) and the loop ioctl dispatcher (sys_ioctl).
-pub static LOOP_FILE_OPS: rux::fs::file::FileOps = rux::fs::file::FileOps::builder()
+pub static LOOP_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(crate::drivers::loop_dev::loop_file_read)
     .write(crate::drivers::loop_dev::loop_file_write)
     .lseek(crate::drivers::loop_dev::loop_file_lseek)
     .build();
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
+fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
             None => return 0,
@@ -1470,9 +1467,9 @@ fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
     // evdev nodes: stash the DevNo in file.private_data — evdev's
     // read/poll dispatch on it (the hook the comments promised but no
     // one ever wired: reads returned EBADF before reaching the queue).
-    if entry.devno == rux::fs::dev_t::DEV_EVDEV_KEYBOARD
-        || entry.devno == rux::fs::dev_t::DEV_EVDEV_POINTER
-        || entry.devno == rux::fs::dev_t::DEV_EVDEV_TOUCHSCREEN
+    if entry.devno == rux::fs::hotpath::DEV_EVDEV_KEYBOARD
+        || entry.devno == rux::fs::hotpath::DEV_EVDEV_POINTER
+        || entry.devno == rux::fs::hotpath::DEV_EVDEV_TOUCHSCREEN
     {
         let b = alloc::boxed::Box::new(entry.devno);
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
@@ -1488,17 +1485,17 @@ fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
     // VT nodes (4, 0..=NR_VT): stash the DevNo (the ioctl layer reads
     // the VT number from it) and mark the VT in use — VT_OPENQRY skips
     // it (gdm opens tty1 precisely to keep the initial VT reserved).
-    if rux::fs::vt::is_vt_devno(&entry.devno) {
+    if rux::fs::hotpath::is_vt_devno(&entry.devno) {
         let b = alloc::boxed::Box::new(entry.devno);
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
-        rux::fs::vt::vt_opened(&entry.devno);
+        rux::fs::hotpath::vt_opened(&entry.devno);
     }
     0
 }
 
 /// DevFS get_file_ops: return device-specific ops for char devices, DIR_FILE_OPS for directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_char_device() || inode.mode.is_block_device() {
         let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
         if crate::drivers::loop_dev::is_loop_devno(entry.devno) {
@@ -1519,7 +1516,7 @@ fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> 
         }
         ops
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else if inode.mode.is_regular_file() {
         // devtmpfs regular files (OH /dev/__parameters__ workspace).
         Some(&DEVFS_REG_FILE_OPS)
@@ -1534,8 +1531,8 @@ fn devfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> 
 
 /// DevFS readdir: list directory entries
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
-    use rux::fs::inode::file_type;
+fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::types::VfsDirEntry>> {
+    use rux::fs::hotpath::file_type;
 
     let entry = rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode)?;
     if !entry.is_dir() {
@@ -1557,7 +1554,7 @@ fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDir
         } else {
             file_type::DT_UNKNOWN
         };
-        entries.push(rux::fs::inode::VfsDirEntry {
+        entries.push(rux::fs::types::VfsDirEntry {
             // Same ino generator as devfs_lookup/devfs_iget (hash of the
             // name) so getdents64+stat agree on the inode number — review
             // 5.4 (devfs lookup/readdir ino 不一致).
@@ -1637,7 +1634,7 @@ fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, 
         ino,
         InodeMode::new(InodeMode::S_IFDIR | new_dir.mode.load(Ordering::Acquire)),
     );
-    inode.fs_id = rux::fs::inode::FS_ID_DEVFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(new_dir) as *mut u8);
     Ok(Arc::new(inode))
@@ -1669,7 +1666,7 @@ fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>,
         ino,
         InodeMode::new(InodeMode::S_IFREG | file_entry.mode.load(Ordering::Acquire)),
     );
-    inode.fs_id = rux::fs::inode::FS_ID_DEVFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(file_entry) as *mut u8);
     Ok(Arc::new(inode))
@@ -1708,7 +1705,7 @@ fn devfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, 
         // Linux symlink nodes: S_IFLNK|0777 (see new_symlink).
         InodeMode::new(InodeMode::S_IFLNK | link_entry.mode.load(Ordering::Acquire)),
     );
-    inode.fs_id = rux::fs::inode::FS_ID_DEVFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.set_size(link_entry.size.load(Ordering::Acquire));
     inode.private_data = Some(Arc::into_raw(link_entry) as *mut u8);
@@ -1993,11 +1990,11 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
 /// mmapped /sys/fs/selinux/status MAP_SHARED and faulted it). The
 /// fs_id + S_IFREG gate rejects every foreign inode BEFORE
 /// private_data is dereferenced; a NULL private_data is rejected too.
-pub fn devfs_reg_current_size(file: &rux::fs::File) -> Option<u64> {
+pub fn devfs_reg_current_size(file: &rux::fs::types::File) -> Option<u64> {
     // Caller passes a valid File; only stable fields are read.
     {
         let inode = rux::fs::r#unsafe::file_inode(file)?;
-        if inode.fs_id != rux::fs::inode::FS_ID_DEVFS
+        if inode.fs_id != rux::fs::hotpath::FS_ID_DEVFS
             || !inode.mode.is_regular_file()
         {
             return None;
@@ -2011,14 +2008,14 @@ pub fn devfs_reg_current_size(file: &rux::fs::File) -> Option<u64> {
 /// `file_off` for a MAP_SHARED mapping of this devfs regular file,
 /// activating/growing the shared backing on demand. None → the caller
 /// falls back to the generic private-page path.
-pub fn shared_fault_file_page(file: &rux::fs::File, file_off: usize) -> Option<u64> {
+pub fn shared_fault_file_page(file: &rux::fs::types::File, file_off: usize) -> Option<u64> {
     // Fault-path caller passes the pinned vm_file; the edges are safe
     // fns (FILEINODE-1 / PRIVDATA-1).
     let inode = rux::fs::r#unsafe::file_inode(file)?;
     // Same identity gate as devfs_reg_current_size: private_data is
     // only a DevfsEntry pointer on devfs inodes (foreign filesystems
     // store table indices/pids there — see that function's comment).
-    if inode.fs_id != rux::fs::inode::FS_ID_DEVFS
+    if inode.fs_id != rux::fs::hotpath::FS_ID_DEVFS
         || !inode.mode.is_regular_file()
     {
         return None;
@@ -2062,7 +2059,7 @@ pub fn shared_fault_file_page(file: &rux::fs::File, file_off: usize) -> Option<u
 /// Whether the file's regular devfs entry currently has an ACTIVE shared
 /// backing (read/write paths consult this — while active the backing is
 /// the canonical store, entry.data is stale).
-fn shared_entry_of(file: &rux::fs::File) -> Option<(&'static DevfsEntry, usize)> {
+fn shared_entry_of(file: &rux::fs::types::File) -> Option<(&'static DevfsEntry, usize)> {
     // Caller passes a valid File; only stable inode fields are read.
     // The entry is leaked-Arc-backed and outlives the file (the
     // privdata edge's INV-FS-PRIVDATA-1 + the leak-at-install
@@ -2109,7 +2106,7 @@ fn shared_read_off(entry: &DevfsEntry, logical: usize, off: usize, buf: &mut [u8
 /// inode size) when the write extends the file. Returns bytes written.
 fn shared_write_off(
     entry: &DevfsEntry,
-    inode: &rux::fs::inode::Inode,
+    inode: &rux::fs::types::Inode,
     off: usize,
     buf: &[u8],
 ) -> usize {
@@ -2141,7 +2138,7 @@ fn shared_write_off(
     done
 }
 
-fn devfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn devfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // SAFETY: VFS callback contract — inode/private_data are valid.
     {
         let inode = match file.get_inode() {
@@ -2172,7 +2169,7 @@ fn devfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-fn devfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn devfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // SAFETY: VFS callback contract — inode/private_data are valid.
     {
         let inode = match file.get_inode() {
@@ -2208,7 +2205,7 @@ fn devfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
     }
 }
 
-fn devfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn devfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     // SAFETY: VFS callback contract — inode/private_data are valid.
     // review-s2b: SEEK_END sizes off the ENTRY-AUTHORITATIVE size — while a
     // MAP_SHARED backing is active entry.data is stale (see devfs_getattr),
@@ -2241,7 +2238,7 @@ fn devfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
 
 /// read_at for devfs regular files: positional, no shared-position swing
 /// (R71 — the mmap demand-fault path reads through this).
-fn devfs_file_read_at(file: &rux::fs::File, offset: u64, buf: &mut [u8]) -> isize {
+fn devfs_file_read_at(file: &rux::fs::types::File, offset: u64, buf: &mut [u8]) -> isize {
     {
         let inode = match file.get_inode() {
             Some(i) => i,
@@ -2366,7 +2363,7 @@ fn devfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 /// new owner without a dentry re-lookup.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
 
     let entry = match rux::fs::r#unsafe::privdata_ref::<DevfsEntry>(inode) {
             Some(v) => v,
@@ -2482,7 +2479,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
 /// Called during mount to set up the root dentry's inode.
 pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode> {
     let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o755));
-    inode.fs_id = rux::fs::inode::FS_ID_DEVFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(Arc::clone(root_entry)) as *mut u8);
     alloc::sync::Arc::new(inode)
@@ -2495,12 +2492,12 @@ pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode
 // ============================================================================
 
 /// The devtmpfs mount entry (old mount.rs "devfs"|"devtmpfs" arm).
-pub fn mount_devtmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_devtmpfs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data);
     init();
     if let Some(root_entry) = get_root_entry() {
-        rux::fs::vfs::vfs_mount(target, create_root_inode(&root_entry), mnt_flags);
-        rux::fs::mount::register_mount(fs_type, target, "devtmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        rux::fs::hotpath::vfs_mount(target, create_root_inode(&root_entry), mnt_flags);
+        rux::fs::hotpath::register_mount(fs_type, target, "devtmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         Ok(())
     } else {
         Err(crate::errno::Errno::NoSuchDevice.as_neg_i32())
@@ -2508,5 +2505,5 @@ pub fn mount_devtmpfs(source: &str, target: &str, fs_type: &str, data: Option<&s
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["devfs", "devtmpfs"], mount_devtmpfs);
+    rux::fs::hotpath::register(&["devfs", "devtmpfs"], mount_devtmpfs);
 }

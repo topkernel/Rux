@@ -403,7 +403,7 @@ pub fn send_signal_core(
         }
         crate::signal::signal_wake_up(task as *const crate::process::types::Task as *mut crate::process::types::Task);
         // P1 signalfd hook: wake signalfd readers of this task.
-        crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
+        crate::fs::hotpath::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
         emit(if already_std { 2 } else { 0 });
         return Ok(());
     }
@@ -415,7 +415,7 @@ pub fn send_signal_core(
             task.pending.add(sig);
             crate::signal::signal_wake_up(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             // P1 signalfd hook: wake signalfd readers of this task.
-            crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
+            crate::fs::hotpath::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
@@ -534,7 +534,7 @@ pub fn send_signal_core(
             // use case (the app blocks the mask and reads via the fd) —
             // no handler path will run, so this wake is the only thing
             // that unblocks a read(sfd) on this signal.
-            crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
+            crate::fs::hotpath::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
@@ -546,7 +546,7 @@ pub fn send_signal_core(
     // P1 signalfd hook: wake signalfd readers of this task (in-mask
     // signals are typically blocked, so they stay pending and are only
     // observable through the fd — this wake is what unblocks read(sfd)).
-    crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
+    crate::fs::hotpath::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
     emit(if already_std { 2 } else { 0 });
     Ok(())
 }

@@ -30,7 +30,7 @@ fn walk_all(fd: usize) -> Option<alloc::vec::Vec<alloc::vec::Vec<u8>>> {
     let mut names = alloc::vec::Vec::new();
     let mut buf = [0u8; 512];
     loop {
-        match crate::fs::vfs::file_getdents64(fd, &mut buf, 512) {
+        match crate::fs::hotpath::file_getdents64(fd, &mut buf, 512) {
             Ok(0) => return Some(names),
             Ok(total) => {
                 let mut off = 0usize;
@@ -54,7 +54,7 @@ pub fn test_getdents_cache() {
     test_group_start("getdents-cache");
 
     // ---- 1. dot synthesis helper (pure) ---------------------------------
-    let dots = crate::fs::vfs::getdents_with_dots(alloc::vec::Vec::new(), 7, 9);
+    let dots = crate::fs::hotpath::getdents_with_dots(alloc::vec::Vec::new(), 7, 9);
     if dots.len() == 2
         && dots[0].name == b".".as_slice()
         && dots[0].ino == 7
@@ -66,12 +66,12 @@ pub fn test_getdents_cache() {
         test_fail("with_dots synthesizes the pair", "wrong shape");
     }
     // A listing that already carries "." is returned untouched.
-    let carried = alloc::vec![crate::fs::inode::VfsDirEntry {
+    let carried = alloc::vec![crate::fs::types::VfsDirEntry {
         ino: 1,
         name: alloc::vec![b'.'],
-        file_type: crate::fs::inode::file_type::DT_DIR,
+        file_type: crate::fs::hotpath::file_type::DT_DIR,
     }];
-    let untouched = crate::fs::vfs::getdents_with_dots(carried, 7, 9);
+    let untouched = crate::fs::hotpath::getdents_with_dots(carried, 7, 9);
     if untouched.len() == 1 && untouched[0].name == b".".as_slice() {
         test_pass("with_dots keeps an existing pair");
     } else {
@@ -80,18 +80,18 @@ pub fn test_getdents_cache() {
 
     // ---- 2. fresh tmpfs with 40 entries; one fd, 512-byte buffer -------
     let mp = "/tmp/getdcachetest";
-    let _ = crate::fs::mount::do_mount("none", mp, "tmpfs", 0, None);
+    let _ = crate::fs::hotpath::do_mount("none", mp, "tmpfs", 0, None);
     // Create via open, but CLOSE every create-fd: a later suite row
     // (syscall_io "ioctl on closed fd") asserts fd 10 is CLOSED in this
     // task's fdtable — leaking 40 fds here flips it to a live tmpfs file
     // and that row reads ENOTTY instead of EBADF.
     for i in 0..40u32 {
         let p = alloc::format!("{}/a{:02}", mp, i);
-        if let Ok(cfd) = crate::fs::vfs::file_open(&p, crate::fs::FileFlags::O_WRONLY | crate::fs::FileFlags::O_CREAT, 0o644) {
-            crate::fs::vfs::file_close(cfd).ok();
+        if let Ok(cfd) = crate::fs::hotpath::file_open(&p, crate::fs::types::FileFlags::O_WRONLY | crate::fs::types::FileFlags::O_CREAT, 0o644) {
+            crate::fs::hotpath::file_close(cfd).ok();
         }
     }
-    let fd = match crate::fs::vfs::file_opendir(mp, 0) {
+    let fd = match crate::fs::hotpath::file_opendir(mp, 0) {
         Ok(fd) => fd,
         Err(e) => {
             test_fail("opendir tmpfs", &alloc::format!("errno {}", -e));
@@ -107,7 +107,7 @@ pub fn test_getdents_cache() {
         Some(n) => n,
         None => {
             test_fail("first walk clean", "malformed stream");
-            crate::fs::vfs::file_close(fd).ok();
+            crate::fs::hotpath::file_close(fd).ok();
             return;
         }
     };
@@ -138,25 +138,25 @@ pub fn test_getdents_cache() {
     // than the listing), create a new entry (bumps VFS_DIR_EPOCH), then
     // continue the SAME stream: the remaining calls must re-materialize
     // and the new entry must be visible before exhaustion.
-    let fd2 = match crate::fs::vfs::file_opendir(mp, 0) {
+    let fd2 = match crate::fs::hotpath::file_opendir(mp, 0) {
         Ok(fd) => fd,
         Err(e) => {
             test_fail("reopendir tmpfs", &alloc::format!("errno {}", -e));
-            crate::fs::vfs::file_close(fd).ok();
+            crate::fs::hotpath::file_close(fd).ok();
             return;
         }
     };
     let mut buf = [0u8; 512];
-    match crate::fs::vfs::file_getdents64(fd2, &mut buf, 512) {
+    match crate::fs::hotpath::file_getdents64(fd2, &mut buf, 512) {
         Ok(n) if n > 0 => {
             test_pass("partial first call consumed");
         }
         _ => test_fail("partial first call consumed", "no bytes"),
     }
     let added = alloc::format!("{}/zz_added", mp);
-    match crate::fs::vfs::file_open(&added, crate::fs::FileFlags::O_WRONLY | crate::fs::FileFlags::O_CREAT, 0o644) {
+    match crate::fs::hotpath::file_open(&added, crate::fs::types::FileFlags::O_WRONLY | crate::fs::types::FileFlags::O_CREAT, 0o644) {
         Ok(fd3) => {
-            crate::fs::vfs::file_close(fd3).ok();
+            crate::fs::hotpath::file_close(fd3).ok();
             test_pass("mid-stream create");
         }
         Err(e) => test_fail("mid-stream create", &alloc::format!("errno {}", -e)),
@@ -165,8 +165,8 @@ pub fn test_getdents_cache() {
         Some(n) => n,
         None => {
             test_fail("post-mutation walk clean", "malformed stream");
-            crate::fs::vfs::file_close(fd).ok();
-            crate::fs::vfs::file_close(fd2).ok();
+            crate::fs::hotpath::file_close(fd).ok();
+            crate::fs::hotpath::file_close(fd2).ok();
             return;
         }
     };
@@ -175,19 +175,19 @@ pub fn test_getdents_cache() {
     } else {
         test_fail("same-fd stream sees post-create entry", "stale snapshot served");
     }
-    crate::fs::vfs::file_close(fd).ok();
-    crate::fs::vfs::file_close(fd2).ok();
+    crate::fs::hotpath::file_close(fd).ok();
+    crate::fs::hotpath::file_close(fd2).ok();
 
     // ---- 4. unlink invalidation on a fresh fd ---------------------------
     let gone = alloc::format!("{}/a00", mp);
-    match crate::fs::vfs::file_unlink(&gone) {
+    match crate::fs::hotpath::file_unlink(&gone) {
         Ok(()) => test_pass("unlink a00"),
         Err(e) => test_fail("unlink a00", &alloc::format!("errno {}", -e)),
     }
-    let fd4 = crate::fs::vfs::file_opendir(mp, 0).ok();
+    let fd4 = crate::fs::hotpath::file_opendir(mp, 0).ok();
     if let Some(fd4) = fd4 {
         let after = walk_all(fd4);
-        crate::fs::vfs::file_close(fd4).ok();
+        crate::fs::hotpath::file_close(fd4).ok();
         match after {
             Some(names) => {
                 if !names.iter().any(|n| n == b"a00".as_slice()) {

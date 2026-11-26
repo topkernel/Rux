@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::blkdev::{GenDisk, ReqCmd, Request};
-use crate::fs::dev_t::{DevNo, LOOP_MAJOR, MISC_MAJOR};
-use crate::fs::file::File;
+use crate::fs::{types::DevNo, hotpath::LOOP_MAJOR, hotpath::MISC_MAJOR};
+use crate::fs::types::File;
 use crate::sync::types::Spinlock;
 
 /// Number of loop devices (Linux's historical default).
@@ -276,7 +276,7 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
                 // the NEXT full-cache sync fail with this device's ENXIO
                 // and poison unrelated syscalls (the mkdtemp ENXIO storm
                 // after a failed mkfs-on-loop).
-                crate::fs::bio::invalidate_device(disk);
+                crate::fs::hotpath::invalidate_device(disk);
             }
             Ok(())
         }
@@ -468,8 +468,8 @@ fn loop_request_fn_claimed(req: &mut Request, dev: &'static LoopDev, idx: usize)
 // Device-node read/write (mkfs/blkid open /dev/loopN directly)
 // ============================================================================
 
-fn loop_devno_of(file: &crate::fs::file::File) -> Option<DevNo> {
-    if !crate::fs::leaf_glue::devfs::is_loop_ops(file.get_ops()?) {
+fn loop_devno_of(file: &crate::fs::types::File) -> Option<DevNo> {
+    if !crate::fs::hotpath::devfs::is_loop_ops(file.get_ops()?) {
         return None;
     }
     file.private_data_ptr().map(|pd| {
@@ -481,7 +481,7 @@ fn loop_devno_of(file: &crate::fs::file::File) -> Option<DevNo> {
 
 /// Read from the loop device at the file position (buffer-cache backed —
 /// coherent with filesystem metadata I/O on the same loop).
-pub fn loop_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+pub fn loop_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
     let devno = match loop_devno_of(file) {
         Some(d) => d,
         None => return -9, // EBADF
@@ -504,7 +504,7 @@ pub fn loop_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         let blocknr = (pos + done) / bs;
         let in_off = (pos + done) % bs;
         let want = core::cmp::min(bs - in_off, buf.len() - done);
-        let bh = match crate::fs::bio::bread(disk, blocknr as u64) {
+        let bh = match crate::fs::hotpath::bread(disk, blocknr as u64) {
             Some(b) => b,
             None => break,
         };
@@ -512,7 +512,7 @@ pub fn loop_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         unsafe {
             let data = &(*bh).b_data;
             buf[done..done + want].copy_from_slice(&data[in_off..in_off + want]);
-            crate::fs::bio::brelse(bh);
+            crate::fs::hotpath::brelse(bh);
         }
         done += want;
     }
@@ -525,7 +525,7 @@ pub fn loop_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 
 /// Write to the loop device at the file position (read-modify-write
 /// through the buffer cache; partial tails preserved).
-pub fn loop_file_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
+pub fn loop_file_write(file: &crate::fs::types::File, buf: &[u8]) -> isize {
     let devno = match loop_devno_of(file) {
         Some(d) => d,
         None => return -9,
@@ -548,7 +548,7 @@ pub fn loop_file_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
         let blocknr = (pos + done) / bs;
         let in_off = (pos + done) % bs;
         let want = core::cmp::min(bs - in_off, buf.len() - done);
-        let bh = match crate::fs::bio::bread(disk, blocknr as u64) {
+        let bh = match crate::fs::hotpath::bread(disk, blocknr as u64) {
             Some(b) => b,
             None => break,
         };
@@ -561,9 +561,9 @@ pub fn loop_file_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
                 let data = &mut (*bh).b_data;
                 data[in_off..in_off + want].copy_from_slice(&buf[done..done + want]);
             }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let r = crate::fs::bio::sync_dirty_buffer(bh);
-            crate::fs::bio::brelse(bh);
+            (*bh).set_state_bit(crate::fs::types::BufferState::BH_Dirty);
+            let r = crate::fs::hotpath::sync_dirty_buffer(bh);
+            crate::fs::hotpath::brelse(bh);
             if r.is_err() {
                 break;
             }
@@ -671,7 +671,7 @@ fn loop_status_of(idx: usize) -> LoopStatus {
 
 /// LOOP_CHANGE_FD: swap the backing file of a BOUND loop.
 fn loop_change_fd(idx: usize, fd: usize) -> Result<(), i32> {
-    let file = crate::fs::file::get_file_fd(fd)
+    let file = crate::fs::hotpath::get_file_fd(fd)
         .ok_or_else(|| crate::errno::Errno::BadFileNumber.as_neg_i32())?;
     let size = file_size_bytes(&file)? as u64;
     // SAFETY: static array access bounded by N_LOOPS (checked by caller).
@@ -705,13 +705,13 @@ fn loop_set_capacity(idx: usize) -> Result<(), i32> {
 /// /dev/loop-control file (devno stashed in private_data by devfs_open).
 /// Returns Some(ret) when handled, None when the file is not a loop.
 pub fn loop_file_ioctl(
-    file: &crate::fs::file::File,
+    file: &crate::fs::types::File,
     request: u32,
     arg: usize,
 ) -> Option<i64> {
     use crate::arch::uaccess_safe as uaccess;
 
-    if !crate::fs::leaf_glue::devfs::is_loop_ops(file.get_ops()?) {
+    if !crate::fs::hotpath::devfs::is_loop_ops(file.get_ops()?) {
         return None;
     }
     let Some(pd) = file.private_data_ptr() else { return None };
@@ -727,7 +727,7 @@ pub fn loop_file_ioctl(
 
     let ret: i64 = match request {
         LOOP_CTL_GET_FREE => {
-            if devno.major != crate::fs::dev_t::MISC_MAJOR
+            if devno.major != crate::fs::hotpath::MISC_MAJOR
                 || devno.minor != LOOP_CONTROL_MINOR
             {
                 return Some(-25i64); // ENOTTY on loop nodes
@@ -740,7 +740,7 @@ pub fn loop_file_ioctl(
             }
         }
         LOOP_CTL_ADD => {
-            if devno.major != crate::fs::dev_t::MISC_MAJOR
+            if devno.major != crate::fs::hotpath::MISC_MAJOR
                 || devno.minor != LOOP_CONTROL_MINOR
             {
                 return Some(-25i64);
@@ -756,7 +756,7 @@ pub fn loop_file_ioctl(
             }
         }
         LOOP_CTL_REMOVE => {
-            if devno.major != crate::fs::dev_t::MISC_MAJOR
+            if devno.major != crate::fs::hotpath::MISC_MAJOR
                 || devno.minor != LOOP_CONTROL_MINOR
             {
                 return Some(-25i64);
@@ -774,7 +774,7 @@ pub fn loop_file_ioctl(
             if !is_loop {
                 return Some(-25i64);
             }
-            let backing = crate::fs::file::get_file_fd(arg);
+            let backing = crate::fs::hotpath::get_file_fd(arg);
             match backing {
                 Some(f) => {
                     let path = fd_backing_path(&f);
@@ -802,7 +802,7 @@ pub fn loop_file_ioctl(
             let fd = u32::from_le_bytes(cfg[0..4].try_into().unwrap()) as usize;
             let offset = u64::from_le_bytes(cfg[8 + 24..8 + 32].try_into().unwrap());
             let sizelimit = u64::from_le_bytes(cfg[8 + 32..8 + 40].try_into().unwrap());
-            let backing = match crate::fs::file::get_file_fd(fd) {
+            let backing = match crate::fs::hotpath::get_file_fd(fd) {
                 Some(f) => f,
                 None => return Some(-9i64),
             };
@@ -1049,7 +1049,7 @@ fn set_loop_geometry(idx: usize, offset: u64, sizelimit: u64) -> Result<(), i32>
 
 /// Seek on the loop device node (position in bytes; sizes come from the
 /// bound backing file, zero for an unbound loop).
-pub fn loop_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+pub fn loop_file_lseek(file: &crate::fs::types::File, offset: isize, whence: i32) -> isize {
     let devno = match loop_devno_of(file) {
         Some(d) => d,
         None => return -9,

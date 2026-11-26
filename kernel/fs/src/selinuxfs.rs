@@ -25,9 +25,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::errno;
-use rux::fs::file::File;
-use rux::fs::inode::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
-use rux::fs::FileOps;
+use rux::fs::types::File;
+use rux::fs::types::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
+use rux::fs::types::FileOps;
 
 const ROOT_INO: u64 = 1;
 
@@ -117,7 +117,7 @@ fn build_child_inode(idx: usize) -> Arc<Inode> {
         Node::Sink => InodeMode::S_IFREG | 0o644,
     };
     let mut inode = Inode::new(child_ino(idx), InodeMode::new(mode_bits));
-    inode.fs_id = rux::fs::inode::FS_ID_SELINUXFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_SELINUXFS;
     inode.ops = Some(&SELINUXFS_INODE_OPS);
     // Report the true byte size: file-backed mmap() faults SIGBUS at or
     // past inode size, so `status` must claim 20 bytes for libselinux's
@@ -206,7 +206,7 @@ fn selinuxfs_readdir(dir: &Inode) -> Option<Vec<VfsDirEntry>> {
 
 fn selinuxfs_get_file_ops(inode: &Inode) -> Option<&'static FileOps> {
     if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         Some(&SELINUXFS_FILE_OPS)
     }
@@ -318,7 +318,7 @@ pub(crate) static SELINUXFS_FILE_OPS: FileOps = FileOps::builder()
 /// Build the root inode for a selinuxfs mount.
 pub fn create_root_inode() -> Arc<Inode> {
     let mut inode = Inode::new(ROOT_INO, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-    inode.fs_id = rux::fs::inode::FS_ID_SELINUXFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_SELINUXFS;
     inode.ops = Some(&SELINUXFS_INODE_OPS);
     Arc::new(inode)
 }
@@ -330,14 +330,14 @@ pub fn create_root_inode() -> Arc<Inode> {
 // ============================================================================
 
 /// The selinuxfs mount entry (old mount.rs arm, verbatim).
-pub fn mount_selinux(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_selinux(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data);
     let root_inode = create_root_inode();
-    rux::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
-    rux::fs::mount::register_mount(fs_type, target, "selinuxfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    rux::fs::hotpath::vfs_mount(target, root_inode, mnt_flags);
+    rux::fs::hotpath::register_mount(fs_type, target, "selinuxfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["selinuxfs"], mount_selinux);
+    rux::fs::hotpath::register(&["selinuxfs"], mount_selinux);
 }

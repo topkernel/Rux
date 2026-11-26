@@ -28,7 +28,7 @@ const MAX_CPUS: usize = crate::config::MAX_CPUS;
 // The counter CELLS and the trap-path mutation fns live framework-side
 // (fs::perf_ctr — the fs-substrate devirtualization: arch traps call
 // them directly, zero indirection); these are the procfs-side readers.
-pub use rux::fs::perf_ctr::{timer_inc, timer_count, soft_inc, soft_count};
+pub use rux::fs::hotpath::{timer_inc, timer_count, soft_inc, soft_count};
 
 /// Increment timer interrupt counter
 // (The cells + trap-path incs + readers moved to fs::perf_ctr; the

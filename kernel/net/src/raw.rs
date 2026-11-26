@@ -29,7 +29,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::fs::file::{File, FileFlags, FileOps};
+use crate::fs::types::{File, FileFlags, FileOps};
 use crate::buffer::{alloc_skb, kfree_skb, SkBuff};
 use crate::socket::{SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::types::WaitQueueHead;
@@ -491,7 +491,7 @@ fn raw_file_close(file: &File) -> i32 {
 }
 
 fn raw_file_poll(file: &File, events: u16) -> u16 {
-    use crate::fs::event_notify::poll_events::*;
+    use crate::fs::hotpath::poll_events::*;
     // SAFETY: ops identity was verified (see raw_file_read).
     let socket = match raw_of_file(file) {
         Some(s) => s,

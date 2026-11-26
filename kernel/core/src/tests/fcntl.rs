@@ -10,7 +10,7 @@
 //! sys_fcntl test
 
 use alloc::format;
-use crate::fs::{file_open, file_close, file_fcntl, fcntl, FileFlags};
+use crate::fs::{hotpath::file_open, hotpath::file_close, hotpath::file_fcntl, hotpath::fcntl, types::FileFlags};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_fcntl() {

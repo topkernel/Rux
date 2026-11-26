@@ -71,7 +71,7 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     // (comm, path) of EAGAIN reads once per comm.
     let ret = sys_read_inner(args);
     if (ret == -11 || ret == 0) && crate::debug::syscost::on() {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(args[0] as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(args[0] as usize) {
             if ret == -11 {
                 crate::debug::syscost::note_read_eagain(&file);
             } else {
@@ -110,7 +110,7 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
     // an unshared fdtable borrows the File with no irq bracket, no rcu
     // section and no refcount RMW — one Acquire slot load. Shared
     // tables (CLONE_FILES threads) take the full get_file (fget).
-    match crate::fs::file::get_file_fd_fast(fd) {
+    match rux::fs::hotpath::get_file_fd_fast(fd) {
         Some(f) => read_file_core(fd, f.file(), buf, count),
         None => -errno::EBADF as i64,
     }
@@ -125,7 +125,7 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
 ///
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller (same contract the sys_read path had at its lookup point).
-fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: usize) -> i64 {
+fn read_file_core(fd: usize, file: &rux::fs::types::File, buf: usize, count: usize) -> i64 {
     // One flags load + one ops load classify this fd for every gate
     // and fast path below: the mode/O_PATH checks and the O_DIRECT
     // check each re-loaded file.flags (Relaxed loads are not
@@ -134,14 +134,14 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     let flags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
     // Linux: reading from an O_WRONLY-only descriptor fails with
     // EBADF (the fd is "not open for reading") — LTP read03.
-    if flags & crate::fs::file::FileFlags::O_ACCMODE
-        == crate::fs::file::FileFlags::O_WRONLY
+    if flags & rux::fs::types::FileFlags::O_ACCMODE
+        == rux::fs::types::FileFlags::O_WRONLY
     {
         return -errno::EBADF as i64;
     }
     // O_PATH descriptors permit no I/O — the fast paths below
     // bypass File::read's gates (LTP open13).
-    if flags & crate::fs::file::FileFlags::O_PATH != 0 {
+    if flags & rux::fs::types::FileFlags::O_PATH != 0 {
         return -errno::EBADF as i64;
     }
     let ops = file.get_ops();
@@ -178,7 +178,7 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     // ext4 fast path: page cache → user memory without the
     // staging buffer (O_DIRECT keeps the generic staged path —
     // it serves straight from the block layer).
-    if flags & crate::fs::file::FileFlags::O_DIRECT == 0
+    if flags & rux::fs::types::FileFlags::O_DIRECT == 0
         && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
     {
         let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf as *mut u8, count) as i64;
@@ -192,7 +192,7 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     // copyout pair (the +34.5 µs/op term on the 1 MiB direct-read row)
     // is gone. None = not applicable (small, unaligned, no SG) — the
     // staged loop below is untouched.
-    if flags & crate::fs::file::FileFlags::O_DIRECT != 0
+    if flags & rux::fs::types::FileFlags::O_DIRECT != 0
         && count >= crate::fs::ext4::file::GUP_DIO_READ_MIN
         && buf % 512 == 0
         && ops.is_some_and(|o| {
@@ -253,7 +253,7 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     // multi-block device reads; a 64 KiB chunk cap serialized a 1 MiB
     // direct read into 16 windows. Stage whole MiBs for ext4 O_DIRECT.
     const DIO_STAGE_MAX: usize = 1024 * 1024;
-    let stage_cap = if flags & crate::fs::file::FileFlags::O_DIRECT != 0
+    let stage_cap = if flags & rux::fs::types::FileFlags::O_DIRECT != 0
         && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
     {
         DIO_STAGE_MAX
@@ -265,7 +265,7 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     // bytes it returns before copy_to_user reads them, so
     // zero-filling the buffer was a 4KB memset per read(2) —
     // measurable on every hot path (file, pipe, tty).
-    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
+    let mut kernel_buf = rux::fs::hotpath::alloc_staging_buf(count.min(stage_cap));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
@@ -327,11 +327,11 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
 /// per-call costs (journal bracket, extent resolve, plugged drain) over
 /// the whole request, so pread64/pwrite64 stage whole MiBs instead of
 /// RW_CHUNK slices. Everything else keeps the 64 KiB bound.
-fn pw_stage_cap(file: &crate::fs::file::File, count: usize) -> usize {
+fn pw_stage_cap(file: &rux::fs::types::File, count: usize) -> usize {
     const DIO_STAGE_MAX: usize = 1024 * 1024;
     let _ = count;
     if file.flags.load(core::sync::atomic::Ordering::Relaxed)
-        & crate::fs::file::FileFlags::O_DIRECT
+        & rux::fs::types::FileFlags::O_DIRECT
         != 0
         && file
             .get_ops()
@@ -365,7 +365,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    match crate::fs::file::get_file_fd_safe(fd) {
+    match rux::fs::hotpath::get_file_fd_safe(fd) {
         Some(file) => {
                 // GUP O_DIRECT fast path (GUP-DIO): the pread twin —
                 // fio's psync engine exercises exactly this entry.
@@ -373,10 +373,10 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 {
                     let pflags =
                         file.flags.load(core::sync::atomic::Ordering::Relaxed);
-                    if pflags & crate::fs::file::FileFlags::O_DIRECT != 0
-                        && pflags & crate::fs::file::FileFlags::O_ACCMODE
-                            != crate::fs::file::FileFlags::O_WRONLY
-                        && pflags & crate::fs::file::FileFlags::O_PATH == 0
+                    if pflags & rux::fs::types::FileFlags::O_DIRECT != 0
+                        && pflags & rux::fs::types::FileFlags::O_ACCMODE
+                            != rux::fs::types::FileFlags::O_WRONLY
+                        && pflags & rux::fs::types::FileFlags::O_PATH == 0
                         && count >= crate::fs::ext4::file::GUP_DIO_READ_MIN
                         && buf % 512 == 0
                         && file.get_ops().is_some_and(|o| {
@@ -410,7 +410,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 // engine preads — the 64 KiB cap serialized a 1 MiB read
                 // into 16 windows).
                 let stage_cap = pw_stage_cap(&file, count);
-                let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
+                let mut kernel_buf = rux::fs::hotpath::alloc_staging_buf(count.min(stage_cap));
                 let mut total: usize = 0;
                 let mut err: i32 = 0;
                 let mut user_ptr = buf;
@@ -644,7 +644,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // fdget fast path (the read twin): unshared fdtable borrows the
     // File with no irq/rcu bracket and no refcount RMW; shared tables
     // take the full get_file (fget). User pointers validated above.
-    match crate::fs::file::get_file_fd_fast(fd) {
+    match rux::fs::hotpath::get_file_fd_fast(fd) {
         Some(f) => write_file_core(fd, f.file(), buf, count),
         None => -errno::EBADF as i64,
     }
@@ -657,20 +657,20 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 ///
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller.
-fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: usize) -> i64 {
+fn write_file_core(fd: usize, file: &rux::fs::types::File, buf: usize, count: usize) -> i64 {
     // One flags load serves both gates (see read_file_core — the
     // Relaxed loads were not CSE-able).
     let flags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
     // Linux: writing to a read-only (O_RDONLY) descriptor fails
     // with EBADF (the fd is "not open for writing") — LTP
     // write03/write04.
-    if flags & crate::fs::file::FileFlags::O_ACCMODE
-        == crate::fs::file::FileFlags::O_RDONLY
+    if flags & rux::fs::types::FileFlags::O_ACCMODE
+        == rux::fs::types::FileFlags::O_RDONLY
     {
         return -errno::EBADF as i64;
     }
     // O_PATH descriptors permit no I/O (LTP open13).
-    if flags & crate::fs::file::FileFlags::O_PATH != 0 {
+    if flags & rux::fs::types::FileFlags::O_PATH != 0 {
         return -errno::EBADF as i64;
     }
     // Check if this is the original console (UART) stdout/stderr
@@ -800,9 +800,9 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // (DIO-CONC §8). Durability flags (O_SYNC/O_DSYNC/O_DIRECT) keep the
     // generic staged shape. `buf` was access_ok-validated at sys_write
     // entry / per-iovec in writev (same contract as the read twin).
-    if flags & (crate::fs::file::FileFlags::O_DIRECT
-        | crate::fs::file::FileFlags::O_SYNC
-        | crate::fs::file::FileFlags::O_DSYNC)
+    if flags & (rux::fs::types::FileFlags::O_DIRECT
+        | rux::fs::types::FileFlags::O_SYNC
+        | rux::fs::types::FileFlags::O_DSYNC)
         == 0
         && ops.is_some_and(|o| {
             core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _)
@@ -820,9 +820,9 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // O_DSYNC combinations keep the staged write-through shape. None =
     // not applicable (small, unaligned, pin hole, no SG) — the staged
     // loop below is untouched.
-    if flags & crate::fs::file::FileFlags::O_DIRECT != 0
-        && flags & (crate::fs::file::FileFlags::O_SYNC
-            | crate::fs::file::FileFlags::O_DSYNC)
+    if flags & rux::fs::types::FileFlags::O_DIRECT != 0
+        && flags & (rux::fs::types::FileFlags::O_SYNC
+            | rux::fs::types::FileFlags::O_DSYNC)
             == 0
         && count >= crate::fs::ext4::file::GUP_DIO_WRITE_MIN
         && buf % 512 == 0
@@ -861,7 +861,7 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     } else {
         RW_CHUNK
     };
-    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
+    let mut kernel_buf = rux::fs::hotpath::alloc_staging_buf(count.min(stage_cap));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
@@ -1015,7 +1015,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // sys_write on the stream path (perf-report 8.10.22). EBADF moves to
     // the head, the errno the first iov's sys_write used to produce.
     // fdtable read only; the Arc is dropped at function exit.
-    let file = match crate::fs::file::get_file_fd_safe(fd) {
+    let file = match rux::fs::hotpath::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -1100,7 +1100,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                 // old resize(start+len, 0) zero-filled every iov before
                 // copy_in overwrote it (hilogd's writev(h28, tag, content)
                 // paid a full memset of the record per call).
-                if !crate::fs::file::gather_append_user(&mut gathered, base, len) {
+                if !rux::fs::hotpath::gather_append_user(&mut gathered, base, len) {
                     crate::debug::unixrd::add(&crate::debug::unixrd::WV_GATHER_NS, ur_t_gather);
                     crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EFAULT as i64;
@@ -1119,8 +1119,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // the stream path below inherits the check from
             // write_file_core, this gathered path needs its own).
             let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
-                & crate::fs::file::FileFlags::O_ACCMODE;
-            if mode == crate::fs::file::FileFlags::O_RDONLY {
+                & rux::fs::types::FileFlags::O_ACCMODE;
+            if mode == rux::fs::types::FileFlags::O_RDONLY {
                 crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                 return -errno::EBADF as i64;
             }
@@ -1206,7 +1206,7 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
     // Leg-52 lever A: one fdtable lookup per readv (was one per iovec
     // through sys_read). EBADF at the head matches the errno the first
     // iov's sys_read used to produce.
-    let file = match crate::fs::file::get_file_fd_safe(fd) {
+    let file = match rux::fs::hotpath::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -1309,7 +1309,7 @@ pub fn sys_dup3(args: SyscallArgs) -> i64 {
     }
 
     // Only O_CLOEXEC is valid for dup3
-    if flags & !(crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+    if flags & !(rux::fs::types::FileFlags::O_CLOEXEC) != 0 {
         return -errno::EINVAL as i64;
     }
 
@@ -1320,7 +1320,7 @@ pub fn sys_dup3(args: SyscallArgs) -> i64 {
             match fdtable.dup2_fd(oldfd, newfd) {
                 Some(fd) => {
                     // dup3 O_CLOEXEC applies to the NEW descriptor only
-                    if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+                    if (flags & rux::fs::types::FileFlags::O_CLOEXEC) != 0 {
                         fdtable.set_fd_cloexec(fd, true);
                     }
                     fd as i64
@@ -1338,7 +1338,7 @@ pub fn sys_fcntl(args: SyscallArgs) -> i64 {
     let cmd = args[1] as usize;
     let arg = args[2] as usize;
 
-    match crate::fs::vfs::file_fcntl(fd, cmd, arg) {
+    match rux::fs::hotpath::file_fcntl(fd, cmd, arg) {
         Ok(result) => result as i64,
         Err(errno) => errno as i64,
     }
@@ -1353,15 +1353,15 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // Linux fdget() gate: an ioctl on an fd that is not open fails with
     // EBADF before the request is even looked at (LTP sockioctl01 uses
     // fd=1025 with SIOCATMARK and expects EBADF, not ENOTTY).
-    if fd < 0 || crate::fs::file::get_file_fd_safe(fd as usize).is_none() {
+    if fd < 0 || rux::fs::hotpath::get_file_fd_safe(fd as usize).is_none() {
         return -errno::EBADF as i64;
     }
 
     // O_PATH descriptors permit no ioctls either (Linux empty-fops; LTP
     // open13: ioctl(FIGETBSZ) on an O_PATH fd is EBADF).
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
+            if file.flags().bits() & rux::fs::types::FileFlags::O_PATH != 0 {
                 return -errno::EBADF as i64;
             }
         }
@@ -1374,7 +1374,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // return ENOTTY there, so udesk fell back to a default 640x480 mode
     // and died past-EOF on the resulting wrong-size mapping.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if rux::api::drivers::is_fb_file(&file) {
                 return rux::api::drivers::fbdev_ioctl(request, arg) as i64;
             }
@@ -1386,7 +1386,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // (drmPrimeHandleToFD exports) carry their own ops table — only
     // DMA_BUF_IOCTL_SYNC reaches them.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if crate::drivers::drm::is_drm_file(&file) {
                 let ret = crate::drivers::drm::drm_ioctl(request, arg);
                 // oh-svc T1: name the llvmpipe displaytarget_map failure —
@@ -1457,7 +1457,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // its own version/size checks.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1482,7 +1482,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // aborted its device probe.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::input::evdev::evdev_file_ioctl(&file, request, arg)
             {
                 return ret;
@@ -1496,7 +1496,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // below — the terminal state must follow the fd, not the system.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::fs::pty::pty_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1510,8 +1510,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // pattern). Non-VT files or unhandled requests return None.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if let Some(ret) = crate::fs::vt::vt_file_ioctl(&file, request, arg) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
+            if let Some(ret) = rux::fs::hotpath::vt_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }
@@ -1522,7 +1522,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // the File's ops identity (losetup / LTP tst_acquire_device).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::loop_dev::loop_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1534,7 +1534,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // ops identity (evdev/loop pattern). Non-firing softdog.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) = rux::api::drivers::watchdog_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1546,7 +1546,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // buffer management; port plan §6 item 2).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::ashmem::ashmem_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1558,7 +1558,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // port plan §6 item 3).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
+        if let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             if let Some(ret) =
                 rux::api::drivers::tokenid_ioctl(&file, request, arg)
             {
@@ -1575,12 +1575,12 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if request == 0x8008_6601 || request == 0x4008_6602 {
         const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
         const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
-        use crate::fs::inode::{
+        use rux::fs::hotpath::{
             FS_APPEND_FL, FS_FL_USER_MODIFIABLE, FS_FL_USER_VISIBLE, FS_IMMUTABLE_FL,
         };
         // get_file_fd_safe returns a valid Arc<File> or None; the fd
         // existence was already validated above.
-        let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) else {
+        let Some(file) = rux::fs::hotpath::get_file_fd_safe(fd as usize) else {
             return -errno::EBADF as i64;
         };
         let Some(inode) = file.get_inode() else {
@@ -1640,7 +1640,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         // Linux checks the fd BEFORE the request: an ioctl on a nonexistent
         // fd is EBADF, not ENOTTY (LTP sockioctl01 "bad file descriptor").
         let file_opt = if fd >= 0 {
-            crate::fs::file::get_file_fd_safe(fd as usize)
+            rux::fs::hotpath::get_file_fd_safe(fd as usize)
         } else {
             None
         };
@@ -1684,7 +1684,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // data, so the answer is always 0).
     if request == 0x8905 {
         let file_opt = if fd >= 0 {
-            crate::fs::file::get_file_fd_safe(fd as usize)
+            rux::fs::hotpath::get_file_fd_safe(fd as usize)
         } else {
             None
         };
@@ -1761,7 +1761,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         0x5401..=0x540F | 0x5410 | 0x5413 | 0x5414)
         || (request & 0xFF00) == 0x5400 && !matches!(request, 0x541B | 0x5421)
     {
-        match crate::fs::file::get_file_fd_safe(fd as usize) {
+        match rux::fs::hotpath::get_file_fd_safe(fd as usize) {
             None => return -errno::EBADF as i64,
             Some(file) => {
                 if !crate::fs::tty::file_is_tty(&file) {
@@ -1969,7 +1969,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             // the FRONT datagram's size (Linux SIOCINQ — sd-device-
             // monitor's size-probe fallback); regular files report
             // size - position; other objects report 0.
-            let readable: i32 = crate::fs::file::get_file_fd_safe(fd as usize)
+            let readable: i32 = rux::fs::hotpath::get_file_fd_safe(fd as usize)
                 .map(|file| {
                     if let Some(n) = crate::fs::pipe::pipe_fionread(&file) {
                         n as i32
@@ -2009,10 +2009,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let on = i32::from_le_bytes(flag_buf) != 0;
-            let file = crate::fs::file::get_file_fd_safe(fd as usize);
+            let file = rux::fs::hotpath::get_file_fd_safe(fd as usize);
             match file {
                 Some(file) => {
-                    use crate::fs::file::FileFlags;
+                    use rux::fs::types::FileFlags;
                     let mut bits = file.flags_bits();
                     if on {
                         bits |= FileFlags::O_NONBLOCK;
@@ -2062,7 +2062,7 @@ pub fn sys_flock(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let operation = args[1] as i32;
 
-    let file = match crate::fs::file::get_file_fd_safe(fd) {
+    let file = match rux::fs::hotpath::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -2103,7 +2103,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    match crate::fs::file::get_file_fd_safe(fd) {
+    match rux::fs::hotpath::get_file_fd_safe(fd) {
         Some(file) => {
             // ext4 buffered fast path (BUFW-2X, the pwrite twin of
             // write_file_core's): plain buffered pwrites on ext4 copy
@@ -2112,9 +2112,9 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             // staging allocs + 16 copies + a second copy per page in the
             // cache batch). `buf` was access_ok-validated above.
             let pflags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
-            if pflags & (crate::fs::file::FileFlags::O_DIRECT
-                | crate::fs::file::FileFlags::O_SYNC
-                | crate::fs::file::FileFlags::O_DSYNC)
+            if pflags & (rux::fs::types::FileFlags::O_DIRECT
+                | rux::fs::types::FileFlags::O_SYNC
+                | rux::fs::types::FileFlags::O_DSYNC)
                 == 0
                 && file
                     .get_ops()
@@ -2127,12 +2127,12 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             {
                 // f_mode + O_PATH gates: same EBADF pair as the staged
                 // path's File::write_at wrapper (LTP write03/04, open13).
-                if pflags & crate::fs::file::FileFlags::O_ACCMODE
-                    == crate::fs::file::FileFlags::O_RDONLY
+                if pflags & rux::fs::types::FileFlags::O_ACCMODE
+                    == rux::fs::types::FileFlags::O_RDONLY
                 {
                     return -errno::EBADF as i64;
                 }
-                if pflags & crate::fs::file::FileFlags::O_PATH != 0 {
+                if pflags & rux::fs::types::FileFlags::O_PATH != 0 {
                     return -errno::EBADF as i64;
                 }
                 return crate::fs::ext4::file::ext4_file_pwrite_user_vfs(
@@ -2146,13 +2146,13 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             // psync engine pwrites. Plain O_DIRECT only; None = staged.
             {
                 let pflags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
-                if pflags & crate::fs::file::FileFlags::O_DIRECT != 0
-                    && pflags & (crate::fs::file::FileFlags::O_SYNC
-                        | crate::fs::file::FileFlags::O_DSYNC)
+                if pflags & rux::fs::types::FileFlags::O_DIRECT != 0
+                    && pflags & (rux::fs::types::FileFlags::O_SYNC
+                        | rux::fs::types::FileFlags::O_DSYNC)
                         == 0
-                    && pflags & crate::fs::file::FileFlags::O_ACCMODE
-                        != crate::fs::file::FileFlags::O_RDONLY
-                    && pflags & crate::fs::file::FileFlags::O_PATH == 0
+                    && pflags & rux::fs::types::FileFlags::O_ACCMODE
+                        != rux::fs::types::FileFlags::O_RDONLY
+                    && pflags & rux::fs::types::FileFlags::O_PATH == 0
                     && count >= crate::fs::ext4::file::GUP_DIO_WRITE_MIN
                     && buf % 512 == 0
                     && file.get_ops().is_some_and(|o| {
@@ -2184,7 +2184,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             // drain per direct pwrite (the 64 KiB cap paid 16 brackets
             // per 1 MiB).
             let stage_cap = pw_stage_cap(&file, count);
-            let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
+            let mut kernel_buf = rux::fs::hotpath::alloc_staging_buf(count.min(stage_cap));
             let mut total: usize = 0;
             let mut err: i32 = 0;
             let mut user_ptr = buf;
@@ -2369,9 +2369,9 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
     // O_CLOEXEC, O_NONBLOCK and O_DIRECT are valid for pipe2. O_DIRECT
     // (kernel 3.4+) applies to the WRITE end only — it marks packets for
     // future buffer-flag use; Linux rejects anything else with EINVAL.
-    const VALID_FLAGS: u32 = crate::fs::file::FileFlags::O_CLOEXEC
-        | crate::fs::file::FileFlags::O_NONBLOCK
-        | crate::fs::file::FileFlags::O_DIRECT;
+    const VALID_FLAGS: u32 = rux::fs::types::FileFlags::O_CLOEXEC
+        | rux::fs::types::FileFlags::O_NONBLOCK
+        | rux::fs::types::FileFlags::O_DIRECT;
     if flags & !VALID_FLAGS != 0 {
         return -errno::EINVAL as i64;
     }
@@ -2380,16 +2380,16 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
     let (mut read_file, mut write_file) = crate::fs::pipe::create_pipe();
 
     // Set O_NONBLOCK on both ends if requested
-    if (flags & crate::fs::file::FileFlags::O_NONBLOCK) != 0 {
+    if (flags & rux::fs::types::FileFlags::O_NONBLOCK) != 0 {
         // Use atomic OR to set O_NONBLOCK — no exclusive access needed.
         use core::sync::atomic::Ordering;
-        read_file.flags.fetch_or(crate::fs::file::FileFlags::O_NONBLOCK, Ordering::Release);
-        write_file.flags.fetch_or(crate::fs::file::FileFlags::O_NONBLOCK, Ordering::Release);
+        read_file.flags.fetch_or(rux::fs::types::FileFlags::O_NONBLOCK, Ordering::Release);
+        write_file.flags.fetch_or(rux::fs::types::FileFlags::O_NONBLOCK, Ordering::Release);
     }
     // O_DIRECT on the write end (LTP pipe2_01 checks F_GETFL shows it).
-    if (flags & crate::fs::file::FileFlags::O_DIRECT) != 0 {
+    if (flags & rux::fs::types::FileFlags::O_DIRECT) != 0 {
         use core::sync::atomic::Ordering;
-        write_file.flags.fetch_or(crate::fs::file::FileFlags::O_DIRECT, Ordering::Release);
+        write_file.flags.fetch_or(rux::fs::types::FileFlags::O_DIRECT, Ordering::Release);
     }
 
     // Get current process fdtable
@@ -2441,7 +2441,7 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
     }
 
     // Set close-on-exec if O_CLOEXEC is set (per-descriptor)
-    if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+    if (flags & rux::fs::types::FileFlags::O_CLOEXEC) != 0 {
         fdtable.set_fd_cloexec(read_fd, true);
         fdtable.set_fd_cloexec(write_fd, true);
     }
@@ -2510,11 +2510,11 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 
     // Offsets already read into kernel memory.
     {
-        let in_file = match crate::fs::file::get_file_fd_safe(fd_in as usize) {
+        let in_file = match rux::fs::hotpath::get_file_fd_safe(fd_in as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match crate::fs::file::get_file_fd_safe(fd_out as usize) {
+        let out_file = match rux::fs::hotpath::get_file_fd_safe(fd_out as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2583,7 +2583,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 // spliced output (Linux FMODE_WRITE gate → EBADF).
                 return -errno::EBADF as i64;
             }
-            if out_file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+            if out_file.flags().bits() & rux::fs::types::FileFlags::O_APPEND != 0 {
                 return -errno::EINVAL as i64; // O_APPEND out (Linux)
             }
             let mut total = 0usize;
@@ -2761,11 +2761,11 @@ pub fn sys_tee(args: SyscallArgs) -> i64 {
 
     // get_file_fd_safe returns valid File references for the fds.
     {
-        let in_file = match crate::fs::file::get_file_fd_safe(fd_in as usize) {
+        let in_file = match rux::fs::hotpath::get_file_fd_safe(fd_in as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match crate::fs::file::get_file_fd_safe(fd_out as usize) {
+        let out_file = match rux::fs::hotpath::get_file_fd_safe(fd_out as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2856,7 +2856,7 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     }
 
     // fd must be a pipe (Linux get_pipe_info failure → EBADF).
-    let file = match crate::fs::file::get_file_fd_safe(fd as usize) {
+    let file = match rux::fs::hotpath::get_file_fd_safe(fd as usize) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -2919,11 +2919,11 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
 
     // Offset already read into kernel memory.
     {
-        let in_file = match crate::fs::file::get_file_fd_safe(in_fd) {
+        let in_file = match rux::fs::hotpath::get_file_fd_safe(in_fd) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match crate::fs::file::get_file_fd_safe(out_fd) {
+        let out_file = match rux::fs::hotpath::get_file_fd_safe(out_fd) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -3078,7 +3078,7 @@ pub fn syscall_eio_line(nr: usize, args: [u64; 6]) {
 /// protocol — e.g. a hisysevent frame). Direct console with a reentrancy
 /// guard: this runs on the write error path, printk here could re-enter
 /// console write and print forever.
-fn eio_report(fd: usize, file: &crate::fs::file::File, head: &[u8]) {
+fn eio_report(fd: usize, file: &rux::fs::types::File, head: &[u8]) {
     use crate::console::putchar_no_lock as putchar;
     static IN_EIO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);

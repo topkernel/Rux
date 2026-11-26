@@ -22,9 +22,9 @@
 //! indirect call, when the hunt is off).
 
 #![forbid(unsafe_code)]
-use crate::fs::bio::BufferHead;
-use crate::fs::inode::{Inode, INodeOps};
-use crate::fs::file::File;
+use crate::fs::types::BufferHead;
+use crate::fs::types::{Inode, INodeOps};
+use crate::fs::types::File;
 use crate::drivers::blkdev::GenDisk;
 use alloc::sync::Arc;
 

@@ -940,10 +940,10 @@ fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
     let mut s = alloc::string::String::new();
     if let Some(desc) = crate::api::net::unix_recv_describe(fd) {
         s = desc;
-    } else if let Some(file) = crate::fs::get_file_fd(fd) {
+    } else if let Some(file) = crate::fs::hotpath::get_file_fd(fd) {
         let ops = file.get_ops().map(|p| p as *const _ as u64).unwrap_or(0);
         let path = match file.get_dentry() {
-            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            Some(dentry) => crate::fs::hotpath::dentry_user_path(dentry),
             None => alloc::string::String::from("<no-dentry>"),
         };
         s = alloc::format!("ops={:#x} path={}", ops, path);
@@ -1002,7 +1002,7 @@ pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
     // Retarget on fd change (follow the current description, RD_DATA
     // pattern; the shape counters restart so the dump shows ONE fd's
     // loop shape at a time).
-    let cur_file = crate::fs::get_file_fd(fd);
+    let cur_file = crate::fs::hotpath::get_file_fd(fd);
     let fid = cur_file.as_ref().map(|f| f.file_id).unwrap_or(0);
     if s.file_id.load(Relaxed) != fid || s.fd.load(Relaxed) != fd as u64 {
         s.file_id.store(fid, Relaxed);
@@ -1012,7 +1012,7 @@ pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
             .as_ref()
             .map(|f| {
                 (f.flags.load(Relaxed)
-                    & crate::fs::file::FileFlags::O_NONBLOCK)
+                    & crate::fs::types::FileFlags::O_NONBLOCK)
                     != 0
             })
             .unwrap_or(false);
@@ -1087,11 +1087,11 @@ pub fn note_read_fail(fd: usize, ret: i64) {
         RD_FAIL[i].ret.store(ret, Relaxed);
         RD_FAIL[i].fd.store(fd as u64, Relaxed);
         RD_FAIL[i].n.store(1, Relaxed);
-        match crate::fs::get_file_fd(fd) {
+        match crate::fs::hotpath::get_file_fd(fd) {
             Some(file) => {
-                let mode = file.flags.load(Relaxed) & crate::fs::file::FileFlags::O_ACCMODE;
+                let mode = file.flags.load(Relaxed) & crate::fs::types::FileFlags::O_ACCMODE;
                 RD_FAIL[i].fd_state.store(
-                    if mode == crate::fs::file::FileFlags::O_WRONLY { 2 } else { 1 },
+                    if mode == crate::fs::types::FileFlags::O_WRONLY { 2 } else { 1 },
                     Relaxed,
                 );
                 RD_FAIL[i].ops.store(
@@ -1099,7 +1099,7 @@ pub fn note_read_fail(fd: usize, ret: i64) {
                     Relaxed,
                 );
                 let path = match file.get_dentry() {
-            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            Some(dentry) => crate::fs::hotpath::dentry_user_path(dentry),
             None => alloc::string::String::from("<no-dentry>"),
         };
                 let mut k = 0;
@@ -1227,7 +1227,7 @@ pub fn note_errno(nr: usize, ret: i64, a0: u64, a1: u64) {
 
 /// pa9 positive-read census: call on every read() that returned data.
 /// See `RdDataSlot` for the design; zero cost when syscost is off.
-pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
+pub fn note_read_data(file: &crate::fs::types::File, n: usize, fd: usize) {
     use core::sync::atomic::Ordering::Relaxed;
     if !on() {
         return;
@@ -1281,7 +1281,7 @@ pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
         Relaxed,
     );
     let path = match file.get_dentry() {
-            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            Some(dentry) => crate::fs::hotpath::dentry_user_path(dentry),
             None => alloc::string::String::from("<no-dentry>"),
         };
     for j in 0..96 {
@@ -1332,7 +1332,7 @@ pub fn on() -> bool {
 /// pa4 EOF-spin census: (comm, path) of readers whose fd returned EOF,
 /// once per comm (a spin candidate is a reader looping read()==0; pa3
 /// proved hilogd.rd_kmsg's 92K/s never reaches /dev/kmsg's counters).
-pub fn note_read_eof(file: &crate::fs::File) {
+pub fn note_read_eof(file: &crate::fs::types::File) {
     use core::sync::atomic::Ordering::Relaxed;
     if !on() {
         return;
@@ -1366,7 +1366,7 @@ pub fn note_read_eof(file: &crate::fs::File) {
             }
             // Reader-relative path (same shape as /proc/<pid>/fd/N).
             let path = match file.get_dentry() {
-            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            Some(dentry) => crate::fs::hotpath::dentry_user_path(dentry),
             None => alloc::string::String::from("<no-dentry>"),
         };
             let mut k = 0;
@@ -1387,7 +1387,7 @@ pub fn note_read_eof(file: &crate::fs::File) {
 /// pa5 EAGAIN-spin census: (comm, path) of nonblocking-fd reads that
 /// returned EAGAIN, once per comm — the fast-path twin of
 /// note_read_eof (pipe/sockets never reach the generic EOF census).
-pub fn note_read_eagain(file: &crate::fs::File) {
+pub fn note_read_eagain(file: &crate::fs::types::File) {
     use core::sync::atomic::Ordering::Relaxed;
     let comm: [u8; 16] = match crate::sched::hotpath::current() {
         // SAFETY: current task; comm is a fixed-size field.
@@ -1407,7 +1407,7 @@ pub fn note_read_eagain(file: &crate::fs::File) {
                 EAGAIN_SPIN[i].comm[j].store(comm[j], Relaxed);
             }
             let path = match file.get_dentry() {
-            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            Some(dentry) => crate::fs::hotpath::dentry_user_path(dentry),
             None => alloc::string::String::from("<no-dentry>"),
         };
             let mut k = 0;

@@ -844,7 +844,7 @@ pub fn dump_all_tasks(reason: &str) {
         // R85 (b148 crawl hunt): the ext4 biglock's own state beside the
         // task snapshot — the b148 shape (whole OH cohort D-parked, lock
         // apparently free, zero STALL prints) was invisible without it.
-        crate::fs::journal_seam::EXT4_BIG_LOCK.debug_census_line();
+        crate::fs::hotpath::EXT4_BIG_LOCK.debug_census_line();
         crate::debug::memwatch::dump_mem();
         // pa16 (magazine): the packing layer's per-class op counts and
         // class-lock acquisitions on the same cadence — locks vs
@@ -1036,7 +1036,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             puts("FROZEN-CPU ticks cpu");
             put_dec(c as u64);
             puts(": n=");
-            put_dec(crate::fs::perf_ctr::timer_count(c));
+            put_dec(crate::fs::hotpath::timer_count(c));
             puts(" last_rip=");
             put_hex(
                 crate::interrupt::preempt::TICK_ENTRY_RIP[c]

@@ -16,9 +16,9 @@
 //! - Does not require disk
 
 use crate::errno;
-use rux::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
-use rux::fs::mount::VfsMount;
-use rux::fs::path::path_normalize;
+use rux::fs::types::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
+use rux::fs::types::VfsMount;
+use rux::fs::hotpath::path_normalize;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use alloc::vec::Vec;
@@ -1261,8 +1261,8 @@ pub static ROOTFS_FS_TYPE: FileSystemType = FileSystemType::new(
 );
 
 pub fn init_rootfs() -> Result<(), i32> {
-    use rux::fs::superblock::register_filesystem;
-    use rux::fs::mount::MntFlags;
+    use rux::fs::hotpath::register_filesystem;
+    use rux::fs::types::MntFlags;
 
     // Register rootfs filesystem
     register_filesystem(&ROOTFS_FS_TYPE)?;
@@ -1323,7 +1323,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         alloc::sync::Arc::new(RootFSNode::new_dir(b"/".to_vec(), 1))
     };
     let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
-    inode.fs_id = rux::fs::inode::FS_ID_ROOTFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_ROOTFS;
     inode.ops = Some(&ROOTFS_INODE_OPS);
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&root_node)) as *mut u8);
     alloc::sync::Arc::new(inode)
@@ -1333,7 +1333,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
 // RootFS Inode Operations
 // ============================================================================
 
-use rux::fs::inode::{Inode, InodeMode, INodeOps, Ino};
+use rux::fs::types::{Inode, InodeMode, INodeOps, Ino};
 
 /// RootFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
@@ -1384,7 +1384,7 @@ fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync
     // Create inode using the node's stored mode (mkdir honors umask-ed mode
     // via the node default; chmod through rootfs_setattr is now real).
     let mut inode = Inode::new(ino, InodeMode::new(*new_dir.mode.lock()));
-    inode.fs_id = rux::fs::inode::FS_ID_ROOTFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_ROOTFS;
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_dir)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1508,7 +1508,7 @@ fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::syn
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(*new_file.mode.lock()));
-    inode.fs_id = rux::fs::inode::FS_ID_ROOTFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_ROOTFS;
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_file)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1544,7 +1544,7 @@ fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(*new_link.mode.lock()));
-    inode.fs_id = rux::fs::inode::FS_ID_ROOTFS;
+    inode.fs_id = rux::fs::hotpath::FS_ID_ROOTFS;
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_link)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1696,7 +1696,7 @@ fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
     let node = match rux::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -1739,13 +1739,13 @@ fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i32 {
 }
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn rootfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn rootfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     let node = match rux::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
         };
 
-    stat.st_dev = rux::fs::inode::FS_ID_ROOTFS;
+    stat.st_dev = rux::fs::hotpath::FS_ID_ROOTFS;
     stat.st_ino = node.ino;
     stat.st_mode = *node.mode.lock();
     stat.st_size = rootfs_node_size(node) as i64;
@@ -1772,7 +1772,7 @@ fn rootfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
 }
 
 /// RootFS file read operation
-fn rootfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn rootfs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     {
         let inode = match file.get_inode() {
             Some(i) => i,
@@ -1797,7 +1797,7 @@ fn rootfs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// RootFS file write operation
-fn rootfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn rootfs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     {
         let inode = match file.get_inode() {
             Some(i) => i,
@@ -1820,7 +1820,7 @@ fn rootfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 }
 
 /// RootFS file seek operation
-fn rootfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn rootfs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     let current_pos = file.get_pos() as isize;
     let inode = match file.get_inode() {
         Some(i) => i,
@@ -1843,12 +1843,12 @@ fn rootfs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize 
 }
 
 /// RootFS file close operation
-fn rootfs_file_close(_file: &rux::fs::File) -> i32 {
+fn rootfs_file_close(_file: &rux::fs::types::File) -> i32 {
     0
 }
 
 /// RootFS file operations table
-pub static ROOTFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static ROOTFS_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(rootfs_file_read)
     .write(rootfs_file_write)
     .lseek(rootfs_file_lseek)
@@ -1857,11 +1857,11 @@ pub static ROOTFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
 
 /// RootFS get_file_ops
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&ROOTFS_FILE_OPS)
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -1869,8 +1869,8 @@ fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps>
 
 /// RootFS readdir: list directory entries
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDirEntry>> {
-    use rux::fs::inode::file_type;
+fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::types::VfsDirEntry>> {
+    use rux::fs::hotpath::file_type;
 
     let node = rux::fs::r#unsafe::privdata_ref::<RootFSNode>(inode)?;
     if !node.is_dir() {
@@ -1888,7 +1888,7 @@ fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
         } else {
             file_type::DT_UNKNOWN
         };
-        entries.push(rux::fs::inode::VfsDirEntry {
+        entries.push(rux::fs::types::VfsDirEntry {
             ino: child.ino,
             name: child.name_vec(),
             file_type: dt,
@@ -1944,7 +1944,7 @@ fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sync::Arc
     let mode = InodeMode::new(*child.mode.lock());
 
     let mut inode = Inode::new(child.ino, mode);
-    inode.fs_id = rux::fs::inode::FS_ID_ROOTFS;  // icache isolation (VFS-H8)
+    inode.fs_id = rux::fs::hotpath::FS_ID_ROOTFS;  // icache isolation (VFS-H8)
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&child)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1979,7 +1979,7 @@ fn rootfs_node_size(node: &RootFSNode) -> usize {
 // read_file row body, and the trait-object view of the global sb.
 // ============================================================================
 
-impl rux::fs::leaf_glue::RamfsView for RootFSSuperBlock {
+impl rux::fs::hotpath::RamfsView for RootFSSuperBlock {
     fn rfs_mkdir(&self, path: &str) -> Result<(), i32> {
         self.mkdir(path)
     }
@@ -2020,8 +2020,8 @@ impl rux::fs::leaf_glue::RamfsView for RootFSSuperBlock {
 
 /// The initrd unpack target as the framework trait object (the global
 /// sb's 'static view — INV-FS-GLOBALSB-1 through the edge).
-pub fn ramfs_view() -> Option<&'static dyn rux::fs::leaf_glue::RamfsView> {
-    get_rootfs_sb_ref().map(|sb| sb as &'static dyn rux::fs::leaf_glue::RamfsView)
+pub fn ramfs_view() -> Option<&'static dyn rux::fs::hotpath::RamfsView> {
+    get_rootfs_sb_ref().map(|sb| sb as &'static dyn rux::fs::hotpath::RamfsView)
 }
 
 /// The legacy read_file_from_rootfs row body (the pre-flip fs::mod

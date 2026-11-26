@@ -574,8 +574,8 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     // mounts (/vendor/bin/hdf_devhost for every display *_host service)
     // came back ENOENT even though the exec pre-flight path_lookup
     // succeeded. Open through the VFS (any mount) and read in chunks.
-    if let Ok(fd) = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0) {
-        let file = crate::fs::file::get_file_fd(fd);
+    if let Ok(fd) = rux::fs::hotpath::file_open(path, 0 /* O_RDONLY */, 0) {
+        let file = rux::fs::hotpath::get_file_fd(fd);
         if let Some(file) = file {
             let mut data = alloc::vec::Vec::new();
             let mut chunk = [0u8; 16384];
@@ -590,12 +590,12 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
                 }
             }
             // fd came from file_open on the current task's table.
-            let _ = crate::fs::file::close_file_fd(fd);
+            let _ = rux::fs::hotpath::close_file_fd(fd);
             if !data.is_empty() {
                 return Some(data);
             }
         } else {
-            let _ = crate::fs::file::close_file_fd(fd);
+            let _ = rux::fs::hotpath::close_file_fd(fd);
         }
     }
     if crate::fs::ext4::is_mounted() {
@@ -620,7 +620,7 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
 pub(crate) struct ExecFile {
     /// Kernel-internal read-only File on the resolved inode (no fdtable
     /// slot, invisible to inotify — Linux get_empty_filp semantics).
-    pub file: alloc::sync::Arc<crate::fs::file::File>,
+    pub file: alloc::sync::Arc<rux::fs::types::File>,
     /// st_mode bits (S_ISUID/S_ISGID/x-bit checks without re-statting).
     pub mode: u32,
     pub uid: u32,
@@ -635,7 +635,7 @@ pub(crate) struct ExecFile {
 /// (may_open: S_ISDIR), missing execute permission is EACCES (even
 /// root needs one x bit — LTP execve03).
 pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
-    let vpath = crate::fs::vfs::path_lookup(path, 0)?;
+    let vpath = rux::fs::hotpath::path_lookup(path, 0)?;
     let inode = vpath
         .inode
         .clone()
@@ -644,12 +644,12 @@ pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
     if inode.mode.is_directory() {
         return Err(-(errno::EACCES as i32));
     }
-    if !crate::fs::permission::inode_permission(&inode, crate::fs::permission::MAY_EXEC) {
+    if !rux::fs::hotpath::inode_permission(&inode, rux::fs::hotpath::MAY_EXEC) {
         return Err(-(errno::EACCES as i32));
     }
     // SAFETY: vpath came from a successful path_lookup; construction is
     // the fd-free kernel open (same as open_file_arc_nofd).
-    let file = crate::fs::vfs::open_file_arc_from_vpath(&vpath)
+    let file = rux::fs::hotpath::open_file_arc_from_vpath(&vpath)
         .ok_or(-(errno::EACCES as i32))?;
     // ETXTBSY (Linux deny_write_access after may_open; LTP execve04): a
     // regular file some open description still holds for writing must
@@ -680,7 +680,7 @@ pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
 /// one wrong-size allocation, correctness never depends on it).
 /// Returns None when nothing could be read.
 fn read_file_via(
-    file: &alloc::sync::Arc<crate::fs::file::File>,
+    file: &alloc::sync::Arc<rux::fs::types::File>,
     size_hint: u64,
 ) -> Option<alloc::vec::Vec<u8>> {
     let cap = usize::try_from(size_hint).unwrap_or(0).min(64 * 1024 * 1024);
@@ -818,7 +818,7 @@ fn execcost_armed(n: u64) -> bool {
 /// Core execve implementation: load and execute an ELF binary.
 /// Handles shebang (#!) scripts by recursing with the interpreter.
 fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::string::String], recursion_depth: u32) -> u64 {
-    use crate::fs::elf::{ElfLoader, Elf64Ehdr};
+    use rux::fs::types::{ElfLoader, Elf64Ehdr};
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -1801,10 +1801,10 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         };
         // ESRCH when the pinned process is gone — including the case
         // where the pid was recycled (resolve_alive pin-checks it).
-        if crate::fs::pidfd::resolve_alive(data).is_none() {
+        if rux::fs::hotpath::resolve_alive(data).is_none() {
             return -(errno::ESRCH as i64);
         }
-        let nonblock = file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+        let nonblock = file.flags().bits() & rux::fs::types::FileFlags::O_NONBLOCK != 0;
         if nonblock {
             // The nonblocking contract: never sleep for the event; an
             // absent event reports EAGAIN. do_waitid's no-event result
@@ -3996,7 +3996,7 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
     // AT_EMPTY_PATH execs whatever file object dirfd holds.
     if flags & AT_SYMLINK_NOFOLLOW != 0 && flags & AT_EMPTY_PATH == 0 {
         if let Ok(vp) =
-            crate::fs::vfs::path_lookup(&path, crate::fs::vfs::LOOKUP_NOFOLLOW)
+            rux::fs::hotpath::path_lookup(&path, rux::fs::hotpath::LOOKUP_NOFOLLOW)
         {
             if let Some(inode) = vp.inode.as_ref() {
                 if inode.mode.is_symlink() {
@@ -5276,8 +5276,8 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         abs.push_str(p);
         abs
     };
-    let new_root = crate::fs::path::path_normalize(&join_cwd(new_root));
-    let put_old = crate::fs::path::path_normalize(&join_cwd(put_old));
+    let new_root = rux::fs::hotpath::path_normalize(&join_cwd(new_root));
+    let put_old = rux::fs::hotpath::path_normalize(&join_cwd(put_old));
     if !new_root.starts_with('/') || !put_old.starts_with('/') {
         return -(errno::EINVAL as i64);
     }
@@ -5287,14 +5287,14 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
 
     // Both must exist and be directories.
     let mut st = crate::fs::Stat::new();
-    if let Err(e) = crate::fs::vfs::stat_file_by_path(&new_root, &mut st) {
+    if let Err(e) = rux::fs::hotpath::stat_file_by_path(&new_root, &mut st) {
         return e as i64;
     }
     if st.st_mode & 0o170000 != 0o040000 {
         return -(errno::ENOTDIR as i64);
     }
     let mut st2 = crate::fs::Stat::new();
-    if let Err(e) = crate::fs::vfs::stat_file_by_path(&put_old, &mut st2) {
+    if let Err(e) = rux::fs::hotpath::stat_file_by_path(&put_old, &mut st2) {
         return e as i64;
     }
     if st2.st_mode & 0o170000 != 0o040000 {
@@ -5350,9 +5350,9 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // Record the jail-root DENTRY too (same as chroot): getcwd derives
     // root-relative paths from it, and the string self-heals from it if
     // mounts move. Best-effort — a failed lookup keeps string-only root.
-    let root_dentry = match crate::fs::vfs::path_lookup(
+    let root_dentry = match rux::fs::hotpath::path_lookup(
         &new_root,
-        crate::fs::vfs::LOOKUP_FOLLOW,
+        rux::fs::hotpath::LOOKUP_FOLLOW,
     ) {
         Ok(vpath) => vpath.dentry.clone(),
         Err(_) => None,
@@ -5389,7 +5389,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // (d) cwd: move into the new root when the old cwd fell outside it.
     let cwd = current.get_cwd();
     let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
-    let cwd_norm = crate::fs::path::path_normalize(cwd_str);
+    let cwd_norm = rux::fs::hotpath::path_normalize(cwd_str);
     let inside = cwd_norm == "/" || cwd_norm.starts_with(&new_root);
     if !inside {
         // String-only reset (clears any cwd dentry — the string is the
@@ -5455,7 +5455,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         // into this namespace re-anchors entering tasks onto it; setns
         // OUT (to a non-pivoted ns) resets pivoted tasks to the global
         // root.
-        *ns.root.lock() = root_dentry.or_else(crate::fs::vfs::get_vfs_root);
+        *ns.root.lock() = root_dentry.or_else(rux::fs::hotpath::get_vfs_root);
     }
 
     // RETIRED (probe-retire): the pivot_root success trace was
@@ -5904,9 +5904,9 @@ pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
     // The flushed targets' DATA blocks sync before the buffer-cache drain
     // and their inode-table blocks after it — the same ordered-data
     // discipline sync(2) uses.
-    let flushed_targets = crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    let flushed_targets = rux::fs::hotpath::get_page_cache().flush_all_dirty();
     let _ = crate::fs::ext4::sync_flushed_data(&flushed_targets);
-    let _ = crate::fs::bio::sync_buffers();
+    let _ = rux::fs::hotpath::sync_buffers();
     let _ = crate::fs::ext4::sync_inode_tables(&flushed_targets);
     0
 }
@@ -6281,7 +6281,7 @@ pub fn sys_pidfd_send_signal(args: SyscallArgs) -> i64 {
     let is_pidfd_shape = file
         .get_ops()
         .map(|ops| {
-            core::ptr::eq(ops as *const _, &crate::fs::pidfd::PIDFD_OPS as *const _)
+            core::ptr::eq(ops as *const _, &rux::fs::hotpath::PIDFD_OPS as *const _)
                 || core::ptr::eq(
                     ops as *const _,
                     &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
@@ -6295,7 +6295,7 @@ pub fn sys_pidfd_send_signal(args: SyscallArgs) -> i64 {
         Some(d) => d,
         None => return -(errno::EBADF as i64),
     };
-    let target = match crate::fs::pidfd::resolve_alive(data) {
+    let target = match rux::fs::hotpath::resolve_alive(data) {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -6568,7 +6568,7 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
 
     // The table cannot hold fds >= MAX_FDS: clamp once instead of
     // spinning through billions of always-EBADF close_fd() calls.
-    let upper = (max_fd as usize).min(crate::fs::file::MAX_FDS - 1);
+    let upper = (max_fd as usize).min(rux::fs::types::MAX_FDS - 1);
 
     if flags & CLOSE_RANGE_CLOEXEC != 0 {
         for target_fd in (fd as usize)..=upper {
@@ -6613,20 +6613,20 @@ pub fn sys_pidfd_open(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    let data = match crate::fs::pidfd::make_pidfd_data(pid) {
+    let data = match rux::fs::hotpath::make_pidfd_data(pid) {
         Some(d) => d,
         None => return -(errno::ESRCH as i64),
     };
 
-    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    let mut file_flags = rux::fs::types::FileFlags::O_RDWR;
     if flags & PIDFD_NONBLOCK != 0 {
-        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+        file_flags |= rux::fs::types::FileFlags::O_NONBLOCK;
     }
-    let file = alloc::sync::Arc::new(crate::fs::File::new(
-        crate::fs::file::FileFlags::new(file_flags),
+    let file = alloc::sync::Arc::new(rux::fs::types::File::new(
+        rux::fs::types::FileFlags::new(file_flags),
     ));
-    file.set_ops(&crate::fs::pidfd::PIDFD_OPS);
-    crate::fs::pidfd::attach(&file, data);
+    file.set_ops(&rux::fs::hotpath::PIDFD_OPS);
+    rux::fs::hotpath::attach(&file, data);
 
     let fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
@@ -6671,7 +6671,7 @@ pub fn sys_pidfd_getfd(args: SyscallArgs) -> i64 {
     let is_pidfd_shape = file
         .get_ops()
         .map(|ops| {
-            core::ptr::eq(ops as *const _, &crate::fs::pidfd::PIDFD_OPS as *const _)
+            core::ptr::eq(ops as *const _, &rux::fs::hotpath::PIDFD_OPS as *const _)
                 || core::ptr::eq(
                     ops as *const _,
                     &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
@@ -6685,7 +6685,7 @@ pub fn sys_pidfd_getfd(args: SyscallArgs) -> i64 {
         Some(d) => d,
         None => return -(errno::EBADF as i64),
     };
-    let target = match crate::fs::pidfd::resolve_alive(data) {
+    let target = match rux::fs::hotpath::resolve_alive(data) {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };

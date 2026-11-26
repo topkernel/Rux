@@ -816,7 +816,7 @@ pub fn console() -> &'static TtyDevice {
 /// console fg_pgrp). Terminal files are exactly these four ops sets:
 /// the kernel-provided UART stdio (char_dev::UART_OPS), /dev/console +
 /// /dev/tty + /dev/ttyS0 (devfs::CONDEV_OPS), and the two pty ends.
-pub fn file_is_tty(file: &rux::fs::file::File) -> bool {
+pub fn file_is_tty(file: &rux::fs::types::File) -> bool {
     let ops = file.get_ops();
     match ops {
         Some(ops) => {
@@ -827,7 +827,7 @@ pub fn file_is_tty(file: &rux::fs::file::File) -> bool {
                 )
                 || core::ptr::eq(ops as *const _, &crate::pty::PTMX_OPS as *const _)
                 || core::ptr::eq(ops as *const _, &crate::pty::PTY_SLAVE_OPS as *const _)
-                || core::ptr::eq(ops as *const _, &rux::fs::vt::VTDEV_OPS as *const _)
+                || core::ptr::eq(ops as *const _, &rux::fs::hotpath::VTDEV_OPS as *const _)
         }
         None => false,
     }

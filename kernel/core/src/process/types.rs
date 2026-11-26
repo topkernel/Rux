@@ -31,7 +31,7 @@ use bitflags::bitflags;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 
-use crate::fs::FdTable;
+use crate::fs::types::FdTable;
 use crate::list::ListHead;
 use crate::mm::types::AddressSpace;
 use crate::signal::{SignalStruct, SigPending};
@@ -523,7 +523,7 @@ pub struct Task {
     /// Filesystem information (cwd, root, umask)
     ///
     /// Shared between threads when CLONE_FS is used
-    pub(super) fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+    pub(super) fs: Option<alloc::sync::Arc<crate::fs::types::FsStruct>>,
 
     /// Signal handling structure (signal_struct)
     /// Use Arc for CLONE_SIGHAND sharing between threads
@@ -1274,7 +1274,7 @@ pub struct MountNamespace {
     /// global VFS root (CLONE_NEWNS does not move "/" — it only private-
     /// copies the mount table). Reserved as the pivot_root bookkeeping
     /// anchor; path_lookup still walks the shared dentry tree.
-    pub root: Spinlock<Option<Arc<crate::fs::dentry::Dentry>>>,
+    pub root: Spinlock<Option<Arc<crate::fs::types::Dentry>>>,
     /// Private copy of the mount table. Copy-on-write: modifications after
     /// CLONE_NEWNS only touch this Vec, never the parent's.
     pub mounts: Spinlock<Vec<MountEntry>>,
@@ -1290,7 +1290,7 @@ pub struct MountNamespace {
     /// mount) until NO spawn could finish inside appspawn's 3 s child
     /// watchdog. Linux unmounts a private namespace's mounts when its
     /// last task exits; Drop below restores exactly that contract.
-    pub vfs_mounts: Spinlock<Vec<Arc<crate::fs::dentry::VfsMountInternal>>>,
+    pub vfs_mounts: Spinlock<Vec<Arc<crate::fs::types::VfsMountInternal>>>,
 }
 
 pub struct PidNamespace {

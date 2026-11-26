@@ -212,7 +212,7 @@ pub fn init() {
 ///
 /// Returns the number of knobs registered.
 pub fn register_debugfs_knobs() -> usize {
-    use crate::fs::leaf_glue::debugfs;
+    use crate::fs::hotpath::debugfs;
     if !debugfs::create_dir("/debug") {
         return 0;
     }

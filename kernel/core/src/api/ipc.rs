@@ -18,8 +18,8 @@
 //! from this table.
 
 #![forbid(unsafe_code)]
-use crate::fs::dev_t::DevNo;
-use crate::fs::file::FileOps;
+use crate::fs::types::DevNo;
+use crate::fs::types::FileOps;
 use crate::process::types::Task;
 use alloc::vec::Vec;
 

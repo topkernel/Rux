@@ -16,8 +16,8 @@
 //! files: BhRef, the i_block header views, FILERES) — this module owns
 //! only the VFS-generic edges.
 
-use crate::fs::file::File;
-use crate::fs::inode::Inode;
+use crate::fs::types::File;
+use crate::fs::types::Inode;
 
 /// INV-FS-PRIVDATA-1: `inode.private_data`, when `Some(p)`, is a raw
 /// pointer to the filesystem-private object that the inode's own
@@ -156,7 +156,7 @@ pub fn file_privdata_ref_mut<T>(file: &File) -> Option<&mut T> {
 // M1a note: `pub` (was pub(crate)) — the mm policy crate (mm) reads
 // the inode through this edge in its fault routing; the audit row is
 // unchanged (INV-FS-FILEINODE-1).
-pub fn file_inode(file: &File) -> Option<&crate::fs::inode::Inode> {
+pub fn file_inode(file: &File) -> Option<&crate::fs::types::Inode> {
     // SAFETY: INV-FS-FILEINODE-1 — write-once cell; the shared read is
     // sound for the description's whole lifetime (same shape as
     // file_privdata_ref).
@@ -167,7 +167,7 @@ pub fn file_inode(file: &File) -> Option<&crate::fs::inode::Inode> {
 /// cell ONCE, before the File is published to any fd table (the
 /// constructor sites: open/create/procfs-memfile synth). No reader
 /// exists at install time by construction.
-pub fn file_inode_install(file: &File, inode: alloc::sync::Arc<crate::fs::inode::Inode>) {
+pub fn file_inode_install(file: &File, inode: alloc::sync::Arc<crate::fs::types::Inode>) {
     // SAFETY: INV-FS-FILEINODE-2 — pre-publication exclusive write.
     unsafe { *file.inode.get() = Some(inode) };
 }
@@ -204,7 +204,7 @@ pub fn privdata_ref_leaked<T>(inode: &Inode) -> Option<&'static T> {
 
 /// The Arc-clone twin of [`file_inode`] (INV-FS-FILEINODE-1): takes a
 /// strong reference for storage beyond the call.
-pub fn file_inode_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs::inode::Inode>> {
+pub fn file_inode_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs::types::Inode>> {
     // SAFETY: INV-FS-FILEINODE-1 (write-once cell); the clone is an
     // ordinary Arc read.
     unsafe { (*file.inode.get()).clone() }
@@ -218,7 +218,7 @@ pub fn file_inode_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs::inode::
 /// cell is a File field, so the borrow cannot outlive the `&File`.
 pub fn file_ra_state_mut(
     file: &File,
-) -> &mut Option<crate::fs::readahead::ReadAheadState> {
+) -> &mut Option<crate::fs::types::ReadAheadState> {
     // SAFETY: INV-FS-RASTATE-1 — the io_lock the caller holds is the
     // exclusivity proof for this &mut.
     unsafe { &mut *file.ra.get() }
@@ -263,7 +263,7 @@ pub fn privdata_drop_arc<T>(inode: &mut Inode) {
 
 /// kill_sb's Box reclaim: the superblock pointer a mount callback
 /// returned via Box::into_raw, reclaimed at unmount (null-safe).
-pub fn kill_sb_reclaim_box<T>(sb: *mut crate::fs::superblock::SuperBlock) {
+pub fn kill_sb_reclaim_box<T>(sb: *mut crate::fs::types::SuperBlock) {
     if !sb.is_null() {
         // SAFETY: the mount callback stored a Box<T> via into_raw; this
         // unmount-path call is the single reclaim.
@@ -320,7 +320,7 @@ pub fn kernel_slice_mut<'a>(p: *mut u8, len: usize) -> &'a mut [u8] {
 /// description's lifetime (the same write-once discipline as the inode
 /// cell, INV-FS-FILEINODE-1). Shared reads through a shared `&File` are
 /// race-free.
-pub fn file_dentry(file: &File) -> Option<&alloc::sync::Arc<crate::fs::dentry::Dentry>> {
+pub fn file_dentry(file: &File) -> Option<&alloc::sync::Arc<crate::fs::types::Dentry>> {
     // SAFETY: INV-FS-FILEDENTRY-1 — write-once cell; the shared read is
     // sound for the description's whole lifetime.
     unsafe { (&*file.dentry.get()).as_ref() }

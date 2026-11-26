@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use alloc::boxed::Box;
 
-use crate::fs::{File, FileOps, FileFlags};
+use crate::fs::{types::File, types::FileOps, types::FileFlags};
 use crate::mm::hotpath::{alloc_pages, free_pages};
 use crate::mm::types::GfpFlags;
 use crate::sync::types::Spinlock;

@@ -31,7 +31,7 @@
 use alloc::vec::Vec;
 
 use crate::errno;
-use rux::fs::inode::Inode;
+use rux::fs::types::Inode;
 
 /// XATTR_NAME_SELINUX (UAPI): the LSM label attribute.
 const XATTR_NAME_SELINUX: &[u8] = b"security.selinux";
@@ -201,7 +201,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), e
     // user.* requires write permission on the target (Linux
     // xattr_permission MAY_WRITE gate for the user namespace).
     if name.starts_with(b"user.") {
-        if !rux::fs::permission::inode_permission(inode, rux::fs::permission::MAY_WRITE) {
+        if !rux::fs::hotpath::inode_permission(inode, rux::fs::hotpath::MAY_WRITE) {
             return Err(errno::Errno::PermissionDenied);
         }
     }

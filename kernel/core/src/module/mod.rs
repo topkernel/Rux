@@ -229,12 +229,12 @@ fn module_name_from_blob(buf: &[u8]) -> Result<String, i32> {
 /// `initstate` ("live") and `refcnt` ("0"). Uses only the public sysfs
 /// KObject API; idempotent.
 fn sysfs_publish(name: &str) {
-    crate::fs::leaf_glue::sysfs::publish_module(name);
+    crate::fs::hotpath::sysfs::publish_module(name);
 }
 
 /// Remove /sys/module/<name> (delete_module path).
 fn sysfs_unpublish(name: &str) {
-    crate::fs::leaf_glue::sysfs::unpublish_module(name);
+    crate::fs::hotpath::sysfs::unpublish_module(name);
 }
 
 // ============================================================================

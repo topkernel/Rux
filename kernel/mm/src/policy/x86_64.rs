@@ -492,7 +492,7 @@ pub fn handle_mm_fault(
     let effective_size = vm_file
         .as_ref()
         .and_then(|f| {
-            if let Some(live) = crate::fs::leaf_glue::devfs::reg_current_size(f.as_ref()) {
+            if let Some(live) = crate::fs::hotpath::devfs::reg_current_size(f.as_ref()) {
                 return Some(live);
             }
             // SAFETY: inode cell written at open time; read-only.
@@ -635,7 +635,7 @@ pub fn handle_mm_fault(
                 && vma_flags.contains(rux::mm::types::VmaFlags::SHARED)
                 && vm_file
                     .as_ref()
-                    .is_some_and(|f| crate::fs::leaf_glue::tmpfs::is_tmpfs_file(f.as_ref()));
+                    .is_some_and(|f| crate::fs::hotpath::tmpfs::is_tmpfs_file(f.as_ref()));
             if fully_past && !tmpfs_shared_write {
                 crate::pr_err!(
                     "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {} pid {} path {}",
@@ -666,7 +666,7 @@ pub fn handle_mm_fault(
                 if let Some(shared_phys) = vm_file.as_ref().and_then(|f| {
                     // The ops-identity gate is folded into the row
                     // (None for non-registry files).
-                    crate::fs::leaf_glue::devfs::shared_fault_file_page(
+                    crate::fs::hotpath::devfs::shared_fault_file_page(
                         f.as_ref(),
                         (file_offset / (PAGE_SIZE as usize)) * (PAGE_SIZE as usize),
                     )
@@ -758,10 +758,10 @@ pub fn handle_mm_fault(
         if vma_flags.contains(rux::mm::types::VmaFlags::SHARED) {
             let file = vm_file
                 .clone()
-                .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
+                .or_else(|| crate::fs::hotpath::get_file_fd(vma_file_fd as usize));
             if let Some(file) = file.filter(|f| {
                 f.get_ops().is_some_and(|ops| ops.fault.is_some())
-                    || crate::fs::leaf_glue::tmpfs::is_tmpfs_file(f.as_ref())
+                    || crate::fs::hotpath::tmpfs::is_tmpfs_file(f.as_ref())
             }) {
                 // Fault-around for SHARED read faults (perf-gap-hunt
                 // 2026-11-04): the reference's filemap_map_pages serves
@@ -802,7 +802,7 @@ pub fn handle_mm_fault(
                         ((vma_offset + (fault_page - vma_start)) / PAGE_SIZE_USIZE) as u64;
                     let inode_ref = crate::fs::r#unsafe::file_inode(&file);
                     if let Some(inode) = inode_ref {
-                        let cache = crate::fs::page_cache::get_page_cache();
+                        let cache = crate::fs::hotpath::get_page_cache();
                         let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
                         let want_w = vma_flags.is_writable();
                         // Leaf form: a W VMA maps cache frames writable
@@ -1153,7 +1153,7 @@ pub fn handle_mm_fault(
                         if mapped_total > 0 {
                             if want_w
                                 && (file.get_ops().is_some_and(|ops| ops.fault.is_some())
-                                    || crate::fs::leaf_glue::tmpfs::is_tmpfs_file(file.as_ref()))
+                                    || crate::fs::hotpath::tmpfs::is_tmpfs_file(file.as_ref()))
                             {
                                 // Conservative v1 dirty mark (the
                                 // single-page arm's rule, applied to the
@@ -1189,8 +1189,8 @@ pub fn handle_mm_fault(
                 // exec. Frames have no disk writeback; read(2) stays
                 // on the node pages (documented deviation class, same
                 // as ext4's write(2) invalidation).
-                let cache_phys = if crate::fs::leaf_glue::tmpfs::is_tmpfs_file(file.as_ref()) {
-                    crate::fs::page_cache::shared_file_fault_page(file.as_ref(), file_offset as u64)
+                let cache_phys = if crate::fs::hotpath::tmpfs::is_tmpfs_file(file.as_ref()) {
+                    crate::fs::hotpath::shared_file_fault_page(file.as_ref(), file_offset as u64)
                 } else {
                     filemap_pin_cache_page(file.as_ref(), file_offset, effective_size, true)
                 };
@@ -1241,7 +1241,7 @@ pub fn handle_mm_fault(
                     }
                     if want_w
                         && (file.get_ops().is_some_and(|ops| ops.fault.is_some())
-                            || crate::fs::leaf_glue::tmpfs::is_tmpfs_file(file.as_ref()))
+                            || crate::fs::hotpath::tmpfs::is_tmpfs_file(file.as_ref()))
                     {
                         // Conservative v1 dirty mark, AFTER the mapping
                         // is installed (a failed/raced attempt leaves no
@@ -1254,7 +1254,7 @@ pub fn handle_mm_fault(
                         // writeback; tmpfs aliases have no disk and
                         // their frames are authoritative while mapped.
                         if let Some(inode) = crate::fs::r#unsafe::file_inode(&file) {
-                            crate::fs::page_cache::get_page_cache().mark_dirty(
+                            crate::fs::hotpath::get_page_cache().mark_dirty(
                                 inode.fs_id,
                                 inode.ino as u64,
                                 (file_offset / PAGE_SIZE_USIZE) as u64,
@@ -1296,7 +1296,7 @@ pub fn handle_mm_fault(
             // SAFETY: fd-table lookup by number for the CURRENT task,
             // same as the single-page fill arm; we are in that task's
             // fault context.
-            crate::fs::get_file_fd(vma_file_fd as usize)
+            crate::fs::hotpath::get_file_fd(vma_file_fd as usize)
         });
         if let Some(file) = file {
             let fault_page = page_virt_addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
@@ -1697,7 +1697,7 @@ pub fn handle_mm_fault(
                 // stale kernel data can leak into a user page).
                 let file = vm_file
                     .clone()
-                    .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
+                    .or_else(|| crate::fs::hotpath::get_file_fd(vma_file_fd as usize));
                 let will_full_read = file.is_some()
                     && file_offset < effective_size
                     && effective_size.saturating_sub(file_offset) >= PAGE_SIZE_USIZE;

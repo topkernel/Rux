@@ -5,7 +5,7 @@
 //! register; the composition bin calls it before the framework impl).
 
 #![forbid(unsafe_code)]
-use crate::fs::File;
+use crate::fs::types::File;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -27,10 +27,10 @@ pub struct NetHooks {
     /// /proc/net/dev rows.
     pub dev_rows: fn() -> Vec<DevRow>,
     /// The futex fd-kind identity probes (the AF_UNIX hunt family).
-    pub is_unix_socket_ops: fn(&'static crate::fs::FileOps) -> bool,
-    pub is_inet_socket_ops: fn(&'static crate::fs::FileOps) -> bool,
-    pub is_netlink_ops: fn(&'static crate::fs::FileOps) -> bool,
-    pub is_raw_ops: fn(&'static crate::fs::FileOps) -> bool,
+    pub is_unix_socket_ops: fn(&'static crate::fs::types::FileOps) -> bool,
+    pub is_inet_socket_ops: fn(&'static crate::fs::types::FileOps) -> bool,
+    pub is_netlink_ops: fn(&'static crate::fs::types::FileOps) -> bool,
+    pub is_raw_ops: fn(&'static crate::fs::types::FileOps) -> bool,
     /// syscost's unix-socket tracing probe.
     pub unix_socket_of: fn(&File) -> Option<(bool, String)>,
     /// posix_mq's notify socket probe.
@@ -61,7 +61,7 @@ pub struct NetHooks {
     pub uevent_broadcast: fn(&[u8]),
     /// vfs fstat's socket arm: stat every socket family as S_IFSOCK
     /// (sd-bus's sd_is_socket negotiation depends on it).
-    pub socket_file_stat: fn(&File, &mut crate::fs::Stat) -> Option<i32>,
+    pub socket_file_stat: fn(&File, &mut crate::fs::types::Stat) -> Option<i32>,
     /// posix_mq SIGEV_THREAD delivery: push the 32-byte musl marker
     /// message onto the helper's netlink socket file.
     pub netlink_push_kernel_message: fn(&File, [u8; 32]),
@@ -216,13 +216,13 @@ pub fn route_rows_dump() -> Vec<RouteRow> { (hooks().route_rows)() }
 #[inline]
 pub fn dev_rows() -> Vec<DevRow> { (hooks().dev_rows)() }
 #[inline]
-pub fn is_unix_socket_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_unix_socket_ops)(ops) }
+pub fn is_unix_socket_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_unix_socket_ops)(ops) }
 #[inline]
-pub fn is_inet_socket_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_inet_socket_ops)(ops) }
+pub fn is_inet_socket_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_inet_socket_ops)(ops) }
 #[inline]
-pub fn is_netlink_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_netlink_ops)(ops) }
+pub fn is_netlink_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_netlink_ops)(ops) }
 #[inline]
-pub fn is_raw_ops(ops: &'static crate::fs::FileOps) -> bool { (hooks().is_raw_ops)(ops) }
+pub fn is_raw_ops(ops: &'static crate::fs::types::FileOps) -> bool { (hooks().is_raw_ops)(ops) }
 #[inline]
 pub fn unix_socket_of(file: &File) -> Option<(bool, String)> { (hooks().unix_socket_of)(file) }
 #[inline]
@@ -249,7 +249,7 @@ pub fn tcp_timer_softirq(vec: usize) { (hooks().tcp_timer_softirq)(vec) }
 #[inline]
 pub fn uevent_broadcast(msg: &[u8]) { (hooks().uevent_broadcast)(msg) }
 #[inline]
-pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> { (hooks().socket_file_stat)(file, stat) }
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::types::Stat) -> Option<i32> { (hooks().socket_file_stat)(file, stat) }
 #[inline]
 pub fn netlink_push_kernel_message(file: &File, msg: [u8; 32]) { (hooks().netlink_push_kernel_message)(file, msg) }
 

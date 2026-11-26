@@ -6,7 +6,7 @@
 //! sys_mkdir, sys_rmdir, sys_unlink test
 
 use alloc::format;
-use crate::fs::{file_mkdir, file_rmdir, file_unlink, file_open, FileFlags};
+use crate::fs::{hotpath::file_mkdir, hotpath::file_rmdir, hotpath::file_unlink, hotpath::file_open, types::FileFlags};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_mkdir_unlink() {
@@ -38,7 +38,7 @@ fn test_mkdir() {
             // Verify directory exists (rootfs-row view — the leaf lives
             // in the fs crate now)
             {
-                match crate::fs::leaf_glue::rootfs::lookup_kind(dirname1) {
+                match crate::fs::hotpath::rootfs::lookup_kind(dirname1) {
                     Some(true) => test_pass("mkdir single level"),
                     Some(false) => test_fail("mkdir", "not a directory"),
                     None => test_skip("mkdir verify", "directory created but lookup failed (dentry cache)"),
@@ -86,7 +86,7 @@ fn test_rmdir() {
         Ok(()) => {
             // Verify directory is deleted (rootfs-row view)
             {
-                if crate::fs::leaf_glue::rootfs::lookup_kind(dirname).is_none() {
+                if crate::fs::hotpath::rootfs::lookup_kind(dirname).is_none() {
                     test_pass("rmdir empty directory");
                 } else {
                     test_fail("rmdir", "directory still exists");
@@ -152,7 +152,7 @@ fn test_unlink() {
                 Ok(()) => {
                     // Verify file is deleted (rootfs-row view)
                     {
-                        if crate::fs::leaf_glue::rootfs::lookup_kind(filename).is_none() {
+                        if crate::fs::hotpath::rootfs::lookup_kind(filename).is_none() {
                             test_pass("unlink file");
                         } else {
                             test_fail("unlink", "file still exists");

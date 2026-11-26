@@ -152,27 +152,27 @@ mod hooks_impl {
         crate::unix::registry_snapshot()
     }
 
-    pub fn is_unix_socket_ops(ops: &'static rux::fs::FileOps) -> bool {
+    pub fn is_unix_socket_ops(ops: &'static rux::fs::types::FileOps) -> bool {
         core::ptr::eq(ops, &crate::unix::UNIX_SOCKET_OPS)
     }
 
-    pub fn is_inet_socket_ops(ops: &'static rux::fs::FileOps) -> bool {
+    pub fn is_inet_socket_ops(ops: &'static rux::fs::types::FileOps) -> bool {
         core::ptr::eq(ops, &crate::socket::SOCKET_OPS)
     }
 
-    pub fn is_netlink_ops(ops: &'static rux::fs::FileOps) -> bool {
+    pub fn is_netlink_ops(ops: &'static rux::fs::types::FileOps) -> bool {
         core::ptr::eq(ops, &crate::netlink::NETLINK_OPS)
     }
 
-    pub fn is_raw_ops(ops: &'static rux::fs::FileOps) -> bool {
+    pub fn is_raw_ops(ops: &'static rux::fs::types::FileOps) -> bool {
         core::ptr::eq(ops, &crate::raw::RAW_OPS)
     }
 
-    pub fn unix_socket_of(_file: &rux::fs::file::File) -> Option<(bool, alloc::string::String)> {
+    pub fn unix_socket_of(_file: &rux::fs::types::File) -> Option<(bool, alloc::string::String)> {
         None // (reserved row; no framework caller after the rung-2 flip)
     }
 
-    pub fn mq_notify_sock(_file: &rux::fs::file::File) -> Option<i32> {
+    pub fn mq_notify_sock(_file: &rux::fs::types::File) -> Option<i32> {
         None // (reserved row; posix_mq consumes is_netlink_ops directly)
     }
 
@@ -188,7 +188,7 @@ mod hooks_impl {
         Some((bound, peer))
     }
 
-    pub fn unix_file_diag(file: &rux::fs::file::File) -> Option<UnixDiag> {
+    pub fn unix_file_diag(file: &rux::fs::types::File) -> Option<UnixDiag> {
         let us = crate::unix::unix_of_file_diag(file)?;
         let kind = alloc::format!("{:?}", us.kind);
         let bound = us.bound_name.lock().clone().unwrap_or_default();
@@ -250,8 +250,8 @@ mod hooks_impl {
     }
 
     pub fn socket_file_stat(
-        file: &rux::fs::file::File,
-        stat: &mut rux::fs::Stat,
+        file: &rux::fs::types::File,
+        stat: &mut rux::fs::types::Stat,
     ) -> Option<i32> {
         crate::socket::socket_file_stat(file, stat)
     }
@@ -260,7 +260,7 @@ mod hooks_impl {
         crate::netlink::uevent_broadcast(msg);
     }
 
-    pub fn netlink_push_kernel_message(file: &rux::fs::file::File, msg: [u8; 32]) {
+    pub fn netlink_push_kernel_message(file: &rux::fs::types::File, msg: [u8; 32]) {
         if let Some(sock) = crate::file_arc::<crate::netlink::NetlinkSocket>(file) {
             let mut v = alloc::vec::Vec::new();
             v.extend_from_slice(&msg);

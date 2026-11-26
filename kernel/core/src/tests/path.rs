@@ -10,7 +10,7 @@
 // Test: Path parsing functionality
 use crate::println;
 use alloc::vec::Vec;
-use crate::fs::path::Path;
+use crate::fs::types::Path;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_path() {
@@ -81,7 +81,7 @@ pub fn test_path() {
     }
 
     // Component classification.
-    use crate::fs::path::PathComponent;
+    use crate::fs::types::PathComponent;
     if PathComponent::new(".").is_current()
         && PathComponent::new("..").is_parent()
         && PathComponent::new("/").is_root()
@@ -133,7 +133,7 @@ pub fn test_path() {
     ];
     let mut all_ok = true;
     for (input, want) in cases {
-        if crate::fs::path::path_normalize(input) != *want {
+        if crate::fs::hotpath::path_normalize(input) != *want {
             all_ok = false;
         }
     }

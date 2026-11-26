@@ -11,7 +11,7 @@
 // mount time (single-threaded).)
 use alloc::sync::Arc;
 
-use rux::fs::bio;
+use rux::fs::hotpath;
 use crate::jbd2;
 use crate::jbd2::types::*;
 
@@ -72,7 +72,7 @@ impl Ext4FileSystem {
         }
 
         // Read journal superblock (first block of the journal)
-        let j_sb_bh = match bio::bread(self.device, journal_start_block) {
+        let j_sb_bh = match hotpath::bread(self.device, journal_start_block) {
             Some(b) => b,
             None => {
                 crate::print_status("ext4", "journal superblock read failed", false);
@@ -82,13 +82,13 @@ impl Ext4FileSystem {
 
         // b_data is a full block-sized byte array; the typed view rides
         // the framework's alignment-checked edge (INV-EXT-EDGE-1).
-        let j_sb: &jbd2::journal_superblock_t = rux::fs::r#unsafe::typed_ref(bio::bh_data(&j_sb_bh))
+        let j_sb: &jbd2::journal_superblock_t = rux::fs::r#unsafe::typed_ref(hotpath::bh_data(&j_sb_bh))
             .expect("journal superblock view");
 
         // Validate magic number
         if u32::from_be(j_sb.s_header.h_magic) != JBD2_MAGIC_NUMBER {
             crate::print_status("ext4", "journal magic mismatch, disabled", false);
-            bio::brelse(j_sb_bh);
+            hotpath::brelse(j_sb_bh);
             return Ok(());
         }
 
@@ -96,7 +96,7 @@ impl Ext4FileSystem {
         let j_blocksize = u32::from_be(j_sb.s_blocksize);
         if j_blocksize != self.block_size {
             crate::print_status("ext4", "journal blocksize mismatch, disabled", false);
-            bio::brelse(j_sb_bh);
+            hotpath::brelse(j_sb_bh);
             return Ok(());
         }
 
@@ -125,7 +125,7 @@ impl Ext4FileSystem {
         if has_csum_v2or3 {
             csum_seed = crate::ext4::csum::crc32c(0xFFFF_FFFF, &j_sb.s_uuid);
             let old = j_sb.s_checksum;
-            let data = bio::bh_data(&j_sb_bh);
+            let data = hotpath::bh_data(&j_sb_bh);
             let bytes: &[u8] =
                 &data[..core::mem::size_of::<jbd2::types::journal_superblock_t>()];
             // SAFETY: j_sb is a & reference into the buffer; the checksum
@@ -141,7 +141,7 @@ impl Ext4FileSystem {
             let calc = crate::ext4::csum::crc32c(0xFFFF_FFFF, &tmp);
             if calc != u32::from_be(old) {
                 crate::print_status("ext4", "journal checksum error, disabled", false);
-                bio::brelse(j_sb_bh);
+                hotpath::brelse(j_sb_bh);
                 return Ok(());
             }
         }
@@ -173,7 +173,7 @@ impl Ext4FileSystem {
             // area would be empty. Disable journaling rather than write
             // through a zero-length ring.
             crate::print_status("ext4", "journal log area empty, disabled", false);
-            bio::brelse(j_sb_bh);
+            hotpath::brelse(j_sb_bh);
             return Ok(());
         }
         let mut journal = jbd2::Journal::new(j_blocksize, j_maxlen);
@@ -262,7 +262,7 @@ impl Ext4FileSystem {
                 }
                 Err(_) => {
                     crate::print_status("ext4", "journal recovery failed", false);
-                    bio::brelse(j_sb_bh);
+                    hotpath::brelse(j_sb_bh);
                     return Ok(());
                 }
             }
@@ -270,7 +270,7 @@ impl Ext4FileSystem {
 
         self.journal.set(journal_arc);
 
-        bio::brelse(j_sb_bh);
+        hotpath::brelse(j_sb_bh);
         Ok(())
     }
 }
@@ -286,7 +286,7 @@ impl Ext4FileSystem {
 /// handle carries no transaction and no journal, so `jbd2_journal_stop`
 /// returns early without committing — but while it is armed on the task
 /// slot it does everything the deferral machinery needs:
-/// - `bio::sync_dirty_buffer` defers (the buffer stays BH_Dirty), so the
+/// - `hotpath::sync_dirty_buffer` defers (the buffer stays BH_Dirty), so the
 ///   3-8 inline synchronous metadata writes per mkdir/create/unlink on
 ///   the no-journal path stop happening; persistence moves to the batch
 ///   points (fsync/sync, buffer-cache eviction), exactly like Linux's
@@ -322,14 +322,14 @@ pub fn ext4_journal_stop(handle: &mut jbd2::Handle) -> Result<(), i32> {
     // PUB_BATCH, in which case this op pays ONE ordered drain — amortized
     // creator-paid write-back instead of either per-op scoped drains
     // (mkdir 15-30ms) or unbounded deferral (unlink constrained 100x).
-    bio::publication_batch_drain();
+    hotpath::publication_batch_drain();
     r
 }
 
 /// Get write access to a buffer within a transaction
 pub fn ext4_journal_get_write_access(
     handle: &mut jbd2::Handle,
-    bio_bh: *mut bio::BufferHead,
+    bio_bh: *mut rux::fs::types::BufferHead,
 ) -> Result<(), i32> {
     jbd2::jbd2_journal_get_write_access(handle, bio_bh)
 }
@@ -337,7 +337,7 @@ pub fn ext4_journal_get_write_access(
 /// Get create access to a buffer within a transaction (for new blocks)
 pub fn ext4_journal_get_create_access(
     handle: &mut jbd2::Handle,
-    bio_bh: *mut bio::BufferHead,
+    bio_bh: *mut rux::fs::types::BufferHead,
 ) -> Result<(), i32> {
     jbd2::jbd2_journal_get_create_access(handle, bio_bh)
 }
@@ -345,7 +345,7 @@ pub fn ext4_journal_get_create_access(
 /// Mark a buffer as dirty metadata within a transaction
 pub fn ext4_journal_dirty_metadata(
     handle: &mut jbd2::Handle,
-    bio_bh: *mut bio::BufferHead,
+    bio_bh: *mut rux::fs::types::BufferHead,
 ) -> Result<(), i32> {
     jbd2::jbd2_journal_dirty_metadata(handle, bio_bh)
 }
@@ -353,7 +353,7 @@ pub fn ext4_journal_dirty_metadata(
 /// Forget a buffer (remove from transaction tracking)
 pub fn ext4_journal_forget(
     handle: &mut jbd2::Handle,
-    bio_bh: *mut bio::BufferHead,
+    bio_bh: *mut rux::fs::types::BufferHead,
 ) -> Result<(), i32> {
     jbd2::jbd2_journal_forget(handle, bio_bh)
 }

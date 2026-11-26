@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 // The EMA cells + the sampler moved framework-side (fs::perf_ctr —
 // the scheduler tick calls update_load_avg directly, zero
 // indirection); generate() reads the framework cells.
-pub use rux::fs::perf_ctr::{AVENRUN, LAST_RUNNING, LAST_TOTAL, update_load_avg};
+pub use rux::fs::hotpath::{AVENRUN, LAST_RUNNING, LAST_TOTAL, update_load_avg};
 
 /// Render one fixed-point load value as "<whole>.<2 digits>" using pure
 /// integer math. The kernel executes with sstatus.FS = Off (no FPU

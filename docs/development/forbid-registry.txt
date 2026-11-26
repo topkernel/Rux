@@ -31,11 +31,7 @@ kernel/core/src/drivers/pci/mod.rs
 kernel/core/src/drivers/virtio/offset.rs
 kernel/core/src/drivers/virtio/virtio_pci.rs
 kernel/core/src/errno.rs
-kernel/core/src/fs/dev_t.rs
-kernel/core/src/fs/fdreap.rs
-kernel/core/src/fs/io_completion.rs
-kernel/core/src/fs/path.rs
-kernel/core/src/fs/readahead.rs
+kernel/core/src/fs/types.rs
 kernel/core/src/interrupt/domain.rs
 kernel/core/src/interrupt/irqchip.rs
 kernel/core/src/interrupt/irqthread.rs

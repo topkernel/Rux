@@ -27,9 +27,9 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::errno;
 use crate::debugfs::DebugFsNode;
-use rux::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
-use rux::fs::mount::{MntFlags, VfsMount};
-use rux::fs::superblock::{FileSystemType, SuperBlock};
+use rux::fs::{hotpath::file_type, types::Ino, types::Inode, types::InodeMode, types::INodeOps, types::VfsDirEntry};
+use rux::fs::types::{MntFlags, VfsMount};
+use rux::fs::types::{FileSystemType, SuperBlock};
 use crate::sync::types::Spinlock;
 
 /// tracefs magic number (the reference: TRACEFS_MAGIC).
@@ -219,7 +219,7 @@ static GLOBAL_SB: AtomicPtr<TraceFsSuperBlock> = AtomicPtr::new(core::ptr::null_
 /// `mount("tracefs", ...)`).
 /// SAFETY: FsContext is a valid VFS mount callback argument.
 fn tracefs_mount_cb(
-    _fs_context: &rux::fs::superblock::FsContext<'_>,
+    _fs_context: &rux::fs::types::FsContext<'_>,
 ) -> Result<*mut SuperBlock, i32> {
     let root = tracefs_root().ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
     let sb = Box::new(TraceFsSuperBlock {
@@ -243,7 +243,7 @@ pub static TRACEFS_FS_TYPE: FileSystemType = FileSystemType::new(
 
 /// Build the tracefs tree and register the filesystem type.
 pub fn init_tracefs() -> Result<(), i32> {
-    use rux::fs::superblock::register_filesystem;
+    use rux::fs::hotpath::register_filesystem;
 
     {
         let guard = ROOT.lock();
@@ -285,9 +285,9 @@ pub fn mount_at(mountpoint: &str) -> Result<(), i32> {
     // the path and would otherwise create missing components as bare
     // dentries, shadowing the underlying sysfs directory (the same
     // dance the debugfs boot mount performs).
-    let _ = rux::fs::vfs::path_lookup(mountpoint, 0);
-    rux::fs::vfs::vfs_mount(mountpoint, create_root_inode(), MntFlags::new(0));
-    rux::fs::mount::register_mount("tracefs", mountpoint, "tracefs", "rw");
+    let _ = rux::fs::hotpath::path_lookup(mountpoint, 0);
+    rux::fs::hotpath::vfs_mount(mountpoint, create_root_inode(), MntFlags::new(0));
+    rux::fs::hotpath::register_mount("tracefs", mountpoint, "tracefs", "rw");
     Ok(())
 }
 
@@ -392,7 +392,7 @@ fn tracefs_iget(
 
 /// tracefs getattr.
 /// SAFETY: VFS callback contract.
-fn tracefs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
+fn tracefs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
     use core::sync::atomic::Ordering::Relaxed;
     let entry = match entry_of(inode) {
         Some(e) => e,
@@ -444,7 +444,7 @@ fn tracefs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
 /// boot error-stream diff (~494 rows). File CONTENT stays kernel-owned.
 /// SAFETY: VFS callback contract.
 fn tracefs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    use rux::fs::inode::setattr_attr;
+    use rux::fs::hotpath::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
@@ -457,8 +457,8 @@ fn tracefs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             entry
                 .mode_ovr
                 .store((arg1 as u32) & 0o7777, core::sync::atomic::Ordering::Relaxed);
-            let keep_type = inode.mode.bits() & rux::fs::inode::InodeMode::S_IFMT;
-            inode.update_cached_mode(rux::fs::inode::InodeMode::new(
+            let keep_type = inode.mode.bits() & rux::fs::types::InodeMode::S_IFMT;
+            inode.update_cached_mode(rux::fs::types::InodeMode::new(
                 keep_type | ((arg1 as u32) & 0o7777),
             ));
             0
@@ -518,7 +518,7 @@ fn tracefs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 /// STREAMING nodes (trace_pipe) skip the snapshot — their reads drain
 /// fresh content per call instead.
 /// SAFETY: VFS callback contract.
-fn tracefs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
+fn tracefs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -548,11 +548,11 @@ fn tracefs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
 
 /// tracefs get_file_ops.
 /// SAFETY: VFS callback contract.
-fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::file::FileOps> {
+fn tracefs_get_file_ops(inode: &Inode) -> Option<&'static rux::fs::types::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&TRACEFS_FILE_OPS)
     } else if inode.mode.is_directory() {
-        Some(&rux::fs::file::DIR_FILE_OPS)
+        Some(&rux::fs::hotpath::DIR_FILE_OPS)
     } else {
         None
     }
@@ -606,7 +606,7 @@ pub struct TraceFsFileContent {
 /// reference trace_pipe's consuming-reader shape; an empty drain
 /// returns 0 ("nothing new now"), which poll loops treat as
 /// EAGAIN-equivalent.
-fn tracefs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
+fn tracefs_file_read(file: &rux::fs::types::File, buf: &mut [u8]) -> isize {
     // The snapshot box is this description's private data
     // (INV-FS-FILEPRIV-1, the mut twin: streaming refill mutates it,
     // serialized by the description's own read sequence).
@@ -641,7 +641,7 @@ fn tracefs_file_read(file: &rux::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// write: dispatch to the file's store handler.
-fn tracefs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
+fn tracefs_file_write(file: &rux::fs::types::File, buf: &[u8]) -> isize {
     // The inode cell is write-once at open (File::get_inode).
     let inode = match file.get_inode().cloned() {
         Some(i) => i,
@@ -666,7 +666,7 @@ fn tracefs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
 }
 
 /// lseek within the snapshot.
-fn tracefs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize {
+fn tracefs_file_lseek(file: &rux::fs::types::File, offset: isize, whence: i32) -> isize {
     // See the read op above (INV-FS-FILEPRIV-1).
     let content = match rux::fs::r#unsafe::file_privdata_ref::<TraceFsFileContent>(file) {
         Some(c) => c,
@@ -687,7 +687,7 @@ fn tracefs_file_lseek(file: &rux::fs::File, offset: isize, whence: i32) -> isize
 }
 
 /// close: free the content snapshot.
-fn tracefs_file_close(file: &rux::fs::File) -> i32 {
+fn tracefs_file_close(file: &rux::fs::types::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
     drop(rux::fs::r#unsafe::file_privdata_take::<TraceFsFileContent>(file));
@@ -695,7 +695,7 @@ fn tracefs_file_close(file: &rux::fs::File) -> i32 {
 }
 
 /// tracefs file operations.
-pub static TRACEFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
+pub static TRACEFS_FILE_OPS: rux::fs::types::FileOps = rux::fs::types::FileOps::builder()
     .read(tracefs_file_read)
     .write(tracefs_file_write)
     .lseek(tracefs_file_lseek)
@@ -709,19 +709,19 @@ pub static TRACEFS_FILE_OPS: rux::fs::FileOps = rux::fs::FileOps::builder()
 // ============================================================================
 
 /// The tracefs mount entry (old mount.rs arm, verbatim).
-pub fn mount_tracefs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::mount::MntFlags) -> Result<(), i32> {
+pub fn mount_tracefs(source: &str, target: &str, fs_type: &str, data: Option<&str>, mnt_flags: rux::fs::types::MntFlags) -> Result<(), i32> {
     let _ = (source, data, fs_type);
     if tracefs_root().is_none() {
         init_tracefs()?;
     }
-    let _ = rux::fs::vfs::path_lookup(target, 0);
-    rux::fs::vfs::vfs_mount(target, create_root_inode(), mnt_flags);
-    rux::fs::mount::register_mount("tracefs", target, "tracefs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+    let _ = rux::fs::hotpath::path_lookup(target, 0);
+    rux::fs::hotpath::vfs_mount(target, create_root_inode(), mnt_flags);
+    rux::fs::hotpath::register_mount("tracefs", target, "tracefs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
     Ok(())
 }
 
 pub fn mount_register() {
-    rux::fs::mount_table::register(&["tracefs"], mount_tracefs);
+    rux::fs::hotpath::register(&["tracefs"], mount_tracefs);
 }
 
 // The boxed-closure interface rows (the framework's adapter boxes the

@@ -392,7 +392,7 @@ pub fn jbd2_journal_extend(handle: &mut Handle, nblocks: i32) -> Result<(), i32>
 ///
 /// This must be called before modifying a buffer that will be journaled.
 /// It freezes a copy of the buffer's current data for the journal.
-pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut rux::fs::types::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
@@ -400,7 +400,7 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut rux::fs::
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
     {
-        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+        let blocknr = rux::fs::hotpath::bh_blocknr(&bio_bh);
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         // Keyed map (perf-gaps G3): O(log n) membership instead of the
@@ -424,7 +424,7 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut rux::fs::
 ///
 /// Similar to get_write_access but the buffer doesn't have meaningful
 /// prior content, so we don't need to preserve old data.
-pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut rux::fs::types::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
@@ -432,7 +432,7 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut rux::fs:
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
     {
-        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+        let blocknr = rux::fs::hotpath::bh_blocknr(&bio_bh);
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         if dirty_bufs.contains_key(&blocknr) {
             return Ok(()); // Already tracked
@@ -451,7 +451,7 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut rux::fs:
 /// `Transaction::t_dirty_buffers`). The commit paths snapshot the LIVE
 /// buffer-cache content through the block number at commit time, which
 /// is always at least as new as any registration-time image (R20).
-pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut rux::fs::types::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
@@ -459,7 +459,7 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut rux::fs::bi
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
     {
-        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+        let blocknr = rux::fs::hotpath::bh_blocknr(&bio_bh);
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         crate::debug::fsw::note_j_dedup(1);
@@ -472,7 +472,7 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut rux::fs::bi
 }
 
 /// Forget a buffer (release it from the transaction)
-pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut rux::fs::bio::BufferHead) -> Result<(), i32> {
+pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut rux::fs::types::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
@@ -480,7 +480,7 @@ pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut rux::fs::bio::Buffe
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
     {
-        let blocknr = rux::fs::bio::bh_blocknr(&bio_bh);
+        let blocknr = rux::fs::hotpath::bh_blocknr(&bio_bh);
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         dirty_bufs.remove(&blocknr);
     }
