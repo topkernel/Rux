@@ -1418,7 +1418,64 @@ Mechanics and evidence, all in the lane worktree `run/`:
   citing the block's pre-move artifact row; final bank: sched/unsafe.rs
   101 annotated / 7 GAP, all 7 pre-existing).
 
-## 6. Process (how this grows)
+## 5.x addendum: the pass-3 unsafe collection, drivers (2026-11-26, p23-p3drivers lane)
+
+Seed-core pass 3 (seed-core-design.md §2c.5), the largest subsystem:
+drivers' scattered unsafe collected into
+`kernel/core/src/drivers/unsafe.rs` (the file did not exist — drivers
+had no edge file at the pass-2 flip). Before: 115 inline unsafe regions
+in `drivers/hotpath.rs` (22,607 lines, the inline timer/intc modules
+included). After: `drivers/hotpath.rs` holds ZERO unsafe regions and
+zero `unsafe` keywords — audited by `scripts/core_unsafe_gate.py
+--strict --dir kernel/core/src/drivers` (rc=0) — and `unsafe.rs`
+carries 99 regions, 67 annotated / 32 GAP (every GAP row is a base
+GAP carried by id: the 20 Send/Sync proofs plus 12 blocks whose
+baseline rows had no harness; none regressed). Every moved region
+carries its contract as a doc comment citing the registry (INV-MMIO-1,
+INV-BLKDEV-1/2/3, INV-SAFECALL-1, INV-DMA-2/3, INV-KPTR-3, INV-SLOT-1,
+INV-SREF-1, INV-CHARDEV-PRIV-1, INV-KTASK-1, INV-FS-FILEPRIV-1, and
+the F5/F7/F9 rows).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 113 directives (77 wraps, 15 inline-call
+  reuses of an edge a wrap above created, 1 move-fn — `kvm_pv_send_ipi`
+  relocates whole and its NESTED `unsafe fn hc` (the one unsafe-fn
+  census region) rides with it, callers rewritten by callmap — and
+  20 move-items), 400 cut lines relocated; the manifest-closed verbatim
+  audit (`pass3.py verify --base <staging commit>`) shows the aggregate
+  line multiset changed only by the claimed mechanical lines
+  (93 removed / 483 added) — zero unclaimed edits. The
+  `IO_BUF_LAYOUT` const is the one body-level divergence: a const
+  context cannot call an unsafe.rs wrapper, so the unchecked
+  `Layout::from_size_align_unchecked` became its const-checked
+  constructor (the 64/16 proof moved from assert to compile time).
+- compiled-kernel identity: pair (all nine pass-2 specs, vs the
+  pre-pass-2 coordinator base ELFs) is rc=0 on all three arches with
+  74/81/76 symbols recorded in docs/development/pass3-pair-exceptions.txt
+  — debug-build instruction-selection drift around the
+  always-inlined contract edges plus base-only FdSet method
+  instantiations whose call sites now inline them; release-codegen
+  equality is pinned by the pbench gate below;
+- warning count 2214 vs baseline 2216 (riscv64 debug build): two
+  fewer — the collection orphaned the `read_volatile`/`write_volatile`
+  and `alloc`/`alloc_zeroed`/`dealloc` imports (removed) and widened
+  `PendingIo` one step, silencing six private-interface warnings the
+  new pub(crate) pending-table edges would have added; the two edges
+  whose parent fn was already dead at base (`vq_avail_mut`,
+  `timer_riscv64_stimecmp_set`) carry `#[allow(dead_code)]`;
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code (reference remap for the unchanged-owner regions plus a
+  generated hand-decisions file — one row per wrapper, artifact read
+  off the 1ae2a43c2 sidecar by the moved region's base id; final bank:
+  drivers/unsafe.rs 67 annotated / 32 GAP, hotpath.rs gone from the
+  ledger; unsafe-verification-exemptions.tsv row drivers/hotpath.rs
+  24->0);
+- suites on the final tree: riscv64 912/912 (verdict green, rc=0),
+  x86_64 914/914 (verdict green, rc=0); x86 pbench
+  `PBENCH DONE rc=0`, medians within band of the gate-p3sched baseline
+  (worst delta reported to the coordinator).
+
+
 - Every merged round that lands a safety property, a perf number, or a
   bug-class elimination appends its evidence here (AGENTS.md rule,
   2026-11-03) — same change, not a follow-up.
