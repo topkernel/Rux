@@ -12,10 +12,16 @@
 //! definitions local to code: a type declared inside a function or
 //! inside a private inline module of `hotpath.rs`.
 //!
-//! This file holds no `unsafe`. A field that was private to its old
-//! topic file is `pub(super)` here because the code that touches it
-//! lives in the sibling module `hotpath`: the mm directory is the
-//! smallest visibility boundary Rust offers for that split.
+//! This file holds no `unsafe`: the attribute below makes the compiler
+//! say so (docs/development/forbid-registry.txt). A field that was
+//! private to its old topic file is `pub(super)` here because the code
+//! that touches it lives in the sibling module `hotpath`: the mm
+//! directory is the smallest visibility boundary Rust offers for that
+//! split.
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
