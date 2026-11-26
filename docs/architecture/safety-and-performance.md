@@ -1418,6 +1418,69 @@ Mechanics and evidence, all in the lane worktree `run/`:
   citing the block's pre-move artifact row; final bank: sched/unsafe.rs
   101 annotated / 7 GAP, all 7 pre-existing).
 
+## 5.x addendum: the pass-3 unsafe collection, mm (2026-11-26, p23-p3mm lane)
+
+Seed-core pass 3 (§2c.5), second subsystem: mm's scattered unsafe
+collected into `kernel/core/src/mm/unsafe.rs`. Before: 53 inline unsafe
+regions in `mm/hotpath.rs` (15,012 lines), 45 regions in `unsafe.rs`.
+After: `mm/hotpath.rs` holds ZERO unsafe regions and zero `unsafe`
+keywords — audited by `scripts/core_unsafe_gate.py --strict --dir
+kernel/core/src/mm` (rc=0) — and `unsafe.rs` carries all 98 mm regions,
+98 annotated, 0 GAP (the pre-existing 45 rows keep their artifacts; the
+53 collected regions carry their INV contracts as doc comments citing
+the registry — INV-HEAP-3, INV-SMALLALLOC-1, INV-PAGEDESC-1, INV-MM-1/
+2/3/12, INV-VDSO-DATA-1 — plus the invariant the ledger's artifacts.tsv
+had already attached to each block at the base commit).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 40 directives (880 cut lines relocated): 28
+  move-fn, 8 move-item, 4 wrap. The ALLOC-HOT-PATH blocks are all
+  verbatim relocations, not new wrappers (MetaArray get/get_mut and
+  fill_interior_order, buddy_block_span, the two GlobalAlloc impls, the
+  kmem trace boundary fns, dealloc_direct) — no new call layer exists
+  on the alloc/free path; the 4 wrap ops (`node_data_ref`,
+  `node_data_ref_mut`, `page_desc_ref`, `meta_audit_scratch`) are
+  `#[inline(always)]` contract fns OFF the allocation fast path. The
+  manifest-closed verbatim audit (`pass3.py verify --base 1ae2a43c2`)
+  shows the aggregate line multiset changed only by claimed mechanical
+  lines (35 removed / 83 added) — zero unclaimed edits;
+- compiled-kernel identity: pair vs freshly built 1ae2a43c2 base ELFs
+  rc=0 on all three arches with the drift recorded in
+  docs/development/pass3-pair-exceptions.txt — the four wrap forwarders
+  drift +2..4 B of debug instruction selection (node_data 90->92,
+  node_data_mut 90->92, page_desc 58->60; rv counts), a64 shows the
+  same class on vdso_init (100->148) and meta_audit_inner
+  (2752->2672), and the ten cfg(x86_64) vDSO/TSC edges appear as
+  1:1 missing/extra pairs from their move out of mod x86_track (each
+  resolves through the in-module re-export); release-codegen equality
+  is pinned by the pbench gate below;
+- warning count unchanged (2216 = baseline 2216 rv, 2182 = 2182 x86,
+  2164 a64 vs 2165 — the delta is a dtb-regeneration environment
+  notice in the base log, not a code warning);
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code (30 regions recovered by moved-item pairing) plus 25 hand
+  decision rows in 18 groups (run/pass3-mm-decisions.tsv), each citing
+  the block's pre-move artifact row; final bank: mm/unsafe.rs 98
+  annotated / 0 GAP;
+- pbench (x86_64, PBENCH DONE rc=0, same rig as the p3sched gate log:
+  tcg,thread=multi smp=2 mem=2G): worst median delta vs
+  p23-coord/gate-p3sched/pbench-x86.log is +14.7% (p5e_child_spin,
+  n=323) — WITHIN the ±20% Tier-2 band. The rows above +5% decompose
+  as measurement physics, not code: p1_null +6.3% and p3c_fault_file
+  0.070->0.080 are one timer-quantum steps whose values sit inside the
+  11 gate logs' historical ranges (p3c 0.060-0.080 across gates),
+  p6_unlink +6.7% is mid-band (74.5-82.6 across gates), and
+  p5e_child_spin ran with two other lanes' QEMUs live on the host (the
+  band across gate logs is 251-274). The load-sensitive rows that
+  could plausibly touch mm code measured flat in the solo run:
+  p5a_pipe +1.5%, p2_ctxsw +0.5%, p4_fork_exec -4.2% — consistent with
+  no new call layer on any hot path (the wrap blocks are pglist/
+  page-desc accessors and an audit scratch borrow, none on these
+  paths). One earlier pbench attempt ran concurrently with this lane's
+  own rv suite QEMU and showed p5a_pipe +21.6% / p2_ctxsw +18.5%; the
+  solo rerun collapses both to noise-level, pinning that run's deltas
+  on host contention.
+
 ## 6. Process (how this grows)
 - Every merged round that lands a safety property, a perf number, or a
   bug-class elimination appends its evidence here (AGENTS.md rule,

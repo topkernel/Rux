@@ -1,0 +1,760 @@
+{
+ "sub": "mm",
+ "target": "kernel/core/src/mm",
+ "imports_rs": [
+  "use core::alloc::{GlobalAlloc, Layout};",
+  "use core::sync::atomic::{AtomicU32, Ordering};",
+  "use super::types::{AuditScratch, BlockMeta, BUDDY_MAX_ORDER, BUDDY_MAX_PAGES, BuddyAllocator, CombinedAllocator, FREE_BITMAP_WORDS, MetaArray, PageDescStats, PhysFrameNr, PAGE_SIZE};",
+  "use super::hotpath::{HEAP_ALLOCATOR, MAX_PAGES, MIN_PFN, nr_descs, pfn_to_page, pfn_to_page_mut};",
+  "#[cfg(feature = \"x86_64\")]",
+  "use super::hotpath::x86_track;"
+ ],
+ "source_edits": [
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "use core::alloc::{GlobalAlloc, Layout};",
+   "replace": "use core::alloc::Layout;",
+   "why": "GlobalAlloc left hotpath.rs with the two GlobalAlloc impls (Layout stays)"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "    PageDescStats,\n",
+   "replace": "",
+   "why": "page_desc_stats moved to unsafe.rs; the types import entry goes unused"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "    fn alloc_blocks(&self, order: usize) -> *mut u8 {",
+   "replace": "    pub(super) fn alloc_blocks(&self, order: usize) -> *mut u8 {",
+   "why": "the moved GlobalAlloc impl (unsafe.rs) calls alloc_blocks"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "    fn size_to_order(&self, size: usize) -> usize {",
+   "replace": "    pub(super) fn size_to_order(&self, size: usize) -> usize {",
+   "why": "the moved GlobalAlloc impl (unsafe.rs) calls size_to_order"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "    fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {",
+   "replace": "    pub(super) fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {",
+   "why": "the moved GlobalAlloc impl (unsafe.rs) calls dealloc_untracked"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {",
+   "replace": "pub(super) static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {",
+   "why": "the meta_audit_scratch edge (unsafe.rs) borrows the scratch cell"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);",
+   "replace": "pub(super) static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);",
+   "why": "the moved init_mem_map (unsafe.rs) owns the one-shot init gate"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);",
+   "replace": "pub(super) static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);",
+   "why": "the moved vDSO edges (unsafe.rs) address the data page at INV-VDSO-DATA-1 offsets"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "static mut VDSO_CODE_PAGE: VdsoCodePage = VdsoCodePage([0; 4096]);",
+   "replace": "pub(super) static mut VDSO_CODE_PAGE: VdsoCodePage = VdsoCodePage([0; 4096]);",
+   "why": "the moved vdso_init (unsafe.rs) installs the code page"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "fn build_code_page() -> [u8; 4096] {",
+   "replace": "pub(super) fn build_code_page() -> [u8; 4096] {",
+   "why": "the moved vdso_init (unsafe.rs) calls the mini-assembler"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "    fn bump(c: &core::sync::atomic::AtomicU64, _tag: &str) {",
+   "replace": "    pub(crate) fn bump(c: &core::sync::atomic::AtomicU64, _tag: &str) {",
+   "why": "the moved tsc_anchor_peek / tsc_track_now_nominal (unsafe.rs) bump x86_track's lane counters"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "    use super::vdso_seq;",
+   "replace": "    // pass 3: the vDSO/TSC edges moved to mm::r#unsafe; the module\n    // re-exports their names so the historical `x86_track::` paths of the\n    // drivers' callers (and the moved vdso_data_tick body) stay valid.\n    pub(crate) use crate::mm::r#unsafe::{\n        publish_tsc_anchor, rd, read_tsc_ordered, seq_end, seq_try_begin,\n        tsc_anchor_peek, tsc_anchor_step_back, tsc_anchor_step_forward,\n        tsc_track_now_nominal, wr,\n    };",
+   "why": "vdso_seq moved away (the use goes stale); the replacement re-exports the ten moved x86_track names in place"
+  },
+  {
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "find": "pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;",
+   "replace": "pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;\n\n// pass 3 (seed-core \u00a72c.5): the audited unsafe operations moved to\n// mm::r#unsafe; the historical `mm::hotpath::` paths of the pub ones stay\n// valid for their callers (lib.rs boot init, the debug/periodic scans,\n// timer.rs and the drivers' TSC resync, the arch mmu_init node walks).\npub use super::r#unsafe::{\n    copy_page_contents, dealloc_direct, first_online_node_mut, get_page,\n    get_page_mut, init_mem_map, mark_non_ram_pages, page_desc_stats,\n    vdso_data_tick, vdso_init,\n};",
+   "why": "path stability for the moved pub fns' external callers"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    pub(super) unsafe fn rd(off: usize) -> u64 {",
+   "replace": "    pub(crate) unsafe fn rd(off: usize) -> u64 {",
+   "why": "x86_track re-exports rd at pub(crate) (the moved vdso_data_tick body calls x86_track::rd)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    pub(super) unsafe fn wr(off: usize, v: u64) {",
+   "replace": "    pub(crate) unsafe fn wr(off: usize, v: u64) {",
+   "why": "x86_track re-exports wr at pub(crate)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    pub(super) unsafe fn seq_try_begin() -> bool {",
+   "replace": "    pub(crate) unsafe fn seq_try_begin() -> bool {",
+   "why": "x86_track re-exports seq_try_begin at pub(crate)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    pub(super) unsafe fn seq_end() {",
+   "replace": "    pub(crate) unsafe fn seq_end() {",
+   "why": "x86_track re-exports seq_end at pub(crate)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    unsafe { &*(VDSO_DATA_PAGE.0.as_ptr() as *const AtomicU32) }",
+   "replace": "    unsafe { &*(super::hotpath::VDSO_DATA_PAGE.0.as_ptr() as *const AtomicU32) }",
+   "why": "the moved vdso_seq body: the page static lives in mm::hotpath"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "                super::VDSO_DATA_PAGE.0.as_ptr().add(off) as *const u64,",
+   "replace": "                super::hotpath::VDSO_DATA_PAGE.0.as_ptr().add(off) as *const u64,",
+   "why": "the moved rd body: super changed module (x86_track -> r#unsafe)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "                super::VDSO_DATA_PAGE.0.as_mut_ptr().add(off) as *mut u64,",
+   "replace": "                super::hotpath::VDSO_DATA_PAGE.0.as_mut_ptr().add(off) as *mut u64,",
+   "why": "the moved wr body: super changed module (x86_track -> r#unsafe)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "                    bump(&PEEK_NONE, \"peek-none-mult0\");",
+   "replace": "                    x86_track::bump(&x86_track::PEEK_NONE, \"peek-none-mult0\");",
+   "why": "the moved tsc_anchor_peek body: bump/PEEK_NONE stay in x86_track"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "            bump(&PEEK_NONE, \"peek-none-retry\");",
+   "replace": "            x86_track::bump(&x86_track::PEEK_NONE, \"peek-none-retry\");",
+   "why": "the moved tsc_anchor_peek body: bump/PEEK_NONE stay in x86_track"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "            bump(&TRACK_READ_NONE, \"track-none\");",
+   "replace": "            x86_track::bump(&x86_track::TRACK_READ_NONE, \"track-none\");",
+   "why": "the moved tsc_track_now_nominal body: bump/TRACK_READ_NONE stay in x86_track"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "                return Some(base.wrapping_add(tsc_delta_nominal(delta, mult)));",
+   "replace": "                return Some(base.wrapping_add(x86_track::tsc_delta_nominal(delta, mult)));",
+   "why": "the moved tsc_track_now_nominal body: the pure math helper stays in x86_track"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "        let base = VDSO_DATA_PAGE.0.as_mut_ptr();",
+   "replace": "        let base = super::hotpath::VDSO_DATA_PAGE.0.as_mut_ptr();",
+   "why": "the moved vdso_data_tick (rv) body: the page static lives in mm::hotpath"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "        VDSO_CODE_PAGE.0 = build_code_page();",
+   "replace": "        super::hotpath::VDSO_CODE_PAGE.0 = super::hotpath::build_code_page();",
+   "why": "the moved vdso_init body: code page + assembler live in mm::hotpath"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    node_data_mut(0)",
+   "replace": "    super::hotpath::node_data_mut(0)",
+   "why": "the moved first_online_node_mut body: the bounds-checked accessor stays in hotpath.rs"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    unsafe { super::hotpath::first_online_node_mut() }",
+   "replace": "    unsafe { first_online_node_mut() }",
+   "why": "the INV-MM-1 edge now calls the collected operation directly (same module)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    unsafe { super::hotpath::copy_page_contents(src_pfn, dst_pfn) }",
+   "replace": "    unsafe { copy_page_contents(src_pfn, dst_pfn) }",
+   "why": "the INV-MM-2 copy edge now calls the collected operation directly (same module)"
+  },
+  {
+   "file": "kernel/core/src/mm/unsafe.rs",
+   "find": "    if MEM_MAP_INIT.swap(1, Ordering::AcqRel) != 0 {",
+   "replace": "    if super::hotpath::MEM_MAP_INIT.swap(1, Ordering::AcqRel) != 0 {",
+   "why": "the moved init_mem_map body: the one-shot gate lives in mm::hotpath"
+  }
+ ],
+ "moves": [
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl Send for MetaArray",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "586696748e5f",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: MetaArray is only accessed through BuddyAllocator, which holds a Spinlock \u2014 every get/get_mut call happens under that lock, so no concurrent mutable access to the underlying array exists."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl Sync for MetaArray",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "3af418f13cc9",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: as the Send proof \u2014 all MetaArray access is under the BuddyAllocator lock; the lock-free shadow audit reads it only as plain integer loads."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "get",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "5b19aebbfe74",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "vis": "pub(super)",
+   "impl_owner": "MetaArray",
+   "inv_note": "INV-HEAP-3: idx is bounds-checked by the assert and the reference is taken under the BuddyAllocator lock (or in the single-threaded init_sized seeder); the method's home moves, the body text is unchanged."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "get_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "c416c63235e4",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "vis": "pub(super)",
+   "impl_owner": "MetaArray",
+   "inv_note": "INV-HEAP-3 exclusive arm: idx bounds-checked; the caller holds the BuddyAllocator lock (or is the single-threaded init seeder) \u2014 the &mut is exclusive."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl Send for BuddyAllocator",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "5c23bc0f43bc",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: BuddyAllocator uses its internal Spinlock for all mutable operations and atomics for read-only fields, making it safe to move across threads."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl Sync for BuddyAllocator",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "d0995e1356b2",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: as the Send proof \u2014 the raw-lock discipline (irqsave) serializes every mutable operation; shared access reads atomics only."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "buddy_block_span",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0018ba8f559f",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "impl_owner": "BuddyAllocator",
+   "inv_note": "INV-HEAP-3 diagnostic arm: read-only BlockMeta probe WITHOUT the buddy lock \u2014 plain u8/u32 loads, worst case a torn value; acceptable for a forensic print (same rationale as small_alloc::object_span)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "fill_interior_order",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "0fa9a9283674",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "vis": "pub(super)",
+   "impl_owner": "BuddyAllocator",
+   "inv_note": "INV-HEAP-3: indices bounds-checked by the assert; the caller holds the allocator lock (or is the single-threaded init_sized seeder); only the order byte of each BlockMeta is written."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl GlobalAlloc for BuddyAllocator",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "7f718da0ff86",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: alloc/realloc/dealloc route through the irqsave buddy lock; the deferred-free interception lives at the dealloc boundary; the raw GlobalAlloc contract (null on failure, layout honored) is the trait's own."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "trace_kmalloc_at",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "ae6eba0d3f52",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3 trace arm: s0 is GlobalAlloc::alloc's own frame pointer (callee-saved, captured at entry); the walk reads only kernel frames and is gated by the tracepoint arming."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "trace_kfree_at",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "e153af0eeea6",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3 trace arm: s0 is current_frame_pointer() read in this frame, the dealloc twin of the alloc capture; same arming gate."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl Send for AuditScratch",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "04f3a0651646",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3 audit arm: see the AuditScratch doc \u2014 all access is claim-serialized (META_AUDIT_BUSY), so the scratch never aliases."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl Sync for AuditScratch",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "de7526da0893",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3 audit arm: as the Send proof \u2014 the META_AUDIT_BUSY claim admits one audit at a time across CPUs."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "meta_audit_inner",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "12614798d07a",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "name": "meta_audit_scratch",
+   "params": "",
+   "ret": "&'static mut [u64; FREE_BITMAP_WORDS]",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "crate::mm::r#unsafe::meta_audit_scratch()",
+   "inline": true,
+   "doc": [
+    "The meta shadow audit's scratch-bitmap borrow (the body of",
+    "meta_audit_inner's scratch take, collected by pass 3)."
+   ],
+   "contract": [
+    "The caller holds the META_AUDIT_BUSY claim (single audit at a time",
+    "across CPUs), so the UnsafeCell is never aliased; the borrow lives",
+    "only inside the audit walk (INV-HEAP-3 audit arm)."
+   ],
+   "body_edits": [
+    {
+     "find": "unsafe { &mut (*META_AUDIT_SCRATCH.data.get()) }",
+     "replace": "unsafe { &mut (*super::hotpath::META_AUDIT_SCRATCH.data.get()) }"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "dealloc_direct",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "92d80f4692e2",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: the pointer routes by region \u2014 slab-resident goes to kfree, the buddy heap window to BuddyAllocator::dealloc; other regions are ignored; this is the drainer entry, so a drained entry can never be re-deferred."
+  },
+  {
+   "op": "move-item",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "unsafe impl GlobalAlloc for CombinedAllocator",
+   "kind": "unsafe-impl",
+   "ordinal": 0,
+   "base_id": "c17937b8814a",
+   "inv": "INV-HEAP-3",
+   "section": "allocator core: BuddyAllocator / CombinedAllocator (INV-HEAP-3)",
+   "inv_note": "INV-HEAP-3: the front routes small 8-aligned layouts to the slab allocator (kmalloc) and everything else to the buddy; frees pass the deferred-free guard then dealloc_direct's region routing."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "copy_page_contents",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "627b27996720",
+   "inv": "INV-MM-2",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "inv_note": "INV-MM-2 copy arm: both pfns are live frames \u2014 src pinned by the migration window's refcount, dst exclusively owned by the claim; the copies run through the linear-map aliases and never overlap."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "mark_non_ram_pages",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "547754e7d9bf",
+   "inv": "INV-MM-3",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "inv_note": "INV-MM-3 boot arm: single-threaded boot init; the descriptors come from pfn_to_page's span validation and init_reserved() only flips flags/refcount (the fake-OOM phantom-drift fix)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "init_mem_map",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "17823f35ac79",
+   "inv": "INV-MM-3",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "inv_note": "INV-MM-3 boot arm: MEM_MAP_INIT makes the init one-shot; pages initialize free before any allocator publication (single CPU), and memblock-reserved ranges re-mark Reserved + refcount 1 inside the initialized span."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "page_desc_stats",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9fe4f03e906a",
+   "inv": "INV-FRAME-1",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "inv_note": "INV-FRAME-1 diag arm: the walk clamps to nr_descs() and the descriptors vmemmap actually mapped (vmemmap_stats().nr_pages) \u2014 dereferencing beyond would fault (the KERNPANIC-in-page_desc_stats fix); descriptors are machine-lifetime statics."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "get_page",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "62c02ecdaaf2",
+   "inv": "INV-FRAME-1",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "inv_note": "INV-FRAME-1: pfn is in the valid span (caller-checked); a shared &'static Page is sound because Page mutates only through atomics (interior-mutable by construction), however many holders alias the frame."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "get_page_mut",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "99909fbc6609",
+   "inv": "INV-FRAME-1",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "inv_note": "INV-FRAME-1 exclusive arm: pfn valid AND no other reference exists (the caller's discipline \u2014 init/boot or exclusive-owner paths only)."
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "page_desc",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1c2c430ba0cc",
+   "inv": "INV-FRAME-1",
+   "section": "page descriptors: mem_map / vmemmap (INV-FRAME-1)",
+   "name": "page_desc_ref",
+   "params": "p: *const Page",
+   "ret": "&'static Page",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "crate::mm::r#unsafe::page_desc_ref(p)",
+   "inline": true,
+   "doc": [
+    "The descriptor borrow behind the safe page_desc accessor (collected",
+    "by pass 3): one checked raw-pointer to &'static Page step."
+   ],
+   "contract": [
+    "INV-FRAME-1: p is a non-null vmemmap descriptor (the caller lifted",
+    "the null check into page_desc and wraps the borrow in Some);",
+    "descriptors are machine-lifetime statics and Page mutates only",
+    "through atomics, so the shared borrow is sound however many",
+    "holders alias the frame."
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "node_data",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "91c3706a5bcf",
+   "inv": "INV-MM-12",
+   "section": "pglist NODE_DATA (INV-MM-12)",
+   "name": "node_data_ref",
+   "params": "node_id: usize",
+   "ret": "Option<&'static PglistData>",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "    crate::mm::r#unsafe::node_data_ref(node_id)",
+   "doc": [
+    "The NODE_DATA slot read behind the safe node_data accessor",
+    "(collected by pass 3)."
+   ],
+   "contract": [
+    "INV-MM-12: node_id < MAX_NUMNODES (bounds-checked by the accessor)",
+    "and NODE_DATA was initialized by init_node_data() before any read;",
+    "the shared borrow only reads."
+   ],
+   "body_edits": [
+    {
+     "find": "NODE_DATA[node_id].as_ref()",
+     "replace": "super::hotpath::NODE_DATA[node_id].as_ref()"
+    }
+   ]
+  },
+  {
+   "op": "wrap",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "node_data_mut",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "39b81b86ecd1",
+   "inv": "INV-MM-12",
+   "section": "pglist NODE_DATA (INV-MM-12)",
+   "name": "node_data_ref_mut",
+   "params": "node_id: usize",
+   "ret": "Option<&'static mut PglistData>",
+   "attr": "#[inline(always)]",
+   "vis": "pub(crate)",
+   "call": "    crate::mm::r#unsafe::node_data_ref_mut(node_id)",
+   "doc": [
+    "The NODE_DATA slot borrow behind the safe node_data_mut accessor",
+    "(collected by pass 3)."
+   ],
+   "contract": [
+    "INV-MM-12 exclusive arm: node_id bounds-checked; the caller",
+    "guarantees exclusive access (boot/init window or the lock that",
+    "provides it)."
+   ],
+   "body_edits": [
+    {
+     "find": "NODE_DATA[node_id].as_mut()",
+     "replace": "super::hotpath::NODE_DATA[node_id].as_mut()"
+    }
+   ]
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "first_online_node_mut",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "5ae198771960",
+   "inv": "INV-MM-1",
+   "section": "pglist NODE_DATA (INV-MM-12)",
+   "inv_note": "INV-MM-1: the caller holds the node's lru_lock or runs in the boot/single-CPU window \u2014 no other thread may hold a mutable or shared reference to the same PglistData simultaneously (the contract the first_node_mut edge documents)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "vdso_seq",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "d1d5b814c5c8",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "inv_note": "INV-VDSO-DATA-1: the seqlock word IS data-page offset 0 \u2014 it is accessed THROUGH the page pointer, never through a separate static (the LTP clock_gettime04 ahead-clock fix); only the tick refresh paths write it."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "vdso_data_tick",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "fc44f4e5a366",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "inv_note": "INV-VDSO-DATA-1 tick arm: the page is written only here, under the seqlock (seq |= 1 begin, volatile field stores at page-constant offsets, seq += 1 end); user readers validate the seq word before trusting the fields."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "rd",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "3439b1921ca3",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 read arm: plain volatile u64 load at a page-constant offset; coherence is the seq word's job (x86 unified-track page)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "wr",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "7c5b3c4e5adb",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 write arm: volatile u64 store at a page-constant offset; the caller holds the cmpxchg even-to-odd writer claim (the seq protocol)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "read_tsc_ordered",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "436ad2f1e584",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1: lfence;rdtsc \u2014 the ordered counter read keeps the TSC stamp inside the seq window (a bare rdtsc can hoist across the field loads; the emitted vDSO code uses the identical pair)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "seq_try_begin",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "315e75da46e5",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 writer-lock arm: cmpxchg even-to-odd takes the page for writing; a losing writer skips the round (the seq word doubles as the writer lock \u2014 the multi-writer tear fix)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "seq_end",
+   "kind": "unsafe-fn",
+   "ordinal": 0,
+   "base_id": "5a39879fc5a9",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1: seq += 1 (Release) closes the write window; readers retry while the word is odd or changed across their read."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "publish_tsc_anchor",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "d5623831ef74",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 publish arm: boot-time single-threaded promote (pre-SMP, IRQs off), but the seq protocol runs anyway for uniformity; mult is write-once and base_mono_nom makes the track continuous with the previous clock."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "tsc_anchor_step_forward",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "2817b21e455a",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 resync arm: forward-only base step under the full seq protocol (1 Hz HPET resync); a lost writer claim returns false and the caller retries next second."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "tsc_anchor_step_back",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "9c86a24dd444",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 rebase arm: the ONE base movement that can go backward (vCPU TSC-offset smash class); the caller prints loudly and the TSC_LAST ratchet freezes the syscall track through the pull."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "tsc_anchor_peek",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "882827d75840",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 read arm: seq-validated anchor triple with no TSC read; None when not promoted (mult == 0) or the writer wedged odd (bounded retry)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "tsc_track_now_nominal",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "183ed3ae0924",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "attr_add": "#[cfg(feature = \"x86_64\")]",
+   "inv_note": "INV-VDSO-DATA-1 kernel-read arm: seq1, fields, lfence;rdtsc, seq2 with the WRAP GUARD \u2014 a TSC behind the published cycle_last retries, then reports unreadable (no manufactured 2^32-second deltas); IDENTICAL arithmetic to the emitted vDSO interpolation."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "vdso_data_tick",
+   "kind": "block",
+   "ordinal": 1,
+   "base_id": "a6bd6d2b7614",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "inv_note": "INV-VDSO-DATA-1 x86 tick arm: the anchor advances to NOW under the writer lock, forward-only by construction; epoch and the interpolation bound republish; skipped entirely while mult == 0 (userspace stays on the syscall fallback)."
+  },
+  {
+   "op": "move-fn",
+   "file": "kernel/core/src/mm/hotpath.rs",
+   "owner": "vdso_init",
+   "kind": "block",
+   "ordinal": 0,
+   "base_id": "1382fea7e30e",
+   "inv": "INV-VDSO-DATA-1",
+   "section": "vDSO data page + TSC anchor (INV-VDSO-DATA-1)",
+   "inv_note": "INV-VDSO-DATA-1 init arm: boot-time single-threaded; the code page is only read after install (user mappings R+X) and the data-page prime goes through the seqlock (vdso_data_tick)."
+  }
+ ],
+ "moved_fns": [
+  "get",
+  "get_mut",
+  "buddy_block_span",
+  "fill_interior_order",
+  "trace_kmalloc_at",
+  "trace_kfree_at",
+  "dealloc_direct",
+  "copy_page_contents",
+  "mark_non_ram_pages",
+  "init_mem_map",
+  "page_desc_stats",
+  "get_page",
+  "get_page_mut",
+  "first_online_node_mut",
+  "vdso_seq",
+  "vdso_data_tick (both cfg arms)",
+  "rd",
+  "wr",
+  "read_tsc_ordered",
+  "seq_try_begin",
+  "seq_end",
+  "publish_tsc_anchor",
+  "tsc_anchor_step_forward",
+  "tsc_anchor_step_back",
+  "tsc_anchor_peek",
+  "tsc_track_now_nominal",
+  "vdso_init"
+ ]
+}
