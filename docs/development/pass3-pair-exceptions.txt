@@ -454,216 +454,216 @@ core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
 ^core\[[0-9a-f]+\]::mem::drop::<alloc\[[0-9a-f]+\]::boxed::Box<rux::fs::CacheEntry>>$
 ^rux::fs::boxed_drop::<rux::fs::BufferHead>$
 ^rux::fs::boxed_drop::<rux::fs::CacheEntry>$
-^rux::fs::hotpath::alloc_staging_buf
-^rux::fs::hotpath::bfree_multi
-^rux::fs::hotpath::bread_async
-^rux::fs::hotpath::claim_entry_arc
-^rux::fs::hotpath::copy_stat_to_user
-^rux::fs::hotpath::data_of
-^rux::fs::hotpath::free_pidfd_data
-^rux::fs::hotpath::fsctx_close
-^rux::fs::hotpath::fsctx_of
-^rux::fs::hotpath::fsctx_of_mut
-^rux::fs::hotpath::gather_append_user
-^rux::fs::hotpath::get_file_fd_fast
-^rux::fs::hotpath::get_vfs_root
-^rux::fs::hotpath::inode_permission
-^rux::fs::hotpath::make_detached_mount
-^rux::fs::hotpath::memo_slot_read
-^rux::fs::hotpath::mount_is_busy::\{closure\#0\}
-^rux::fs::hotpath::mountfd_close
-^rux::fs::hotpath::mountfd_of
-^rux::fs::hotpath::path_lookup
-^rux::fs::hotpath::pcache_dirty_histogram
-^rux::fs::hotpath::pidfd_close
-^rux::fs::hotpath::pin_leader
-^rux::fs::hotpath::publication_capture_note_dirty
-^rux::fs::hotpath::reg_file_lseek
-^rux::fs::hotpath::reg_file_read
-^rux::fs::hotpath::reg_file_write
-^rux::fs::hotpath::resolve_alive
-^rux::fs::hotpath::shared_file_fault_page
-^rux::fs::hotpath::sync_block_ordered
-^rux::fs::hotpath::sync_dirty_blocks_batched
-^rux::fs::hotpath::sync_dirty_buffer
-^rux::fs::hotpath::target_exited
-^rux::fs::hotpath::treepath_dentry
-^rux::fs::hotpath::vt_file_ioctl
-^rux::fs::hotpath::vtdev_close
-^rux::fs::hotpath::wait_buffer_io_done
-^rux::fs::hotpath::with_block::
-^rux::fs::hotpath::with_block_deferred_mut::
-^rux::fs::hotpath::with_block_mut::
+^rux::fs::(hotpath::)?alloc_staging_buf
+^rux::fs::(hotpath::)?bfree_multi
+^rux::fs::(hotpath::)?bread_async
+^rux::fs::(hotpath::)?claim_entry_arc
+^rux::fs::(hotpath::)?copy_stat_to_user
+^rux::fs::(hotpath::)?data_of
+^rux::fs::(hotpath::)?free_pidfd_data
+^rux::fs::(hotpath::)?fsctx_close
+^rux::fs::(hotpath::)?fsctx_of
+^rux::fs::(hotpath::)?fsctx_of_mut
+^rux::fs::(hotpath::)?gather_append_user
+^rux::fs::(hotpath::)?get_file_fd_fast
+^rux::fs::(hotpath::)?get_vfs_root
+^rux::fs::(hotpath::)?inode_permission
+^rux::fs::(hotpath::)?make_detached_mount
+^rux::fs::(hotpath::)?memo_slot_read
+^rux::fs::(hotpath::)?mount_is_busy::\{closure\#0\}
+^rux::fs::(hotpath::)?mountfd_close
+^rux::fs::(hotpath::)?mountfd_of
+^rux::fs::(hotpath::)?path_lookup
+^rux::fs::(hotpath::)?pcache_dirty_histogram
+^rux::fs::(hotpath::)?pidfd_close
+^rux::fs::(hotpath::)?pin_leader
+^rux::fs::(hotpath::)?publication_capture_note_dirty
+^rux::fs::(hotpath::)?reg_file_lseek
+^rux::fs::(hotpath::)?reg_file_read
+^rux::fs::(hotpath::)?reg_file_write
+^rux::fs::(hotpath::)?resolve_alive
+^rux::fs::(hotpath::)?shared_file_fault_page
+^rux::fs::(hotpath::)?sync_block_ordered
+^rux::fs::(hotpath::)?sync_dirty_blocks_batched
+^rux::fs::(hotpath::)?sync_dirty_buffer
+^rux::fs::(hotpath::)?target_exited
+^rux::fs::(hotpath::)?treepath_dentry
+^rux::fs::(hotpath::)?vt_file_ioctl
+^rux::fs::(hotpath::)?vtdev_close
+^rux::fs::(hotpath::)?wait_buffer_io_done
+^rux::fs::(hotpath::)?with_block::
+^rux::fs::(hotpath::)?with_block_deferred_mut::
+^rux::fs::(hotpath::)?with_block_mut::
 
-^rux::fs::hotpath::alloc_staging_buf.*
+^rux::fs::(hotpath::)?alloc_staging_buf.*
 #   rv: 60->64, x86: 83->95, a64: 88->96
-^rux::fs::hotpath::bfree_multi.*
+^rux::fs::(hotpath::)?bfree_multi.*
 #   rv: 52->44, x86: 48->40, a64: 60->56
-^rux::fs::hotpath::bread_async.*
+^rux::fs::(hotpath::)?bread_async.*
 #   rv: 2226->2238, x86: 3356->3395, a64: 3344->3360
-^rux::fs::hotpath::claim_entry_arc.*
+^rux::fs::(hotpath::)?claim_entry_arc.*
 #   rv: 38->40, x86: 36->40, a64: 44->48
-^rux::fs::hotpath::copy_stat_to_user.*
+^rux::fs::(hotpath::)?copy_stat_to_user.*
 #   rv: 32->38, x86: 71->94, a64: 44->56
-^rux::fs::hotpath::data_of.*
+^rux::fs::(hotpath::)?data_of.*
 #   rv: 96->100, x86: 117->125, a64: 288->276
-^rux::fs::hotpath::free_pidfd_data.*
+^rux::fs::(hotpath::)?free_pidfd_data.*
 #   rv: 68->70, x86: 65->69, a64: 160->164
-^rux::fs::hotpath::fsctx_close.*
+^rux::fs::(hotpath::)?fsctx_close.*
 #   rv: 80->86, x86: 109->121, a64: 272->240
-^rux::fs::hotpath::fsctx_of.*
+^rux::fs::(hotpath::)?fsctx_of.*
 #   rv: 138->142, x86: 194->202, a64: 352->336
-^rux::fs::hotpath::fsctx_of_mut.*
+^rux::fs::(hotpath::)?fsctx_of_mut.*
 #   rv: 138->142, x86: 194->202, a64: 352->336
-^rux::fs::hotpath::gather_append_user.*
+^rux::fs::(hotpath::)?gather_append_user.*
 #   rv: 186->226, x86: 225->313, a64: 256->320
-^rux::fs::hotpath::get_file_fd_fast.*
+^rux::fs::(hotpath::)?get_file_fd_fast.*
 #   rv: 188->206, x86: 253->284, a64: 216->468
-^rux::fs::hotpath::get_vfs_root.*
+^rux::fs::(hotpath::)?get_vfs_root.*
 #   rv: 160->162, x86: 161->165, a64: 180->184
-^rux::fs::hotpath::inode_permission.*
+^rux::fs::(hotpath::)?inode_permission.*
 #   rv: 160->162, x86: 179->183, a64: 184->268
-^rux::fs::hotpath::make_detached_mount.*
+^rux::fs::(hotpath::)?make_detached_mount.*
 #   rv: 508->514, x86: 729->748, a64: 628->632
-^rux::fs::hotpath::memo_slot_read.*
+^rux::fs::(hotpath::)?memo_slot_read.*
 #   rv: 234->236, x86: 359->369, a64: 448->452
-^rux::fs::hotpath::mount_is_busy::\{closure\#0\}.*
+^rux::fs::(hotpath::)?mount_is_busy::\{closure\#0\}.*
 #   rv: 306->310, x86: 443->451, a64: 388->468
-^rux::fs::hotpath::mountfd_close.*
+^rux::fs::(hotpath::)?mountfd_close.*
 #   rv: 80->86, x86: 109->121, a64: 272->240
-^rux::fs::hotpath::mountfd_of.*
+^rux::fs::(hotpath::)?mountfd_of.*
 #   rv: 138->142, x86: 194->202, a64: 352->336
-^rux::fs::hotpath::path_lookup.*
+^rux::fs::(hotpath::)?path_lookup.*
 #   rv: 12860->12968, x86: 15799->15946, a64: 11756->11860
-^rux::fs::hotpath::pcache_dirty_histogram.*
+^rux::fs::(hotpath::)?pcache_dirty_histogram.*
 #   rv: 1346->1350, x86: 2102->2112, a64: 1740->1744
-^rux::fs::hotpath::pidfd_close.*
+^rux::fs::(hotpath::)?pidfd_close.*
 #   rv: 72->76, x86: 101->109, a64: 268->232
-^rux::fs::hotpath::pin_leader.*
+^rux::fs::(hotpath::)?pin_leader.*
 #   rv: 132->142, x86: 153->172, a64: 324->344
-^rux::fs::hotpath::publication_capture_note_dirty.*
+^rux::fs::(hotpath::)?publication_capture_note_dirty.*
 #   rv: 464->466, x86: 867->874, a64: 844->848
-^rux::fs::hotpath::reg_file_lseek.*
+^rux::fs::(hotpath::)?reg_file_lseek.*
 #   rv: 250->258, x86: 401->428, a64: 452->440
-^rux::fs::hotpath::reg_file_read.*
+^rux::fs::(hotpath::)?reg_file_read.*
 #   rv: 174->184, x86: 247->272, a64: 324->316
-^rux::fs::hotpath::reg_file_write.*
+^rux::fs::(hotpath::)?reg_file_write.*
 #   rv: 616->626, x86: 1112->1131, a64: 940->936
-^rux::fs::hotpath::resolve_alive.*
+^rux::fs::(hotpath::)?resolve_alive.*
 #   rv: 76->80, x86: 88->95, a64: 200->208
-^rux::fs::hotpath::shared_file_fault_page.*
+^rux::fs::(hotpath::)?shared_file_fault_page.*
 #   rv: 374->348, x86: 675->662, a64: 648->552
-^rux::fs::hotpath::sync_block_ordered.*
+^rux::fs::(hotpath::)?sync_block_ordered.*
 #   rv: 124->126, x86: 148->152, a64: 252->256
-^rux::fs::hotpath::sync_dirty_blocks_batched.*
+^rux::fs::(hotpath::)?sync_dirty_blocks_batched.*
 #   rv: 670->674, x86: 797->819, a64: 800->812
-^rux::fs::hotpath::sync_dirty_buffer.*
+^rux::fs::(hotpath::)?sync_dirty_buffer.*
 #   rv: 170->172, x86: 203->207, a64: 356->360
-^rux::fs::hotpath::target_exited.*
+^rux::fs::(hotpath::)?target_exited.*
 #   rv: 102->106, x86: 102->109, a64: 200->208
-^rux::fs::hotpath::treepath_dentry.*
+^rux::fs::(hotpath::)?treepath_dentry.*
 #   rv: 106->134, x86: 142->168, a64: 224->232
-^rux::fs::hotpath::vt_file_ioctl.*
+^rux::fs::(hotpath::)?vt_file_ioctl.*
 #   rv: 2956->3048, x86: 4259->4498, a64: 3916->3984
-^rux::fs::hotpath::vtdev_close.*
+^rux::fs::(hotpath::)?vtdev_close.*
 #   rv: 102->108, x86: 140->152, a64: 388->356
-^rux::fs::hotpath::wait_buffer_io_done.*
+^rux::fs::(hotpath::)?wait_buffer_io_done.*
 #   rv: 394->396, x86: 501->511, a64: 548->564
-^rux::fs::hotpath::with_block::<core\[93ee42ca37157773\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[a4152748d33ef3db\]::ext4::extent::find_block_in_external_extent_ex:.*
+^rux::fs::(hotpath::)?with_block::<core\[93ee42ca37157773\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[a4152748d33ef3db\]::ext4::extent::find_block_in_external_extent_ex:.*
 #   rv: 152->154, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block::<core\[93ee42ca37157773\]::result::Result<u64,\ i32>,\ ext4\[a4152748d33ef3db\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
+^rux::fs::(hotpath::)?with_block::<core\[93ee42ca37157773\]::result::Result<u64,\ i32>,\ ext4\[a4152748d33ef3db\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
 #   rv: 142->144, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block::<core\[c9230c9cd16dbdec\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[d12844bc12980c48\]::ext4::extent::find_block_in_external_extent_ex:.*
+^rux::fs::(hotpath::)?with_block::<core\[c9230c9cd16dbdec\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[d12844bc12980c48\]::ext4::extent::find_block_in_external_extent_ex:.*
 #   rv: -->-, x86: 259->272, a64: -->-
-^rux::fs::hotpath::with_block::<core\[c9230c9cd16dbdec\]::result::Result<u64,\ i32>,\ ext4\[d12844bc12980c48\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
+^rux::fs::(hotpath::)?with_block::<core\[c9230c9cd16dbdec\]::result::Result<u64,\ i32>,\ ext4\[d12844bc12980c48\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
 #   rv: -->-, x86: 217->227, a64: -->-
-^rux::fs::hotpath::with_block::<core\[f485ab2f9f61e21a\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[42200414761e858b\]::ext4::extent::find_block_in_external_extent_ex:.*
+^rux::fs::(hotpath::)?with_block::<core\[f485ab2f9f61e21a\]::result::Result<\(u64,\ bool\),\ i32>,\ ext4\[42200414761e858b\]::ext4::extent::find_block_in_external_extent_ex:.*
 #   rv: -->-, x86: -->-, a64: 276->280
-^rux::fs::hotpath::with_block::<core\[f485ab2f9f61e21a\]::result::Result<u64,\ i32>,\ ext4\[42200414761e858b\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
+^rux::fs::(hotpath::)?with_block::<core\[f485ab2f9f61e21a\]::result::Result<u64,\ i32>,\ ext4\[42200414761e858b\]::ext4::extent::find_block_in_external_extent::\{closure\#0.*
 #   rv: -->-, x86: -->-, a64: 252->256
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 512->520
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 488->496
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
 #   rv: -->-, x86: -->-, a64: 512->520
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 512->520
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 488->496
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
 #   rv: 268->272, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
 #   rv: 260->264, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
 #   rv: 268->272, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
 #   rv: 268->272, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
 #   rv: 260->264, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::update_group_desc_free_blocks::\{closure\#0\}>.*
 #   rv: -->-, x86: 413->430, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::update_superblock_free_blocks::\{closure\#0\}>.*
 #   rv: -->-, x86: 391->405, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::refresh_bg_itable_unused::\{closure\#1\}>.*
 #   rv: -->-, x86: 413->430, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::update_group_desc_free_inodes::\{closure\#0\}>.*
 #   rv: -->-, x86: 413->430, a64: -->-
-^rux::fs::hotpath::with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_deferred_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::update_superblock_free_inodes::\{closure\#0\}>.*
 #   rv: -->-, x86: 391->405, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 624->632
-^rux::fs::hotpath::with_block_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[42200414761e858b\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 624->632
-^rux::fs::hotpath::with_block_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
 #   rv: 366->370, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[a4152748d33ef3db\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
 #   rv: 366->370, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::BlockAllocator>::write_block_bitmap::\{closure\#0\}>.*
 #   rv: -->-, x86: 514->534, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ <ext4\[d12844bc12980c48\]::ext4::allocator::InodeAllocator>::write_inode_bitmap::\{closure\#0\}>.*
 #   rv: -->-, x86: 514->534, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 644->652
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 584->600
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::write_node::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::write_node::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 608->616
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::write_node::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::extent::write_node::\{closure\#1\}>.*
 #   rv: -->-, x86: -->-, a64: 624->632
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 584->600
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
 #   rv: -->-, x86: -->-, a64: 584->600
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[42200414761e858b\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
 #   rv: -->-, x86: -->-, a64: 624->632
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
 #   rv: 390->394, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
 #   rv: 344->348, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::write_node::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::write_node::\{closure\#0\}>.*
 #   rv: 352->356, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::write_node::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::extent::write_node::\{closure\#1\}>.*
 #   rv: 366->370, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
 #   rv: 344->348, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
 #   rv: 344->348, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[a4152748d33ef3db\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
 #   rv: 366->370, x86: -->-, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::allocator::set_bitmap_csum_in_gd::\{closure\#0\}>.*
 #   rv: -->-, x86: 566->583, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::alloc_meta_block::\{closure\#0\}>.*
 #   rv: -->-, x86: 472->486, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::write_node::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::write_node::\{closure\#0\}>.*
 #   rv: -->-, x86: 490->510, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::write_node::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::extent::write_node::\{closure\#1\}>.*
 #   rv: -->-, x86: 514->534, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::file::allocate_indirect_block::\{closure\#0\}>.*
 #   rv: -->-, x86: 472->486, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::file::allocate_indirect_block::\{closure\#1\}>.*
 #   rv: -->-, x86: 472->486, a64: -->-
-^rux::fs::hotpath::with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
+^rux::fs::(hotpath::)?with_block_mut::<\(\),\ ext4\[d12844bc12980c48\]::ext4::indirect::write_indirect_block::\{closure\#0\}>.*
 #   rv: -->-, x86: 514->534, a64: -->-
 #   the fs::hotpath fns whose inline unsafe blocks became
 #   always-inlined unsafe.rs contract calls (same-name size drift,
@@ -671,3 +671,5 @@ core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
 #   pinned by the pbench gate). The 59 renamed pairings the other
 #   patterns below cover: the BlockCache/Dentry/FdTable/CacheEntry
 #   methods and the moved free fns + for_each_file closures.
+# fs collection closures: same collection-drift class (p3fs2 gate 2026-11-27).
+^rux::fs::\{closure\}$
