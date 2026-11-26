@@ -55,17 +55,9 @@ pub fn last_report_n() -> u32 {
 
 static LAST_REPORT_N: AtomicU32 = AtomicU32::new(0);
 
-/// Per-task watch state, direct-mapped by pid (512 slots — attribution
-/// fidelity at census granularity, the hilogcensus trade-off).
-struct Watch {
-    pid: AtomicU32,
-    /// zero-event returns in the current window.
-    n: AtomicU32,
-    /// jiffies when the window opened.
-    win: AtomicU64,
-    /// jiffies when this task last REPORTED (rate limit).
-    last_rep: AtomicU64,
-}
+// Watch — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{Watch};
 
 impl Watch {
     const fn new() -> Self {

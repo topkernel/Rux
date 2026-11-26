@@ -24,14 +24,13 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 const N: usize = 8;
-const CAP: usize = 128;
+// CAP — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{CAP};
 
-struct Slot {
-    tid: AtomicU32,
-    op: AtomicU32,
-    len: AtomicU32,
-    buf: [u8; CAP],
-}
+// Slot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{Slot};
 
 static mut SLOTS: [Slot; N] = [const {
     Slot {

@@ -47,76 +47,9 @@ static BUDGET: AtomicU32 = AtomicU32::new(400);
 const SLOTS: usize = 2048;
 const SLOT_MASK: usize = SLOTS - 1;
 
-struct LoSlot {
-    task: AtomicUsize,
-    /// `&'static Location` of the most recent PREEMPT_OFFSET acquire.
-    site: AtomicUsize,
-    /// jiffies at that acquire.
-    jif: AtomicU64,
-    /// preempt_count value immediately AFTER that acquire (1 = outermost).
-    cnt_after: AtomicI32,
-    /// `&'static Location` of the most recent HARDIRQ_OFFSET acquire
-    /// (s14: the stranded-0x10000 face — pc=0x10000/0x10001 incumbents
-    /// and the 0x10000-grid strand family). With `irq_enter` marked
-    /// #[track_caller] this names the trap dispatch site (timer/soft/
-    /// ext), so a leaked hardirq bit reports WHICH bracket booked it.
-    hsite: AtomicUsize,
-    /// jiffies at that HARDIRQ acquire.
-    hjif: AtomicU64,
-    // ---- phantom-bits (2026-11-01): SOFTIRQ-bit shadow ----
-    // The monopolist face of the eighth successor's lb60 dump (pid 552,
-    // preempt=0x100, RUNNING, CFS-undefeatable) strands exactly ONE
-    // SOFTIRQ_OFFSET whose release never executed anywhere (zero
-    // sub=0x100 underflows all boot; SOFTIRQ-BRACKET-LEAK silent). Only
-    // two +0x100 bookers exist on this tree (__do_softirq's bracket and
-    // SeqLock::write's stats sections) — this shadow names which one
-    // booked a stranded bit, and the tick-side orphan scan
-    /// (preempt::tick_orphan_scan) reports it while the bit sits.
-    /// `&'static Location` of the most recent SOFTIRQ_OFFSET acquire.
-    ssite: AtomicUsize,
-    /// jiffies at that SOFTIRQ acquire.
-    sjif: AtomicU64,
-    /// CPU id where it ran.
-    scpu: AtomicU32,
-    /// 1 = at acquire time this CPU's sched slot named a DIFFERENT task
-    /// (booking resolved through tp; the slot is the heal's observer —
-    /// divergence means the heal watches the wrong task for this bit).
-    smis: AtomicU32,
-    /// One report per leak episode (cleared on each new acquire).
-    reported: AtomicBool,
-    // ---- preempt-hunt (2026-11-01): OUTERMOST acquire tap ----
-    // The `site` shadow above is last-acquire-wins: after a leak, any
-    // correctly-paired inner guard pair (1->2->1) overwrites it, so the
-    // reported site is dominated by the hottest lock family (the four
-    // allocator sites) even when the leak's acquire was elsewhere. The
-    // OUTERmost acquire (base-field 0->1) whose matching 1->0 release
-    // never ran is, by construction, the leak's origin: the base count
-    // is still nonzero precisely because THAT release never executed.
-    // Inner pairs (1->2->1) do not touch these fields, so the record is
-    // stable from the leaking acquire until the count returns to zero
-    // (or a heal zeroes it — at which point the WAKE-HEAL report prints
-    // this record and names the producer's home site directly).
-    /// Task that executed the outermost base acquire (0 = none).
-    otask: AtomicUsize,
-    /// `&'static Location` of that outermost acquire.
-    osite: AtomicUsize,
-    /// jiffies at that acquire.
-    ojif: AtomicU64,
-    /// CPU id where it ran.
-    ocpu: AtomicU32,
-    /// 1 = at acquire time this CPU's sched slot named a DIFFERENT task
-    /// (tp vs slot divergence — the stale-tp / mid-switch window family).
-    omis: AtomicU32,
-    /// When omis=1: the task pointer the sched slot named at acquire
-    /// time (0 = unreadable). Identifies WHICH window the divergent
-    /// booking ran in (preempt-hunt).
-    oslot: AtomicUsize,
-    /// jiffies of the last user-return report for this slot
-    /// (preempt-hunt rate gate: one stuck +1 re-reports on every guard
-    /// re-acquire; 50-jiffy spacing keeps the episode signature without
-    /// flooding the budget).
-    urrep_jif: AtomicU64,
-}
+// LoSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{LoSlot};
 
 static TABLE: [LoSlot; SLOTS] = {
     #[allow(clippy::declare_interior_mutable_const)]

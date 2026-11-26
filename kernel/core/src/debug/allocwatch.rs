@@ -67,18 +67,9 @@ fn slot_of(site: u8, class: u8) -> usize {
     (base + class as usize).min(SLOTS - 1)
 }
 
-struct Holder {
-    /// (site | class << 8) the stamp was written for; also the exit key.
-    key: AtomicU32,
-    /// Monotonic acquire epoch; exit only clears a matching epoch so an
-    /// overwritten slot cannot be cleared by a stale release.
-    epoch: AtomicU64,
-    pid: AtomicU32,
-    tgid: AtomicU32,
-    jif: AtomicU64,
-    /// Last report jiffies for THIS slot (per-slot throttle).
-    jif_report: AtomicU64,
-}
+// Holder — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{Holder};
 
 impl Holder {
     const fn new() -> Self {
@@ -159,11 +150,9 @@ pub fn guard(site: u8, class: u8) -> AwGuard {
     AwGuard { site, class, ep }
 }
 
-pub struct AwGuard {
-    site: u8,
-    class: u8,
-    ep: u64,
-}
+// AwGuard — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{AwGuard};
 
 impl Drop for AwGuard {
     fn drop(&mut self) {

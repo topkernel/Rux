@@ -26,6 +26,10 @@
 //! ```
 
 pub mod mmforensics;
+/// The subsystem's type definitions (seed-core-design §2c.3): every
+/// struct/enum/bitflags group that has no file of its own; impls stay in
+/// the topic files, which re-export their types from here.
+pub mod types;
 pub mod taint;
 /// Allocator class-lock holder watch (cmdline `rux:allocwatch (retired debug=allocwatch)`): cross-CPU
 /// naming of a small_alloc/slab/buddy class-lock holder frozen mid-section

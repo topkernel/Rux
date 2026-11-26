@@ -32,23 +32,16 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 const TABLE_N: usize = 192;
 
-/// One tracking slot: the entry tuple and when it was first/last seen.
-struct Slot {
-    pid: u32,
-    sys: u64,
-    epc: u64,
-    state: u32,
-    first_j: u64,
-    last_j: u64,
-    printed_j: u64,
-}
+// SlowtaskSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{SlowtaskSlot};
 
 // Round table under a spinlock: the heartbeat CAS admits ONE auditor,
 // so the lock is uncontended in the healthy case — it exists so the
 // slot array's exclusivity is type-checked, not review-enforced.
-static SLOTS: crate::sync::types::Spinlock<[Slot; TABLE_N]> =
+static SLOTS: crate::sync::types::Spinlock<[SlowtaskSlot; TABLE_N]> =
     crate::sync::types::Spinlock::new([const {
-        Slot {
+        SlowtaskSlot {
             pid: 0,
             sys: 0,
             epc: 0,

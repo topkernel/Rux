@@ -78,19 +78,13 @@ pub fn compat_arm() {
     }
 }
 
-const COMM: usize = 16;
+// COMM — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{COMM};
 
-/// The /dev/kmsg writer row (read by the crate-side dump through this
-/// pub surface — the kmsg marker stayed framework-side with printk's
-/// call site).
-pub struct KmsgSender {
-    pub pid: AtomicU32,
-    pub n: AtomicU64,
-    pub comm: [AtomicU8; COMM],
-    /// Last line head (raw, ≤32 bytes) — the repeating-pattern sample.
-    pub head: [AtomicU8; 32],
-    pub head_len: AtomicU32,
-}
+// KmsgSender — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{KmsgSender};
 
 impl KmsgSender {
     const fn new() -> Self {

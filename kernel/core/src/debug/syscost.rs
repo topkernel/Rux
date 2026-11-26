@@ -63,11 +63,9 @@ const SLOW_CYC: u64 = 40_000;
 /// Dump cadence in jiffies (100 Hz -> 60 s).
 const SYSCOST_DUMP_SECS: u64 = 60;
 
-pub struct SysStat {
-    pub count: AtomicU64,
-    pub cyc: AtomicU64,
-    pub max: AtomicU64,
-}
+// SysStat — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SysStat};
 
 const EMPTY_SYS: SysStat = SysStat {
     count: AtomicU64::new(0),
@@ -77,10 +75,9 @@ const EMPTY_SYS: SysStat = SysStat {
 
 pub static TABLE: [SysStat; NR_SLOTS] = [EMPTY_SYS; NR_SLOTS];
 
-pub struct RipSlot {
-    pub page: AtomicU64,
-    pub count: AtomicU64,
-}
+// RipSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RipSlot};
 
 const EMPTY_RIP: RipSlot = RipSlot {
     page: AtomicU64::new(0),
@@ -89,11 +86,9 @@ const EMPTY_RIP: RipSlot = RipSlot {
 
 pub static RIP_HIST: [RipSlot; RIP_SLOTS] = [EMPTY_RIP; RIP_SLOTS];
 
-pub struct SlowEnt {
-    pub nr: AtomicU64,
-    pub cyc: AtomicU64,
-    pub comm: [AtomicU8; 16],
-}
+// SlowEnt — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SlowEnt};
 
 const EMPTY_SLOW: SlowEnt = SlowEnt {
     nr: AtomicU64::new(0),
@@ -118,11 +113,9 @@ static LAST_DUMP: AtomicU64 = AtomicU64::new(0);
 static ARMED: AtomicU8 = AtomicU8::new(0);
 
 
-pub struct EofSpin {
-    pub comm: [AtomicU8; 16],
-    pub path: [AtomicU8; 96],
-    pub n: AtomicU64,
-}
+// EofSpin — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{EofSpin};
 
 const EMPTY_EOF: EofSpin = EofSpin {
     comm: [const { AtomicU8::new(0) }; 16],
@@ -134,31 +127,9 @@ pub static EOF_SPIN: [EofSpin; 12] = [const { EMPTY_EOF }; 12];
 
 pub static EAGAIN_SPIN: [EofSpin; 12] = [const { EMPTY_EOF }; 12];
 
-/// pa9 positive-read census slot: which open file description is
-/// actually RETURNING data, per comm. pa3-pa8 proved hilogd.rd_kmsg's
-/// 92K reads/s never touch /dev/kmsg and never return EOF/EAGAIN —
-/// they return data, from an unknown fd. Keyed by comm only (pa7
-/// lesson: anything finer lets init's config reads starve the table
-/// before the spinner starts); the slot FOLLOWS the comm's current
-/// open-file-description (`file_id`, never reused — R36-B1). A read on
-/// the tracked description costs one u64 compare + increments; a read
-/// on a different one retargets the slot (one dentry-path resolve +
-/// the ops-table pointer, symbolized host-side via nm). At dump time a
-/// spin loop shows one description with a huge n_cur.
-pub struct RdDataSlot {
-    /// First 8 comm bytes as one u64 — fast scan pre-filter (comm
-    /// compare is the per-read hot path; "hilogd.s*" vs "hilogd.r*"
-    /// differ here, and a filter miss is one load).
-    pub comm0: AtomicU64,
-    pub comm: [AtomicU8; 16],
-    pub file_id: AtomicU64,
-    pub fd: AtomicU64,
-    pub ops: AtomicU64,
-    pub n_cur: AtomicU64,
-    pub n_total: AtomicU64,
-    pub bytes: AtomicU64,
-    pub path: [AtomicU8; 96],
-}
+// RdDataSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RdDataSlot};
 
 const EMPTY_RD: RdDataSlot = RdDataSlot {
     comm0: AtomicU64::new(0),
@@ -174,26 +145,9 @@ const EMPTY_RD: RdDataSlot = RdDataSlot {
 
 pub static RD_DATA: [RdDataSlot; 16] = [const { EMPTY_RD }; 16];
 
-/// pa10 failing-read census: (comm, errno, fd-resolution) of reads that
-/// return a negative errno other than EAGAIN. pa9 closed the remaining
-/// gap: hilogd.rd_kmsg issues 15.4M reads/boot that return neither data
-/// (positive-read census: 195 reads total) nor EOF/EAGAIN (censuses
-/// fire and list other comms) — the only shape left is a failing errno,
-/// and WHICH errno (EBADF from a closed/write-only fd? EFAULT?) decides
-/// kernel-fix vs OH-behavior routing. Once per comm.
-pub struct RdFailSlot {
-    pub comm0: AtomicU64,
-    pub comm: [AtomicU8; 16],
-    pub ret: AtomicI64,
-    pub n: AtomicU64,
-    /// 1 = get_file_fd(fd) resolved at census time (fd open), 0 = it
-    /// did not (fd closed), 2 = resolved and file is O_WRONLY (read
-    /// mode check would EBADF before any file-layer read).
-    pub fd_state: AtomicU8,
-    pub fd: AtomicU64,
-    pub ops: AtomicU64,
-    pub path: [AtomicU8; 96],
-}
+// RdFailSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RdFailSlot};
 
 const EMPTY_RDFAIL: RdFailSlot = RdFailSlot {
     comm0: AtomicU64::new(0),
@@ -264,7 +218,9 @@ pub const ZONE_HARDIRQ: u8 = 1;
 pub const ZONE_SOFTIRQ: u8 = 2;
 pub const ZONE_UART: u8 = 3;
 
-const ZSTK_DEPTH: usize = 4;
+// ZSTK_DEPTH — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{ZSTK_DEPTH};
 
 const EMPTY_ZROW: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
@@ -278,15 +234,9 @@ const EMPTY_ZROW: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 pub const REST_SITES_N: usize = 96;
 
-pub struct RestSite {
-    /// `Location as *const () as u64`; 0 = free slot.
-    pub loc: AtomicU64,
-    /// Opens charged to this site.
-    pub n: AtomicU64,
-    /// Closed span (raw TSC) charged to this site.
-    pub cyc: AtomicU64,
-    pub max: AtomicU64,
-}
+// RestSite — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RestSite};
 
 const EMPTY_SITE: RestSite = RestSite {
     loc: AtomicU64::new(0),
@@ -305,28 +255,9 @@ pub static REST_OF: RestSite = EMPTY_SITE;
 const SLOT_NONE: u8 = 0xff;
 const SLOT_OF: u8 = 0xfe;
 
-pub struct If0Zone {
-    /// Our model of IF while the probe hooks are live (false = enabled).
-    pub if0: [AtomicU8; crate::config::MAX_CPUS],
-    /// Raw-TSC stamp of the currently open IF=0 segment (valid if if0).
-    pub t0: [AtomicU64; crate::config::MAX_CPUS],
-    /// Zone stack (nesting), ZD = current depth.
-    pub zstk: [[AtomicU8; ZSTK_DEPTH]; crate::config::MAX_CPUS],
-    pub zd: [AtomicU8; crate::config::MAX_CPUS],
-    /// Cumulative raw TSC per zone per CPU.
-    pub cum: [[AtomicU64; 4]; crate::config::MAX_CPUS],
-    /// Number of IF=0 segments closed per zone (window-count shape).
-    pub nseg: [[AtomicU64; 4]; crate::config::MAX_CPUS],
-    /// Longest closed segment per zone (raw TSC).
-    pub seg_max: [[AtomicU64; 4]; crate::config::MAX_CPUS],
-    /// REST_SITES row (or SLOT_*) the open segment charges.
-    pub slot: [AtomicU8; crate::config::MAX_CPUS],
-    /// v3 self-heal evidence: modeled-open spans closed on IF=1 evidence.
-    pub heal_n: [AtomicU64; crate::config::MAX_CPUS],
-    pub heal_cyc: [AtomicU64; crate::config::MAX_CPUS],
-    /// v3 missed-edge counter: disable seen with real IF=0, model closed.
-    pub miss_n: [AtomicU64; crate::config::MAX_CPUS],
-}
+// If0Zone — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{If0Zone};
 
 pub static IFZ: If0Zone = If0Zone {
     if0: [const { AtomicU8::new(0) }; crate::config::MAX_CPUS],
@@ -724,16 +655,13 @@ pub fn if0_now() -> bool {
 // the per-byte cli-cost distribution for the console-async decision.
 // ---------------------------------------------------------------------------
 
-pub const UART_HIST: usize = 40;
+// UART_HIST — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{UART_HIST};
 
-pub struct UartStat {
-    pub n: AtomicU64,
-    pub cyc: AtomicU64,
-    pub max: AtomicU64,
-    pub polls: AtomicU64,
-    pub polls_gt1: AtomicU64,
-    pub hist: [AtomicU64; UART_HIST],
-}
+// UartStat — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{UartStat};
 
 const EMPTY_UART: UartStat = UartStat {
     n: AtomicU64::new(0),
@@ -783,14 +711,9 @@ pub fn uart_putc_note(dt: u64, polls: u64, if0: bool) {
 // the only printk part that costs cli time in task context).
 // ---------------------------------------------------------------------------
 
-pub struct PrSlot {
-    pub comm0: AtomicU64,
-    pub comm: [AtomicU8; 16],
-    pub recs: AtomicU64,
-    pub ring_bytes: AtomicU64,
-    pub con_bytes: AtomicU64,
-    pub con_if0_bytes: AtomicU64,
-}
+// PrSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{PrSlot};
 
 const EMPTY_PR: PrSlot = PrSlot {
     comm0: AtomicU64::new(0),
@@ -889,25 +812,9 @@ pub fn note_printk_con(len: usize) {
 // (unix sockets: kind + bound name + peer; symbolize ops host-side).
 // ---------------------------------------------------------------------------
 
-pub struct RxSlot {
-    pub comm0: AtomicU64,
-    pub comm: [AtomicU8; 16],
-    pub nr: AtomicU64,
-    pub fd: AtomicU64,
-    pub file_id: AtomicU64,
-    pub flags: AtomicI64,
-    pub nonblock: AtomicU8,
-    pub n_total: AtomicU64,
-    pub n_cur: AtomicU64,
-    pub n_data: AtomicU64,
-    pub data_bytes: AtomicU64,
-    pub n_eagain: AtomicU64,
-    pub n_zero: AtomicU64,
-    pub err: AtomicI64,
-    pub n_err: AtomicU64,
-    pub ops: AtomicU64,
-    pub desc: [AtomicU8; 96],
-}
+// RxSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RxSlot};
 
 const EMPTY_RX: RxSlot = RxSlot {
     comm0: AtomicU64::new(0),
@@ -1130,20 +1037,9 @@ pub fn note_read_fail(fd: usize, ret: i64) {
 // attributed to a window and a caller. Printed at every SYSCOST dump.
 // ---------------------------------------------------------------------------
 
-pub struct ErrSlot {
-    pub nr: AtomicU64,
-    pub err: AtomicI64,
-    pub n: AtomicU64,
-    /// First-seen boot time, ms (only written on cell creation).
-    pub first_ms: AtomicU64,
-    /// First-seen comm (16 bytes, NUL-padded).
-    pub comm: [AtomicU8; 16],
-    /// First-seen a0 (fd or path pointer, depending on the syscall).
-    pub a0: AtomicU64,
-    /// First-seen PATH STRING (NUL-padded snapshot; only meaningful for
-    /// path-taking syscalls — the pointer is read ONCE at cell creation).
-    pub path: [AtomicU8; 64],
-}
+// ErrSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ErrSlot};
 
 const EMPTY_ERR: ErrSlot = ErrSlot {
     nr: AtomicU64::new(0),
@@ -1446,10 +1342,9 @@ pub fn enter() -> Option<u64> {
 pub const FLOOD_NRS: [usize; 6] = [0 /*read*/, 228 /*clock_gettime*/, 47 /*recvmsg*/, 45 /*recvfrom*/, 20 /*writev*/, 202 /*futex*/];
 
 
-pub struct CommCount {
-    pub comm: [AtomicU8; 16],
-    pub n: AtomicU64,
-}
+// CommCount — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{CommCount};
 
 const EMPTY_CC: CommCount = CommCount {
     comm: [const { AtomicU8::new(0) }; 16],

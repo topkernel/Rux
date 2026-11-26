@@ -49,21 +49,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::debug::backtrace::ConsoleWriter;
 use crate::debug::taint;
 
-/// What class of kernel fault produced the oops — selects the head
-/// line's wording (the reference derives the same distinction from the
-/// trap cause / fault address).
-#[derive(Clone, Copy)]
-pub enum Kind {
-    /// A kernel page fault with no fixup entry. `addr` chooses the
-    /// reference's wording: below one page it is a NULL pointer
-    /// dereference, above it a paging request.
-    PageFault { addr: u64 },
-    /// Kernel-mode illegal instruction (no fixup class).
-    IllegalInstruction,
-    /// A kernel-mode exception the arch has no specific handler for
-    /// (`cause` is the arch's trap-cause word, riscv64 scause).
-    UnknownException { cause: u64 },
-}
+// Kind — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{Kind};
 
 /// The oops counter — the `[#N]` in the die banner (Linux's
 /// `die_counter`, per boot).

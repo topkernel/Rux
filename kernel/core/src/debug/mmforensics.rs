@@ -62,17 +62,9 @@ static CAPTURES: AtomicUsize = AtomicUsize::new(0);
 // the get/put sequence with sites: a put whose `old` shows the mapping
 // reference already missing names the early consumer directly.
 
-/// One recorded descriptor refcount transition on a PageCache frame.
-pub struct RefRingEntry {
-    pub ppn: AtomicU64,
-    /// kind (0 = get, 1 = put) in the high byte, driftwatch site below.
-    pub kind_site: AtomicU64,
-    /// Refcount BEFORE the transition (the value the actor observed).
-    pub old: AtomicI32,
-    /// Descriptor mapcount at the transition.
-    pub mc: AtomicI32,
-    pub pid: AtomicU32,
-}
+// RefRingEntry — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RefRingEntry};
 
 // 8192 entries (256 KiB of statics): a fammm boot's PageCache mapping
 // transitions can push far past 1024 entries between the early put and
@@ -114,19 +106,9 @@ pub fn note_ref(page: *const crate::mm::types::Page, kind: u8, site: u8, old: i3
     e.pid.store(crate::process::hotpath::current_pid(), Ordering::Relaxed);
 }
 
-/// One live-tree reference to the target frame, found by the bounded
-/// reverse scan. `level` semantics (x86_64 naming; riscv64 Sv39 maps
-/// analogously): 0 = the root itself, 1..3 = an upper-table link at the
-/// given depth, 4 = a LEAF entry (the frame is mapped as DATA by that
-/// tree). `idx0/idx1` are the walk indices naming the exact entry.
-#[derive(Clone, Copy)]
-pub struct TreeHit {
-    pub pid: u32,
-    pub root_ppn: u64,
-    pub level: u8,
-    pub idx0: u32,
-    pub idx1: u32,
-}
+// TreeHit — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{TreeHit};
 
 /// Current task's page-table root (0 when the context has no user mm).
 fn current_root_ppn() -> u64 {

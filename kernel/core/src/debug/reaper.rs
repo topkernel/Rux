@@ -77,22 +77,13 @@ const ZLINGER_REPEAT_SECS: u64 = 30;
 /// the serial).
 const MAX_ZLINGER_PRINTS: u32 = 96;
 
-/// PUB write/peek surface (crate-flip rung debug): the debug crate's
-/// SPAWN/ZEXIT arms lock and write these maps; the ZLINGER scan below
-/// reads EXIT_MAP under the same lock.
-#[derive(Clone, Copy)]
-pub struct NameRec {
-    pub pid: u32,
-    pub t_set: u64,
-}
+// NameRec — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{NameRec};
 
-#[derive(Clone, Copy)]
-pub struct ExitRec {
-    pub pid: u32,
-    pub t_exit: u64,
-    pub code: i32,
-    pub last_report: u64,
-}
+// ExitRec — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ExitRec};
 
 pub static NAME_MAP: crate::sync::types::Spinlock<[NameRec; NAME_MAP_LEN]> =
     crate::sync::types::Spinlock::new([NameRec { pid: 0, t_set: 0 }; NAME_MAP_LEN]);

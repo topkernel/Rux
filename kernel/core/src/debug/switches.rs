@@ -91,61 +91,9 @@ macro_rules! debug_switch_table {
 
 pub(crate) use debug_switch_table;
 
-/// Runtime DEBUG switches, indexed by name on the `debug=` cmdline parameter.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DfxSwitch {
-    /// Adjudication injector (GNOME-wedge hunt): every 50 jiffies the
-    /// timer softirq leaks a claim of CPU 7 (nonexistent on any board we
-    /// boot) onto every LINKED CFS task that shows {on_cpu=false,
-    /// claim=-1} — exactly the protocol-impossible state the g2 freeze
-    /// left behind. On an unpatched kernel this reproduces the wedge
-    /// deterministically (tasks stranded on the timeline, every pick
-    /// skips them); with the pick-side stale-claim heal the system must
-    /// keep scheduling. OFF unless explicitly requested; never enable in
-    /// production or LTP runs. PERMANENT SWITCH (debug-migrate round 5):
-    /// a fault injector changes kernel behavior — no tracepoint form.
-    ClaimInject,
-    /// R85 (tail-phase PICK-SKIP wedge adjudication): every 50 jiffies,
-    /// stamp the FULL lost-release ownership shape {on_cpu=true,
-    /// claim=7(nonexistent), pk=LIVE} onto every LINKED CFS task that
-    /// shows the pickable {on_cpu=false, claim=-1}. An unpatched kernel
-    /// strands the task forever (every pick skips it why=1); a kernel
-    /// with the R85 pick-side ownership adjudication sweeps the poison
-    /// within ~50 jiffies (STALE-ONCPU-RESET) and keeps scheduling. OFF
-    /// unless explicitly requested; never enable in production or LTP
-    /// runs. PERMANENT SWITCH (debug-migrate round 5): fault injector.
-    OncpuInject,
-    /// Also park (scribble_park breakpoint) on the first confirmed hit
-    /// so a gdb session can arm QEMU watchpoints on the victim address.
-    /// PERMANENT SWITCH (debug-migrate round 5): parking a CPU for an
-    /// external debugger is an action, not observation. Arming it also
-    /// arms the `rux:scribble` detection engine.
-    ScribblePark,
-    /// Park when pid 1 registers — the init task's Task struct and
-    /// kernel stack live at boot-fixed addresses for the whole run, so
-    /// a gdb session can arm persistent watchpoints on them.
-    /// PERMANENT SWITCH (debug-migrate round 5, gdb-park action); arms
-    /// `rux:scribble` as a side effect.
-    ScribblePid1,
-    /// Park when the 64th task registers (early in the fork/exec storm)
-    /// so gdb can arm quiet-region watchpoints across the live set.
-    /// PERMANENT SWITCH (debug-migrate round 5, gdb-park action); arms
-    /// `rux:scribble` as a side effect.
-    ScribbleSweep,
-    /// Wild-write attribution tripwire (wildwrite-hunt line): the hpet
-    /// quiet-statics guard cluster (plus its canary page) goes READ-ONLY
-    /// in the kernel page tables after init, in every alias (kernel-half
-    /// link VAs, linear map, low identity). The b77/wt1 wild-write
-    /// engine's smash then page-faults AT THE WRITER — the existing
-    /// kernel-#PF printer hands over rip + rbp walk + KERNPANIC dump.
-    /// The canary page is also checksum-verified from the timer cadence
-    /// (DMA-class writers bypass PTEs). One arming print per boot; zero
-    /// traffic until a hit. See debug/wildwatch.rs. PERMANENT SWITCH
-    /// (debug-migrate round 5): the detection mechanism itself mutates
-    /// kernel state (PTE write-bits + CR0.WP), so arming cannot be a
-    /// runtime-safe trace-event enable.
-    WildWatch,
-}
+// DfxSwitch — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{DfxSwitch};
 
 const SWITCH_COUNT: usize = 6;
 

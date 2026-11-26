@@ -68,21 +68,9 @@ const SINK_SIZE: usize = 16 * 1024;
 /// The record magic: "RUXPST02".
 const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST02");
 
-/// The record header, 32 bytes, at the region start.
-#[repr(C)]
-struct RecordHeader {
-    magic: u64,
-    version: u32,
-    /// Payload length in bytes (after this header).
-    length: u32,
-    /// jiffies at the capture (the record's timestamp).
-    jiffies: u32,
-    /// Record kind: 0 = console (the panic report, exposed as
-    /// console-ramoops-0), 1 = dmesg (the oops report, exposed as
-    /// dmesg-ramoops-0) — the reference pstore's two ramoops flavors.
-    kind: u32,
-    _reserved: [u32; 2],
-}
+// RecordHeader — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{RecordHeader};
 
 const VERSION: u32 = 2;
 
@@ -107,9 +95,9 @@ static SINK_AT: AtomicUsize = AtomicUsize::new(0);
 /// The sink is armed (between panic-handler entry and the region write).
 static SINK_ARMED: AtomicBool = AtomicBool::new(false);
 
-/// A byte cell the panic sink can write without any lock (atomics only;
-/// `AtomicU8` directly would also do, this keeps the array decl short).
-struct AtomicU8Cell(core::sync::atomic::AtomicU8);
+// AtomicU8Cell — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{AtomicU8Cell};
 
 impl AtomicU8Cell {
     const fn new() -> Self {
@@ -351,11 +339,9 @@ fn write_record(kind: u32, hw: &HeadWriter) {
     }
 }
 
-/// Stack-buffer fmt sink for the record head (no allocation).
-struct HeadWriter {
-    buf: [u8; 512],
-    len: usize,
-}
+// HeadWriter — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{HeadWriter};
 
 impl core::fmt::Write for HeadWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {

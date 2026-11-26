@@ -56,10 +56,9 @@ use core::sync::atomic::Ordering;
 // memwatch census, small_alloc census lines, schb, the trap printers —
 // no call site changes, only the write discipline changed.
 
-struct DumpStage {
-    buf: [u8; 512],
-    n: usize,
-}
+// DumpStage — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DumpStage};
 
 static DUMP_STAGES: [crate::sync::types::Spinlock<DumpStage>; crate::config::MAX_CPUS] =
     [const {
@@ -101,15 +100,9 @@ pub fn putc_brief(c: u8) {
     staged_putc(c, EmitBudget::Brief)
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum EmitBudget {
-    /// 50 ms — dump contexts that hold no scheduler-critical lock and
-    /// run with interrupts ENABLED (the stage guard is dropped before
-    /// the flush wait; see `staged_putc`).
-    Full,
-    /// 100 µs — sched-path prints under the GRQ and irq-context echoes.
-    Brief,
-}
+// EmitBudget — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{EmitBudget};
 
 fn staged_putc(c: u8, budget: EmitBudget) {
     // cpu_id is clamped defensively: trap printers can run before the
@@ -914,19 +907,10 @@ const FROZEN_TEXT_LO: u64 = 0xffff_ffff_8020_0000;
 #[cfg(feature = "x86_64")]
 const FROZEN_TEXT_HI: u64 = 0xffff_ffff_8200_0000;
 
-/// Answer block filled by the IPI callback ON the frozen CPU. Static so
-/// the CSD callback (IRQ context) never touches the caller's stack.
+// FrozenAnswer — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
 #[cfg(feature = "x86_64")]
-struct FrozenAnswer {
-    answered: core::sync::atomic::AtomicBool,
-    gs_cpu: core::sync::atomic::AtomicU32,
-    gs_magic: core::sync::atomic::AtomicU64,
-    lapic: core::sync::atomic::AtomicU32,
-    int_rip: core::sync::atomic::AtomicU64,
-    int_rsp: core::sync::atomic::AtomicU64,
-    stack: [core::sync::atomic::AtomicU64; 12],
-    stack_n: core::sync::atomic::AtomicUsize,
-}
+use super::types::FrozenAnswer;
 
 #[cfg(feature = "x86_64")]
 static FROZEN_ANSWER: FrozenAnswer = FrozenAnswer {
@@ -1307,14 +1291,13 @@ pub fn parked_kstack_syms(t: &crate::process::types::Task) -> alloc::string::Str
 // regenerates them every snapshot.
 // ---------------------------------------------------------------------------
 
-const DEFER_LINE_MAX: usize = 256;
+// DEFER_LINE_MAX — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DEFER_LINE_MAX};
 
-struct DeferredEmit {
-    ring: [Option<alloc::string::String>; DEFER_LINE_MAX],
-    head: usize,
-    tail: usize,
-    dropped: u64,
-}
+// DeferredEmit — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DeferredEmit};
 
 static DEFER_Q: crate::sync::types::Spinlock<DeferredEmit> =
     crate::sync::types::Spinlock::new(DeferredEmit {
@@ -1328,14 +1311,13 @@ static DEFER_Q: crate::sync::types::Spinlock<DeferredEmit> =
 // bulk census flood evicted them on ohc43 (2k+ lines dropped per window —
 // the samgr FFRT-worker walks never reached the serial). A separate ring,
 // drained FIRST by censusd; drop-oldest only within its own class.
-const DEFER_FOCUS_MAX: usize = 512;
+// DEFER_FOCUS_MAX — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DEFER_FOCUS_MAX};
 
-struct DeferredFocus {
-    ring: [Option<alloc::string::String>; DEFER_FOCUS_MAX],
-    head: usize,
-    tail: usize,
-    dropped: u64,
-}
+// DeferredFocus — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DeferredFocus};
 
 static DEFER_FOCUS_Q: crate::sync::types::Spinlock<DeferredFocus> =
     crate::sync::types::Spinlock::new(DeferredFocus {

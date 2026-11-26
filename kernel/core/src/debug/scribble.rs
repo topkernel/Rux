@@ -56,28 +56,12 @@ const OFF_RET: usize =
 const OFF_ONCPU: usize = core::mem::offset_of!(Task, ti_on_cpu);
 const OFF_CLAIM: usize = core::mem::offset_of!(Task, running_on_cpu);
 
-struct Slot {
-    /// Task pointer this slot tracks (0 = free).
-    task: AtomicU64,
-    /// 0 = pre-first-run (init writes not yet absorbed), 1 = armed.
-    armed: AtomicU32,
-    /// Seqlock: odd while quiesce() is rewriting the shadows, bumped on
-    /// every re-sync. verify() only trusts a read set bracketed by an
-    /// unchanged even generation.
-    gen: AtomicU32,
-    sh_fs: AtomicU64,
-    sh_gs: AtomicU64,
-    sh_sp: AtomicU64,
-    sh_ret: AtomicU64,
-    sh_rip: AtomicU64,
-    sh_rsp: AtomicU64,
-    sh_cs: AtomicU64,
-    /// Anomaly-class rate-limit bitmask for verify_consistency.
-    armed_swapped: AtomicU32,
-}
+// ScribbleSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{ScribbleSlot};
 
-static SLOTS: [Slot; SCRIBBLE_SLOTS] = [const {
-    Slot {
+static SLOTS: [ScribbleSlot; SCRIBBLE_SLOTS] = [const {
+    ScribbleSlot {
         task: AtomicU64::new(0),
         armed: AtomicU32::new(0),
         gen: AtomicU32::new(0),
@@ -115,13 +99,9 @@ static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 // Every mark_picked_on_cpu and x86_switch_publish appends here; the CONS
 // report dumps the tail, showing the last picks/switches around an
 // abandoned pick (on_cpu=1, claim=-1, re-linked, owned by no slot).
-pub struct RingEntry {
-    pub stamp: AtomicU64, // jiffies at append
-    pub cpu: AtomicU32,
-    pub kind: AtomicU32, // 1 = mark_picked(next), 2 = publish(prev,next)
-    pub a: AtomicU64,    // marked/prev task
-    pub b: AtomicU64,    // next task (publish) / 0
-}
+// RingEntry — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{RingEntry};
 
 pub static RING: [RingEntry; 128] = [const {
     RingEntry {
@@ -194,13 +174,9 @@ pub const AUDIT_KIND_HANDOFF: u32 = 1; // alloc returned a live Task page
 pub const AUDIT_KIND_FREE_LIVE: u32 = 2; // free targeted a live Task page
 pub const AUDIT_KIND_DOUBLE_FREE: u32 = 3; // free of an already-free block
 
-pub struct AuditRec {
-    pub kind: AtomicU32,
-    pub addr: AtomicU64,
-    pub order: AtomicU32,
-    pub cpu: AtomicU32,
-    pub frames: [AtomicU64; 6],
-}
+// AuditRec — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{AuditRec};
 
 const AUDIT_SLOTS: usize = 8;
 static ALLOC_AUDIT: [AuditRec; AUDIT_SLOTS] = [const {
@@ -635,7 +611,7 @@ fn dump_qwords(tag: &[u8], base: usize, n: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// Slot table
+// ScribbleSlot table
 // ---------------------------------------------------------------------------
 
 fn hash_of(task: usize) -> usize {
@@ -1442,9 +1418,10 @@ pub extern "C" fn kernpanic_park(badaddr: u64, rip: u64, rsp: u64) {
 #[inline(never)]
 pub extern "C" fn scribble_park(_field_addr: u64) {}
 
-/// Full text of the last HIT report (also readable via gdb after the
-/// run dies: serial interleaving cannot destroy this copy).
-pub struct ReportBuf(core::cell::UnsafeCell<[u8; 4096]>);
+// ReportBuf — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ReportBuf};
+
 unsafe impl Sync for ReportBuf {}
 /// Symbol gdb dumps after a run: `dump binary memory file &REPORT_BUF ..`
 pub static REPORT_BUF: ReportBuf = ReportBuf(core::cell::UnsafeCell::new([0; 4096]));

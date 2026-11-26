@@ -58,16 +58,9 @@ fn dec_buf(n: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[i..]
 }
 
-/// Append a decimal to a stack line buffer. The cap always leaves one
-/// byte for the terminator: `emit` writes buf[len] = '\n', and a push
-/// that consumed the whole buffer would push that store out of bounds —
-/// the exact shape of the pt3/pt4 audit-boot panics ("index out of
-/// bounds: the len is 160 but the index is 160", ledger.rs emit). pt5
-/// survived only because its census digit widths happened to sum to 159.
-struct Line {
-    buf: [u8; 160],
-    len: usize,
-}
+// Line — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{Line};
 
 impl Line {
     fn new(head: &[u8]) -> Self {
@@ -182,27 +175,9 @@ pub fn oomfx_line(
     l.emit();
 }
 
-/// One bucket row of the census.
-#[derive(Default)]
-struct Census {
-    /// refcount==0 and OnFreelist — the LEADER page of a buddy free block
-    /// (the flag marks leaders only, see PageFlag::OnFreelist / R15-6).
-    free_leader: u64,
-    /// refcount==0, not reserved, not a leader — the MEMBER pages of
-    /// higher-order free blocks. Not a leak: the leader owns them.
-    free_member: u64,
-    reserved: u64,
-    page_tables: u64,
-    anon: u64,
-    cow: u64,
-    mapped_file: u64,
-    lru_file: u64,
-    other_used: u64,
-    // refcount distribution of used pages (pinned/shared shape)
-    rc_eq1: u64,
-    rc_2_8: u64,
-    rc_gt8: u64,
-}
+// Census — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{Census};
 
 /// The full census + reconciliation. printk-based; see the module doc for
 /// context restrictions. `site` names the trigger (OOM moment, UART magic).

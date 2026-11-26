@@ -44,22 +44,13 @@ pub static FREE_BINS: [AtomicUsize; NUM_BINS] =
 
 /// Histogram slots for allocation call sites.
 pub const SITE_SLOTS: usize = 192;
-/// Frames recorded per site: the raw_vec/alloc growth machinery at -O0 is
-/// deeper than the kernel code (realloc: this method <- __rust_realloc <-
-/// realloc_nonnull <- grow_impl <- Allocator::grow <- finish_grow <-
-/// grow_amortized <- do_reserve <- reserve <- append_elements <- THE
-/// KERNEL CODE), so 12 slots are needed before the kernel frame appears.
-pub const SITE_FRAMES: usize = 12;
+// SITE_FRAMES — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SITE_FRAMES};
 
-struct Site {
-    key: AtomicUsize,
-    count: AtomicUsize,
-    bucket: AtomicUsize,
-    /// First-seen exact byte size at this site (disambiguates within a
-    /// power-of-two bucket — 129..256 vs exactly 256 matters).
-    size: AtomicUsize,
-    frames: [AtomicUsize; SITE_FRAMES],
-}
+// Site — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{Site};
 
 static SITES: [Site; SITE_SLOTS] = [const {
     Site {
@@ -407,12 +398,10 @@ pub static LIVE_BINS: [AtomicUsize; NUM_BINS] =
 // larger than 64 KiB, with the first 4 frame-chain entries. See the
 // note_alloc comment for why the live-site table alone cannot see them.
 // ---------------------------------------------------------------------------
-pub struct BigRingSlot {
-    pub size: AtomicUsize,
-    pub ptr: AtomicUsize,
-    pub pid: AtomicUsize,
-    pub frames: [AtomicUsize; 4],
-}
+// BigRingSlot — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BigRingSlot};
+
 pub static BIG_RING: [BigRingSlot; 32] = [const {
     BigRingSlot {
         size: AtomicUsize::new(0),
@@ -455,14 +444,10 @@ pub static PAGE_SITE: [AtomicU8; TRACKED_PAGES] = [const { AtomicU8::new(0) }; T
 /// leak class ever gets a slot (observed: live table frozen at boot-time
 /// entries while b8 leaked unnoticed).
 pub const LIVE_SLOTS: usize = 250;
-pub struct LiveSite {
-    pub key: AtomicUsize,
-    pub allocs: AtomicUsize,
-    pub frees: AtomicUsize,
-    pub size: AtomicUsize,
-    pub bucket: AtomicUsize,
-    pub frames: [AtomicUsize; SITE_FRAMES],
-}
+// LiveSite — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{LiveSite};
+
 pub static LIVE_SITES: [LiveSite; LIVE_SLOTS] = [const {
     LiveSite {
         key: AtomicUsize::new(0),
@@ -636,13 +621,10 @@ pub static FUT_CALLS: AtomicUsize = AtomicUsize::new(0);
 pub static FUT_TABLES: AtomicUsize = AtomicUsize::new(0);
 /// data pages actually returned by the teardown walk (put_page -> 0).
 pub static FUT_PAGES: AtomicUsize = AtomicUsize::new(0);
-pub struct PageSite {
-    pub key: AtomicUsize,
-    pub allocs: AtomicUsize,
-    pub frees: AtomicUsize,
-    pub order: AtomicUsize,
-    pub frames: [AtomicUsize; SITE_FRAMES],
-}
+// PageSite — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{PageSite};
+
 pub static PSITES: [PageSite; PSITE_SLOTS] = [const {
     PageSite {
         key: AtomicUsize::new(0),

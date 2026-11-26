@@ -147,11 +147,10 @@ pub const T_NEWBORN_TAIL: u8 = 12;
 pub const T_SIGCHECK: u8 = 13;
 pub const T_SYSENTRY: u8 = 14;
 
-struct TEv {
-    tsc: AtomicU64,
-    site: AtomicU8,
-    pid: AtomicU32,
-}
+// TEv — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{TEv};
+
 const EV0: TEv = TEv {
     tsc: AtomicU64::new(0),
     site: AtomicU8::new(255),
@@ -245,19 +244,17 @@ pub fn report_trace() {
     }
     crate::println!("FTRACE END");
 }
-struct PhaseStat {
-    count: AtomicU64,
-    cyc: AtomicU64,
-    max: AtomicU64,
-}
+// ForkPhaseStat — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{ForkPhaseStat};
 
-const EMPTY: PhaseStat = PhaseStat {
+const EMPTY: ForkPhaseStat = ForkPhaseStat {
     count: AtomicU64::new(0),
     cyc: AtomicU64::new(0),
     max: AtomicU64::new(0),
 };
 
-static STATS: [PhaseStat; P_COUNT] = [EMPTY; P_COUNT];
+static STATS: [ForkPhaseStat; P_COUNT] = [EMPTY; P_COUNT];
 
 static ARMED: AtomicU8 = AtomicU8::new(0);
 static REPORTED: AtomicBool = AtomicBool::new(false);

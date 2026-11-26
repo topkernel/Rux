@@ -19,26 +19,9 @@ use core::fmt::Write;
 // ConsoleWriter — lockless UART output for crash/panic contexts
 // ============================================================================
 
-/// Lockless console writer that bypasses printk and CONSOLE_LOGLEVEL.
-///
-/// Writes staged bytes through the lockless batched TX path. Safe to
-/// use in panic/OOPS contexts where normal printk infrastructure may be
-/// unavailable or recursive.
-pub struct ConsoleWriter {
-    /// Whether this writer holds the printk console emit lock (bounded
-    /// best-effort acquire in `new()`): keeps diagnostic reports from
-    /// interleaving mid-line with an in-flight printk record on another
-    /// CPU (OH b140: "…len BUG: soft lockup" garble). On timeout —
-    /// e.g. a wedged holder, or this CPU's own interrupted task holds
-    /// the lock — output proceeds locklessly exactly as before.
-    emit_locked: bool,
-    /// Staged-byte buffer (perf-console): write_str fragments coalesce
-    /// here and flush through ONE batched TX pass per 128 bytes instead
-    /// of one register-IO pair per byte — a softlockup stack dump is
-    /// thousands of bytes through this writer.
-    buf: [u8; 128],
-    len: usize,
-}
+// ConsoleWriter — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ConsoleWriter};
 
 impl ConsoleWriter {
     pub fn new() -> Self {

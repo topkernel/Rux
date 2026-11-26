@@ -69,11 +69,9 @@ pub const B_NAMES: [&str; B_N] = ["len<=64K", "len<=1M", "len<=16M", "len>16M"];
 // ---- per-comm issuer attribution (mmap count) ----
 pub const COMM_SLOTS: usize = 8;
 
-pub struct PhaseStat {
-    pub count: AtomicU64,
-    pub cyc: AtomicU64,
-    pub max: AtomicU64,
-}
+// PhaseStat — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{PhaseStat};
 
 const EMPTY: PhaseStat = PhaseStat {
     count: AtomicU64::new(0),
@@ -85,10 +83,10 @@ pub static STATS: [PhaseStat; P_COUNT] = [EMPTY; P_COUNT];
 pub static SCALARS: [AtomicU64; P_SCALARS] = [const { AtomicU64::new(0) }; P_SCALARS];
 pub static BUCKETS: [PhaseStat; B_N] = [EMPTY; B_N];
 
-pub struct CommEnt {
-    pub comm: [AtomicU8; 16],
-    pub n: AtomicU64,
-}
+// CommEnt — the definition moved to debug/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{CommEnt};
+
 const EMPTY_COMM: CommEnt = CommEnt {
     comm: [const { AtomicU8::new(0) }; 16],
     n: AtomicU64::new(0),
