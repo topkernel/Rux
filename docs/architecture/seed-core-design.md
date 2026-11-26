@@ -931,7 +931,10 @@ source file.
    `sched/hotpath.rs` holds zero unsafe keywords, the whole-core gate
    (`scripts/core_unsafe_gate.py`) runs rc=0 on the allowance list, and
    the per-lane recipe is `scripts/refactor/pass3.py` with the spec in
-   `scripts/refactor/pass3/sched.json`.
+   `scripts/refactor/pass3/sched.json`. MM LANDED 2026-11-26
+   (p23-p3mm): mm collected the same way — 53 regions (28 move-fn /
+   8 move-item / 4 wrap), spec `scripts/refactor/pass3/mm.json`,
+   `--strict` rc=0 on kernel/core/src/mm.
 
 Pass 1 and 2 are verifiable by one criterion: the compiled kernel is
 unchanged apart from symbol names. Pass 3 changes the code and takes
