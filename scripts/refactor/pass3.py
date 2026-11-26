@@ -157,7 +157,8 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and masked[j:j + 5] in ("impl ", "fn ", "trai", "exter"):
+        elif j < len(masked) and re.match(
+                r"(impl[ <]|fn |trai|exter)", masked[j:j + 6]):
             brace = find_body_brace(masked, j)
             if brace >= 0:
                 hits.append((m.start(), match_brace(masked, brace) + 1))
@@ -169,14 +170,20 @@ def region_char_span(text, masked, reg, kind):
 
 def fn_span_from(text, masked, inner_char):
     """Line span (first, last inclusive) of the innermost fn containing
-    inner_char, doc comment and attributes included."""
+    inner_char, doc comment and attributes included. `unsafe fn`
+    signatures match from the `unsafe` keyword (it precedes `fn`, so the
+    keyword position sits inside the signature — a bare-fn span would
+    exclude it)."""
     best = None
-    for m in FN_SPAN.finditer(masked):
+    for m in re.finditer(r"(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", masked):
         brace = find_body_brace(masked, m.start())
-        if brace < 0 or brace >= inner_char:
+        if brace < 0:
             continue
         end = match_brace(masked, brace)
-        if end < inner_char:
+        # containment by the whole fn span (signature included): an
+        # `unsafe` keyword in its own fn's signature sits before the
+        # body brace, so body containment would never match it.
+        if m.start() > inner_char or end < inner_char:
             continue
         if best is None or m.start() > best[0]:
             best = (m.start(), end)
