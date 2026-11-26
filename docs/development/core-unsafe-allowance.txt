@@ -152,5 +152,4 @@ kernel/core/src/timer.rs	pre-collection state at baseline f8e6eb94d: 4 unsafe ke
 kernel/core/src/timer/nohz.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/timer/wheel.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/trace/mod.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/debug/hotpath.rs	pass-3 pending: the debug flip collected the subsystem into hotpath.rs; its 101 unsafe keyword(s) await the debug pass-3 lane
 kernel/core/src/drivers/hotpath.rs	pass-3 pending: the drivers flip collected the subsystem into hotpath.rs (inline timer/intc modules included); its 115 unsafe keyword(s) await the drivers pass-3 lane

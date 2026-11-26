@@ -39,3 +39,50 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 #           init 668->704, scheduler_tick 15940->15780
 #   every other sched symbol pairs 1:1 at equal size on all three arches
 #   (after module-path, moved-nested-fn and closure normalization).
+#
+# --- the pass-3 debug collection (p23-p3debug lane, 2026-11-26) ---
+^rux::debug::(canary_qword_read|canary_selftest_fire|clear_record_magic|csr_quad_read_aarch64|csr_quad_read_riscv|enable_write_protect|fill_canary|gs_percpu_magic_read|gs_triple_read|kernel_pa_offset|leak_page_counts3|leak_page_flags4|page_desc_report|page_table_virt_raw|page_view|ppage_slot_load|ppage_stamp_slot|protect_page|provoke_illegal_riscv|provoke_illegal_x86|provoke_pagefault_read|pstore_commit|putchar_no_lock_raw|raw_qword|read_volatile_t|record_header_at|record_payload|resolve_phys|save_regs_aarch64|save_regs_riscv64|save_regs_x86_64|sched_slot_current|stash_slot_at|stash_slot_for|table_virt|task_view|t_state_bits|t_state_dead|wild_link_aliases)$
+^rux::debug::location_ref::<rux::arch::x86_64::pt_regs::PtRegs>$
+#   the pass-3 contract fns (scripts/refactor/pass3/debug.json, 34 wraps +
+#   25 move-fns + 1 move-item + 20 inline-calls over the census's 101
+#   regions): NEW symbols on the current side. Unlike the sched pilot the
+#   debug wrappers are NOT inline(always) — debug is the diagnostic
+#   subsystem, the wrapped sites sit on gated-off print/hunt paths, so a
+#   named #[inline] fn keeps the debug-build profiles readable (the
+#   wrapper's symbol names the contract). Three of the rows are not new
+#   code at all: location_ref::<PtRegs> / raw_qword are new OUT-OF-LINE
+#   materializations of EXISTING audited unsafe.rs edges (the audit_frames
+#   and frozen_ipi_probe inline-calls now reference them by name), and the
+#   four moved wildwatch engines (enable_write_protect/fill_canary/
+#   protect_page/resolve_phys) re-materialize under their new home
+#   rux::debug::* while the old rux::debug::x86::* copies retire (see the
+#   GONE list). Measured (base -> current bytes, same rig, debug profile):
+#     rv:   wrappers new at 26..714 bytes (pstore_commit 714,
+#           save_regs_riscv64 132, page_desc_report 122, task_view 26,
+#           clear_record_magic 28; full table run/pair-rv-sizes.tsv);
+#           nothing grew — every base-only symbol's body reappears inside
+#           its wrapper.
+#     x86:  wrappers new at 22..1541 bytes (wild_link_aliases 728,
+#           protect_page 1541, save_regs_x86_64 106; full table
+#           run/pair-x86-sizes.tsv).
+#     a64:  wrappers new at 22..819 bytes (pstore_commit 819; full table
+#           run/pair-a64-sizes.tsv).
+^(<rux::process::types::Task>::state|<rux::process::types::TaskState>::(bits|contains|is_dead|new))$
+#   GONE (base-only): out-of-line copies of process's TaskState accessors
+#   that used to materialize at the locktrace call sites (note_acquire and
+#   friends read pid/state/preempt_count through inline blocks). The reads
+#   now run inside the unsafe.rs adopt edges (t_pid / t_state_bits /
+#   t_state_dead / task_view — all verbatim bodies), so the accessor
+#   copies inline into THOSE and the standalone copies vanish. Same
+#   instruction stream, different home.
+#     rv:   base copies gone at [42x2, 20, 28x5, 66x8, 18] bytes
+#     x86:  base copies gone at [42x2, 20, 28x5, 66x8, 18] bytes
+#     a64:  base copies gone at [42x2, 20, 28x5, 66x8, 18] bytes
+^rux::debug::x86::(enable_write_protect|fill_canary|protect_page|resolve_phys)$
+#   GONE (x86 only): the wildwatch engines' OLD module-path copies — the
+#   functions moved whole to debug/unsafe.rs (verbatim bodies, same
+#   symbols at the new rux::debug:: path, where they pair 1:1 in size).
+core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
+#   GONE (aarch64 only): core's volatile-read precondition-check stub —
+#   an ABI-adjacent helper whose single materialization moved with the
+#   wrapper bodies (read_volatile call sites unchanged).

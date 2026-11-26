@@ -1418,6 +1418,84 @@ Mechanics and evidence, all in the lane worktree `run/`:
   citing the block's pre-move artifact row; final bank: sched/unsafe.rs
   101 annotated / 7 GAP, all 7 pre-existing).
 
+## 5.x addendum: the pass-3 unsafe collection, debug (2026-11-26, p23-p3debug lane)
+
+Seed-core pass 3 on debug, the diagnostic subsystem — the lane the
+coordinator's brief flagged as the print-site-heavy one. Before: 101
+inline unsafe regions in `debug/hotpath.rs` (15,674 lines; the whole
+subsystem), 8 regions in `unsafe.rs`. After: `debug/hotpath.rs` holds
+ZERO unsafe regions and zero `unsafe` keywords — audited by
+`scripts/core_unsafe_gate.py --strict --dir kernel/core/src/debug`
+(rc=0) — and `unsafe.rs` carries 88 regions, 85 annotated (44 INV:F1,
+12 INV:F2, 9 INV:F18, 6 INV:F3, 4 INV:F4, 2 INV:F10 + the 8 pre-existing
+INV-FOR rows); the 3 GAP rows are the provoke-oops deliberate faults,
+GAP at the base too. The scribble and wildwatch cfg-exception inline
+modules keep their module structure: their engines moved whole into
+unsafe.rs (verbatim bodies, `#[cfg(feature = "x86_64")]` preserved) and
+the modules re-export them, so `crate::debug::hotpath::scribble::*` and
+the arch callers' paths are unchanged.
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 80 directives (1,956 cut lines relocated): 25
+  move-fn (whole-function engines: the fp/ra/walk_fp_chain readers, the
+  scribble detection/report set, the wildwatch PTE engines, the
+  locktrace big reports), 34 wrap (contract fns: per-arch save_regs /
+  CSR quads, the pstore record edges, the ppage table slots, the stale
+  TaskBorrow/task-state adopt edges, the sched-slot volatile read), 20
+  inline-call (re-use of ALREADY audited unsafe.rs edges — t_pid /
+  t_preempt_count x11, location_ref, raw_qword x2, and the new canary /
+  sched_slot_current / task_view edges), 1 move-item (the ReportBuf
+  Sync proof). The manifest-closed verbatim audit (`pass3.py verify
+  --base 1ae2a43c2`) closes clean: 127 aggregate lines removed, 272
+  added, every one a claimed mechanical line (braces, wrapper
+  signatures, call-site lines, the visibility widenings the moves
+  force).
+- print behavior: the raw print helpers (scribble's putc/puts/put_hex/
+  put_dec, the ReportBuf mirror, taskdump lines) moved VERBATIM with
+  their callers; `scripts/hotpath_print_check.py` shows debug/hotpath.rs
+  104 -> 98 un-annotated print sites (the 6 moved into unsafe.rs with
+  their fns — sites re-homed, none removed) and the ratchet is updated
+  as the tool instructs. The one intentional print-path cleanup: the
+  slowtask heartbeat's `unsafe { audit(now) }` was an unsafe block
+  around a SAFE call (audit is a plain fn) — the block is dropped, the
+  call unchanged.
+- compiled-kernel identity: pair vs the base ELFs built at 1ae2a43c2
+  in the lane worktree pairs 1:1 at equal size on all three arches
+  after module-path normalization EXCEPT the recorded classes in
+  docs/development/pass3-pair-exceptions.txt: 34 new contract-fn
+  symbols (debug is diagnostic cold path — the wrappers are named
+  #[inline] fns, NOT inline(always), so debug profiles name the
+  contract), the vanished base-only TaskState accessor copies (their
+  bodies inline into the adopt edges now), the wildwatch engines'
+  old rux::debug::x86::* copies (moved whole to rux::debug::*, equal
+  size), and 2 new out-of-line materializations of EXISTING edges
+  (location_ref::<PtRegs>, raw_qword). rv/x86/a64 pair rc=0 with the
+  recorded patterns.
+- warning count: rux-core lib (riscv64 debug clean rebuild) 577 ->
+  438. No NEW warning class appears; the drop is entirely the
+  dead-code family (`constant/function/field/static is never used`,
+  `creating a mutable reference to mutable static`) in NON-debug files
+  (drivers/fs/console/perf): the collection widens the reference ROOTS
+  (pub(crate) statics and the moved engines' new call edges), so
+  reference chains that were dead-through-private at the base are now
+  reachable. The lane's own regressions (2 feature-gated wrappers
+  dead in default builds, 6 pub(super)-type-exposure warnings) were
+  fixed in the spec, not allowed.
+- ledger re-bank with reference 1ae2a43c2: annotations followed the
+  code — 45 regions carried automatically (moved-item pairing), 35
+  wrapped/impl regions re-attached by hand decisions
+  (`run/pass3-debug-decisions.tsv`, each citing the block's pre-move
+  artifact row), 20 inline-call regions retired INTO the already
+  annotated unsafe.rs edges they now call; final bank: debug/unsafe.rs
+  85 annotated / 3 GAP (all 3 pre-existing GAPs). The exemption row
+  for debug/hotpath.rs 98 -> 0 records the retirement.
+
+Tool fixes landed in scripts/refactor/pass3.py (reported to the
+coordinator): unsafe-fn region location (two bugs), multi-line inline
+block splice, gitignored-build-artifact exclusion from the verify
+multiset, and rewrite_vis stripping the existing visibility instead of
+stacking (`pub pub fn`).
+
 ## 6. Process (how this grows)
 - Every merged round that lands a safety property, a perf number, or a
   bug-class elimination appends its evidence here (AGENTS.md rule,

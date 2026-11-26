@@ -3,17 +3,9 @@
 # sites allowed per hot-path file. Regenerate with --update after
 # removing prints (never after adding one without a review).
 kernel/core/src/sync/hotpath.rs 8
-kernel/core/src/ipc/binder.rs 0
-kernel/core/src/sync/futex.rs 0
 kernel/core/src/ipc/hotpath.rs 0
-kernel/core/src/syscall/process.rs 29
-kernel/core/src/syscall/file.rs 0
-kernel/core/src/syscall/memory.rs 0
-kernel/core/src/mm/page_alloc.rs 0
-kernel/core/src/mm/pglist.rs 19
-kernel/core/src/signal.rs 15
 kernel/core/src/signal.rs 6
 kernel/core/src/sched/hotpath.rs 3
-kernel/core/src/debug/hotpath.rs 104
+kernel/core/src/debug/hotpath.rs 98
 kernel/core/src/arch/riscv64/trap.rs 0
 kernel/core/src/arch/x86_64/trap.rs 0
