@@ -39,3 +39,22 @@ SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
 #           init 668->704, scheduler_tick 15940->15780
 #   every other sched symbol pairs 1:1 at equal size on all three arches
 #   (after module-path, moved-nested-fn and closure normalization).
+
+# --- debug9 nine-subsystem gate + p3sched gate (2026-11-26) ---
+# <Console as fmt::Write>::write_str: zero live callers outside the panic
+# path's dead branch; LTO pop-in/out (present at base 462B, absent after).
+^<rux::print::Console as core\[[0-9a-f]*\]::fmt::Write>::write_str$
+# IrqDomain::new: callers remain (interrupt/domain.rs:87); the body is fully
+# inlined at all of them in the current build — LTO inline jitter.
+^<rux::interrupt::domain::IrqDomain>::new$
+# syscall::FdSet trivial bit-op methods (new/set/clear/is_set/zero): every
+# call site inlines them; base carried out-of-line copies. Same jitter.
+^<rux::syscall::FdSet>::(new|set|clear|is_set|zero)$
+# syscall::seam_register_default: single caller, fully inlined. Same jitter.
+^rux::syscall::seam_register_default$
+# interrupt/domain functions: callers remain (5/3/7/5 external references,
+# x86_64 gate 2026-11-26); fully inlined at all of them in this build.
+^rux::interrupt::domain::generic_handle_domain_irq$
+^rux::interrupt::domain::get_default_domain$
+^rux::interrupt::domain::irq_create_mapping$
+^rux::interrupt::domain::irq_domain_create_linear$
