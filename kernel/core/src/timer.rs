@@ -319,7 +319,7 @@ static TIMER_TABLE: Spinlock<wheel::TimerWheel> =
 /// walked task's ti_on_cpu offset (AtomicBool + the 7 bytes the old
 /// instrument deliberately observed with it). Read-only, under the
 /// pid-hash walk's bucket lock.
-pub fn ww_task_on_cpu(task: &crate::process::task::Task) -> u64 {
+pub fn ww_task_on_cpu(task: &crate::process::types::Task) -> u64 {
     // SAFETY: plain volatile read of shared state during the census
     // walk (the read the WW heartbeat has always done; ti_on_cpu is
     // 8-byte aligned — the Task layout assert above).
@@ -838,7 +838,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                 // hands &Task (pinned by the pid-hash walk), and
                 // Task::pt_regs_ref() is the shared read view of the
                 // frame at the top of the task's own kernel stack.
-                let entry_sys = |tk: &crate::process::Task| -> u64 {
+                let entry_sys = |tk: &crate::process::types::Task| -> u64 {
                     let regs = match tk.pt_regs_ref() {
                         Some(r) => r,
                         None => return 0,
@@ -1504,7 +1504,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
             Action::Wake { pid } => {
                 // R13-3: pinned (softirq wake racing a concurrent reap) — the
                 // last unpinned cross-CPU wake path.
-                let task = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
+                let task = crate::process::hotpath::pid_hash_lookup_pinned(pid);
                 if !task.is_null() {
                     let ok = crate::sched::hotpath::wake_up_process(task);
                     // nanosleep-loss conviction: fire-side direct map —
@@ -1526,7 +1526,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                         // id through the wheel's removal discipline);
                         // TaskBorrow's short-read contract.
                         if let Some(t) = unsafe {
-                            crate::process::task_ref::TaskBorrow::from_raw(task)
+                            crate::process::types::TaskBorrow::from_raw(task)
                         } {
                             let (onrq, key, stb) = (
                                 t.sched_entity().on_rq.load(Ordering::Relaxed),
@@ -1551,7 +1551,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                     if !ok {
                         // Same pinned-target adopt as above.
                         let (st, on_rq, pk) = match unsafe {
-                            crate::process::task_ref::TaskBorrow::from_raw(task)
+                            crate::process::types::TaskBorrow::from_raw(task)
                         } {
                             Some(t) => (
                                 t.state().bits(),
@@ -1579,7 +1579,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                             );
                         }
                     }
-                    crate::process::task::Task::task_put(task);
+                    crate::process::types::Task::task_put(task);
                 } else if ww_latefire_budget_ok() {
                     WW_PIDMISS_N.fetch_add(1, Ordering::Relaxed);
                     crate::pr_err!(
@@ -1732,7 +1732,7 @@ pub static NSL_ITER: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 // marker statics stay here (pub) with the reader side (pdec).
 
 /// Reader: the task's timed-sleep loop-iteration count (0 = unseen).
-pub fn nsleep_iter_of(task: *mut crate::process::Task) -> u64 {
+pub fn nsleep_iter_of(task: *mut crate::process::types::Task) -> u64 {
     let key = task as usize;
     for k in 0..16 {
         if NSL_TASK[k].load(Ordering::Relaxed) == key {

@@ -9,7 +9,7 @@
 
 use core::arch::asm;
 use super::r#unsafe::SavedFrame;
-use crate::process::task::TaskState;
+use crate::process::types::TaskState;
 use riscv::register::sie;
 
 // Include trap.S assembly code.
@@ -22,13 +22,13 @@ use riscv::register::sie;
 // GNOME wedge scribbler). Derived constants cannot drift.
 core::arch::global_asm!(
     include_str!("trap.S"),
-    task_ti_preempt = const crate::process::task::task_offsets::TI_PREEMPT_COUNT,
-    task_ti_kernel_sp = const crate::process::task::task_offsets::TI_KERNEL_SP,
-    task_ti_user_sp = const crate::process::task::task_offsets::TI_USER_SP,
-    task_ti_cpu = const crate::process::task::task_offsets::TI_CPU,
-    task_ti_a0 = const crate::process::task::task_offsets::TI_A0,
+    task_ti_preempt = const crate::process::hotpath::task_offsets::TI_PREEMPT_COUNT,
+    task_ti_kernel_sp = const crate::process::hotpath::task_offsets::TI_KERNEL_SP,
+    task_ti_user_sp = const crate::process::hotpath::task_offsets::TI_USER_SP,
+    task_ti_cpu = const crate::process::hotpath::task_offsets::TI_CPU,
+    task_ti_a0 = const crate::process::hotpath::task_offsets::TI_A0,
     // R85 ksp gates: stack-top repair reads the task's own stack record.
-    task_kstack_bottom = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
+    task_kstack_bottom = const crate::process::hotpath::task_offsets::TASK_KERNEL_STACK_BOTTOM,
     kernel_stack_size = const crate::config::KERNEL_STACK_SIZE,
     // R86 (smp8 panic): the CPU-id clamps in trap.S (interrupt-stack
     // selection + trap_handler's cpu_id argument) must track MAX_CPUS —
@@ -43,7 +43,7 @@ core::arch::global_asm!(
 /// when a task is preempted in kernel mode.
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     use crate::sched::hotpath::current;
-    use crate::process::task::Task;
+    use crate::process::types::Task;
 
     // SAFETY: stack_top is the kernel stack base allocated by the task; pt_regs lives
     // at the fixed offset (stack_top - sizeof(PtRegs)) established by trap_entry in trap.S.
@@ -364,18 +364,18 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 let cs_exit = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 if tp_entry != tp_exit || cs_entry != cs_exit {
-                    let a = tp_entry as *mut crate::process::task::Task;
-                    let b = tp_exit as *mut crate::process::task::Task;
+                    let a = tp_entry as *mut crate::process::types::Task;
+                    let b = tp_exit as *mut crate::process::types::Task;
                     let (pa, pb) = unsafe {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
                     let cs_pid = if cs_entry != 0 {
-                        unsafe { (*(cs_entry as *mut crate::process::task::Task)).pid() }
+                        unsafe { (*(cs_entry as *mut crate::process::types::Task)).pid() }
                     } else {
                         0
                     };
                     let csx_pid = if cs_exit != 0 {
-                        unsafe { (*(cs_exit as *mut crate::process::task::Task)).pid() }
+                        unsafe { (*(cs_exit as *mut crate::process::types::Task)).pid() }
                     } else {
                         0
                     };
@@ -414,8 +414,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 let cs_exit = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 if tp_entry != tp_exit || cs_entry != cs_exit {
-                    let a = tp_entry as *mut crate::process::task::Task;
-                    let b = tp_exit as *mut crate::process::task::Task;
+                    let a = tp_entry as *mut crate::process::types::Task;
+                    let b = tp_exit as *mut crate::process::types::Task;
                     let (pa, pb) = unsafe {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
@@ -444,8 +444,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 let cs_exit = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 if tp_entry != tp_exit || cs_entry != cs_exit {
-                    let a = tp_entry as *mut crate::process::task::Task;
-                    let b = tp_exit as *mut crate::process::task::Task;
+                    let a = tp_entry as *mut crate::process::types::Task;
+                    let b = tp_exit as *mut crate::process::types::Task;
                     let (pa, pb) = unsafe {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
@@ -598,7 +598,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 ///   after; __schedule returns with SIE per R54's syscall-caller
 ///   contract, so the hook re-disables before unwinding the handler.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
-    use crate::process::task::task_flags::TaskFlags;
+    use crate::process::types::TaskFlags;
     static KP_ARMED: core::sync::atomic::AtomicU8 =
         core::sync::atomic::AtomicU8::new(0);
     match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
@@ -875,7 +875,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         // Instruction stream unreadable: cannot decode or retry safely.
         crate::pr_debug!("trap: unreadable instruction at epc={:#x}", epc);
         if regs.user_mode() {
-            crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+            crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGILL as i32));
         }
         return;
     }
@@ -1059,7 +1059,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     }
 
     if regs.user_mode() {
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+        crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGILL as i32));
     }
 
     // Do NOT advance epc — the task is now ZOMBIE and will not resume
@@ -1093,20 +1093,20 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         if let Some(task) = crate::sched::hotpath::current() {
             if (*task).single_step_active() && regs.epc == (*task).single_step_addr() {
                 let saved = (*task).single_step_saved_insn();
-                let restored = crate::process::ptrace_core::write_target_word(
+                let restored = crate::process::hotpath::write_target_word(
                     task, regs.epc, saved,
                 );
                 (*task).clear_single_step();
                 if !restored {
                     // Could not put the instruction back — the tracee's
                     // text is gone (unmapped racing the step). Kill it.
-                    crate::process::exit::do_exit(
+                    crate::process::hotpath::do_exit(
                         -(crate::signal::Signal::SIGSEGV as i32));
                 }
                 if (*task).tracer_pid() != 0 {
                     // SAFETY: task is the current task in its trap path.
                     unsafe {
-                        crate::process::ptrace_core::ptrace_stop(
+                        crate::process::hotpath::ptrace_stop(
                             task,
                             crate::signal::Signal::SIGTRAP as i32,
                             crate::signal::SigInfo::new(
@@ -1143,7 +1143,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 regs.epc += 4;
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
-                    crate::process::ptrace_core::ptrace_stop(
+                    crate::process::hotpath::ptrace_stop(
                         task,
                         crate::signal::Signal::SIGTRAP as i32,
                         crate::signal::SigInfo::new(
@@ -1162,7 +1162,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             regs.epc,
             regs.ra
         );
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+        crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
         // Kernel-mode ebreak is a kernel bug, not something to step over.
@@ -1235,7 +1235,7 @@ pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> ! {
     putb(b'\n');
 
             }
-    crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+    crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
     // do_exit schedules away and never returns; park defensively.
     loop {
         // SAFETY: wfi halts the hart until an interrupt; safe in a dead
@@ -1306,7 +1306,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // userspace. Without one — or with the fault happening
                 // inside the handler itself — the default action kills
                 // here (and avoids a fault-retry loop).
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 // si_code/si_addr parity (arena-mmap lane 2026-11-14):
                 // force_sig_fault(SEGV, SEGV_MAPERR, fault_addr) — the
                 // siginfo must carry the faulting address, or any handler
@@ -1419,7 +1419,7 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                 // huks-wedge lane (hw5): group death (Linux do_group_exit)
                 // — a fault-path default death kills the whole process;
                 // the thread-only exit orphaned the dead thread's locks.
-                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+                crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                                 // HOTPATH-PRINT: budget-gated (SEGV, 8/boot) — per user SIGSEGV fault; the death dump below carries the forensics
                 static SEGV_N: core::sync::atomic::AtomicU32 =
@@ -1444,7 +1444,7 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                 // PROT_NONE probes are survivable guard-page events.
                 // si_code = SEGV_ACCERR with si_addr = the fault address
                 // (arena-mmap lane parity with the x86_64 twin).
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 let acc_info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
                     crate::signal::si_code::SEGV_ACCERR,
@@ -1464,7 +1464,7 @@ crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
                 }
                 let _ = crate::signal::send_signal_with_info_directed(pid, acc_info);
                 // huks-wedge lane (hw5): group death (Linux do_group_exit).
-                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+                crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                                 // HOTPATH-PRINT: budget-gated (PDENY, 8/boot) — W^X/probing workloads hit this per store; the signal delivery is the event
                 static PDENY_N: core::sync::atomic::AtomicU32 =
@@ -1482,7 +1482,7 @@ crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
                 // lane, 2026-11): the line prints only on the FATAL
                 // branch. si_code/si_addr parity (arena-mmap lane):
                 // BUS_ADRERR + fault_addr, Linux force_sig_bus shape.
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 let _ = crate::signal::send_signal_with_info_directed(
                     pid,
                     crate::signal::SigInfo::fault(
@@ -1499,7 +1499,7 @@ crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
 crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
                     }
                     // huks-wedge lane (hw5): group death (Linux do_group_exit).
-                    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
+                    crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
@@ -1551,10 +1551,10 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             // nothing killable).
             if regs.user_mode() {
                 if !crate::api::mm::fault_oom_kill_or_retry(
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                 ) {
                     // Terminate user process via do_exit (properly notifies parent)
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                    crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGKILL as i32));
                 }
                 // true: fall through — returning to userspace re-executes
                 // the faulting instruction; the victim's freed pages serve
@@ -1686,7 +1686,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
                 let mut w = crate::debug::backtrace::ConsoleWriter::new();
                 if kernel_tp {
                     let task = unsafe {
-                        &*(tp as *const crate::process::task::Task)
+                        &*(tp as *const crate::process::types::Task)
                     };
                     unsafe {
                         let _ = write!(w,
@@ -1714,12 +1714,12 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
                 // before `state` — the walk was reading the wrong fields
                 // (state=0x50, pid=0x54, children=0x760, sibling=0x770
                 // at HEAD a6219f8). These are diagnostic-only reads.
-                use crate::process::task::task_offsets as tsk_off;
+                use crate::process::hotpath::task_offsets as tsk_off;
                 const OFF_STATE: usize = tsk_off::TASK_STATE;
                 const OFF_PID: usize = tsk_off::TASK_PID;
                 const OFF_CHILDREN: usize = tsk_off::TASK_CHILDREN;
                 const OFF_SIBLING: usize = tsk_off::TASK_SIBLING;
-                let t = (task as *mut crate::process::task::Task) as usize;
+                let t = (task as *mut crate::process::types::Task) as usize;
                 let head = (t + OFF_CHILDREN) as *const usize;
                 let mut pos = unsafe { core::ptr::read_volatile(head) };
                 let head_v = head as usize;
@@ -1858,7 +1858,7 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         cause, regs.epc, regs.badaddr);
 
     if regs.user_mode() {
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+        crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGKILL as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
         // Kernel-mode unknown exceptions (misaligned access, access
@@ -2035,5 +2035,5 @@ pub extern "C" fn ret_from_fork_kernel(fn_arg: *mut core::ffi::c_void,
     let _ret = fn_ptr(fn_arg);
 
     // Kernel thread has finished, call do_exit
-    crate::process::exit::do_exit(_ret);
+    crate::process::hotpath::do_exit(_ret);
 }

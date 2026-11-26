@@ -39,7 +39,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::process::task::TaskState;
+use crate::process::types::TaskState;
 
 /// One CPU's time accounting, in jiffies (Linux /proc/stat columns).
 ///
@@ -74,7 +74,7 @@ fn procs_blocked() -> u64 {
     let mut blocked = 0u64;
     // Non-blocking walk: a busy bucket is skipped rather than waited
     // for, so reading /proc/stat never blocks the caller.
-    crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+    crate::process::hotpath::pid_hash_for_each_task_try(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
         let t = task;
         if t.pid() != 0 && t.state().bits() & TaskState::UNINTERRUPTIBLE != 0 {

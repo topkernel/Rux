@@ -310,7 +310,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     let is_rt_task = rux::sched::hotpath::current().is_some_and(|t| {
         matches!(
             t.policy(),
-            process::task::SchedPolicy::Fifo | process::task::SchedPolicy::Rr
+            rux::process::types::SchedPolicy::Fifo | rux::process::types::SchedPolicy::Rr
         )
     });
     let timer_slack_ns = if is_rt_task {
@@ -454,8 +454,8 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
 
         if wake.is_some() {
             // Mark INTERRUPTIBLE BEFORE the final re-check (state-first).
-            current.set_state(process::task::TaskState::new(
-                process::task::TaskState::INTERRUPTIBLE
+            current.set_state(rux::process::types::TaskState::new(
+                rux::process::types::TaskState::INTERRUPTIBLE
             ));
 
             // Re-check AFTER marking sleeping: the one-shot timer (or a
@@ -464,8 +464,8 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // state (we may already be RUNNING + enqueued again), or the
             // condition is now observable — either way we must not sleep.
             if timer::read_time() >= hres_deadline || signal::signal_pending() {
-                current.set_state(process::task::TaskState::new(
-                    process::task::TaskState::RUNNING
+                current.set_state(rux::process::types::TaskState::new(
+                    rux::process::types::TaskState::RUNNING
                 ));
                 // NEW-C2: a wake in the window above may have enqueued us
                 // while we are in fact still executing on this CPU — take
@@ -507,8 +507,8 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // rearm_if_spent refreshes the spent guard; its refresh and
             // the loop's deadline check terminate the sleep normally).
             if !wake.as_ref().is_some_and(|w| w.pending()) {
-                current.set_state(process::task::TaskState::new(
-                    process::task::TaskState::RUNNING
+                current.set_state(rux::process::types::TaskState::new(
+                    rux::process::types::TaskState::RUNNING
                 ));
                 continue;
             }
@@ -529,8 +529,8 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // after (D) already ran) would turn this yield into an
             // eternal park (the r41v15/v17 power_host shape: sys=35,
             // INTERRUPTIBLE, no wheel entry, no shadow-visible id).
-            current.set_state(process::task::TaskState::new(
-                process::task::TaskState::RUNNING
+            current.set_state(rux::process::types::TaskState::new(
+                rux::process::types::TaskState::RUNNING
             ));
             rux::sched::hotpath::schedule();
         }
@@ -1254,7 +1254,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    let state = ::process::task::PosixTimerState {
+    let state = rux::process::types::PosixTimerState {
         kernel_timer_id: 0,
         clock_id: clockid,
         interval_jiffies: 0,
@@ -1502,7 +1502,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
 
 /// Current (it_interval sec/nsec, it_value sec/nsec) of a POSIX timer —
 /// precise readback for timer_gettime and settime old_value.
-fn posix_timer_current(timer: &::process::task::PosixTimerState) -> (i64, i64, i64, i64) {
+fn posix_timer_current(timer: &rux::process::types::PosixTimerState) -> (i64, i64, i64, i64) {
     let interval_ns = timer.interval_ns;
     let oi = (interval_ns / 1_000_000_000) as i64;
     let on = (interval_ns % 1_000_000_000) as i64;

@@ -134,7 +134,7 @@ fn run_command(cmd: u8) {
 /// Send `sig` to every process except init (pid 1).
 fn signal_all_except_init(sig: i32) {
     let mut sent = 0u32;
-    crate::process::pid_hash::pid_hash_for_each_task(|task| {
+    crate::process::hotpath::pid_hash_for_each_task(|task| {
         // The pid-hash walk hands out live task REFERENCES (safe API).
         let pid = task.pid();
         if pid > 1 {
@@ -162,7 +162,7 @@ fn dump_all_cpu_stacks() {
         }
         // Per-CPU current task pointer, read-only diagnostics (the
         // diag-adoption edge).
-        let t: &crate::process::task::Task = rux::fs::r#unsafe::diag_task_ref(*task);
+        let t: &crate::process::types::Task = rux::fs::r#unsafe::diag_task_ref(*task);
         crate::println!(
             "CPU{}: pid={} state={:#x} on_cpu={} idle={}",
             cpu,
@@ -176,7 +176,7 @@ fn dump_all_cpu_stacks() {
 }
 
 /// Print the kernel-text words found on a task's kernel stack.
-fn print_task_stack_words(task: &crate::process::task::Task) {
+fn print_task_stack_words(task: &crate::process::types::Task) {
     #[cfg(feature = "x86_64")]
     extern "C" {
         static __stext: u8;
@@ -224,7 +224,7 @@ fn print_task_stack_words(task: &crate::process::task::Task) {
 /// Display tasks stuck in uninterruptible/blocked state (Linux sysrq 'w').
 fn dump_blocked_tasks() {
     let mut count = 0u32;
-    crate::process::pid_hash::pid_hash_for_each_task(|t| {
+    crate::process::hotpath::pid_hash_for_each_task(|t| {
         // The pid-hash walk hands out live task REFERENCES (safe API).
         let state = t.state().bits();
         // TASK_UNINTERRUPTIBLE / TASK_KILLABLE / TASK_NOLOAD: the states

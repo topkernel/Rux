@@ -15,7 +15,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use crate::timer::msecs_to_jiffies;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 
 /// Status returned by [`IoCompletion::wait`] when the bounded wait deadline
 /// expired without the device signaling completion (-ETIMEDOUT).

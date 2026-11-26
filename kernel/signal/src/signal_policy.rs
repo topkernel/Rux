@@ -206,7 +206,7 @@ pub fn force_unblock_current(sig: i32) {
 /// `task` is borrowed from the caller's PINNED handle (task_refcnt held
 /// by the caller) — liveness is the pin's, not this fn's problem.
 pub fn send_signal_core(
-    task: &crate::process::task::Task,
+    task: &crate::process::types::Task,
     sig: i32,
     si: Option<SigInfo>,
     group: i32,
@@ -266,7 +266,7 @@ pub fn send_signal_core(
         let pid_layout =
             info.si_code <= 0 || info.si_signo == Signal::SIGCHLD as i32;
         if pid_layout && info.si_pid > 0 {
-            info.si_pid = crate::process::ns::translate_sender_pid_ns(
+            info.si_pid = crate::process::hotpath::translate_sender_pid_ns(
                 info.si_pid as u32,
                 task.ns_pid.as_ref(),
             ) as i32;
@@ -401,9 +401,9 @@ pub fn send_signal_core(
         } else {
             task.pending.add(sig);
         }
-        crate::signal::signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+        crate::signal::signal_wake_up(task as *const crate::process::types::Task as *mut crate::process::types::Task);
         // P1 signalfd hook: wake signalfd readers of this task.
-        crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+        crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
         emit(if already_std { 2 } else { 0 });
         return Ok(());
     }
@@ -413,9 +413,9 @@ pub fn send_signal_core(
         Some(s) => s,
         None => {
             task.pending.add(sig);
-            crate::signal::signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+            crate::signal::signal_wake_up(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             // P1 signalfd hook: wake signalfd readers of this task.
-            crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+            crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
@@ -504,7 +504,7 @@ pub fn send_signal_core(
             // at IF=0 — the both-CPU-freeze DEADLOCK-spin class (the
             // spinner prints at Task::rlimit+0x89; verified byte-exact
             // on the OH A/B pollwake roll pw-5 and cg-1's storm).
-            let limit = task.rlimits.lock_irqsave()[crate::process::task::rlimit_res::SIGPENDING].0;
+            let limit = task.rlimits.lock_irqsave()[crate::process::hotpath::rlimit_res::SIGPENDING].0;
             if limit != u64::MAX && task.pending.rt_queued_count() as u64 >= limit {
                 emit(4);
                 return Err(crate::errno::Errno::TryAgain.as_neg_i32());
@@ -529,12 +529,12 @@ pub fn send_signal_core(
             // sigwaitinfo01/rt_sigtimedwait01). Waking is always safe:
             // every sleeper re-checks its own condition and re-sleeps if
             // unmet.
-            crate::signal::signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+            crate::signal::signal_wake_up(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             // P1 signalfd hook: a BLOCKED signal is exactly the signalfd
             // use case (the app blocks the mask and reads via the fd) —
             // no handler path will run, so this wake is the only thing
             // that unblocks a read(sfd) on this signal.
-            crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+            crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
             emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
@@ -542,11 +542,11 @@ pub fn send_signal_core(
 
     // Default or Handler disposition — wake the target so an
     // interruptible sleeper reaches the delivery point.
-    crate::signal::signal_wake_up(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+    crate::signal::signal_wake_up(task as *const crate::process::types::Task as *mut crate::process::types::Task);
     // P1 signalfd hook: wake signalfd readers of this task (in-mask
     // signals are typically blocked, so they stay pending and are only
     // observable through the fd — this wake is what unblocks read(sfd)).
-    crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::task::Task as *mut crate::process::task::Task);
+    crate::fs::event_notify::signalfd_notify_task(task as *const crate::process::types::Task as *mut crate::process::types::Task);
     emit(if already_std { 2 } else { 0 });
     Ok(())
 }
@@ -559,7 +559,7 @@ pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
-    let my_pid = crate::process::current_pid();
+    let my_pid = crate::process::hotpath::current_pid();
     let my_uid = match crate::sched::hotpath::current() {
         Some(c) => (*c).cred().uid,
         None => 0,
@@ -576,7 +576,7 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
     // Broadcast over the PID hash so sleeping tasks receive it too; each
     // target still goes through the kill permission check (kernel-originated
     // signals from the TTY layer pass because init runs as root).
-    crate::process::pid_hash::pid_hash_for_each_task(|task| {
+    crate::process::hotpath::pid_hash_for_each_task(|task| {
         // The walk hands &Task under the bucket lock — plain safe reads.
         if task.pgid() == pgid && crate::security::can_send_signal(task.cred()) {
             let _ = crate::signal::send_signal(task.pid(), sig);

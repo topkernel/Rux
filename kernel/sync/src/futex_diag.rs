@@ -59,7 +59,7 @@ use crate::futex::{
 #[allow(unused_imports)]
 use rux::sync::Spinlock;
 #[allow(unused_imports)]
-use crate::process::Task;
+use crate::process::types::Task;
 #[allow(unused_imports)]
 use core::sync::atomic::AtomicU32;
 
@@ -166,7 +166,7 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
 /// park does not decode. debug-gated by the caller; walker-only reads
 /// of the pinned waiter's frozen mm.
 pub fn ffrt_chain_walk(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     uaddr: usize,
 ) -> Option<(alloc::string::String, Option<u64>)> {
     use core::fmt::Write as _;
@@ -416,7 +416,7 @@ pub fn ffrt_chain_walk(
 pub static FRMTX_LIVE_WORD: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string::String> {
+pub fn ffrt_mutex_scan(task: *mut crate::process::types::Task) -> Option<alloc::string::String> {
     use core::fmt::Write as _;
     if task.is_null() {
         return None;
@@ -730,7 +730,7 @@ pub fn fuxw_owner_park_state(tid: u32, uaddr: u64, now: u32) -> (u32, bool, usiz
 /// object: [uaddr-0x10, uaddr-0x8=l, uaddr, +0x10, +0x18] plus the
 /// vtable-deref-exec verdict at -0x10. Returns None when the window
 /// is unreadable or the shape is a plain cv seq word.
-pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<alloc::string::String> {
+pub fn fuxw_word_shape(task: *mut crate::process::types::Task, uaddr: u64) -> Option<alloc::string::String> {
     use core::fmt::Write as _;
     if task.is_null() {
         return None;
@@ -796,7 +796,7 @@ pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<al
 /// scan above the entry rsp (the spill window the rbp chain skips).
 /// Walker-only reads of the pinned task's mm (the ffrt_chain_walk
 /// contract); None when the entry frame is unavailable.
-pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String> {
+pub fn deep_ufw(task: *mut crate::process::types::Task) -> Option<alloc::string::String> {
     use core::fmt::Write as _;
     if task.is_null() {
         return None;
@@ -1141,7 +1141,7 @@ pub static OH67_M2_TGID: core::sync::atomic::AtomicU32 =
 /// never arrives; for the wide catches (tid345 class) it shows the
 /// array's head. Bounded to 6 entries + 6 path lookups.
 pub fn oh67_poll_decode(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     fds: u64,
     nfds: u64,
     timeout: u64,
@@ -3403,7 +3403,7 @@ pub fn kill_dump_tgid(tgid: u32) {
     crate::sched::hotpath::for_each_task(|t| {
         if t.tgid() as u32 == tgid {
             let t = t as *const Task as *mut Task;
-            if crate::process::task::Task::try_pin(t) {
+            if crate::process::types::Task::try_pin(t) {
                 threads_cell.borrow_mut().push(t);
             }
         }
@@ -3531,7 +3531,7 @@ pub fn kill_dump_tgid(tgid: u32) {
     // references of the concurrently-dying threads — schedulable
     // context, no locks held).
     for &t in threads.iter() {
-        crate::process::task::Task::task_put(t);
+        crate::process::types::Task::task_put(t);
     }
 }
 
@@ -3849,7 +3849,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
 /// task's page tables (shape test for the frozen-rwlock class).
 /// INV-SY-1 in rux::sync::unsafe owns the read; kept here as the
 /// pub face binder's diagnostic uses.
-pub fn read_park_word_via_task(task: *mut crate::process::Task, word: u64) -> Option<u32> {
+pub fn read_park_word_via_task(task: *mut crate::process::types::Task, word: u64) -> Option<u32> {
     if task.is_null() || word < 0x1000 {
         return None;
     }

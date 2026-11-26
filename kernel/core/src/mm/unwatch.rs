@@ -70,7 +70,7 @@ static LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlo
 /// Record one PTE-clearing event. Cheap (one short spinlock section);
 /// never prints.
 pub fn note(kind: u8, a: u64, b: u64, cnt: u64) {
-    let pid = crate::process::current_pid() as u64;
+    let pid = crate::process::hotpath::current_pid() as u64;
     let j = crate::timer::get_jiffies();
     let idx = CURSOR.fetch_add(1, Ordering::Relaxed) % RING_LEN;
     let _g = LOCK.lock_irqsave();

@@ -284,7 +284,7 @@ pub fn page_record_mapping(page: &Page, mm_ptr: usize, vaddr: usize) {
                 page.index(),
                 vpn,
                 mm_ptr,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 page.mapcount()
             );
         }

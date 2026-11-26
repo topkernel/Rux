@@ -707,7 +707,7 @@ pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
     let header = get_extent_header(i_block);
     crate::pr_info!(
         "EXT-HUNT-READHOLE pid={} ino={} logical={} root[magic={:x} depth={} entries={} max={}]",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical_block,
         header.eh_magic,
@@ -793,7 +793,7 @@ pub fn exthunt_wr_put(ino: u32, logical: u64, phys: u64, pat: u8, buf_ptr: *cons
     }
     crate::pr_info!(
         "EXT-HUNT-WRPUT pid={} ino={} logical={} phys={} pat={:02x} buf={:p}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical,
         phys,
@@ -815,7 +815,7 @@ pub fn exthunt_rd_serve(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8) {
     }
     crate::pr_info!(
         "EXT-HUNT-RDSERVE pid={} ino={} logical={} phys={} b0={:02x}{:02x}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical,
         phys,
@@ -838,7 +838,7 @@ pub fn exthunt_rd_batch(ino: u64, logical: u64, phys: u64, nblocks: u32) {
     }
     crate::pr_info!(
         "EXT-HUNT-RDBATCH pid={} ino={} logical={} phys={} n={}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical,
         phys,
@@ -858,7 +858,7 @@ pub fn exthunt_rd_od(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8, buf_ptr:
     }
     crate::pr_info!(
         "EXT-HUNT-RDOD pid={} ino={} logical={} phys={} b0={:02x}{:02x} buf={:p}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical,
         phys,
@@ -882,7 +882,7 @@ pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
     }
     crate::pr_info!(
         "EXT-HUNT-RDHIT pid={} ino={} logical={} b0={:02x}{:02x}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical,
         b0,
@@ -955,7 +955,7 @@ pub fn exthunt_evict_unhash(blocknr: u64, dirty: bool) {
     }
     crate::pr_info!(
         "EXT-HUNT-EVICT pid={} blk={} dirty={}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         blocknr,
         dirty as u8
     );
@@ -973,7 +973,7 @@ pub fn exthunt_evict_done(blocknr: u64, rc: i32) {
     }
     crate::pr_info!(
         "EXT-HUNT-EVICTED pid={} blk={} rc={}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         blocknr,
         rc
     );
@@ -996,7 +996,7 @@ pub fn exthunt_fab(blocknr: u64, skipped_evicting: bool, sync_path: bool) {
     }
     crate::pr_info!(
         "EXT-HUNT-FAB pid={} blk={} skip={} path={}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         blocknr,
         skipped_evicting as u8,
         if sync_path { "sync" } else { "async" }
@@ -1016,7 +1016,7 @@ pub fn exthunt_bc_blind(blocknr: u64) {
     }
     crate::pr_info!(
         "EXT-HUNT-BCBLIND pid={} blk={}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         blocknr
     );
 }
@@ -1038,7 +1038,7 @@ pub fn exthunt_rxbhit(blocknr: u64, buf_ptr: *const u8, b0: u8, b1: u8) {
     }
     crate::pr_info!(
         "EXT-HUNT-RXBHIT pid={} blk={} b0={:02x}{:02x} buf={:p}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         blocknr,
         b0,
         b1,
@@ -1065,7 +1065,7 @@ pub fn exthunt_zzero(kind: &str, ino: u32, logical: u64, phys: u64) {
     crate::pr_info!(
         "EXT-HUNT-ZZERO-{} pid={} ino={} logical={} phys={}",
         kind,
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         ino,
         logical,
         phys

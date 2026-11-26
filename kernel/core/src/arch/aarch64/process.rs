@@ -13,7 +13,7 @@ use super::mm::memory_layout::VirtAddr;
 use super::pt_regs::{
     PtRegs, SPSR_DAIF, SPSR_M_EL0T, SPSR_M_MASK,
 };
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 /// Initialize a user thread's register state (exec entry)
 #[inline]

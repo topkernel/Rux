@@ -23,7 +23,7 @@
 //!   written once by `grq_init` under the GRQ_READY CAS, read only
 //!   after the flag's Acquire side.
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 use super::types::SchedEntity;
 use super::types::GlobalRunQueue;
@@ -193,10 +193,10 @@ pub fn task_poison_pair_volatile(t: *const Task) -> (u32, u32) {
     // offsets; the caller's walk keeps the page mapped.
     unsafe {
         let pid = core::ptr::read_volatile(
-            (t as *const u8).add(crate::process::task::TASK_PID) as *const u32,
+            (t as *const u8).add(crate::process::hotpath::TASK_PID) as *const u32,
         );
         let state = core::ptr::read_volatile(
-            (t as *const u8).add(crate::process::task::TASK_STATE) as *const u32,
+            (t as *const u8).add(crate::process::hotpath::TASK_STATE) as *const u32,
         );
         (pid, state)
     }
@@ -214,7 +214,7 @@ pub fn task_pid_volatile(t: *const Task) -> u32 {
     // page mapped.
     unsafe {
         core::ptr::read_volatile(
-            (t as *const u8).add(crate::process::task::TASK_PID) as *const u32,
+            (t as *const u8).add(crate::process::hotpath::TASK_PID) as *const u32,
         )
     }
 }
@@ -297,10 +297,10 @@ pub fn arch_context_switch(prev: &mut Task, next: &mut Task) {
 /// (`process::task_ref`'s audited adoption edge, INV-SCE-2 contract):
 /// syscall-context short read/write, no yield, no store.
 #[inline]
-pub fn task_borrow(p: *mut Task) -> Option<crate::process::task_ref::TaskBorrow> {
+pub fn task_borrow(p: *mut Task) -> Option<crate::process::types::TaskBorrow> {
     // SAFETY: INV-SCE-2 — the callers' cgroup walkers hold the same
     // borrow proofs the pre-consolidation call sites documented.
-    unsafe { crate::process::task_ref::TaskBorrow::from_raw(p) }
+    unsafe { crate::process::types::TaskBorrow::from_raw(p) }
 }
 
 /// Derive a shared CgroupNode reference from a RANGE-CHECKED raw node

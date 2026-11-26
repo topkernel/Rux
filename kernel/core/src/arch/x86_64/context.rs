@@ -31,7 +31,7 @@
 //! the first switch into the child "returns" into ret_from_fork which
 //! pops the frame back to user mode.
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 use super::cpu::{read_cr3, rdmsr, wrmsr, write_cr3};
 
 /// MSR_FS_BASE — per-task TLS pointer.
@@ -246,8 +246,8 @@ pub extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) -> u64 {
     // for the whole handler, exactly the short-op proof the type wants).
     // SAFETY: the asm caller passes the two tasks the scheduler picked;
     // both are live for the handler's duration (pick-marked / idle).
-    let prev = unsafe { crate::process::task_ref::TaskBorrow::from_raw(prev) };
-    let next = unsafe { crate::process::task_ref::TaskBorrow::from_raw(next) };
+    let prev = unsafe { crate::process::types::TaskBorrow::from_raw(prev) };
+    let next = unsafe { crate::process::types::TaskBorrow::from_raw(next) };
     let cpu = crate::arch::cpu_id() as i32;
     // R65 witness: prev must still carry its pick mark here. A clear mark
     // at publish entry means the R49 heal (or a scribble) reset the
@@ -432,7 +432,7 @@ pub extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) -> u64 {
 pub extern "C" fn x86_update_rsp0(task: *mut Task) {
     // One adoption (same IRQs-off short-op proof as the publish twin).
     // SAFETY: the asm caller passes the incoming task.
-    let task = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) };
+    let task = unsafe { crate::process::types::TaskBorrow::from_raw(task) };
     let top = match &task {
         Some(t) => t.get_kernel_stack().map_or(0, |p| p as u64),
         None => 0,
@@ -585,7 +585,7 @@ fn context_switch_body(prev: &mut Task, next: &mut Task) {
     // skip.
     if (*next).pid() != 0 {
         let st = next.pick_state();
-        if st != crate::process::task::PICK_PICKED {
+        if st != crate::process::hotpath::PICK_PICKED {
             crate::sched::hotpath::pick_trace(next as *mut Task, 8);
             // SAFETY: the early-abort repair edge (nothing switched yet).
             unsafe { x86_switch_abort(prev, next, 0) };
@@ -858,7 +858,7 @@ pub extern "C" fn x86_switch_abort(
     // One adoption (IRQs-off abort repair; same proof as the publish
     // twin — prev never stopped running).
     // SAFETY: the asm/early-check callers pass the two pick targets.
-    let prev = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(prev) } {
+    let prev = match unsafe { crate::process::types::TaskBorrow::from_raw(prev) } {
         Some(p) => p,
         None => return,
     };

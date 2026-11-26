@@ -44,9 +44,9 @@ fn test_sched_yield() {
     test_assert!(result == 0, "sys_sched_yield returns 0");
 
     // PID should not change after yield
-    let pid_before = process::current_pid();
+    let pid_before = process::hotpath::current_pid();
     let _ = sys_sched_yield([0, 0, 0, 0, 0, 0]);
-    let pid_after = process::current_pid();
+    let pid_after = process::hotpath::current_pid();
     test_assert!(pid_before == pid_after, "sched_yield preserves PID");
 
     // Multiple yields should all succeed
@@ -191,7 +191,7 @@ fn test_priority() {
 
 fn test_sched_policy() {
     // SchedPolicy enum values
-    use crate::process::task::SchedPolicy;
+    use crate::process::types::SchedPolicy;
     test_assert_eq!(SchedPolicy::Normal as u32, 0, "SchedPolicy::Normal == 0");
     test_assert_eq!(SchedPolicy::Fifo as u32, 1, "SchedPolicy::Fifo == 1");
     test_assert_eq!(SchedPolicy::Rr as u32, 2, "SchedPolicy::Rr == 2");

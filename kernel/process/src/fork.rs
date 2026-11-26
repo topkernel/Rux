@@ -11,7 +11,7 @@
 //! - child's thread.ra points to ret_from_fork
 
 #![forbid(unsafe_code)]
-use crate::task::{Task, TaskState, Pid};
+use rux::process::types::{Task, TaskState, Pid};
 use crate::fs::FdTable;
 use crate::arch::pt_regs::PtRegs;
 
@@ -426,10 +426,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // rlimits copy below and all other enforcement points are active.
         if false && args.flags & CLONE_THREAD == 0 {
             let (nproc_cur, _) = current
-                .rlimit(crate::task::rlimit_res::NPROC);
+                .rlimit(rux::process::hotpath::rlimit_res::NPROC);
             if nproc_cur != u64::MAX {
                 let mut user_procs: u64 = 0;
-                crate::pid_hash::pid_hash_for_each_task(|t| {
+                rux::process::hotpath::pid_hash_for_each_task(|t| {
                     if t.address_space().is_some() {
                         user_procs += 1;
                     }
@@ -539,7 +539,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             {
                 crate::r#unsafe::borrow_task(parent_handle).remove_child(slot);
                 let slot_pid = crate::r#unsafe::borrow_task(slot).pid();
-                crate::pid_hash::pid_hash_remove(slot_pid);
+                rux::process::hotpath::pid_hash_remove(slot_pid);
                 crate::r#unsafe::borrow_task_mut(slot).free_kernel_stack();
                 crate::pid::free_pid(slot_pid);
                 crate::sched::hotpath::free_task_slot(slot);
@@ -632,7 +632,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // namespace — the same value clone(2) returns (a container
             // task's fork() must hand back the ns-local pid, not the
             // global one).
-            let tid_val = crate::ns::translate_sender_pid_ns(
+            let tid_val = rux::process::hotpath::translate_sender_pid_ns(
                 pid,
                 current.ns_pid.as_ref(),
             ) as i32;
@@ -969,7 +969,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // policy/priority — it lands on SCHED_OTHER with nice 0, and
             // the reset request itself is cleared (LTP sched_setscheduler04).
             if parent.sched_reset_on_fork() {
-                child.set_policy(crate::task::SchedPolicy::Normal);
+                child.set_policy(rux::process::types::SchedPolicy::Normal);
                 child.set_nice(0);
                 child.set_rt_priority(0);
                 child.set_sched_reset_on_fork(false);
@@ -1033,7 +1033,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // clone with EPERM when a non-user ns was requested without
         // CAP_SYS_ADMIN. ===
         if let Err(e) =
-            crate::ns::copy_namespaces(current, child, args.flags)
+            rux::process::hotpath::copy_namespaces(current, child, args.flags)
         {
             return unwind(task_ptr, e);
         }

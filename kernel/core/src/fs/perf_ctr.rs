@@ -139,7 +139,7 @@ pub fn charge_tick(user_mode: bool) {
 /// A task that was still runnable when it was switched out was
 /// PREEMPTED — involuntary. A task that had gone to sleep had BLOCKED
 /// — voluntary.
-pub fn note_switch(prev: &crate::process::task::Task) {
+pub fn note_switch(prev: &crate::process::types::Task) {
     CTXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
     // perf per-CPU context-switch accounting (PERF_COUNT_SW_CONTEXT_
     // SWITCHES; one relaxed load when no perf event wants it).
@@ -148,7 +148,7 @@ pub fn note_switch(prev: &crate::process::task::Task) {
         return; // the idle task is not a process
     }
     let state = prev.state().bits();
-    let blocked = state & (crate::process::task::TaskState::INTERRUPTIBLE | crate::process::task::TaskState::UNINTERRUPTIBLE) != 0;
+    let blocked = state & (crate::process::types::TaskState::INTERRUPTIBLE | crate::process::types::TaskState::UNINTERRUPTIBLE) != 0;
     if blocked {
         prev.nvcsw.fetch_add(1, Ordering::Relaxed);
         // NOTE: this is a voluntary context switch (nvcsw), NOT a

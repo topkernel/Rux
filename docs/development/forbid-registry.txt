@@ -90,14 +90,10 @@ kernel/core/src/panic_policy.rs
 kernel/core/src/print.rs
 kernel/process/src/coredump.rs
 kernel/process/src/exec_policy.rs
-kernel/core/src/process/exit.rs
 kernel/process/src/fork.rs
 kernel/process/src/kthread.rs
-kernel/core/src/process/ns.rs
 kernel/process/src/pid.rs
-kernel/core/src/process/pid_hash.rs
-kernel/core/src/process/task.rs
-kernel/core/src/process/wait.rs
+kernel/core/src/process/types.rs
 kernel/core/src/sched/types.rs
 kernel/sched/src/deadline.rs
 kernel/sched/src/idle.rs
@@ -171,5 +167,3 @@ kernel/process/src/lib.rs
 kernel/process/src/exit_teardown.rs
 kernel/process/src/exit_wait.rs
 kernel/process/src/task_helpers.rs
-kernel/core/src/process/ptrace_core.rs
-kernel/core/src/process/exec_ring.rs

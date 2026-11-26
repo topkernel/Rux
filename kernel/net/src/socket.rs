@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 use alloc::collections::VecDeque;
 use crate::sync::spinlock::Spinlock;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use core::cell::UnsafeCell;
 
 use crate::fs::file::{File, FileFlags, FileOps, FdTable};
@@ -1851,12 +1851,12 @@ fn socket_of_file(file: &File) -> Option<Arc<Socket>> {
 /// Register `task` on the socket's wait queue. RX landing (wake_tcp_matches
 /// / wake_udp_matches / recv_queue enqueue) wakes this queue, so a poll/
 /// select waiter registered here is woken by packet arrival.
-pub fn socket_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+pub fn socket_poll_wait(file: &File, task: *mut crate::process::types::Task) -> bool {
     match socket_of_file(file) {
         Some(socket) => {
             socket
                 .wait_queue
-                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+                .add(crate::process::types::WaitQueueEntry::new(task, false));
             true
         }
         None => false,
@@ -1864,7 +1864,7 @@ pub fn socket_poll_wait(file: &File, task: *mut crate::process::task::Task) -> b
 }
 
 /// Remove a registration added by socket_poll_wait.
-pub fn socket_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+pub fn socket_poll_unwait(file: &File, task: *mut crate::process::types::Task) {
     if let Some(socket) = socket_of_file(file) {
         socket.wait_queue.remove(task);
     }
@@ -2361,8 +2361,8 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
             crate::timer::del_timer(timer_id);
             return;
         }
-        current.set_state(crate::process::task::TaskState::new(
-            crate::process::task::TaskState::INTERRUPTIBLE,
+        current.set_state(crate::process::types::TaskState::new(
+            crate::process::types::TaskState::INTERRUPTIBLE,
         ));
         if drained(tcp_fd) || timer::get_jiffies() >= target {
             crate::sched::hotpath::dequeue_task(current);

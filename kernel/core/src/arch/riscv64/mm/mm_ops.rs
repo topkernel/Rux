@@ -1424,7 +1424,7 @@ pub fn copy_page_table_cow(
                         // took a reference on a stamped (file-fill) frame.
                         crate::mm::page_desc::text_stamp_note(
                             phys_ppn,
-                            crate::process::current_pid() as u32,
+                            crate::process::hotpath::current_pid() as u32,
                             'K',
                             after,
                         );
@@ -1706,13 +1706,13 @@ pub fn handle_cow_fault(
         // either way for the lifecycle ring.
         crate::mm::page_desc::text_stamp_note(
             old_ppn as usize,
-            crate::process::current_pid() as u32,
+            crate::process::hotpath::current_pid() as u32,
             'C',
             after,
         );
         crate::mm::page_desc::text_stamp_remove_if_owner(
             old_ppn as usize,
-            crate::process::current_pid() as u32,
+            crate::process::hotpath::current_pid() as u32,
         );
     }
 

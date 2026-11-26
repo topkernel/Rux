@@ -43,8 +43,8 @@ pub fn test_getpid() {
     }
 
     // Test 5: Test process module wrapper functions
-    let wrapper_pid = crate::process::current_pid();
-    let wrapper_ppid = crate::process::current_ppid();
+    let wrapper_pid = crate::process::hotpath::current_pid();
+    let wrapper_ppid = crate::process::hotpath::current_ppid();
     if wrapper_pid == current_pid && wrapper_ppid == parent_pid {
         test_pass("wrapper functions");
     } else {

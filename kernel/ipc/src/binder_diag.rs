@@ -160,7 +160,7 @@ pub fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) 
     use core::fmt::Write;
     // Safe task lookup (INV: process::find_task_by_pid pins under the
     // pid-hash bucket; the &'static mut lives for this diagnostic).
-    let Some(tk) = crate::process::find_task_by_pid(t.tid) else {
+    let Some(tk) = crate::process::hotpath::find_task_by_pid(t.tid) else {
         return;
     };
     let comm = {
@@ -198,14 +198,14 @@ pub fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) 
     // wake→run path; woken=false indicts the key match (key_mm
     // vs the task's own current identity) or the releaser.
     if let Some((uaddr, key_mm, woken)) =
-        crate::sync::futex::waiter_of(tk as *mut crate::process::task::Task)
+        crate::sync::futex::waiter_of(tk as *mut crate::process::types::Task)
     {
         let _ = writeln!(
             out,
             "   futex waiter uaddr={:#x} key_mm={:#x} own_mm={:#x} woken={}",
             uaddr,
             key_mm,
-            crate::sync::futex::task_futex_mm_id(tk as *mut crate::process::task::Task),
+            crate::sync::futex::task_futex_mm_id(tk as *mut crate::process::types::Task),
             woken
         );
         // sc75: read the futex WORD through the HOLDER's own
@@ -244,7 +244,7 @@ pub fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) 
                 // owner TID in the mutex word for
                 // error-checking/recursive mutexes).
                 if v > 0 && v < 0x00ff_ffff {
-                    if let Some(ot) = crate::process::find_task_by_pid(v) {
+                    if let Some(ot) = crate::process::hotpath::find_task_by_pid(v) {
                         // Stack-freed guard (KILLDUMP census race class):
                         // the owner may have exited and freed its stack
                         // before this lookup — skip, never fault.
@@ -394,7 +394,7 @@ pub fn dump_latched_maps_taskctx() {
             return;
         }
         // The latch stores thread-group ids; the leader's pid == tgid.
-        let Some(tk) = crate::process::find_task_by_pid(tgid) else {
+        let Some(tk) = crate::process::hotpath::find_task_by_pid(tgid) else {
             continue;
         };
         let aspace = match tk.address_space() {
@@ -532,7 +532,7 @@ pub fn sleep_snapshot() {
     if !crate::trace::EVENT_SLEEPSNAP.armed() {
         return;
     }
-    crate::trace::trace_sleepsnap(0, crate::process::current_pid(), 0, 0);
+    crate::trace::trace_sleepsnap(0, crate::process::hotpath::current_pid(), 0, 0);
     // sc207 (launcher leg 13): NEVER print inside the for_each_task
     // callback - it runs under the pid-hash bucket lock, and one printk
     // per S-state task held each bucket across console port-IO for ~a
@@ -560,15 +560,15 @@ pub fn sleep_snapshot() {
         // as hung_task's check_tasks); reads are confined to the task's
         // own fields and its mapped kernel stack. oh67_poll_decode
         // still takes the raw pointer identity.
-        let task_raw = task as *const crate::process::task::Task
-            as *mut crate::process::task::Task;
+        let task_raw = task as *const crate::process::types::Task
+            as *mut crate::process::types::Task;
         {
             let tk = task;
             if tk.pid() == 0 {
                 return;
             }
             let state = tk.state();
-            if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+            if !state.contains(crate::process::types::TaskState::INTERRUPTIBLE) {
                 return;
             }
             // Stack-freed guard (KILLDUMP census race class): the walk
@@ -1570,18 +1570,18 @@ pub fn txn_hang_audit() {
     // INV-BINDER-DIAG-COMM (unsafe-slim r3 -> binder_edges edge at the
     // flip): the ONE audited raw-task comm read in the diagnostics; the
     // unsafe stayed framework-side, the closure is the typed call.
-    let comm_of = |p: *mut crate::process::Task| -> &str {
+    let comm_of = |p: *mut crate::process::types::Task| -> &str {
         crate::r#unsafe::diag_task_comm(p)
     };
     let mut w = crate::debug::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
     for h in &hung {
-        let srv = crate::process::find_task_by_pid(h.stid);
+        let srv = crate::process::hotpath::find_task_by_pid(h.stid);
         // Raw identity for the sched diag APIs (they take *mut Task) and
         // for the comm_of capsule; reads go through `srv.as_deref()`.
         let srv_raw = srv
             .as_deref()
-            .map(|t| t as *const crate::process::task::Task as *mut crate::process::task::Task)
+            .map(|t| t as *const crate::process::types::Task as *mut crate::process::types::Task)
             .unwrap_or(core::ptr::null_mut());
         let comm_srv = comm_of(srv_raw);
         let (state, sys, rip, a0, a1) = match srv.as_deref() {
@@ -1606,8 +1606,8 @@ pub fn txn_hang_audit() {
             h.cpid,
             h.ctid,
             comm_of(
-                crate::process::find_task_by_pid(h.ctid)
-                    .map(|t| t as *mut crate::process::task::Task)
+                crate::process::hotpath::find_task_by_pid(h.ctid)
+                    .map(|t| t as *mut crate::process::types::Task)
                     .unwrap_or(core::ptr::null_mut()),
             ),
             h.spid,
@@ -1988,10 +1988,10 @@ pub fn txn_hang_audit() {
     // spot: if the hung handler's FFRT mutex is held by one of them,
     // the chain is handler -> mutex -> holder -> nested BWR -> peer.
     for hl in &holders {
-        let t = crate::process::find_task_by_pid(hl.tid);
+        let t = crate::process::hotpath::find_task_by_pid(hl.tid);
         let t_raw = t
             .as_deref()
-            .map(|tk| tk as *const crate::process::task::Task as *mut crate::process::task::Task)
+            .map(|tk| tk as *const crate::process::types::Task as *mut crate::process::types::Task)
             .unwrap_or(core::ptr::null_mut());
         let (state, sys, a0, a1) = match t.as_deref() {
             None => (0u64, 0u64, 0u64, 0u64),
@@ -2237,12 +2237,12 @@ pub fn bwr_park_audit() {
     // WORLD released — task forensics + user BWR decode + prints.
     // (comm_of capsule contract: INV-BINDER-DIAG-COMM; entry-frame read
     // contract: INV-BINDER-ENTRYFRAME.)
-    let comm_of = |p: *mut crate::process::Task| -> &str {
+    let comm_of = |p: *mut crate::process::types::Task| -> &str {
         crate::r#unsafe::diag_task_comm(p)
     };
     // Entry-frame (syscall nr, a0, a1, a2) of a task, if its kernel
     // stack is pinned and mapped.
-    let entry_regs = |p: Option<&crate::process::task::Task>| -> Option<(u64, u64, u64, u64)> {
+    let entry_regs = |p: Option<&crate::process::types::Task>| -> Option<(u64, u64, u64, u64)> {
         let top = p?.kernel_stack_top_checked()?;
         // INV-BINDER-ENTRYFRAME: (sys, a0, a1, a2) reorder.
         let (_, sys, a0, a1, a2) = entry_frame(top);
@@ -2273,12 +2273,12 @@ pub fn bwr_park_audit() {
                 .max()
                 .unwrap_or(0)
         };
-        let task = crate::process::find_task_by_pid(s.tid);
+        let task = crate::process::hotpath::find_task_by_pid(s.tid);
         // Raw identity for the *-mut-taking diag helpers below; reads go
         // through task.as_deref().
         let task_raw = task
             .as_deref()
-            .map(|t| t as *const crate::process::task::Task as *mut crate::process::task::Task)
+            .map(|t| t as *const crate::process::types::Task as *mut crate::process::types::Task)
             .unwrap_or(core::ptr::null_mut());
         // State bits (RUNNING=0, INT=1, UNINT=2): a RUNNING thread
         // caught mid-ioctl must not read as parked.
@@ -2959,7 +2959,7 @@ pub fn ams46_audit() {
                 core::sync::atomic::AtomicUsize::new(0);
             let n = SNAP_N.fetch_add(1, Relaxed);
             if n < 40 && (n % 2) == 0 {
-                let tk = crate::process::find_task_by_pid(rtid);
+                let tk = crate::process::hotpath::find_task_by_pid(rtid);
                 let t = tk.as_deref();
                 if t.is_none() {
                     crate::pr_debug!("AMS46-T j={} tid={} GONE", now / 100, rtid);
@@ -2976,7 +2976,7 @@ pub fn ams46_audit() {
                     };
                     use core::fmt::Write;
                     let mut s = alloc::string::String::new();
-                    const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                    const RL: usize = crate::process::types::LAST_CALLS_LEN;
                     let cur = t.ext.last_calls_cur.load(Relaxed);
                     let mut shown = 0usize;
                     for k in 0..RL {
@@ -3305,9 +3305,9 @@ pub fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::string:
 /// page-walk dumps that made the old WORLD-held stall_report a ~500 ms
 /// IRQ-off window (sc82, khungtaskd death).
 pub fn user_park_stack_dump(t: &Arc<BinderThread>) {
-    let task = crate::process::find_task_by_pid(t.tid);
+    let task = crate::process::hotpath::find_task_by_pid(t.tid);
     let Some(task) = task else { return };
-    user_task_park_stack(task as *mut crate::process::task::Task);
+    user_task_park_stack(task as *mut crate::process::types::Task);
 }
 
 /// 81st: the task-level half of the park-stack dump, callable from the
@@ -3317,7 +3317,7 @@ pub fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// and the handler that parked (module+fileoff, offline-symbolized).
 /// Writes through the caller's ConsoleWriter — pr_warn from the censusd
 /// audit context is dropped (the missing FUXPARK-ARM prints class).
-pub fn user_task_park_stack(task: *mut crate::process::Task) {
+pub fn user_task_park_stack(task: *mut crate::process::types::Task) {
     let mut w = crate::debug::backtrace::ConsoleWriter::new();
     user_task_park_stack_w(task, &mut w);
 }
@@ -3365,7 +3365,7 @@ pub fn census_tgid_due(gate: usize, tgid: u32, now: u32, interval: u32) -> bool 
 }
 
 pub fn user_task_park_stack_w(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     w: &mut crate::debug::backtrace::ConsoleWriter,
 ) {
     use core::fmt::Write as _;
@@ -3451,7 +3451,7 @@ pub fn user_task_park_stack_w(
 pub fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
     use core::fmt::Write;
     let (total, woken) = t.wait.vw_queue_census();
-    let task = crate::process::find_task_by_pid(t.tid);
+    let task = crate::process::hotpath::find_task_by_pid(t.tid);
     let state = task
         .as_deref()
         .map(|tk| tk.state().bits())
@@ -3665,12 +3665,12 @@ pub fn stall_report() {
                             // idle worker; the WAKE-STRANDED family). Dump
                             // the task's scheduler view: linked? on_cpu?
                             // pick_state? — names which stage ate the wake.
-                            let task = crate::process::find_task_by_pid(t.tid);
+                            let task = crate::process::hotpath::find_task_by_pid(t.tid);
                             let task_raw = task
                                 .as_deref()
                                 .map(|tk| {
-                                    tk as *const crate::process::task::Task
-                                        as *mut crate::process::task::Task
+                                    tk as *const crate::process::types::Task
+                                        as *mut crate::process::types::Task
                                 })
                                 .unwrap_or(core::ptr::null_mut());
                             if !task_raw.is_null() {
@@ -3714,11 +3714,11 @@ pub fn stall_report() {
                                 // futex, not on the binder waitqueue).
                                 let pol = tk.policy() as u8;
                                 let onrq = match tk.policy() {
-                                    crate::process::task::SchedPolicy::Fifo
-                                    | crate::process::task::SchedPolicy::Rr => {
+                                    crate::process::types::SchedPolicy::Fifo
+                                    | crate::process::types::SchedPolicy::Rr => {
                                         tk.rt_entity().is_on_rq()
                                     }
-                                    crate::process::task::SchedPolicy::Deadline => {
+                                    crate::process::types::SchedPolicy::Deadline => {
                                         tk.dl_entity().is_on_rq()
                                     }
                                     _ => tk.sched_entity().is_on_rq(),
@@ -3750,9 +3750,9 @@ pub fn stall_report() {
                                 // forever — no adjudication possible.
                                 let rt_policy = matches!(
                                     tk.policy(),
-                                    crate::process::task::SchedPolicy::Fifo
-                                        | crate::process::task::SchedPolicy::Rr
-                                        | crate::process::task::SchedPolicy::Deadline
+                                    crate::process::types::SchedPolicy::Fifo
+                                        | crate::process::types::SchedPolicy::Rr
+                                        | crate::process::types::SchedPolicy::Deadline
                                 );
                                 let exec_now = tk
                                     .sched_entity()
@@ -3928,7 +3928,7 @@ pub fn stall_report() {
                 if let Some(op) = world.procs.iter().find(|p| Arc::ptr_eq(p, owner)) {
                     let opm = pm(world, op);
                     // Name the owing process via its main thread's comm.
-                    let pname = crate::process::find_task_by_pid(op.pid)
+                    let pname = crate::process::hotpath::find_task_by_pid(op.pid)
                         .map(|mt| {
                             let c = mt.comm();
                             core::str::from_utf8(&c[..])

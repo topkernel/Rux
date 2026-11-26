@@ -1564,12 +1564,12 @@ pub fn pci_blk_holder_watchdog(now: u64) {
 }
 
 /// Per-slot wait queue for PCI VirtIO block I/O completion (interrupt-driven wakeup).
-static PCI_BLK_WAIT_QUEUES: [crate::process::wait::WaitQueueHead; MAX_PCI_BLK_DISKS] =
-    [const { crate::process::wait::WaitQueueHead::new() }; MAX_PCI_BLK_DISKS];
+static PCI_BLK_WAIT_QUEUES: [crate::process::types::WaitQueueHead; MAX_PCI_BLK_DISKS] =
+    [const { crate::process::types::WaitQueueHead::new() }; MAX_PCI_BLK_DISKS];
 
 /// Wait queue for MMIO VirtIO block I/O completion (interrupt-driven wakeup)
-static VIRTIO_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
-    crate::process::wait::WaitQueueHead::new();
+static VIRTIO_BLK_WAIT_QUEUE: crate::process::types::WaitQueueHead =
+    crate::process::types::WaitQueueHead::new();
 
 /// Global VirtIO MMIO block device expected used.idx (for tracking I/O completion status)
 /// Incremented each time a request is submitted under the queue lock.
@@ -3539,12 +3539,12 @@ pub fn increment_expected_used_idx_at(slot: usize) {
 }
 
 /// Get a slot's sync-I/O wait queue (for interrupt handler / softirq wake).
-pub fn get_pci_blk_wait_queue(slot: usize) -> &'static crate::process::wait::WaitQueueHead {
+pub fn get_pci_blk_wait_queue(slot: usize) -> &'static crate::process::types::WaitQueueHead {
     &PCI_BLK_WAIT_QUEUES[slot.min(MAX_PCI_BLK_DISKS - 1)]
 }
 
 /// Get reference to MMIO VirtIO block wait queue (for interrupt handler)
-pub fn get_mmio_blk_wait_queue() -> &'static crate::process::wait::WaitQueueHead {
+pub fn get_mmio_blk_wait_queue() -> &'static crate::process::types::WaitQueueHead {
     &VIRTIO_BLK_WAIT_QUEUE
 }
 

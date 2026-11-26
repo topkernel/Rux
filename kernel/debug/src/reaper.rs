@@ -62,10 +62,10 @@ pub fn note_nameset(pid: u32, comm: &[u8]) {
     static N: AtomicU32 = AtomicU32::new(0);
     if N.fetch_add(1, Ordering::Relaxed) < MAX_SPAWN_PRINTS {
         // Parent pid at nameset time (appspawn for app children).
-        let ppid = crate::process::find_task_by_pid(pid)
+        let ppid = crate::process::hotpath::find_task_by_pid(pid)
             .map(|p| p.ppid())
             .unwrap_or(0);
-        let pname = crate::process::find_task_by_pid(ppid)
+        let pname = crate::process::hotpath::find_task_by_pid(ppid)
             .map(|p| comm_str(p.comm()))
             .unwrap_or("?");
         crate::pr_warn!(
@@ -125,7 +125,7 @@ pub fn on_zombie(pid: u32, code: i32, parent_pid: u32, comm: &[u8; 16], last_nr:
         Some(t0) => alloc::format!(" age={}", secs(now.saturating_sub(t0))),
         None => alloc::string::String::new(),
     };
-    let pname = crate::process::find_task_by_pid(parent_pid)
+    let pname = crate::process::hotpath::find_task_by_pid(parent_pid)
         .map(|p| comm_str(p.comm()))
         .unwrap_or("?");
     crate::pr_warn!(
@@ -145,7 +145,7 @@ pub fn on_zombie(pid: u32, code: i32, parent_pid: u32, comm: &[u8; 16], last_nr:
 
 /// The reaper's comm (lookup — the reaper is the CALLING task, alive).
 fn comm_of(pid: u32) -> alloc::string::String {
-    crate::process::find_task_by_pid(pid)
+    crate::process::hotpath::find_task_by_pid(pid)
         .map(|p| alloc::string::String::from(comm_str(p.comm())))
         .unwrap_or_else(|| alloc::string::String::from("?"))
 }

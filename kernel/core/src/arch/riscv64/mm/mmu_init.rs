@@ -714,7 +714,7 @@ fn task_pid_alive(pid: u32) -> bool {
             // on recycled root frames (stale registry entry + unreaped
             // zombie owner) — the exitwalk probe tripped it within seconds.
             let st = (*t).state();
-            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+            if !st.is_dead() && !st.contains(crate::process::types::TaskState::ZOMBIE) {
                 alive.store(true, core::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -999,7 +999,7 @@ pub(crate) fn release_user_leaf(
         crate::mm::rmap::page_remove_rmap(page);
     }
     let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
-    let dying = crate::process::current_pid() as u32;
+    let dying = crate::process::hotpath::current_pid() as u32;
     if stamp.is_some() {
         crate::mm::page_desc::text_stamp_note(pfn, dying, 'T', new_ref);
     }

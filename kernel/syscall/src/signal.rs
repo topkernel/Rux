@@ -644,15 +644,15 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
             // If a signal arrives here, the signal delivery path will see
             // INTERRUPTIBLE and call wake_up_process(), which sets us back
             // to RUNNING before schedule() yields the CPU.
-            current.set_state(::process::task::TaskState::new(
-                ::process::task::TaskState::INTERRUPTIBLE
+            current.set_state(rux::process::types::TaskState::new(
+                rux::process::types::TaskState::INTERRUPTIBLE
             ));
             // Re-check after setting state (signal may have arrived)
             let pending2 = current.pending.get_all();
             if pending2 & !blocked != 0 {
                 // Signal arrived while we were preparing to sleep
-                current.set_state(::process::task::TaskState::new(
-                    ::process::task::TaskState::RUNNING
+                current.set_state(rux::process::types::TaskState::new(
+                    rux::process::types::TaskState::RUNNING
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
                 rux::sched::hotpath::dequeue_task(current);
@@ -692,14 +692,14 @@ pub fn sys_pause(_args: SyscallArgs) -> i64 {
             // Set state BEFORE re-checking to close the race window (same
             // as sigsuspend): a wake-up between the check and schedule()
             // finds us INTERRUPTIBLE and leaves us RUNNING.
-            current.set_state(::process::task::TaskState::new(
-                ::process::task::TaskState::INTERRUPTIBLE,
+            current.set_state(rux::process::types::TaskState::new(
+                rux::process::types::TaskState::INTERRUPTIBLE,
             ));
             // Re-check after setting state (signal may have arrived)
             let pending2 = current.pending.get_all();
             if pending2 & !blocked != 0 {
-                current.set_state(::process::task::TaskState::new(
-                    ::process::task::TaskState::RUNNING,
+                current.set_state(rux::process::types::TaskState::new(
+                    rux::process::types::TaskState::RUNNING,
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
                 rux::sched::hotpath::dequeue_task(current);

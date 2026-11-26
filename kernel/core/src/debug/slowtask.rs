@@ -356,7 +356,7 @@ fn audit(now: u64) {
         let mut comm_buf = [0u8; 16];
         let comm_len;
         {
-            if let Some(t) = crate::process::task_ref::TaskBorrow::lookup(n.pid) {
+            if let Some(t) = crate::process::types::TaskBorrow::lookup(n.pid) {
                 let c = t.comm();
                 let n = c.len().min(comm_buf.len());
                 comm_buf[..n].copy_from_slice(&c[..n]);
@@ -392,7 +392,7 @@ fn audit(now: u64) {
 /// sp upward (the wait chain; symbolize offline).
 fn print_parked_chain(pid: u32, epc: u64) {
     // TaskBorrow's short-read contract (diagnostic, no yield below).
-    let tk = match crate::process::task_ref::TaskBorrow::lookup(pid) {
+    let tk = match crate::process::types::TaskBorrow::lookup(pid) {
         Some(t) => t,
         None => return,
     };

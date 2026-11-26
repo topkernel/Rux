@@ -65,7 +65,7 @@ HOT_FILES = re.compile(
     r"|interrupt/[^/]+\.rs"
     # the timekeeping core and the allocator entry points
     r"|timer\.rs|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|unsafe)\.rs"
-    r"|process/(task_ref|unsafe)\.rs"
+    r"|process/(hotpath|unsafe)\.rs"
     r"|safety/.*\.rs)$")
 
 FN = re.compile(

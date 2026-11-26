@@ -32,7 +32,7 @@
 #![forbid(unsafe_code)]
 use crate::fs::elf::Elf64Ehdr;
 use crate::fs::file::File;
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 // ==================== ProcessHooks (lifecycle) ====================
 

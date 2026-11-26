@@ -27,7 +27,7 @@ use crate::vmscan::balance_pgdat;
 // ============================================================================
 
 /// kswapd task pointer.  Set once during init.
-static KSWAPD_TASK: AtomicPtr<crate::process::task::Task> = AtomicPtr::new(core::ptr::null_mut());
+static KSWAPD_TASK: AtomicPtr<rux::process::types::Task> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Wake flag — set by wakeup_kswapd(), cleared by kswapd loop.
 static KSWAPD_WAKE: AtomicBool = AtomicBool::new(false);
@@ -79,8 +79,8 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             // Nothing to do — sleep.
             if let Some(current) = crate::sched::hotpath::current() {
                 current.set_state(
-                    crate::process::task::TaskState::new(
-                        crate::process::task::TaskState::INTERRUPTIBLE,
+                    rux::process::types::TaskState::new(
+                        rux::process::types::TaskState::INTERRUPTIBLE,
                     ),
                 );
             }
@@ -165,8 +165,8 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                     // the OOM below.
                     if let Some(current) = crate::sched::hotpath::current() {
                         current.set_state(
-                            crate::process::task::TaskState::new(
-                                crate::process::task::TaskState::INTERRUPTIBLE,
+                            rux::process::types::TaskState::new(
+                                rux::process::types::TaskState::INTERRUPTIBLE,
                             ),
                         );
                     }
@@ -204,8 +204,8 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // indefinitely if the zone remains below watermarks.
         if let Some(current) = crate::sched::hotpath::current() {
             current.set_state(
-                crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::INTERRUPTIBLE,
+                rux::process::types::TaskState::new(
+                    rux::process::types::TaskState::INTERRUPTIBLE,
                 ),
             );
         }
@@ -262,7 +262,7 @@ pub fn wakeup_kswapd(order: i32) {
     // was vestigial).
     let task_ptr = KSWAPD_TASK.load(Ordering::Acquire);
     if !task_ptr.is_null() {
-        crate::process::task::Task::wake_up(task_ptr);
+        rux::process::types::Task::wake_up(task_ptr);
     }
 }
 

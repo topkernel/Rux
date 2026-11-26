@@ -97,7 +97,7 @@ pub fn record() -> bool {
     if !on() {
         return false;
     }
-    let pid = crate::process::current_pid();
+    let pid = crate::process::hotpath::current_pid();
     let w = &WATCH[(pid as usize) & (SLOTS - 1)];
     if w.pid.load(Relaxed) != pid {
         w.pid.store(pid, Relaxed);

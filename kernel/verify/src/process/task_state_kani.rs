@@ -4,7 +4,8 @@
 //!
 //! Kani proof harnesses for TaskState bitmap operations.
 //!
-//! Types copied from: kernel/core/src/process/task.rs
+//! Types copied from: kernel/core/src/process/types.rs (the struct)
+//! and kernel/core/src/process/hotpath.rs (its impl)
 
 #![cfg(kani)]
 

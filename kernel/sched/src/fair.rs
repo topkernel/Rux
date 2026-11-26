@@ -9,7 +9,7 @@ use crate::sched::r#unsafe::{node_key, node_of_task, task_of_node};
 use rux::api::sched::{CLASS_CFS_BIT, WW_EV_LINK, WW_EV_UNLINK_POISON};
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::{MAX_CPUS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
-use crate::process::task::{Task, SchedPolicy};
+use rux::process::types::{Task, SchedPolicy};
 use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 
 struct SkipHistSlot {

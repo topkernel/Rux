@@ -32,7 +32,7 @@
 //! OFF); no edge is reachable from a hot path that is measured by the
 //! perf gate with the gates disarmed.
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 /// Adopt a possibly-stale task handle as a shared view.
 ///

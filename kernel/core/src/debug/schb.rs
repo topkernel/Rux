@@ -188,13 +188,13 @@ pub fn oom_anat_dump() {
     if DONE.swap(true, Ordering::AcqRel) {
         return;
     }
-    let (kn, khw) = crate::process::task::kstack_anat();
+    let (kn, khw) = crate::process::hotpath::kstack_anat();
     taskdump_raw_line(b"OOM-ANAT kstack live=");
     taskdump_dec(kn);
     taskdump_raw_line(b" hw=");
     taskdump_dec(khw);
     taskdump_raw_line(b" taskSZ=");
-    taskdump_dec(core::mem::size_of::<crate::process::task::Task>() as u64);
+    taskdump_dec(core::mem::size_of::<crate::process::types::Task>() as u64);
     // Type sizes for the per-class census mapping below (bytes, the
     // small-alloc class is the next power of two >= size).
     taskdump_raw_line(b"\nOOM-ANAT sizes: vma=");
@@ -294,7 +294,7 @@ fn comm_str(c: &[u8; 16]) -> &str {
 
 /// schbd main loop: sleep / beat / detect / census.
 extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::TaskState;
+    use crate::process::types::TaskState;
 
     let hz = crate::config::KERNEL_HZ as u64;
     if hz == 0 {
@@ -434,11 +434,11 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // held (the delta is packing slack); oN = buddy per-order live
         // pages (o5 = the 128KB kernel-stack class on this config).
         {
-            let (kn, khw) = crate::process::task::kstack_anat();
+            let (kn, khw) = crate::process::hotpath::kstack_anat();
             // kb/ks = packed-slab blocks/live slots (x86_64 only; 0/0
             // reads as "no slab" on arches that keep plain order-5
             // stacks — see process/task.rs).
-            let (kb, ks, _fb) = crate::process::task::kstack_slab_stats();
+            let (kb, ks, _fb) = crate::process::hotpath::kstack_slab_stats();
             let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
             let np = &crate::mm::buddy_allocator::NET_PAGES;
             let mut w = ConsoleWriter::new();
@@ -574,7 +574,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
         for sn in &snaps {
             // Diagnostic re-find via TaskBorrow (short read; the task may
             // have exited between walk and now — lookup returns None).
-            let linked = crate::process::task_ref::TaskBorrow::lookup(sn.pid);
+            let linked = crate::process::types::TaskBorrow::lookup(sn.pid);
             let linked_str = if linked.is_none() {
                 "gone"
             } else {

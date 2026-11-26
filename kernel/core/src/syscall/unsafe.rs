@@ -44,7 +44,7 @@
 //!   and the sleep is undone before the caller re-runs.
 
 use crate::list::ListHead;
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 // ---------------------------------------------------------------------------
 // INV-SYSC-1: epoll intrusive-list family
@@ -183,8 +183,8 @@ pub fn boxed_drop<T>(p: *mut T) {
 #[inline]
 pub fn task_park_unwind(task: *mut Task) {
     let t = crate::process::r#unsafe::borrow_task(task);
-    t.set_state(crate::process::task::TaskState::new(
-        crate::process::task::TaskState::RUNNING,
+    t.set_state(crate::process::types::TaskState::new(
+        crate::process::types::TaskState::RUNNING,
     ));
     crate::sched::hotpath::dequeue_task(t);
 }

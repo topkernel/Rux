@@ -28,7 +28,7 @@
 //! framework-native flags, never hook rows, so they cannot recurse.
 
 #![forbid(unsafe_code)]
-use crate::process::task::{Task, SchedPolicy};
+use crate::process::types::{Task, SchedPolicy};
 use crate::sched::hotpath::SchedClass;
 use crate::sched::types::{GlobalRunQueue, GrqPendingReport};
 use crate::sched::types::W2RefusalCensus;
@@ -81,7 +81,7 @@ pub const EV_RT_THROTTLED: u32 = 18; // "RT-CLASS-THROTTLED"
 pub struct SchedHooks {
     pub r56_print_pid: fn(prefix: &[u8], pid: u32, suffix: &[u8]),
     pub sched_clock: fn() -> u64,
-    pub change_task_policy: fn(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32),
+    pub change_task_policy: fn(task: *mut Task, new_policy: crate::process::types::SchedPolicy, rt_prio: u32),
     pub ww_record: fn(task: *mut Task, code: u32),
     pub orphan_watch_confirm: fn(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool,
     pub yield_cpu: fn(),
@@ -128,7 +128,7 @@ pub struct SchedHooks {
     pub lp_idle_lie_report: fn(cpu: usize),
     pub sched_slice_to_ms: fn(slice_ns: u64) -> u32,
     pub sched_ev_drain: fn(budget: usize) -> usize,
-    pub note_task_freed: fn(task: *mut crate::process::Task),
+    pub note_task_freed: fn(task: *mut crate::process::types::Task),
     pub report_poisoned_rq_entry: fn(cpu: usize, raw: usize),
     pub psledger_task: fn(cpu: usize) -> usize,
     pub psledger_cpu: fn(cpu: usize) -> u32,
@@ -273,7 +273,7 @@ pub fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) { (hooks().r56_prin
 pub fn sched_clock() -> u64 { (hooks().sched_clock)() }
 
 #[inline]
-pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32) { (hooks().change_task_policy)(task, new_policy, rt_prio) }
+pub fn change_task_policy(task: *mut Task, new_policy: crate::process::types::SchedPolicy, rt_prio: u32) { (hooks().change_task_policy)(task, new_policy, rt_prio) }
 
 /// Gated wrapper (devirt lane): the policy body's first act is the
 /// schedtrace arm check — a disarmed boot (every standard boot) records
@@ -435,7 +435,7 @@ pub fn sched_slice_to_ms(slice_ns: u64) -> u32 { (hooks().sched_slice_to_ms)(sli
 pub fn sched_ev_drain(budget: usize) -> usize { (hooks().sched_ev_drain)(budget) }
 
 #[inline]
-pub fn note_task_freed(task: *mut crate::process::Task) { (hooks().note_task_freed)(task) }
+pub fn note_task_freed(task: *mut crate::process::types::Task) { (hooks().note_task_freed)(task) }
 
 #[inline]
 pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) { (hooks().report_poisoned_rq_entry)(cpu, raw) }

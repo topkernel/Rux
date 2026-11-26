@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64};
 
 use crate::list::ListHead;
-use crate::process::task::Task;
+use crate::process::types::Task;
 use crate::sync::spinlock::Spinlock;
 
 // The trait the two class iterators name is code: it stays in hotpath.rs.
@@ -56,7 +56,7 @@ pub struct CfsRunQueue {
     pub timeline: RbTimeline,
 
     /// Currently running scheduling entity
-    pub curr: *mut crate::process::Task,
+    pub curr: *mut crate::process::types::Task,
 
     /// Minimum vruntime in queue
     ///

@@ -111,7 +111,7 @@ pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old
     e.kind_site.store(((kind as u64) << 8) | site as u64, Ordering::Relaxed);
     e.old.store(old, Ordering::Relaxed);
     e.mc.store(p.mapcount(), Ordering::Relaxed);
-    e.pid.store(crate::process::current_pid(), Ordering::Relaxed);
+    e.pid.store(crate::process::hotpath::current_pid(), Ordering::Relaxed);
 }
 
 /// One live-tree reference to the target frame, found by the bounded
@@ -314,7 +314,7 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
     if CAPTURES.fetch_add(1, Ordering::Relaxed) >= 4 {
         return;
     }
-    let pid = crate::process::current_pid();
+    let pid = crate::process::hotpath::current_pid();
     crate::pr_err!(
         "=== MMFORENSICS capture #{}: pfn={:#x} why={} pid={} root={:#x} ===",
         CAPTURES.load(Ordering::Relaxed),

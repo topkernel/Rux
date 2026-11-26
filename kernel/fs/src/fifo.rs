@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::errno;
 use rux::fs::file::{File, FileFlags, FileOps};
 use crate::pipe::Pipe;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 /// Live state of one FIFO inode.

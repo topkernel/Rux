@@ -59,8 +59,8 @@ core::arch::global_asm!(
     S_FAR = const core::mem::offset_of!(PtRegs, far),
     S_ORIG_X0 = const core::mem::offset_of!(PtRegs, orig_x0),
     S_SYSCALLNO = const core::mem::offset_of!(PtRegs, syscallno),
-    TI_PREEMPT = const crate::process::task::task_offsets::TI_PREEMPT_COUNT,
-    TI_KSTACK_BOTTOM = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
+    TI_PREEMPT = const crate::process::hotpath::task_offsets::TI_PREEMPT_COUNT,
+    TI_KSTACK_BOTTOM = const crate::process::hotpath::task_offsets::TASK_KERNEL_STACK_BOTTOM,
     KSTACK_SIZE = const crate::config::KERNEL_STACK_SIZE,
 );
 
@@ -571,12 +571,12 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         regs.pc,
         regs.esr
     );
-    let pid = crate::process::current_pid();
+    let pid = crate::process::hotpath::current_pid();
     let _ =
         crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
     if !sigill_has_handler() {
         // huks-wedge lane (hw5): group death (Linux do_group_exit).
-        crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGILL as i32));
+        crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGILL as i32));
     }
 }
 
@@ -627,7 +627,7 @@ fn sigill_has_handler() -> bool {
 /// demand-maps the faulting page installs the WRONG page and
 /// re-faults forever.
 fn fault_sigsegv_route(code: i32, addr: u64) {
-    let pid = crate::process::current_pid();
+    let pid = crate::process::hotpath::current_pid();
     let info = crate::signal::SigInfo::fault(
         crate::signal::Signal::SIGSEGV as i32,
         code,
@@ -644,7 +644,7 @@ fn fault_sigsegv_route(code: i32, addr: u64) {
     // huks-wedge lane (hw5): group death (Linux do_group_exit) — a
     // fault-path default death kills the whole process; the thread-only
     // exit orphaned the dead thread's userspace locks.
-    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+    crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
 }
 
 // (aarch64_bad_user_frame lives below, with the signal-routing helpers)
@@ -672,7 +672,7 @@ pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> ! {
     }
     // huks-wedge lane (hw5): group death — Linux fixup_bad_iret class
     // terminates the process, not just the faulting thread.
-    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+    crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     // do_exit schedules away and never returns; park defensively.
     loop {
         // SAFETY: wfi halts the core until an interrupt; safe in a dead
@@ -762,7 +762,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 crate::sched::hotpath::get_current_pid()
             );
             if regs.user_mode() {
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 // si_code/si_addr parity (arena-mmap lane): BUS_ADRERR +
                 // fault_addr, Linux force_sig_bus shape.
                 let _ = crate::signal::send_signal_with_info_directed(
@@ -775,7 +775,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 );
                 if !sigbus_has_handler() {
                     // huks-wedge lane (hw5): group death (Linux do_group_exit).
-                    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
+                    crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
@@ -797,12 +797,12 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             if regs.user_mode() {
                 // Generic OOM kill policy (riscv64 parity): SIGKILL the
                 // faulting task; kernel-mode OOM stays fatal.
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 let _ = crate::signal::send_signal_directed(
                     pid,
                     crate::signal::Signal::SIGKILL as i32,
                 );
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGKILL as i32));
             } else {
                 crate::debug::oops::oops(
                     crate::debug::oops::Kind::PageFault { addr: fault_addr },
@@ -837,7 +837,7 @@ pub extern "C" fn ret_from_fork_kernel_helper(
     _regs: &mut PtRegs,
 ) {
     let ret = fn_ptr(fn_arg);
-    crate::process::exit::do_exit(ret);
+    crate::process::hotpath::do_exit(ret);
 }
 
 // ============================================================================

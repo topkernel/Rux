@@ -517,8 +517,8 @@ pub fn __do_softirq() -> bool {
                 crate::interrupt::preempt::SOFTIRQ_OFFSET
             );
         } else {
-            let released = crate::process::task::Task::release_hardirq_base_on(
-                sirq_entry_task as *mut crate::process::task::Task,
+            let released = crate::process::types::Task::release_hardirq_base_on(
+                sirq_entry_task as *mut crate::process::types::Task,
                 crate::interrupt::preempt::SOFTIRQ_OFFSET,
                 core::panic::Location::caller(),
             );
@@ -558,8 +558,8 @@ pub fn __do_softirq() -> bool {
     if tp_entry != tp_exit {
         // Forensics edge (SOFTIRQ-BRACKET-LEAK): raw reads of tasks that
         // may already be gone — no typed handle can prove liveness here.
-        let a = tp_entry as *mut crate::process::task::Task;
-        let b = tp_exit as *mut crate::process::task::Task;
+        let a = tp_entry as *mut crate::process::types::Task;
+        let b = tp_exit as *mut crate::process::types::Task;
         let (pa, pb) = unsafe {
             ((*a).preempt_count(), (*b).preempt_count())
         };

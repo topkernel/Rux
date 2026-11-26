@@ -207,7 +207,7 @@ pub fn stack_word(addr: usize, base: usize, top: usize) -> Option<u64> {
 
 /// INV-BINDER-DIAG-COMM: the audited raw-task comm read the moved
 /// audits share (was the per-audit `comm_of` closure; one edge now).
-pub fn diag_task_comm(p: *mut crate::process::Task) -> &'static str {
+pub fn diag_task_comm(p: *mut crate::process::types::Task) -> &'static str {
     if p.is_null() {
         return "?";
     }
@@ -222,7 +222,7 @@ pub fn diag_task_comm(p: *mut crate::process::Task) -> &'static str {
 /// INV-BINDER-DIAG-TASKREF: diagnostic &Task borrow of a raw task
 /// pointer from the binder object model (proc.task / walk callbacks).
 /// The caller's context pins the task for the borrow's life.
-pub fn diag_task<'a>(p: *mut crate::process::Task) -> &'a crate::process::Task {
+pub fn diag_task<'a>(p: *mut crate::process::types::Task) -> &'a crate::process::types::Task {
     // SAFETY: read-only diagnostic borrow; the owner is alive under the
     // caller's WORLD section / pid-hash bucket (INV above).
     unsafe { &*p }

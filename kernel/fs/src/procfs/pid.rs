@@ -38,7 +38,7 @@ pub fn is_valid_pid(pid: u64) -> bool {
     if pid == 0 {
         return false;
     }
-    use crate::process::{current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_pid, hotpath::find_task_by_pid};
     current_pid() as u64 == pid || find_task_by_pid(pid as u32).is_some()
 }
 
@@ -66,8 +66,8 @@ pub fn parse_pid(name: &[u8]) -> Option<u64> {
 ///
 /// Mirrors the kernel's `task_state_array[]` ordering:
 /// R=running, S=sleeping, D=disk sleep, T=stopped, Z=zombie, X=dead.
-fn task_state_char(task: &crate::process::Task) -> u8 {
-    use crate::process::task::TaskState;
+fn task_state_char(task: &crate::process::types::Task) -> u8 {
+    use crate::process::types::TaskState;
     let st = task.state();
     if st.is_running() { b'R' }
     else if st.contains(TaskState::INTERRUPTIBLE) { b'S' }
@@ -79,8 +79,8 @@ fn task_state_char(task: &crate::process::Task) -> u8 {
 }
 
 /// Return the human-readable task state string used in /proc/[pid]/status.
-fn task_state_str(task: &crate::process::Task) -> &'static str {
-    use crate::process::task::TaskState;
+fn task_state_str(task: &crate::process::types::Task) -> &'static str {
+    use crate::process::types::TaskState;
     let st = task.state();
     if st.is_running() { "running" }
     else if st.contains(TaskState::INTERRUPTIBLE) { "sleeping" }
@@ -101,7 +101,7 @@ fn task_state_str(task: &crate::process::Task) -> &'static str {
 /// of /proc/[pid]/stat — systemd's PID 1 check compares /proc/1/comm
 /// against "systemd". Kernel threads (no exe) report their kthread name
 /// like Linux.
-fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
+fn task_comm(task: &crate::process::types::Task) -> alloc::borrow::Cow<'_, str> {
     let comm = task.comm();
     let nul = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
     if nul > 0 {
@@ -150,20 +150,20 @@ fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
 /// exclusively; Drop releases it — the pre-flip manual task_put would
 /// now double-release).
 struct PinnedTask {
-    inner: crate::process::task_ref::TaskRef,
+    inner: crate::process::types::TaskRef,
 }
 impl PinnedTask {
     fn lookup(pid: u32) -> Option<PinnedTask> {
-        crate::process::task_ref::TaskRef::lookup(pid).map(|inner| PinnedTask { inner })
+        crate::process::types::TaskRef::lookup(pid).map(|inner| PinnedTask { inner })
     }
-    fn get(&mut self) -> &mut crate::process::task::Task {
+    fn get(&mut self) -> &mut crate::process::types::Task {
         &mut self.inner
     }
 }
 
 /// Generate /proc/[pid]/comm content (U2): "<comm>\n".
 pub fn generate_comm(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let mut pinned;
     let task = if current_pid() as u64 == pid {
@@ -237,8 +237,8 @@ pub fn generate_cgroup(pid: u64) -> Vec<u8> {
     }
     // Effective uid of the task (0 for kernel threads / lookup races).
     let mut pinned;
-    let task = if crate::process::current_pid() as u64 == pid {
-        crate::process::current_task()
+    let task = if crate::process::hotpath::current_pid() as u64 == pid {
+        crate::process::hotpath::current_task()
     } else {
         pinned = match PinnedTask::lookup(pid as u32) {
             Some(g) => g,
@@ -255,7 +255,7 @@ pub fn generate_cgroup(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/status content
 pub fn generate_status(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let mut content = String::new();
 
@@ -502,7 +502,7 @@ fn read_target_user_mm(
 /// ptrace_may_access (minimal form) for /proc/[pid]/environ: the caller
 /// must be the target itself or hold CAP_SYS_PTRACE (review 5.7).
 pub fn environ_access_allowed(pid: u64) -> bool {
-    use crate::process::current_pid;
+    use crate::process::hotpath::current_pid;
     if current_pid() as u64 == pid {
         return true;
     }
@@ -515,7 +515,7 @@ pub fn environ_access_allowed(pid: u64) -> bool {
 /// user memory via its own page tables (review 5.7: was read through the
 /// caller's address space — garbage for other processes).
 pub fn generate_cmdline(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let mut pinned;
     let task = if current_pid() as u64 == pid {
@@ -562,7 +562,7 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
 /// gate off the file still renders — zeros, the honest value of never
 /// having been counted.
 pub fn generate_schedstat(pid: u64) -> Vec<u8> {
-    use crate::process::{current_pid, current_task};
+    use crate::process::{hotpath::current_pid, hotpath::current_task};
 
     let mut pinned;
     let task = if current_pid() as u64 == pid {
@@ -586,7 +586,7 @@ pub fn generate_schedstat(pid: u64) -> Vec<u8> {
 }
 
 pub fn generate_stat(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
     use alloc::string::ToString;
 
     let mut pinned;
@@ -720,7 +720,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/exe symlink target
 pub fn generate_exe_link(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let name = if current_pid() as u64 == pid {
         if let Some(task) = current_task() {
@@ -744,7 +744,7 @@ pub fn generate_exe_link(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/cwd symlink target
 pub fn generate_cwd_link(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     if current_pid() as u64 == pid {
         if let Some(task) = current_task() {
@@ -768,7 +768,7 @@ pub fn generate_cwd_link(pid: u64) -> Vec<u8> {
 /// unauthorized readers get an empty buffer; sys_openat's /proc shortcut
 /// additionally fails the open with EACCES.
 pub fn generate_environ(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     if !environ_access_allowed(pid) {
         return Vec::new();
@@ -814,10 +814,10 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
 /// splits VMAs range-precisely, so this equals the locked bytes).
 pub fn generate_smaps(pid: u64) -> Vec<u8> {
     let maps = generate_maps(pid);
-    let task = if crate::process::current_pid() as u64 == pid {
-        crate::process::current_task()
+    let task = if crate::process::hotpath::current_pid() as u64 == pid {
+        crate::process::hotpath::current_task()
     } else {
-        crate::process::find_task_by_pid(pid as u32)
+        crate::process::hotpath::find_task_by_pid(pid as u32)
     };
     let task = match task {
         Some(t) => t,
@@ -908,7 +908,7 @@ fn re_header() -> fn(&str) -> Option<(usize, usize)> {
 /// Format: start-end perms offset dev inode pathname
 /// e.g.: 00010000-00020000 r-xp 00000000 00:00 0 [exe]
 pub fn generate_maps(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
     use crate::mm::vma::{VmaFlags, VmaType};
 
     let mut pinned;
@@ -1074,7 +1074,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
 /// VFS magic-link redirect (follow_symlink) all resolve through here so
 /// they can never disagree about whether a descriptor exists.
 pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<rux::fs::File>> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -1092,7 +1092,7 @@ pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<rux::fs::File>>
 /// Returns a list of (fd_number, path_string) tuples.
 /// For each open fd, resolves the file path from dentry.
 pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -1151,7 +1151,7 @@ fn get_fd_path(file: &alloc::sync::Arc<rux::fs::File>) -> alloc::string::String 
 ///
 /// Returns the path that the fd symlink points to.
 pub fn generate_fd_link(pid: u64, fd: u32) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -1183,7 +1183,7 @@ pub fn generate_fd_link(pid: u64, fd: u32) -> Vec<u8> {
 /// Returns the OOM badness score for the process (read-only).
 /// Score is computed dynamically: total_vm + oom_score_adj * totalpages / 1000
 pub fn generate_oom_score(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
     use crate::mm::pglist::first_online_node_mut;
     use crate::mm::zone::ZoneType;
 
@@ -1222,7 +1222,7 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
 /// Returns the OOM score adjustment for the process (read-only).
 /// Range: -1000 (immune) to 1000 (always kill).
 pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -1369,7 +1369,7 @@ pub fn attr_label_set(pid: u64, exec: bool, buf: &[u8]) {
 /// inotify table carries one "inotify wd:..." record per watch — LTP
 /// inotify12 parses the mask back out of it.
 pub fn generate_fdinfo(pid: u64, fd: u32) -> Vec<u8> {
-    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::process::{hotpath::current_task, hotpath::current_pid, hotpath::find_task_by_pid};
 
     let task = if current_pid() as u64 == pid {
         current_task()

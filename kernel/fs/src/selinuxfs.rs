@@ -150,7 +150,7 @@ fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
                 crate::pr_info!(
                     "selinuxfs: class lookup '{}' by pid {} -> ENOTDIR",
                     s,
-                    crate::process::current_pid()
+                    crate::process::hotpath::current_pid()
                 );
             }
         }
@@ -164,7 +164,7 @@ fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
                 crate::pr_info!(
                     "selinuxfs: first lookup '{}' by pid {}",
                     NODES[idx].0,
-                    crate::process::current_pid()
+                    crate::process::hotpath::current_pid()
                 );
             }
             Ok(child_ino(idx))

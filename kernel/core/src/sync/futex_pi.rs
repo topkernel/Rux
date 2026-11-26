@@ -77,7 +77,7 @@
 //!   would corrupt kernel memory).
 
 use crate::arch::cpu;
-use crate::process::task::{SchedPolicy, Task, TaskState};
+use crate::process::types::{SchedPolicy, Task, TaskState};
 use crate::sync::futex::{futex_hash, task_futex_mm_id, FutexKey};
 
 /// Set while any waiter is queued on the futex (reference bit 31).

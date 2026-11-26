@@ -27,7 +27,7 @@ pub static LAST_GOT_PPN: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 /// 5. Update process context (address space, stack pointer, trap frame)
 ///
 pub fn do_execve_elf(
-    task: &mut crate::task::Task,
+    task: &mut rux::process::types::Task,
     program_data: &[u8],
     argv: &[String],
     envp: &[String],
@@ -311,10 +311,10 @@ pub fn do_execve_elf(
     // act of zeroing).
     {
         use core::sync::atomic::Ordering::Relaxed;
-        let i = crate::exec_ring::STACKZERO_CURSOR.fetch_add(1, Relaxed) % crate::exec_ring::STACKZERO_RING.len();
-        crate::exec_ring::STACKZERO_RING[i].pid.store(crate::current_pid(), Relaxed);
-        crate::exec_ring::STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
-        crate::exec_ring::STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
+        let i = rux::process::hotpath::STACKZERO_CURSOR.fetch_add(1, Relaxed) % rux::process::hotpath::STACKZERO_RING.len();
+        rux::process::hotpath::STACKZERO_RING[i].pid.store(crate::current_pid(), Relaxed);
+        rux::process::hotpath::STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
+        rux::process::hotpath::STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
     }
 
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers
@@ -1009,7 +1009,7 @@ pub fn do_execve_elf(
     // syscall/process.rs uses the same formula).
     let stack_size_limit = {
         let rlim_cur = crate::sched::hotpath::current()
-            .map(|t| t.rlimit(crate::task::rlimit_res::STACK).0)
+            .map(|t| t.rlimit(rux::process::hotpath::rlimit_res::STACK).0)
             .unwrap_or(STACK_MAX_SIZE);
         rlim_cur.min(STACK_MAX_SIZE)
     };
@@ -1434,7 +1434,7 @@ pub fn do_execve_elf(
     // vfork_parent field (if set) points to the parent that created this
     // child via CLONE_VFORK; the parent is blocked in UNINTERRUPTIBLE
     // sleep. vfork_wake_parent is a safe fn on the raw handle.
-    crate::task::vfork_wake_parent(task as *mut crate::task::Task);
+    rux::process::hotpath::vfork_wake_parent(task as *mut rux::process::types::Task);
 
     // Success — the RAII guard was defused at the MmStruct ownership
     // transfer (see there); the installed mm owns the tree.

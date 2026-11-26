@@ -131,19 +131,19 @@ pub fn ww_heartbeat(now_time: u64) {
         if crate::arch::cpu_id() as usize == 0
             && PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
             putchar(b'\n');
-            crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+            crate::process::hotpath::pid_hash_for_each_task_try(|task| {
                 // The walk hands &Task under the bucket lock — plain reads.
                 // Helper APIs taking raw identity get the safe &-to-raw cast.
-                let task_raw = task as *const crate::process::task::Task
-                    as *mut crate::process::task::Task;
+                let task_raw = task as *const crate::process::types::Task
+                    as *mut crate::process::types::Task;
                 {
                 let pid = task.pid();
                 if pid == 0 || pid == crate::sched::hotpath::TASK_POISON { return; }
                 let q = rux::timer::ww_task_on_cpu(task);
                 let st = task.state().bits();
                 let linked = match task.policy() {
-                    crate::process::task::SchedPolicy::Fifo
-                    | crate::process::task::SchedPolicy::Rr => false,
+                    crate::process::types::SchedPolicy::Fifo
+                    | crate::process::types::SchedPolicy::Rr => false,
                     _ => task.sched_entity().timeline_key().is_some(),
                 };
                 let (ptc, ptj) =
@@ -310,7 +310,7 @@ pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
 pub fn nsleep_iter_bump() {
     use rux::timer::{NSL_ITER, NSL_TASK};
     let Some(t) = crate::sched::hotpath::current() else { return };
-    let key = t as *mut crate::process::Task as usize;
+    let key = t as *mut crate::process::types::Task as usize;
     for k in 0..16 {
         if NSL_TASK[k].load(Ordering::Relaxed) == key {
             NSL_ITER[k].fetch_add(1, Ordering::Relaxed);

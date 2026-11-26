@@ -51,7 +51,7 @@
 //! LTP targets verified against: add_key01..04, keyctl01..03.
 
 use crate::arch::uaccess::{access_ok, strncpy_from_user};
-use crate::process::task::Cred;
+use crate::process::types::Cred;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use alloc::collections::BTreeMap;

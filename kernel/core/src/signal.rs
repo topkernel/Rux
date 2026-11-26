@@ -16,7 +16,7 @@ use crate::sync::rwlock::RwSpinlock;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
 use alloc::boxed::Box;
-use crate::process::task::TaskState;
+use crate::process::types::TaskState;
 
 /// Signal number type
 pub type SigType = i32;
@@ -1315,7 +1315,7 @@ pub mod consts {
 /// * `false` - If no pending signals
 pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     use crate::sched;
-    use crate::process::task::TaskState;
+    use crate::process::types::TaskState;
 
     let current = match sched::hotpath::current() {
         Some(c) => c,
@@ -1392,7 +1392,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                     Some(i) => {
                         // Short read in syscall context: TaskBorrow's
                         // lookup contract (the reaper cannot run here).
-                        let scomm = match crate::process::task_ref::TaskBorrow::lookup(
+                        let scomm = match crate::process::types::TaskBorrow::lookup(
                             i.si_pid as u32,
                         ) {
                             Some(t) => alloc::string::String::from(t.comm_str()),
@@ -1446,7 +1446,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
             current.pending.remove(sig);
             // SAFETY (one cross-module edge): current is the running task; ptrace_stop
             // stays an unsafe fn of the ptrace lane until that lane converts it.
-            unsafe { crate::process::ptrace_core::ptrace_stop(current, sig, info) };
+            unsafe { crate::process::hotpath::ptrace_stop(current, sig, info) };
             // ptrace_stop parked the task; on resume re-select — the
             // tracer may have re-injected a signal or sent SIGKILL.
             delivered = true;
@@ -1706,7 +1706,7 @@ pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_00;
 /// Set up the arch-specific signal frame and redirect the trap frame into
 /// the handler.
 fn setup_frame(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     sig: i32,
     action: &SigAction,
     regs: &mut crate::arch::pt_regs::PtRegs,
@@ -1740,7 +1740,7 @@ fn setup_frame(
 /// `regs` is the current task's live PtRegs; `task` is the running task.
 #[cfg(feature = "aarch64")]
 fn setup_frame_aarch64(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     sig: i32,
     action: &SigAction,
     regs: &mut crate::arch::pt_regs::PtRegs,
@@ -1937,7 +1937,7 @@ fn setup_frame_aarch64(
 
 #[cfg(feature = "riscv64")]
 fn setup_frame_riscv64(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     sig: i32,
     action: &SigAction,
     regs: &mut crate::arch::pt_regs::PtRegs,
@@ -2141,7 +2141,7 @@ fn setup_frame_riscv64(
 /// * `true` - Restore successful
 /// * `false` - Restore failed
 pub fn restore_sigcontext(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     frame_addr: u64,
     regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
@@ -2172,7 +2172,7 @@ pub fn restore_sigcontext(
 /// `task` is the running task; `regs` is its live PtRegs.
 #[cfg(feature = "aarch64")]
 fn restore_sigcontext_aarch64(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     frame_addr: u64,
     regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
@@ -2282,7 +2282,7 @@ fn restore_sigcontext_aarch64(
 
 #[cfg(feature = "riscv64")]
 fn restore_sigcontext_riscv64(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     frame_addr: u64,
     regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
@@ -2390,7 +2390,7 @@ fn restore_sigcontext_riscv64(
 
 #[cfg(feature = "x86_64")]
 fn setup_frame_x86_64(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     sig: i32,
     action: &SigAction,
     regs: &mut crate::arch::pt_regs::PtRegs,
@@ -2644,7 +2644,7 @@ fn setup_frame_x86_64(
 
 #[cfg(feature = "x86_64")]
 fn restore_sigcontext_x86_64(
-    task: &mut crate::process::task::Task,
+    task: &mut crate::process::types::Task,
     frame_addr: u64,
     regs: &mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
@@ -2769,7 +2769,7 @@ fn handle_default_signal(sig: i32) {
                             // caller's syscall context — TaskBorrow's
                             // short-read contract.
                             let parent =
-                                match unsafe { crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) } {
+                                match unsafe { crate::process::types::TaskBorrow::from_raw(parent_ptr as *mut crate::process::types::Task) } {
                                     Some(p) => p,
                                     None => return,
                                 };
@@ -2786,7 +2786,7 @@ fn handle_default_signal(sig: i32) {
                             // handle is TaskBorrow-adopted above; exit.rs's
                             // wake helper stays unsafe until its lane
                             // converts it.
-                            crate::process::exit::wake_group_chldexit(&*parent);
+                            crate::process::hotpath::wake_group_chldexit(&*parent);
                             crate::signal::signal_wake_up(parent.as_ptr());
                         }
                     }
@@ -2813,7 +2813,7 @@ fn handle_default_signal(sig: i32) {
                         // SAFETY (one adopt edge): tree handle under the
                         // caller's syscall context — TaskBorrow's contract.
                         let parent =
-                            match unsafe { crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) } {
+                            match unsafe { crate::process::types::TaskBorrow::from_raw(parent_ptr as *mut crate::process::types::Task) } {
                                 Some(p) => p,
                                 None => return,
                             };
@@ -2826,7 +2826,7 @@ fn handle_default_signal(sig: i32) {
                         info._rest[..4].copy_from_slice(&sig.to_le_bytes());
                         let _ = crate::signal::send_signal_with_info(parent.pid(), info);
                         // SAFETY (one exit-path edge): as above.
-                        crate::process::exit::wake_group_chldexit(&*parent);
+                        crate::process::hotpath::wake_group_chldexit(&*parent);
                         crate::signal::signal_wake_up(parent.as_ptr());
                     }
                     // The actual park happens in do_signal's group-stop
@@ -2861,8 +2861,8 @@ fn handle_default_signal(sig: i32) {
                 }
             });
             match group_code {
-                Some(code) => crate::process::exit::do_exit_group(code),
-                None => crate::process::exit::do_exit_group(-(sig as i32)),
+                Some(code) => crate::process::hotpath::do_exit_group(code),
+                None => crate::process::hotpath::do_exit_group(-(sig as i32)),
             }
         }
     }
@@ -2990,8 +2990,8 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     // free_task_slot fired on a task still linked in the pid hash and its
     // parent's child list — the slim4 fio-corruption regression (freed
     // task read as pid=0xdeadbeef in pid-1's wait4 walk).
-    let task_ref = match crate::process::task_ref::TaskRef::from_pinned(
-        crate::process::pid_hash::pid_hash_lookup_pinned(pid),
+    let task_ref = match crate::process::types::TaskRef::from_pinned(
+        crate::process::hotpath::pid_hash_lookup_pinned(pid),
     ) {
         Some(t) => t,
         None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
@@ -3084,8 +3084,8 @@ fn send_signal_with_info_g(pid: u32, info: SigInfo, group: i32) -> Result<(), i3
     // owns the pin and releases it once in Drop — NO manual task_put
     // (the double release was the slim4 fio-corruption regression;
     // see send_signal_g).
-    let task_ref = match crate::process::task_ref::TaskRef::from_pinned(
-        crate::process::pid_hash::pid_hash_lookup_pinned(pid),
+    let task_ref = match crate::process::types::TaskRef::from_pinned(
+        crate::process::hotpath::pid_hash_lookup_pinned(pid),
     ) {
         Some(t) => t,
         None => return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32()),
@@ -3101,15 +3101,15 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
     crate::api::signal::send_to_pgid(pgid, sig)
 }
 
-pub fn park_stopped_task(task: *mut crate::process::task::Task) {
-    use crate::process::task::TaskState;
+pub fn park_stopped_task(task: *mut crate::process::types::Task) {
+    use crate::process::types::TaskState;
 
     // SAFETY (the one adopt edge): park_stopped_task parks the CURRENT
     // task; the running task's slot cannot be freed while this CPU
     // executes it, across every schedule() in the loop below — the
     // running-task contract extended to the park window because the
     // parker IS the owner.
-    let t = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+    let t = match unsafe { crate::process::types::TaskBorrow::from_raw(task) } {
         Some(t) => t,
         None => return,
     };
@@ -3136,7 +3136,7 @@ pub fn park_stopped_task(task: *mut crate::process::task::Task) {
 /// SIGNAL_UNKILLABLE on every pid-namespace init — a container's pid 1
 /// survives kill(1, SIGKILL) from INSIDE the namespace just like the
 /// global init survives broadcast kills (LTP pidns04).
-fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
+fn is_unkillable_init(t: &crate::process::types::Task) -> bool {
     if t.pid() == 1 && t.tgid() == 1 {
         return true;
     }
@@ -3302,7 +3302,7 @@ pub fn signal_pending() -> bool {
 /// - Wake up parent process to handle SIGCHLD in `do_exit()`
 /// - Any scenario requiring asynchronous wake up of sleeping process
 ///
-pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate::process::task::TaskState) -> bool {
+pub fn signal_wake_up_state(task: *mut crate::process::types::Task, _state: crate::process::types::TaskState) -> bool {
     if task.is_null() {
         return false;
     }
@@ -3311,7 +3311,7 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
     // current task, a pid-hash pin, or a tree-lock-protected parent) —
     // the same short-read contract TaskBorrow documents; the wake below
     // does not yield, so the borrow lives to its end.
-    let t = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+    let t = match unsafe { crate::process::types::TaskBorrow::from_raw(task) } {
         Some(t) => t,
         None => return false,
     };
@@ -3343,7 +3343,7 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
         // Task::wake_up is the safe-enqueue entry (its GRQ-locked
         // re-check owns the exclusion); the raw hand-off stays the wake
         // path's interface.
-        crate::process::Task::wake_up(task);
+        crate::process::types::Task::wake_up(task);
 
         true
     } else {
@@ -3362,7 +3362,7 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
 /// # Returns
 /// * `true` - Successfully woke up
 /// * `false` - Invalid pointer
-pub fn signal_wake_up(task: *mut crate::process::task::Task) -> bool {
-    signal_wake_up_state(task, crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE))
+pub fn signal_wake_up(task: *mut crate::process::types::Task) -> bool {
+    signal_wake_up_state(task, crate::process::types::TaskState::new(TaskState::INTERRUPTIBLE))
 }
 

@@ -32,7 +32,7 @@
 //! audited TCB. Nothing here grows domain logic — the process semantics
 //! stay in the service files; only the pointer discipline lives here.
 
-use super::task::Task;
+use super::types::Task;
 
 /// Borrow a live task immutably.
 ///
@@ -340,7 +340,7 @@ pub fn apppark_rets(t: &Task) {
 #[inline]
 pub fn freelist_next(entry: *mut u8) -> *mut u8 {
     // SAFETY: INV-PROC-KSTACK-1 — entry is a linked, dead stack bottom.
-    unsafe { (*(entry as *mut super::task::FreeStackEntry)).next as *mut u8 }
+    unsafe { (*(entry as *mut super::types::FreeStackEntry)).next as *mut u8 }
 }
 
 /// Write a free-stack entry's next pointer (the push-side linkage).
@@ -351,7 +351,7 @@ pub fn freelist_next(entry: *mut u8) -> *mut u8 {
 pub fn freelist_link(entry: *mut u8, next: *mut u8) {
     // SAFETY: INV-PROC-KSTACK-1 — dead stack bottom, lock-held linkage.
     unsafe {
-        (*(entry as *mut super::task::FreeStackEntry)).next = next as *mut super::task::FreeStackEntry;
+        (*(entry as *mut super::types::FreeStackEntry)).next = next as *mut super::types::FreeStackEntry;
     }
 }
 
@@ -412,11 +412,11 @@ pub fn write_volatile_u64(addr: *mut u64, v: u64) {
 // KSTACK_BLOCKS), which serialize every dereference — the same words
 // the pre-conversion comments at the types argued.
 // SAFETY: StackCache's raw head is managed only under STACK_CACHE.
-unsafe impl Send for super::task::StackCache {}
+unsafe impl Send for super::types::StackCache {}
 // SAFETY: the raw block bases are only ever dereferenced as stack
 // storage handed out one slot at a time under the KSTACK_BLOCKS lock.
 #[cfg(target_arch = "x86_64")]
-unsafe impl Send for crate::process::task::KstackBlocks {}
+unsafe impl Send for crate::process::types::KstackBlocks {}
 
 /// Volatile read of one aligned u32 (poison-canary screens).
 ///
@@ -1001,9 +1001,9 @@ pub fn page_refcount(pg: *mut crate::mm::page_desc::Page) -> Option<i32> {
 // SAFETY: WaitQueueHead uses internal Mutex/Spinlock synchronization;
 // the *mut Task entries are only dereferenced under the queue lock and
 // the scheduler's park/wake protocol.
-unsafe impl Send for crate::process::wait::WaitQueueHead {}
+unsafe impl Send for crate::process::types::WaitQueueHead {}
 // SAFETY: same lock discipline across CPUs.
-unsafe impl Sync for crate::process::wait::WaitQueueHead {}
+unsafe impl Sync for crate::process::types::WaitQueueHead {}
 
 // ---- pid-hash chain edges -----------------------------------------------
 // The bucket chains are raw singly-linked Task lists whose link words

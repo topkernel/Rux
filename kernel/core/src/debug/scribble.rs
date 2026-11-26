@@ -30,7 +30,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 pub const SCRIBBLE_SLOTS: usize = 512;
 
@@ -767,7 +767,7 @@ pub fn register(task: *mut Task) {
                     puts(b" ret=");
                     put_hex((task as usize + OFF_RET) as u64);
                     puts(b" state=");
-                    put_hex((task as usize + crate::process::task::TASK_STATE) as u64);
+                    put_hex((task as usize + crate::process::hotpath::TASK_STATE) as u64);
                     puts(b"\n");
                     scribble_park(task as u64);
                 }
@@ -899,9 +899,9 @@ pub fn verify() {
         {
             let st = unsafe { (*task).state().bits() };
             if st
-                & (crate::process::task::TaskState::TASK_NEW
-                    | crate::process::task::TaskState::ZOMBIE
-                    | crate::process::task::TaskState::DEAD)
+                & (crate::process::types::TaskState::TASK_NEW
+                    | crate::process::types::TaskState::ZOMBIE
+                    | crate::process::types::TaskState::DEAD)
                 != 0
             {
                 continue;
@@ -981,7 +981,7 @@ pub fn verify() {
             && unsafe {
                 let hts = (*task).hung_task_since.load(Ordering::Acquire);
                 let a0 = core::ptr::read_volatile(
-                    (task as usize + crate::process::task::TI_A0) as *const u64,
+                    (task as usize + crate::process::hotpath::TI_A0) as *const u64,
                 );
                 hts >> 48 != 0 || a0 != 0
             }
@@ -996,7 +996,7 @@ pub fn verify() {
                 put_hex((*task).hung_task_since.load(Ordering::Acquire));
                 puts(b" a0=");
                 put_hex(core::ptr::read_volatile(
-                    (task as usize + crate::process::task::TI_A0) as *const u64,
+                    (task as usize + crate::process::hotpath::TI_A0) as *const u64,
                 ));
                 puts(b" comm=");
                 for &b in (*task).comm() {
@@ -1062,9 +1062,9 @@ pub fn verify() {
         let st = unsafe { (*task).state().bits() };
         let on_cpu = unsafe { (*task).on_cpu() };
         if !on_cpu
-            && st != crate::process::task::TaskState::RUNNING
-            && (st == crate::process::task::TaskState::INTERRUPTIBLE
-                || st == crate::process::task::TaskState::UNINTERRUPTIBLE)
+            && st != crate::process::types::TaskState::RUNNING
+            && (st == crate::process::types::TaskState::INTERRUPTIBLE
+                || st == crate::process::types::TaskState::UNINTERRUPTIBLE)
         {
             if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
                 let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
@@ -1189,7 +1189,7 @@ pub fn verify_consistency() {
         let (on_rq, on_cpu, state) = unsafe {
             ((*task).sched_entity().is_on_rq(), (*task).on_cpu(), (*task).state().bits())
         };
-        let running = state == crate::process::task::TaskState::RUNNING;
+        let running = state == crate::process::types::TaskState::RUNNING;
         const CLS_A: &[u8] = b"onrq+oncpu";
         const CLS_B: &[u8] = b"onrq+sleeping";
         const CLS_C: &[u8] = b"phantom-run";

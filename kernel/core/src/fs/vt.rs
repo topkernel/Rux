@@ -34,7 +34,7 @@
 // discipline.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::Spinlock;
 
 /// Highest VT number this kernel provides (/dev/tty1..=tty7).

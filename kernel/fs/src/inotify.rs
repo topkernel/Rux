@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use rux::fs::file::{File, FileOps, FileFlags, get_file_fd_install};
 use rux::fs::inode::Inode;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // ============================================================================
@@ -735,12 +735,12 @@ pub static INOTIFY_OPS: FileOps = FileOps::builder()
 /// paths do wait_queue.wake_up_all() on this same queue, so a poll/select
 /// waiter registered here is woken when events arrive instead of by the
 /// timed re-check slice.
-pub fn inotify_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+pub fn inotify_poll_wait(file: &File, task: *mut crate::process::types::Task) -> bool {
     match instance_of(file) {
         Some(instance) => {
             instance
                 .wait_queue
-                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+                .add(crate::process::types::WaitQueueEntry::new(task, false));
             true
         }
         None => false,
@@ -748,7 +748,7 @@ pub fn inotify_poll_wait(file: &File, task: *mut crate::process::task::Task) -> 
 }
 
 /// Remove a registration added by inotify_poll_wait.
-pub fn inotify_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+pub fn inotify_poll_unwait(file: &File, task: *mut crate::process::types::Task) {
     if let Some(instance) = instance_of(file) {
         instance.wait_queue.remove(task);
     }

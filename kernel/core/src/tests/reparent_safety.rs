@@ -8,8 +8,8 @@
 //! (gnome-shell gjs/mozjs heap-cage SIGSEGV at guest+998s).
 
 use crate::println;
-use crate::process::Task;
-use crate::process::task::SchedPolicy;
+use crate::process::types::Task;
+use crate::process::types::SchedPolicy;
 use crate::sched::hotpath::TASK_POISON;
 use alloc::boxed::Box;
 use super::{test_pass, test_fail, test_skip, test_group_start};
@@ -52,11 +52,11 @@ pub fn test_plausible_task_ptr() {
     let base = &mut *t as *mut Task as *mut u8;
     unsafe {
         core::ptr::write_volatile(
-            base.add(crate::process::task::task_offsets::TASK_STATE) as *mut u32,
+            base.add(crate::process::hotpath::task_offsets::TASK_STATE) as *mut u32,
             TASK_POISON,
         );
         core::ptr::write_volatile(
-            base.add(crate::process::task::task_offsets::TASK_PID) as *mut u32,
+            base.add(crate::process::hotpath::task_offsets::TASK_PID) as *mut u32,
             TASK_POISON,
         );
     }
@@ -100,7 +100,7 @@ pub fn test_move_child() {
         // Simulate the concurrent reaper: unlink under the tree lock the
         // way release_task/claim does, then move — must refuse.
         {
-            let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
+            let _lock = crate::process::hotpath::PROCESS_TREE_LOCK.lock();
             if Task::claim_child_locked(child) {
                 test_pass("claim of linked child succeeds");
             } else {
@@ -146,7 +146,7 @@ pub fn test_move_child() {
         }
 
         // Cleanup: unlink from dest, then drop the heap Tasks. free via Box.
-        let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
+        let _lock = crate::process::hotpath::PROCESS_TREE_LOCK.lock();
         let claimed = Task::claim_child_locked(child);
         drop(_lock);
         if claimed {
@@ -184,7 +184,7 @@ pub fn test_claim_child() {
         (*parent).add_child(z2);
 
         let (c1, c2, c3) = {
-            let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
+            let _lock = crate::process::hotpath::PROCESS_TREE_LOCK.lock();
             // First scanner claims z1; a second scanner must fail.
             let c1 = Task::claim_child_locked(z1);
             let c2 = Task::claim_child_locked(z1);

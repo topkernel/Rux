@@ -10,7 +10,7 @@
 //! pick-state abort check → prev FPU bookkeeping → switch_mm (TTBR0_EL1
 //! root + ASID) → __switch_to.
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 // Field offsets for the asm (thread::ThreadStruct)
 use super::thread::{
@@ -188,10 +188,10 @@ __switch_to:
     wfe
     b .Lswitch_sp_bad
 "#,
-    t_off = const crate::process::task::task_offsets::TASK_THREAD,
-    pid_off = const crate::process::task::task_offsets::TASK_PID,
-    pick_off = const crate::process::task::task_offsets::TI_PICK_STATE,
-    on_cpu_off = const crate::process::task::task_offsets::TI_ON_CPU,
+    t_off = const crate::process::hotpath::task_offsets::TASK_THREAD,
+    pid_off = const crate::process::hotpath::task_offsets::TASK_PID,
+    pick_off = const crate::process::hotpath::task_offsets::TI_PICK_STATE,
+    on_cpu_off = const crate::process::hotpath::task_offsets::TI_ON_CPU,
     s_off = const THREAD_S0,
     sp_off = const THREAD_SP,
     ra_off = const THREAD_RA,
@@ -248,7 +248,7 @@ el0_entry_fpsimd_save:
     str w16, [x17, #4]
 1:  ret
 "#,
-    t_off = const crate::process::task::task_offsets::TASK_THREAD,
+    t_off = const crate::process::hotpath::task_offsets::TASK_THREAD,
     uv_off = const THREAD_USER_FPSIMD,
 );
 
@@ -288,7 +288,7 @@ el0_exit_fpsimd_restore:
     msr fpsr, x16
 1:  ret
 "#,
-    t_off = const crate::process::task::task_offsets::TASK_THREAD,
+    t_off = const crate::process::hotpath::task_offsets::TASK_THREAD,
     uv_off = const THREAD_USER_FPSIMD,
 );
 
@@ -402,7 +402,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // R56-heal early revoked-pick check (generic pick-state protocol)
     if (*next).pid() != 0 {
         let st = next.pick_state();
-        if st != crate::process::task::PICK_PICKED {
+        if st != crate::process::hotpath::PICK_PICKED {
             aarch64_switch_abort(prev, next);
             return;
         }

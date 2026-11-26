@@ -25,7 +25,7 @@
 //!   arch uaccess accessors (fault-isolated); caller holds the hash
 //!   bucket that serializes kernel-side accessors of the word.
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 // ---------------------------------------------------------------------------
 // INV-SY-1: cross-task user-memory diagnostic reads

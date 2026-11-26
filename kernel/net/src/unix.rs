@@ -49,7 +49,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize
 
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 /// Address family
@@ -598,7 +598,7 @@ fn current_unix_cred() -> UnixCred {
         Some(task) => {
             let c = task.cred();
             UnixCred {
-                pid: crate::process::current_pid() as i32,
+                pid: crate::process::hotpath::current_pid() as i32,
                 uid: c.uid,
                 gid: c.gid,
             }
@@ -972,7 +972,7 @@ fn unix_wait_round(
             crate::pr_warn!(
                 "WQ-PARK #{} pid={} sock={:#x} segs={} kind={:?} jif={} dt={}",
                 n,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 sock_of_queue,
                 q.recv_queue.lock().segs.len(),
                 q.kind,
@@ -1451,7 +1451,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
             "unix: BIND raw={:?} key={:?} by pid={}",
             key_shown(&addr.key),
             key_shown(&key),
-            crate::process::current_pid()
+            crate::process::hotpath::current_pid()
         );
     }
     // bound_name stays the sun_path the caller gave (display/reporting);
@@ -1592,7 +1592,7 @@ pub fn unix_connect(
                             "unix: connect REFUSED no-entry key={:?} raw={:?} by pid={}",
                             key_shown(&lookup_key),
                             key_shown(&addr.key),
-                            crate::process::current_pid()
+                            crate::process::hotpath::current_pid()
                         );
                     }
                     return Err(-111); // ECONNREFUSED
@@ -1678,7 +1678,7 @@ pub fn unix_connect(
                     crate::pr_warn!(
                         "PCTL-CONNECT #{} pid={} qlen={}",
                         n,
-                        crate::process::current_pid(),
+                        crate::process::hotpath::current_pid(),
                         server.accept_queue.lock().len()
                     );
                 }
@@ -1723,7 +1723,7 @@ pub fn unix_connect(
                     let awok = server.wait_queue.wake_up_all();
                     crate::pr_warn!(
                         "socksnap: CONNECT pid={} -> {} (server fid={:#x}) wq=({},{}) woke={}",
-                        crate::process::current_pid(),
+                        crate::process::hotpath::current_pid(),
                         key_shown(name.as_deref().unwrap_or("?")),
                         fid,
                         tot,
@@ -1967,7 +1967,7 @@ pub fn unix_send(
             let (qb, qt, _c, ql) = sock.diag_snapshot();
             crate::pr_warn!(
                 "unixsend-loop: pid {} rounds={} dgram_peer={} self(q={}B true={} qlen={}) len={} cap={} nonblock={}",
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 rounds,
                 tqp,
                 qb,
@@ -2109,7 +2109,7 @@ pub fn unix_send(
                 let name = target.bound_name.lock().clone();
                 crate::pr_warn!(
                     "socksnap: REQ pid={} -> {} len={} hex={} txt={}",
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     key_shown(name.as_deref().unwrap_or("?")),
                     data.len(),
                     hex,
@@ -2175,7 +2175,7 @@ pub fn unix_send(
                 if !data.is_empty() && data.len() >= 12 {
                     let is_param_listener =
                         target.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0;
-                    let sender_pid = crate::process::current_pid();
+                    let sender_pid = crate::process::hotpath::current_pid();
                     // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
                     // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
                     // msgSize == data.len() and key starts printable.
@@ -2881,7 +2881,7 @@ pub fn unix_recv(
                 // 110th: gated behind rux:pctlmon (retired debug=pctlmon) (the switch built for
                 // exactly this tap) — ~132 lines rode every perf boot,
                 // each costing UART emit + hilogd drain.
-                if copied >= 12 && crate::process::current_pid() == 1 && pctlmon_on() {
+                if copied >= 12 && crate::process::hotpath::current_pid() == 1 && pctlmon_on() {
                     let mtype = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                     if mtype <= 5 && buf[12] >= b'a' && buf[12] <= b'z' {
                         static PCTL_R_N: core::sync::atomic::AtomicUsize =
@@ -3068,7 +3068,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
             crate::pr_warn!(
                 "PCTL-CLOSE #{} pid={} fid={:#x} queued={}B/{}segs peer_alive={}",
                 n,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 sock.file_id.load(Ordering::Acquire),
                 qb,
                 ql,
@@ -3742,7 +3742,7 @@ pub static UNIX_SOCKET_OPS: FileOps = FileOps::builder()
 /// unix_dgram_peer_wake relay — which would additionally route them to a
 /// dgram POLLOUT poller's own queue — is not ported; epoll watchers are
 /// covered by the direct epoll_notify_file re-arm on every drain).
-pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+pub fn unix_poll_wait(file: &File, task: *mut crate::process::types::Task) -> bool {
     // SAFETY: ops identity was verified by the dispatcher (UNIX_SOCKET_OPS)
     // before this is called; private_data holds Arc::into_raw(UnixSocket)
     // and the caller's Arc<File> keeps the socket alive.
@@ -3750,7 +3750,7 @@ pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> boo
         Some(socket) => {
             socket
                 .wait_queue
-                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+                .add(crate::process::types::WaitQueueEntry::new(task, false));
             true
         }
         None => false,
@@ -3758,7 +3758,7 @@ pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> boo
 }
 
 /// Remove a registration added by unix_poll_wait.
-pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+pub fn unix_poll_unwait(file: &File, task: *mut crate::process::types::Task) {
     // SAFETY: same identity/ownership contract as unix_poll_wait.
     if let Some(socket) = unix_of_file(file) {
         socket.wait_queue.remove(task);
@@ -3858,7 +3858,7 @@ fn unix_socket_install(
             crate::pr_warn!(
                 "PCTL-ACCEPT #{} pid={} fd={} fid={:#x}",
                 n,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 fd,
                 file.file_id
             );
@@ -4195,7 +4195,7 @@ pub fn unix_park_audit() {
         if tk.pid() == 0 {
             return;
         }
-        if !tk.state().contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+        if !tk.state().contains(crate::process::types::TaskState::INTERRUPTIBLE) {
             return;
         }
         let Some(top) = tk.kernel_stack_top_checked() else {

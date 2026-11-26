@@ -14,7 +14,7 @@
 
 use crate::arch::pt_regs::{PtRegs, SR_PIE, SR_FS_INITIAL, SR_FS as SR_FS_MASK};
 use crate::arch::mm::VirtAddr;
-use crate::process::task::Task;
+use crate::process::types::Task;
 use core::arch::asm;
 
 /// Start new user program

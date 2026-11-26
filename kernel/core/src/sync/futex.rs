@@ -37,8 +37,8 @@
 
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::AtomicU32;
-use crate::process::Task;
-use crate::process::task::TaskState;
+use crate::process::types::Task;
+use crate::process::types::TaskState;
 use crate::errno::constants::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
 
 /// FUTEX opcodes
@@ -1254,11 +1254,11 @@ pub static OH68_OWNER_CTX: core::sync::atomic::AtomicU64 =
 pub static FUXWATCH_OWNER_TASK: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 #[cfg(target_arch = "x86_64")]
-pub fn oh68_fs_base(tk: &crate::process::Task) -> u64 {
+pub fn oh68_fs_base(tk: &crate::process::types::Task) -> u64 {
     tk.thread().fs_base
 }
 #[cfg(not(target_arch = "x86_64"))]
-pub fn oh68_fs_base(_tk: &crate::process::Task) -> u64 {
+pub fn oh68_fs_base(_tk: &crate::process::types::Task) -> u64 {
     0
 }
 
@@ -2252,7 +2252,7 @@ pub fn futex_stuck_census() {
             return;
         }
         let st_bits = tk.state().bits();
-        let run = st_bits == crate::process::task::TaskState::RUNNING
+        let run = st_bits == crate::process::types::TaskState::RUNNING
             || tk.on_cpu()
             || tk.sched_entity().is_on_rq();
         let fux = tk.ext.futex_wait_enqueued.load(Relaxed);
@@ -3026,7 +3026,7 @@ pub fn futex_stuck_census() {
                         return;
                     }
                     let st_bits = tk.state().bits();
-                    let run = st_bits == crate::process::task::TaskState::RUNNING
+                    let run = st_bits == crate::process::types::TaskState::RUNNING
                         || tk.on_cpu()
                         || tk.sched_entity().is_on_rq();
                     if run {
@@ -3215,7 +3215,7 @@ fn free_waiter(index: usize) {
 /// slot frees while we are parked; returns immediately if no task/timer
 /// context is available (caller retries anyway).
 fn pool_full_backoff() {
-    use crate::process::task::{Task, TaskState};
+    use crate::process::types::{Task, TaskState};
 
     let current = match crate::sched::hotpath::current() {
         Some(c) => c as *mut Task,
@@ -4463,7 +4463,7 @@ pub fn futex_requeue(
         for task in &wake_list {
             if !task.is_null() {
                 let pid = crate::sched::r#unsafe::task_shared(*task).pid();
-                let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+                let fresh = crate::process::hotpath::pid_hash_lookup(pid);
                 if fresh == *task {
                     Task::wake_up_in_futex_bucket(*task, &head1.proof());
                 }
@@ -4618,7 +4618,7 @@ pub fn futex_requeue(
         for task in &wake_list {
             if !task.is_null() {
                 let pid = crate::sched::r#unsafe::task_shared(*task).pid();
-                let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+                let fresh = crate::process::hotpath::pid_hash_lookup(pid);
                 if fresh == *task {
                     Task::wake_up_in_futex_bucket(*task, &guard_lo.proof());
                 }
@@ -5607,7 +5607,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         // between the dlopen cascade and the park.
                         {
                             use core::sync::atomic::Ordering::Relaxed;
-                            const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                            const RL: usize = crate::process::types::LAST_CALLS_LEN;
                             let cur = tk.ext.last_calls_cur.load(Relaxed);
                             let mut s2 = alloc::string::String::new();
                             use core::fmt::Write;
@@ -5633,8 +5633,8 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         {
                             use core::fmt::Write;
                             use core::sync::atomic::Ordering::Relaxed;
-                            const RL: usize = crate::process::task::INIT_CALLS_LEN;
-                            const BL: usize = crate::process::task::BIRTH_CALLS_LEN;
+                            const RL: usize = crate::process::types::INIT_CALLS_LEN;
+                            const BL: usize = crate::process::types::BIRTH_CALLS_LEN;
                             let cur = tk.ext.init_calls_cur.load(Relaxed);
                             // sc143: 512 entries in chunks of 128 so a
                             // single UART flush cannot gut the whole line.
@@ -6175,7 +6175,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     if n < 2 {
                         use core::fmt::Write;
                         use core::sync::atomic::Ordering::Relaxed;
-                        const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                        const RL: usize = crate::process::types::LAST_CALLS_LEN;
                         let cur = tk.ext.last_calls_cur.load(Relaxed);
                         let mut s2 = alloc::string::String::new();
                         let _ = write!(s2, "FTWAIT calls:");

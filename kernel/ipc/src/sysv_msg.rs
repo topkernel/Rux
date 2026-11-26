@@ -7,7 +7,7 @@
 //! Implements msgget, msgctl, msgsnd, msgrcv following the Linux kernel design.
 
 use crate::arch::uaccess::access_ok;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
@@ -751,8 +751,8 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 }
                 // sched::current() returns a live &mut Task — the
                 // historical raw-deref unsafe wrapper was vestigial.
-                current.set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::RUNNING,
+                current.set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::RUNNING,
                 ));
                 crate::sched::hotpath::dequeue_task(&*current);
                 return 0;
@@ -770,7 +770,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                     entry.inner.wq_recv.remove(cur as *mut _);
                 }
             }
-            (*cur).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+            (*cur).set_state(crate::process::types::TaskState::new(crate::process::types::TaskState::RUNNING));
             crate::sched::hotpath::dequeue_task(&*cur);
             return -(errno::EINTR as i64);
         }
@@ -977,8 +977,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 }
                 // sched::current() returns a live &mut Task — the
                 // historical raw-deref unsafe wrapper was vestigial.
-                current.set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::RUNNING,
+                current.set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::RUNNING,
                 ));
                 crate::sched::hotpath::dequeue_task(&*current);
                 continue;
@@ -996,7 +996,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     entry.inner.wq_recv.remove(cur as *mut _);
                 }
             }
-            (*cur).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+            (*cur).set_state(crate::process::types::TaskState::new(crate::process::types::TaskState::RUNNING));
             crate::sched::hotpath::dequeue_task(&*cur);
             return -(errno::EINTR as i64);
         }

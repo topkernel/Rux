@@ -744,7 +744,7 @@ pub fn console_drain_pending(budget: usize) -> usize {
 
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     crate::debug::syscost::note_printk_ring(text.len()); // syscost probe
-    let pid = crate::process::current_pid() as u32;
+    let pid = crate::process::hotpath::current_pid() as u32;
     // Real CPU id (review批次8: hard-coded 0 attributed every message to
     // CPU 0, hiding cross-CPU issues in the logs).
     let cpu_id: u16 = (crate::arch::cpu_id() as u16).min(u16::MAX);
@@ -1520,8 +1520,8 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 /// Readers blocked in /dev/kmsg read waiting for the next record.
 /// Woken from write_to_ring_buffer after each record lands (printk
 /// context — IRQs may be off; WaitQueueHead takes irqsave locks).
-static KMSG_READ_WQ: crate::process::wait::WaitQueueHead =
-    crate::process::wait::WaitQueueHead::new();
+static KMSG_READ_WQ: crate::process::types::WaitQueueHead =
+    crate::process::types::WaitQueueHead::new();
 
 /// Deferred /dev/kmsg reader wake (grq-lock-1st).
 ///
@@ -1980,7 +1980,7 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 /// the only waker, state-first re-check, NEW-C2 self-dequeue on a
 /// racing wake). Returns false when no task/timer was available.
 fn kmsg_poll_sleep(ms: u64) -> bool {
-    use crate::process::task::{Task, TaskState};
+    use crate::process::types::{Task, TaskState};
 
     let target =
         crate::timer::get_jiffies() + crate::timer::msecs_to_jiffies(ms);
@@ -2335,7 +2335,7 @@ mod persistent_log {
     /// wake discipline — a one-shot timer as the waker so the sleep is
     /// real, not wake-by-luck).
     extern "C" fn klogd_fn(_arg: *mut core::ffi::c_void) -> i32 {
-        use crate::process::task::TaskState;
+        use crate::process::types::TaskState;
         let interval_jiffies =
             (FLUSH_PERIOD_SECS * crate::config::KERNEL_HZ as u64).max(1);
         loop {

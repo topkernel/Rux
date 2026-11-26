@@ -39,9 +39,9 @@ pub enum HookId {
 pub struct HookArgs {
     pub hook_id: HookId,
     /// Current task's credentials.
-    pub cred: *const crate::process::task::Cred,
+    pub cred: *const crate::process::types::Cred,
     /// Target task's credentials (for signal, ptrace).
-    pub target_cred: *const crate::process::task::Cred,
+    pub target_cred: *const crate::process::types::Cred,
     /// Capability number (for HookId::Capable).
     pub cap: u32,
     /// Inode owner UID (for HookId::InodePermission).
@@ -167,7 +167,7 @@ pub fn security_hook_call(hook: HookId, args: &mut HookArgs) -> LsmResult {
 /// Check if a credential has the given capability, going through the LSM chain.
 ///
 /// Returns 0 if the capability is granted, -EPERM if denied.
-pub fn security_capable(cred: &crate::process::task::Cred, cap: u32) -> LsmResult {
+pub fn security_capable(cred: &crate::process::types::Cred, cap: u32) -> LsmResult {
     let mut args = HookArgs::new(HookId::Capable);
     args.cred = cred;
     args.cap = cap;
@@ -178,8 +178,8 @@ pub fn security_capable(cred: &crate::process::task::Cred, cap: u32) -> LsmResul
 ///
 /// Returns 0 if allowed, -EPERM if denied.
 pub fn security_signal_send(
-    cred: &crate::process::task::Cred,
-    target_cred: &crate::process::task::Cred,
+    cred: &crate::process::types::Cred,
+    target_cred: &crate::process::types::Cred,
     sig: i32,
 ) -> LsmResult {
     let mut args = HookArgs::new(HookId::SignalSend);

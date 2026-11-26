@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering};
-use crate::process::task::{Task, SchedPolicy};
+use rux::process::types::{Task, SchedPolicy};
 use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 use crate::list::ListHead;
 use crate::sched::{types::RtRunQueue, types::SchedRtEntity, types::MAX_RT_PRIO, hotpath::RR_TIMESLICE_TICKS};

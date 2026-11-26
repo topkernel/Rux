@@ -59,7 +59,7 @@ pub fn init() {
 /// Wakes every `HUNG_TASK_CHECK_INTERVAL_SECS` via a one-shot kernel timer
 /// and scans all tasks (pid-hash traversal — never the pid-slot array).
 extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::TaskState;
+    use crate::process::types::TaskState;
 
     // Check interval in jiffies (timeout/2, at least one tick).
     let interval_jiffies = (HUNG_TASK_CHECK_INTERVAL_SECS
@@ -156,7 +156,7 @@ fn check_tasks() {
             let pid = task_ref.pid();
 
             // Only check uninterruptible tasks
-            if !state.contains(crate::process::task::TaskState::UNINTERRUPTIBLE) {
+            if !state.contains(crate::process::types::TaskState::UNINTERRUPTIBLE) {
                 // Not in D-state: reset tracking
                 task_ref.hung_task_since.store(0, Ordering::Release);
                 return;
@@ -187,7 +187,7 @@ fn check_tasks() {
 }
 
 /// Report a hung task.
-fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
+fn report_hung_task(task_ref: &crate::process::types::Task, elapsed_secs: u64) {
     let mut w = ConsoleWriter::new();
 
     // rwlock-livelock: comm was a pid placeholder — the ub2404 wedge left
@@ -211,14 +211,14 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
     // vfork linkage) and up to 8 kernel-text words from its parked stack;
     // symbolized offline these name the wait site directly.
     {
-        use crate::process::task::Task;
+        use crate::process::types::Task;
         let t: &Task = task_ref;
         let claim = t.running_on_cpu.load(Ordering::Acquire);
         // SAFETY (one adopt edge): the vfork parent tree handle under the
         // caller's softirq context — TaskBorrow's short-read contract.
         let vfork_ppid = t
             .vfork_parent_ptr()
-            .and_then(|p| unsafe { crate::process::task_ref::TaskBorrow::from_raw(p as *mut crate::process::task::Task) })
+            .and_then(|p| unsafe { crate::process::types::TaskBorrow::from_raw(p as *mut crate::process::types::Task) })
             .map(|p| p.pid())
             .unwrap_or(0);
         let _ = write!(

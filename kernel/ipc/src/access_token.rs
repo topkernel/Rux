@@ -184,7 +184,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     // port which already uses task.tgid().
     let pid = crate::sched::hotpath::current()
         .map(|t| t.tgid() as u32)
-        .unwrap_or_else(crate::process::current_pid);
+        .unwrap_or_else(crate::process::hotpath::current_pid);
     // rux:syscalltrace (retired debug=syscalltrace): the per-ioctl trace. Ungated this is the
     // highest-rate print of an OH boot — hdf_devmgr polls
     // GET_PERMISSION/GET_TOKENID in a tight loop from early boot on
@@ -226,7 +226,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             // OH requires root / the device owner (uid 3020) /
             // nwebspawn+render. We accept root and 3020 — init's service
             // children run as root until their setuid.
-            let uid = crate::process::current_task()
+            let uid = crate::process::hotpath::current_task()
                 .map(|t| t.cred().uid)
                 .unwrap_or(0);
             if uid != 0 && uid != 3020 {

@@ -12,7 +12,7 @@ use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use crate::sync::spinlock::Spinlock;
 
-use crate::task::{self, Task};
+use rux::process::types::Task;
 use crate::sched;
 
 // ============================================================================
@@ -68,7 +68,7 @@ pub fn kernel_thread_create(
     let task = crate::r#unsafe::borrow_task_mut(task_ptr);
 
     // 2. Mark as kernel thread
-    task.set_ti_flag(task::task_flags::TaskFlags::PF_KTHREAD.bits());
+    task.set_ti_flag(rux::process::types::TaskFlags::PF_KTHREAD.bits());
 
     // 3. Compute pt_regs address before mutable borrow (pt_regs takes &self)
     let pt_regs_ptr = task.pt_regs();
@@ -219,7 +219,7 @@ pub fn kthread_enqueue(task: &'static mut Task) -> Option<&'static mut Task> {
         // unwind mirrors the fork.rs failure paths (hash first, then the
         // stack — R7-B3/R33-pre discipline).
         {
-            crate::pid_hash::pid_hash_remove(pid);
+            rux::process::hotpath::pid_hash_remove(pid);
             crate::r#unsafe::borrow_task_mut(task_ptr).free_kernel_stack();
             crate::pid::free_pid(pid);
             crate::sched::hotpath::free_task_slot(task_ptr);

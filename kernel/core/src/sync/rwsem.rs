@@ -169,7 +169,7 @@ fn stall_report_ok() -> bool {
 
 /// One queued waiter (reference `struct rwsem_waiter`, rwsem.c:338).
 struct RwsemWaiter {
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     is_writer: bool,
     /// Jiffies deadline after which this waiter may demand HANDOFF.
     timeout: u64,
@@ -317,7 +317,7 @@ impl RwSemaphore {
         // rwsem_read_trylock (rwsem.c:241-254)
         let count = self.count.fetch_add(READER_BIAS, Ordering::Acquire);
         if count & READ_FAILED_MASK == 0 {
-            self.set_reader_owned(crate::process::current_pid());
+            self.set_reader_owned(crate::process::hotpath::current_pid());
             preempt_enable();
             return;
         }
@@ -335,7 +335,7 @@ impl RwSemaphore {
             .compare_exchange(0, WRITER_LOCKED, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            self.set_owner_writer(crate::process::current_pid());
+            self.set_owner_writer(crate::process::hotpath::current_pid());
             preempt_enable();
             return;
         }
@@ -356,7 +356,7 @@ impl RwSemaphore {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.set_reader_owned(crate::process::current_pid());
+                    self.set_reader_owned(crate::process::hotpath::current_pid());
                     return true;
                 }
                 Err(cur) => c = cur,
@@ -374,7 +374,7 @@ impl RwSemaphore {
             .compare_exchange(0, WRITER_LOCKED, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            self.set_owner_writer(crate::process::current_pid());
+            self.set_owner_writer(crate::process::hotpath::current_pid());
             true
         } else {
             false
@@ -452,7 +452,7 @@ impl RwSemaphore {
         &self,
         wake_type: WakeType,
         list: &mut alloc::vec::Vec<RwsemWaiter>,
-        wakers: &mut alloc::vec::Vec<*mut crate::process::Task>,
+        wakers: &mut alloc::vec::Vec<*mut crate::process::types::Task>,
     ) {
         // rwsem.c:427-441: writer at the head — mark it for wake; it
         // re-runs the acquire CAS itself, and until it runs, other
@@ -597,7 +597,7 @@ impl RwSemaphore {
         // Acquired — remove our entry and publish ownership
         // (rwsem.c:659-665).
         list.remove(index);
-        self.set_owner_writer(crate::process::current_pid());
+        self.set_owner_writer(crate::process::hotpath::current_pid());
         true
     }
 
@@ -678,7 +678,7 @@ impl RwSemaphore {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.set_owner_writer(crate::process::current_pid());
+                    self.set_owner_writer(crate::process::hotpath::current_pid());
                     return true;
                 }
                 Err(cur) => count = cur,
@@ -771,7 +771,7 @@ impl RwSemaphore {
 
         if !reader_stream && count & (WRITER_LOCKED | FLAG_HANDOFF) == 0 {
             // Steal: keep the bias we already added.
-            self.set_reader_owned(crate::process::current_pid());
+            self.set_reader_owned(crate::process::hotpath::current_pid());
             // First reader past queued waiters: hand the reader phase
             // to the queued readers too (rwsem.c:1023-1030).
             if rcnt == 1 && count & FLAG_WAITERS != 0 {
@@ -796,7 +796,7 @@ impl RwSemaphore {
         preempt_enable();
 
         let cur = match crate::sched::hotpath::current() {
-            Some(t) => t as *mut crate::process::Task,
+            Some(t) => t as *mut crate::process::types::Task,
             None => {
                 // Degradation (SleepMutex parity): no task context
                 // (early boot / secondary hart) — cannot sleep. Back
@@ -862,7 +862,7 @@ impl RwSemaphore {
             }
 
             if granted {
-                self.set_reader_owned(crate::process::current_pid());
+                self.set_reader_owned(crate::process::hotpath::current_pid());
                 // A concurrent grant's wake may have enqueued us
                 // while we never slept — undo (no-op otherwise).
                 crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
@@ -874,8 +874,8 @@ impl RwSemaphore {
             // wait_lock, so a racing grant's wake_up_process lands on
             // a sleeping-state task.
             {
-                crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::UNINTERRUPTIBLE,
+                crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::UNINTERRUPTIBLE,
                 ));
             }
             let granted_now = {
@@ -901,11 +901,11 @@ impl RwSemaphore {
             }
             if granted_now {
                 {
-                    crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::task::TaskState::new(
-                        crate::process::task::TaskState::RUNNING,
+                    crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::types::TaskState::new(
+                        crate::process::types::TaskState::RUNNING,
                     ));
                 }
-                self.set_reader_owned(crate::process::current_pid());
+                self.set_reader_owned(crate::process::hotpath::current_pid());
                 crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
                 return;
             }
@@ -922,7 +922,7 @@ impl RwSemaphore {
     fn cond_wake_waiter(
         &self,
         list: &mut alloc::vec::Vec<RwsemWaiter>,
-        wakers: &mut alloc::vec::Vec<*mut crate::process::Task>,
+        wakers: &mut alloc::vec::Vec<*mut crate::process::types::Task>,
     ) {
         let count = self.count.load(Ordering::Acquire);
         if count & WRITER_LOCKED != 0 {
@@ -948,7 +948,7 @@ impl RwSemaphore {
         }
 
         let cur = match crate::sched::hotpath::current() {
-            Some(t) => t as *mut crate::process::Task,
+            Some(t) => t as *mut crate::process::types::Task,
             None => {
                 // Degradation: no task context — pure spin.
                 loop {
@@ -1004,8 +1004,8 @@ impl RwSemaphore {
 
             // State-first + re-check, then sleep.
             {
-                crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::UNINTERRUPTIBLE,
+                crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::UNINTERRUPTIBLE,
                 ));
             }
             let acquired_now = {
@@ -1049,8 +1049,8 @@ impl RwSemaphore {
             }
             if acquired_now {
                 {
-                    crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::task::TaskState::new(
-                        crate::process::task::TaskState::RUNNING,
+                    crate::sched::r#unsafe::task_shared(cur).set_state(crate::process::types::TaskState::new(
+                        crate::process::types::TaskState::RUNNING,
                     ));
                 }
                 crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
@@ -1087,16 +1087,16 @@ impl RwSemaphore {
 // ==================== helpers ====================
 
 #[inline]
-fn pid_hash_lookup_pinned(pid: u32) -> *mut crate::process::Task {
+fn pid_hash_lookup_pinned(pid: u32) -> *mut crate::process::types::Task {
     if pid == 0 {
         return core::ptr::null_mut();
     }
-    crate::process::pid_hash::pid_hash_lookup_pinned(pid)
+    crate::process::hotpath::pid_hash_lookup_pinned(pid)
 }
 
 #[inline]
-fn task_put(t: *mut crate::process::Task) {
-    crate::process::task::Task::task_put(t);
+fn task_put(t: *mut crate::process::types::Task) {
+    crate::process::types::Task::task_put(t);
 }
 
 #[inline]

@@ -24,7 +24,7 @@ pub fn generic_permission(
     inode_uid: u32,
     inode_gid: u32,
     mask: u32,
-    cred: &crate::process::task::Cred,
+    cred: &crate::process::types::Cred,
 ) -> bool {
     // (perf-gap-hunt) Capability-only fast path: the capability LSM is
     // always registered (order 0) and is the ONLY module on the

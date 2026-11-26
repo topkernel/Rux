@@ -15,7 +15,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::process::task::Task;
+use rux::process::types::Task;
 use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
 
 /// Stop task scheduling class

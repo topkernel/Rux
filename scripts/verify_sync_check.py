@@ -1398,7 +1398,7 @@ MAPPINGS = [
     {
         "name": "process/exit_status",
         "verify": "kernel/verify/src/process/exit_status_test.rs",
-        "kernel": "kernel/core/src/process/exit.rs",
+        "kernel": "kernel/core/src/process/hotpath.rs",
         "type": None,  # POSIX wait status encoding extracted as standalone fns
         "compare": [],
         "skip": [],
@@ -1407,7 +1407,7 @@ MAPPINGS = [
     {
         "name": "process/task_state",
         "verify": "kernel/verify/src/process/task_state_test.rs",
-        "kernel": "kernel/core/src/process/task.rs",
+        "kernel": "kernel/core/src/process/hotpath.rs",
         "type": "TaskState",
         "compare": ["new", "bits", "contains", "is_running", "is_sleeping", "is_dead", "is_interruptible"],
         "skip": [],
@@ -1418,7 +1418,7 @@ MAPPINGS = [
     {
         "name": "process/cred",
         "verify": "kernel/verify/src/process/cred_test.rs",
-        "kernel": "kernel/core/src/process/task.rs",
+        "kernel": "kernel/core/src/process/hotpath.rs",
         "type": "Cred",
         "compare": ["new_init", "new_user"],
         "skip": [],

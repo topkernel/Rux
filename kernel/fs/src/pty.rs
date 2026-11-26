@@ -34,7 +34,7 @@ use crate::tty::{termios_to_kernel_bytes, termios_from_kernel_bytes, TERMIOS_KER
     termios_from_termio_bytes, termios_from_user_bytes, termios_to_termio_bytes,
     termios_to_user_bytes, TtyDevice, TERMIOS_USER_SIZE, TERMIO_USER_SIZE,
 };
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::signal::Signal;
 use crate::sync::spinlock::Spinlock;
 
@@ -834,7 +834,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             // (4c81598 shell/job.c checks tcgetpgrp == getpgrp() with
             // no -1 handling, 100% CPU since boot as init).
             let pgid = if pgid == 0 {
-                crate::process::current_pgid()
+                crate::process::hotpath::current_pgid()
             } else {
                 pgid
             };

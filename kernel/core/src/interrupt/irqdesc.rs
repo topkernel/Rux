@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::spinlock::Spinlock;
-use crate::process::task::Task;
+use crate::process::types::Task;
 use alloc::boxed::Box;
 
 use crate::config::PLIC_MAX_INTERRUPTS;
@@ -568,7 +568,7 @@ pub fn force_thread_even_optouts() -> bool {
     FORCE_THREADED.load(core::sync::atomic::Ordering::Relaxed) == 3
 }
 
-use crate::process::task::TaskState;
+use crate::process::types::TaskState;
 
 extern "C" fn irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
     let irq = (arg as usize) as u32;
@@ -677,7 +677,7 @@ fn irq_thread_spawn(irq: u32, name: &'static str) {
     ) {
         crate::sched::hotpath::change_task_policy(
             t,
-            crate::process::task::SchedPolicy::Fifo,
+            crate::process::types::SchedPolicy::Fifo,
             50,
         );
         desc.thread_task.store(

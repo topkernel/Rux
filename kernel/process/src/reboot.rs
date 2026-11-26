@@ -330,7 +330,7 @@ pub(crate) fn sbi_legacy_shutdown() {
 /// reboot syscall waits for it (INTERRUPTIBLE sleep + one-shot timer, the
 /// nanosleep/linger discipline).
 pub(crate) fn sleep_one_tick() {
-    use crate::task::{Task, TaskState};
+    use rux::process::types::{Task, TaskState};
 
     let current = match crate::sched::hotpath::current() {
         Some(t) => t,

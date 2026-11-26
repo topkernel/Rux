@@ -933,7 +933,7 @@ fn task_pid_alive(pid: u32) -> bool {
             // on recycled root frames (stale registry entry + unreaped
             // zombie owner) — the exitwalk probe tripped it within seconds.
             let st = (*t).state();
-            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+            if !st.is_dead() && !st.contains(crate::process::types::TaskState::ZOMBIE) {
                 alive.store(true, Ordering::Relaxed);
             }
         }
@@ -1971,7 +1971,7 @@ pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u6
                     core::slice::from_raw_parts(old_kv, 16)
                         == core::slice::from_raw_parts(new_kv, 16)
                 };
-                let comm = crate::process::current_task()
+                let comm = crate::process::hotpath::current_task()
                     .map(|t| {
                         core::str::from_utf8(t.comm())
                             .unwrap_or("?")
@@ -1983,7 +1983,7 @@ pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u6
                     virt_addr,
                     old.bits(),
                     pte_bits,
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     comm,
                     ctx,
                     if equal { "COPIED" } else { "DESTROYED" }

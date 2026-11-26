@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use alloc::sync::Arc;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 
 /// Pipe buffer capacity (bytes). Linux default is 16 pages = 64 KiB.
 /// Was 16 KiB (review 5.2: pipe capacity below Linux default).
@@ -595,13 +595,13 @@ fn pipe_or_fifo_of_file(file: &File) -> Option<&'static Pipe> {
 /// (writer enqueue / reader drain / end-close) wake both on every
 /// readiness transition, so a poll/select waiter registered here is
 /// woken by real events instead of the timed re-check slice.
-pub fn pipe_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+pub fn pipe_poll_wait(file: &File, task: *mut crate::process::types::Task) -> bool {
     match pipe_or_fifo_of_file(file) {
         Some(pipe) => {
             pipe.read_queue()
-                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+                .add(crate::process::types::WaitQueueEntry::new(task, false));
             pipe.write_queue()
-                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+                .add(crate::process::types::WaitQueueEntry::new(task, false));
             true
         }
         None => false,
@@ -609,7 +609,7 @@ pub fn pipe_poll_wait(file: &File, task: *mut crate::process::task::Task) -> boo
 }
 
 /// Remove a registration added by pipe_poll_wait.
-pub fn pipe_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+pub fn pipe_poll_unwait(file: &File, task: *mut crate::process::types::Task) {
     if let Some(pipe) = pipe_or_fifo_of_file(file) {
         pipe.read_queue().remove(task);
         pipe.write_queue().remove(task);
@@ -1250,7 +1250,7 @@ fn oasync_signal_owner(kind: u8, id: i32, sig: i32, poll_code: i32, band: i32, f
         }
         2 => {
             let pgid = id.unsigned_abs();
-            crate::process::pid_hash::pid_hash_for_each_task(|task| {
+            crate::process::hotpath::pid_hash_for_each_task(|task| {
                 if (*task).pgid() == pgid {
                     let _ = crate::signal::send_signal_with_info_directed((*task).pid(), info);
                 }

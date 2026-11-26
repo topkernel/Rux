@@ -39,7 +39,7 @@
 //!   stops the tracee but wait4 cannot reap it, matching no-reparent
 //!   simplicity).
 
-use crate::task::Task;
+use rux::process::types::Task;
 use crate::signal::{SigInfo, Signal};
 use crate::syscall::SyscallArgs;
 
@@ -82,7 +82,7 @@ const EINVAL: i64 = 22;
 // ==================== permission helpers ====================
 
 /// ptrace_may_access (minimal): same-uid credentials or CAP_SYS_PTRACE.
-pub fn ptrace_may_access(target_cred: &crate::task::Cred) -> bool {
+pub fn ptrace_may_access(target_cred: &rux::process::types::Cred) -> bool {
     if let Some(cur) = crate::sched::hotpath::current() {
         // SAFETY: current is the running task; cred() is immutable.
         let cred = crate::r#unsafe::borrow_task(cur as *mut Task).cred();
@@ -295,13 +295,13 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
 
     // ---- all other requests operate on a pinned target ----
     // SAFETY: pinned lookup keeps the Task alive until task_put below.
-    let target = crate::pid_hash::pid_hash_lookup_pinned(pid);
+    let target = rux::process::hotpath::pid_hash_lookup_pinned(pid);
     if target.is_null() {
         return -ESRCH;
     }
     let ret = dispatch_request(current, my_pid, target, request, addr, data);
     // SAFETY: release the pin taken above.
-    crate::task::Task::task_put(target);
+    rux::process::types::Task::task_put(target);
     ret
 }
 
@@ -317,7 +317,7 @@ fn dispatch_request(
     use crate::arch::uaccess::access_ok;
 
     // SAFETY: target is pinned for the whole call.
-    let is_stopped = crate::r#unsafe::borrow_task(target).state().contains(crate::task::TaskState::STOPPED);
+    let is_stopped = crate::r#unsafe::borrow_task(target).state().contains(rux::process::types::TaskState::STOPPED);
 
     if request == PTRACE_ATTACH {
         if target == _current {
@@ -399,7 +399,7 @@ fn dispatch_request(
                     match read_target_word(target, epc) {
                         Some(word) => {
                             crate::r#unsafe::borrow_task(target).arm_single_step(epc, word);
-                            if !crate::ptrace_core::write_target_word(target, epc, EBREAK_INSN) {
+                            if !rux::process::hotpath::write_target_word(target, epc, EBREAK_INSN) {
                                 crate::r#unsafe::borrow_task(target).clear_single_step();
                                 return -EIO;
                             }
@@ -441,7 +441,7 @@ fn dispatch_request(
             if !is_stopped {
                 return -ESRCH;
             }
-            if crate::ptrace_core::write_target_word(target, addr, data) {
+            if rux::process::hotpath::write_target_word(target, addr, data) {
                 0
             } else {
                 -EIO

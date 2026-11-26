@@ -350,7 +350,7 @@ pub fn test_fileops_caps() {
     );
     check(
         "nsfile caps",
-        &crate::process::ns::NS_FILE_OPS,
+        &crate::process::hotpath::NS_FILE_OPS,
         Expect { read: true, write: false, lseek: false, close: true, poll: false, read_at: false },
     );
 

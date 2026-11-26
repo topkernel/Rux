@@ -490,7 +490,7 @@ fn add_uevent_attr(dev: &Arc<KObject>) {
                     crate::pr_info!(
                         "UESTORE[{}] pid={} dev={} action='{}'",
                         UES_N.load(core::sync::atomic::Ordering::Relaxed),
-                        crate::process::current_pid(),
+                        crate::process::hotpath::current_pid(),
                         devpath,
                         action
                     );

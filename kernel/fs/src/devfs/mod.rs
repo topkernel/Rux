@@ -1464,7 +1464,7 @@ fn devfs_open(inode: &Inode, file: &rux::fs::File) -> i32 {
             "drm: open {} (#{}) by pid {}",
             entry.name,
             n + 1,
-            crate::process::current_pid()
+            crate::process::hotpath::current_pid()
         );
     }
     // evdev nodes: stash the DevNo in file.private_data — evdev's
@@ -2053,7 +2053,7 @@ pub fn shared_fault_file_page(file: &rux::fs::File, file_off: usize) -> Option<u
             file.path(),
             file_off,
             pfn,
-            crate::process::current_pid()
+            crate::process::hotpath::current_pid()
         );
     }
     Some((pfn << 12) as u64)
@@ -2420,7 +2420,7 @@ fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                             entry.name,
                             inode.get_size(),
                             arg1,
-                            crate::process::current_pid()
+                            crate::process::hotpath::current_pid()
                         );
                     }
                     // Shared backing active: keep it canonical. Grow

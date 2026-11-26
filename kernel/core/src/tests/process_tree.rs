@@ -5,8 +5,8 @@
 
 // Test: Process tree management functionality
 use crate::println;
-use crate::process::Task;
-use crate::process::task::SchedPolicy;
+use crate::process::types::Task;
+use crate::process::types::SchedPolicy;
 use alloc::boxed::Box;
 use alloc::format;
 use super::{test_pass, test_fail, test_group_start};

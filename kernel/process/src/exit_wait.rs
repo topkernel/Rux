@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 use crate::errno;
-use crate::task::{Pid, Task, TaskState};
+use rux::process::types::{Pid, Task, TaskState};
 use crate::exit::{release_task, ERESTARTSYS};
 /// Per-arch wait-class entry syscall numbers (NATIVE numbering, same
 /// decode contract as the r41v17 TIMEDSLEEP ticktrap's NS_SYS).
@@ -81,7 +81,7 @@ fn wl_entry_syscall(tk: &Task) -> (u64, u64) {
 ///                             notify was stored and never delivered.
 pub fn wait4_park_audit() {
     use core::sync::atomic::Ordering as O;
-    use crate::task::TaskState;
+    use rux::process::types::TaskState;
 
     // 1 Hz self-gate (one relaxed load per tick when quiet).
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -161,7 +161,7 @@ pub fn wait4_park_audit() {
     // stable): classify every task whose parent is one of the waiters,
     // and collect the waiter-side verdict fields. Skips the beat when
     // the tree lock is contended (the next 1 Hz beat retries).
-    let tree = match crate::task::PROCESS_TREE_LOCK.try_lock() {
+    let tree = match rux::process::hotpath::PROCESS_TREE_LOCK.try_lock() {
         Some(g) => g,
         None => return,
     };
@@ -479,7 +479,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             let mut found_tracee = false;
             {
                 let mut tracee_stop: Option<*mut Task> = None;
-                crate::pid_hash::pid_hash_for_each_task(|t| {
+                rux::process::hotpath::pid_hash_for_each_task(|t| {
                     if tracee_stop.is_some() {
                         return;
                     }
@@ -553,7 +553,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                         }
                     });
                     if !need_rescan {
-                        crate::pid_hash::pid_hash_for_each_task(|t| {
+                        rux::process::hotpath::pid_hash_for_each_task(|t| {
                             if need_rescan {
                                 return;
                             }
@@ -1024,7 +1024,7 @@ pub fn do_waitid(
                 // CALLER's pid namespace (U1c parity with wait4's
                 // report_wait_pid); the child is still hash-resident at
                 // this point — release_task runs after the write.
-                let report_pid = crate::ns::wait_vpid(child_pid);
+                let report_pid = rux::process::hotpath::wait_vpid(child_pid);
                 write_siginfo(infop, si_code, report_pid, child_uid, si_status);
 
                 // Reap zombie unless WNOWAIT

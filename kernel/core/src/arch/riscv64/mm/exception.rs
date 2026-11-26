@@ -35,7 +35,7 @@ use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault};
 // Re-export MmFaultResult from page_fault (canonical definition)
 pub use super::page_fault::MmFaultResult;
 use crate::println;
-use crate::process::task::TaskState;
+use crate::process::types::TaskState;
 use crate::mm::vma::VmaFlags;
 
 /// Exception table entry
@@ -370,7 +370,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             {
                 let dying = current.state().is_dead()
                     || (current.ti_flags()
-                        & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                        & crate::process::types::TaskFlags::PF_EXITING
                             .bits())
                         != 0;
                 let cross_stack = !current.is_in_kernel_stack(regs.sp as usize);
@@ -559,7 +559,7 @@ crate::pr_err!(
                             // currently-walked stack ppn.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
-                                use crate::process::exec_ring::STACKZERO_RING;
+                                use crate::process::hotpath::STACKZERO_RING;
                                 let me = crate::sched::hotpath::get_current_pid();
                                 for i in 0..STACKZERO_RING.len() {
                                     let zp = STACKZERO_RING[i].pid.load(Relaxed);
@@ -577,7 +577,7 @@ crate::pr_err!(
                             // Correlate with the exec stack-zeroing ledger.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
-                                use crate::process::exec_ring::STACKZERO_RING;
+                                use crate::process::hotpath::STACKZERO_RING;
                                 let me = crate::sched::hotpath::get_current_pid();
                                 let pa = ppn as u64 * 4096;
                                 for i in 0..STACKZERO_RING.len() {

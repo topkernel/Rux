@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use crate::errno::constants;
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // ============================================================================
@@ -996,7 +996,7 @@ pub fn netlink_bind(
         if UEBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
             crate::pr_info!(
                 "UEBIND pid={} groups={:#x} sock={:#x}",
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 groups,
                 alloc::sync::Arc::as_ptr(sock) as usize
             );

@@ -66,7 +66,7 @@
 //! everything it protects is above the state spinlock. It must never
 //! be taken while holding any spinlock.
 
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 /// R77-style stall tripwire support: is the recorded owner still a live
@@ -77,12 +77,12 @@ fn locked_owner_alive_wait(owner: &u32) -> bool {
     if *owner == 0 {
         return false;
     }
-    let t = crate::process::pid_hash::pid_hash_lookup_pinned(*owner);
+    let t = crate::process::hotpath::pid_hash_lookup_pinned(*owner);
     if t.is_null() {
         return false;
     }
     let alive = unsafe { !(*t).state().is_dead() };
-    crate::process::task::Task::task_put(t);
+    crate::process::types::Task::task_put(t);
     alive
 }
 
@@ -309,7 +309,7 @@ impl SleepMutex {
         };
         // Holder task on-CPU? Pinned lookup keeps the Task alive across
         // the read (a racing release+exit would otherwise free it).
-        let t = crate::process::pid_hash::pid_hash_lookup_pinned(owner_pid);
+        let t = crate::process::hotpath::pid_hash_lookup_pinned(owner_pid);
         if t.is_null() {
             // Owner pid unresolvable (exiting / hash moment): cannot
             // prove spinning is profitable — queue. The R77 stall
@@ -319,7 +319,7 @@ impl SleepMutex {
         let on_cpu = unsafe {
             (*t).ti_on_cpu.load(core::sync::atomic::Ordering::Acquire)
         };
-        crate::process::task::Task::task_put(t);
+        crate::process::types::Task::task_put(t);
         if on_cpu {
             OptimisticProbe::Spin
         } else {
@@ -393,7 +393,7 @@ impl SleepMutex {
     }
 
     fn lock_inner(&'static self, killable: bool) -> Option<SleepMutexGuard> {
-        let pid = crate::process::current_pid();
+        let pid = crate::process::hotpath::current_pid();
         if self.fsw_notes {
             crate::debug::fsw::note_biglock();
         }
@@ -641,7 +641,7 @@ impl SleepMutex {
                 if let Some((si, wi)) = crate::sync::futex_pi::rt_waiter_enter(
                     self as *const _ as usize,
                     owner_pid,
-                    cur as *mut crate::process::task::Task,
+                    cur as *mut crate::process::types::Task,
                 ) {
                     pi_q = Some((si, wi));
                     let mut st = self.state.lock();
@@ -695,7 +695,7 @@ impl SleepMutex {
                             )
                             .is_ok()
                     {
-                        let cur_pid = crate::process::current_pid();
+                        let cur_pid = crate::process::hotpath::current_pid();
                         if stranded_free {
                             crate::pr_err!(
                                 "{}-STALL-FREE waiter={} owner=none waiters={} waited={}j (dropped handoff / stuck count)",
@@ -811,7 +811,7 @@ impl SleepMutex {
             if rtq > 0 {
                 if let Some(wtask) = self.wait.wake_up_one_hiprio() {
                     let wpid = unsafe {
-                        (*(wtask as *mut crate::process::task::Task)).pid()
+                        (*(wtask as *mut crate::process::types::Task)).pid()
                             as u32
                     };
                     crate::sync::futex_pi::rt_release_handoff(
@@ -893,7 +893,7 @@ impl SleepMutex {
                 if rtq > 0 {
                     if let Some(wtask) = self.wait.wake_up_one_hiprio() {
                         let wpid = unsafe {
-                            (*(wtask as *mut crate::process::task::Task))
+                            (*(wtask as *mut crate::process::types::Task))
                                 .pid() as u32
                         };
                         crate::sync::futex_pi::rt_release_handoff(
