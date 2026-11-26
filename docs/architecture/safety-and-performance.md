@@ -1489,6 +1489,17 @@ Mechanics and evidence, all in the lane worktree `run/`:
   (FdSet methods + interrupt::domain fns, no sync touch) — recorded in
   docs/development/pass3-pair-exceptions.txt; release-codegen equality
   is pinned by the pbench gate below;
+- pbench (x86_64 release, PBENCH DONE rc=0, two runs): every median
+  within band of the gate-debug9 baseline. Run 1 flagged two probes
+  whose history is quantization noise, not code: p3c_fault_file
+  0.070 vs baseline 0.060 (+16.7%) and p5e_child_spin 274.0 vs 250.9
+  (+9.2%) — both reproduce at baseline in run 2 (0.060, +0.0%;
+  251.8, +0.3%), and the ten prior gate logs show the same probes
+  swinging the full band (p3c 0.060-0.080 = one 10 ns TSC quantum;
+  p5e 250.9-274.1) with zero sync changes. Run 2 worst delta
+  +4.6% (p5b_dgram_recv_peek); improvements p5a_pipe -10.5%,
+  p6_unlink -6.9%, p1_null -3.2%. The always-inlined guard deref
+  wrappers keep release codegen identical, as designed;
 - pass-3 tool fixes (separate commit, reported to the coordinator):
   generic `unsafe impl<K: ..>` regions were unlocatable by apply, and
   an `unsafe fn`'s own signature keyword found no enclosing fn span.
