@@ -32,8 +32,7 @@ use crate::sync::types::{Spinlock, SpinlockIrqGuard};
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 use alloc::collections::btree_map::{BTreeMap};
 use crate::net::types::{SkBuff};
-use core::ptr::{read_volatile, write_volatile};
-use alloc::alloc::{Layout, alloc, alloc_zeroed, dealloc};
+use alloc::alloc::Layout;
 use alloc::sync::{Arc};
 use alloc::collections::vec_deque::{VecDeque};
 use alloc::string::{String};
@@ -230,7 +229,7 @@ pub fn iar1_read() -> u32 {
     let v: u64;
     // SAFETY: ICC_IAR1_EL1 read is the GIC acknowledge; side effect is
     // the priority drop for the returned INTID.
-    unsafe { asm!("mrs {}, icc_iar1_el1", out(reg) v, options(nomem, nostack)) };
+    v = crate::drivers::r#unsafe::gicv3_iar1_read();
     v as u32 & 0xFF_FFFF
 }
 
@@ -239,10 +238,7 @@ pub fn iar1_read() -> u32 {
 #[inline]
 pub fn eoir1_write(intid: u32) {
     // SAFETY: EOIR1 write deactivates the previously acknowledged INTID.
-    unsafe {
-        asm!("msr icc_eoir1_el1, {}",
-             in(reg) intid as u64, options(nomem, nostack))
-    };
+    crate::drivers::r#unsafe::gicv3_eoir1_write(intid);
 }
 
 /// Generate an SGI (ICC_SGI1R_EL1) to the target list.
@@ -259,11 +255,7 @@ pub fn eoir1_write(intid: u32) {
 pub fn send_sgi(target_aff0: u8, intid: u32) {
     let sgi = (((intid as u64) & 0xF) << 24) | (1u64 << (target_aff0 & 0xF));
     // SAFETY: SGI1R write raises the SGI on the target core(s).
-    unsafe {
-        asm!("dsb st",
-             "msr icc_sgi1r_el1, {}",
-             in(reg) sgi, options(nomem, nostack))
-    };
+    crate::drivers::r#unsafe::gicv3_sgi1r_write(sgi);
 }
 
 // ==================== Distributor ====================
@@ -341,7 +333,7 @@ static RD_BASE_PER_CPU: [AtomicU64; crate::config::MAX_CPUS] =
 
 /// Locate this CPU's RD_base frame by matching GICR_TYPER.AffinityValue
 /// against MPIDR. Frames walk 2*64KB apart until the Last marker.
-fn find_my_rd_base() -> Option<usize> {
+pub(crate) fn find_my_rd_base() -> Option<usize> {
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
         let cached = RD_BASE_PER_CPU[cpu].load(Ordering::Acquire);
@@ -378,7 +370,7 @@ fn find_my_rd_base() -> Option<usize> {
 /// Configure this CPU's redistributor SGI/PPI bank: all INTID 0-31
 /// Group 1, priorities set, everything but the IPI SGI + timer PPI
 /// left disabled (enabled on demand by enable_ppi / request_irq).
-fn redist_configure_local(rd: usize) {
+pub(crate) fn redist_configure_local(rd: usize) {
     // Wake the frame if it slept (PSCI-off CPUs can re-enter sleep;
     // QEMU clears ProcessorSleep itself, the poll is for real HW).
     let waker = rd + gicr::WAKER;
@@ -423,25 +415,7 @@ fn redist_configure_local(rd: usize) {
 pub fn enable_cpu_interface() {
     // SAFETY: ICC_* system-register programming below is the standard
     // GICv3 CPU-interface enable sequence for Group 1 at EL1.
-    unsafe {
-        // 1. System-register access (QEMU fixes SRE=1; set defensively).
-        let sre: u64;
-        asm!("mrs {}, icc_sre_el1", out(reg) sre, options(nomem, nostack));
-        if sre & 1 == 0 {
-            asm!("msr icc_sre_el1, {}", in(reg) 1u64, options(nomem, nostack));
-            asm!("isb", options(nomem, nostack));
-        }
-
-        // 2. Per-CPU redistributor: locate + configure SGI/PPI bank.
-        if let Some(rd) = find_my_rd_base() {
-            redist_configure_local(rd);
-        }
-
-        // 3. Unmask priorities and forward Group 1 to EL1.
-        asm!("msr icc_pmr_el1, {}", in(reg) 0xFFu64, options(nomem, nostack));
-        asm!("msr icc_igrpen1_el1, {}", in(reg) 1u64, options(nomem, nostack));
-        asm!("isb", options(nomem, nostack));
-    }
+    crate::drivers::r#unsafe::gicv3_cpu_interface_enable();
 }
 
 /// Enable a per-CPU interrupt (PPI/SGI INTID < 32) on THIS cpu's
@@ -1059,15 +1033,7 @@ pub fn get_ipi_count(hart: usize) -> u32 {
 /// Current time (cycles)
 pub fn read_time() -> u64 {
     // SAFETY: rdtime is a read-only CSR available in S-mode on RISC-V.
-    unsafe {
-        let time: u64;
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) time,
-            options(nostack, readonly)
-        );
-        time
-    }
+    crate::drivers::r#unsafe::timer_riscv64_read_time()
 }
 
 /// Set timer compare value
@@ -1082,9 +1048,7 @@ pub fn set_timecmp(_hart: usize, value: u64) {
     // Note: SBI's set_timer is per-hart, automatically applies to current hart
     // SAFETY: sbi_rt::set_timer is an SBI ecall with no special preconditions;
     // the `value` is an absolute timer deadline (u64), always valid.
-    unsafe {
-        sbi_rt::set_timer(value);
-    }
+    crate::drivers::r#unsafe::timer_riscv64_sbi_set_timer(value);
 }
 
 }
@@ -1101,11 +1065,11 @@ use crate::arch::cpu::{inb, outb, rdmsr, wrmsr};
 // ---------------------------------------------------------------------------
 
 /// IA32_APIC_BASE MSR
-const MSR_IA32_APIC_BASE: u32 = 0x1B;
+pub(crate) const MSR_IA32_APIC_BASE: u32 = 0x1B;
 /// APIC global-enable bit (bit 11 of IA32_APIC_BASE)
-const APIC_BASE_ENABLE: u64 = 1 << 11;
+pub(crate) const APIC_BASE_ENABLE: u64 = 1 << 11;
 /// x2APIC mode bit (bit 10 of IA32_APIC_BASE)
-const APIC_BASE_X2APIC: u64 = 1 << 10;
+pub(crate) const APIC_BASE_X2APIC: u64 = 1 << 10;
 
 // xAPIC MMIO register offsets (from LAPIC_BASE)
 const XAPIC_ID: u32 = 0x020;
@@ -1125,11 +1089,11 @@ const XAPIC_ISR7: u32 = 0x170;
 const XAPIC_IRR7: u32 = 0x270;
 
 // x2APIC MSR indices
-const X2APIC_ID: u32 = 0x802;
+pub(crate) const X2APIC_ID: u32 = 0x802;
 const X2APIC_TPR: u32 = 0x808;
 const X2APIC_EOI: u32 = 0x80B;
-const X2APIC_SVR: u32 = 0x80F;
-const X2APIC_ICR: u32 = 0x830;
+pub(crate) const X2APIC_SVR: u32 = 0x80F;
+pub(crate) const X2APIC_ICR: u32 = 0x830;
 const X2APIC_TIMER_LVT: u32 = 0x832;
 const X2APIC_TIMER_INIT: u32 = 0x838;
 const X2APIC_TIMER_CURR: u32 = 0x839;
@@ -1158,7 +1122,7 @@ const LVT_EXTINT: u32 = 0x7 << 8;
 // ---------------------------------------------------------------------------
 
 /// x2APIC active (per-machine: all CPUs switch together).
-static X2APIC: AtomicBool = AtomicBool::new(false);
+pub(crate) static X2APIC: AtomicBool = AtomicBool::new(false);
 /// Driver initialized on this CPU (guards MSR writes that would #GP
 /// before x2APIC is enabled).
 static READY: AtomicBool = AtomicBool::new(false);
@@ -1200,7 +1164,7 @@ pub static TSC_FREQ: AtomicU64 = AtomicU64::new(0);
 fn reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
     if X2APIC.load(Ordering::Acquire) {
         // SAFETY: x2APIC MSR read; READY gates first use.
-        unsafe { rdmsr(msr_x2apic) as u32 }
+        crate::drivers::r#unsafe::apic_reg_read_msr(msr_x2apic)
     } else {
         // Linux fixmap discipline: the LAPIC window is accessed through the
         // kernel-half device alias (shared into every mm), never through a
@@ -1210,7 +1174,7 @@ fn reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
         ) as usize + reg_xapic as usize;
         // SAFETY: MMIO read of the local APIC window (kernel-half alias,
         // mapped once at setup_device_mappings time).
-        unsafe { core::ptr::read_volatile(va as *const u32) }
+        crate::drivers::r#unsafe::apic_reg_read_mmio(va)
     }
 }
 
@@ -1219,13 +1183,13 @@ fn reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
 fn reg_write(reg_xapic: u32, msr_x2apic: u32, value: u32) {
     if X2APIC.load(Ordering::Acquire) {
         // SAFETY: x2APIC MSR write; READY gates first use.
-        unsafe { wrmsr(msr_x2apic, value as u64) };
+        crate::drivers::r#unsafe::apic_reg_write_msr(msr_x2apic, value);
     } else {
         let va = crate::arch::mm::memory_layout::device_alias(
             crate::arch::mm::memory_layout::LAPIC_BASE as u64,
         ) as usize + reg_xapic as usize;
         // SAFETY: MMIO write to the local APIC window (kernel-half alias).
-        unsafe { core::ptr::write_volatile(va as *mut u32, value) };
+        crate::drivers::r#unsafe::apic_reg_write_mmio(va, value);
     }
 }
 
@@ -1294,12 +1258,12 @@ pub fn send_ipi(dest: u32, vector: u8) {
             let on = KVM_PV_IPI.load(Ordering::Acquire)
                 && crate::cmdline::get_param("ipi").as_deref() == Some("pv");
             KVM_PV_IPI_ARMED.store(if on { 1 } else { 2 }, Ordering::Release);
-            if on && kvm_pv_send_ipi(dest, vector) {
+            if on && crate::drivers::r#unsafe::kvm_pv_send_ipi(dest, vector) {
                 return;
             }
         }
         1 => {
-            if kvm_pv_send_ipi(dest, vector) {
+            if crate::drivers::r#unsafe::kvm_pv_send_ipi(dest, vector) {
                 return;
             }
         }
@@ -1317,21 +1281,21 @@ pub fn send_ipi(dest: u32, vector: u8) {
 /// Hypercall number (uapi linux/kvm_para.h; stable since introduction —
 /// the host KVM interprets this, and 10 has been KVM_HC_SEND_IPI since
 /// the 4.16 merge).
-const KVM_HC_SEND_IPI: u64 = 10;
+pub(crate) const KVM_HC_SEND_IPI: u64 = 10;
 /// CPUID leaf carrying KVM_FEATURE_* bits.
 const KVM_CPUID_FEATURES: u32 = 0x4000_0001;
 /// Bit 11: PV_SEND_IPI.
 const KVM_FEATURE_PV_SEND_IPI: u32 = 1 << 11;
 
 /// PV_SEND_IPI negotiated with the hypervisor (set once at init).
-static KVM_PV_IPI: AtomicBool = AtomicBool::new(false);
+pub(crate) static KVM_PV_IPI: AtomicBool = AtomicBool::new(false);
 /// Runtime USE of the PV path (0 = undecided, 1 = on, 2 = off) — the
 /// `ipi=pv` cmdline knob, memoized on first send (a per-IPI cmdline
 /// scan would cost more than the IPI).
 static KVM_PV_IPI_ARMED: AtomicU8 = AtomicU8::new(0);
 /// Use VMMCALL (SVM) vs VMCALL (VMX) — chosen by the physical CPU
 /// vendor at init (KVM intercepts the one its hardware defines).
-static KVM_HC_VMMCALL: AtomicBool = AtomicBool::new(false);
+pub(crate) static KVM_HC_VMMCALL: AtomicBool = AtomicBool::new(false);
 
 /// Probe CPUID for the KVM signature + PV_SEND_IPI feature bit. Called
 /// once from `init()` (BSP context, before any IPI is needed).
@@ -1357,54 +1321,6 @@ pub fn kvm_para_init() {
     KVM_PV_IPI.store(true, Ordering::Release);
 }
 
-/// One FIXED unicast through the PV hypercall. Returns false (caller
-/// falls back to the ICR write) when not negotiated or the hypervisor
-/// refuses. The register convention is the KVM pv hypercall ABI:
-/// rax=nr, rbx=a1, rcx=a2, rdx=a3, rsi=a4, return rax (0 on success,
-/// negative -KVM_E* on refusal).
-fn kvm_pv_send_ipi(dest: u32, vector: u8) -> bool {
-    if !KVM_PV_IPI.load(Ordering::Acquire) {
-        return false;
-    }
-    // IRREDUCIBLE F-ROW (F-HVCALL-X1): the KVM hypercall ABI
-    // (vmmcall/vmcall with the RBX-shuttle push/mov/pop bracket) —
-    // reference kernel arch/x86/kernel/kvm.c __send_ipi_mask's hc()
-    // twin; a register protocol with no memory operands has no safe
-    // shape. The bitmap is a single-bit cluster with min=dest
-    // (bitmap_low=1, bitmap_high=0).
-    unsafe fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
-        let ret: i64;
-        // The KVM ABI passes arg1 in RBX, which LLVM reserves — shuttle
-        // it through any free GPR with an explicit push/mov/pop bracket
-        // (stack-neutral; that is why nostack is not claimed).
-        if vmmcall {
-            core::arch::asm!(
-                "push rbx",
-                "mov rbx, {b}",
-                "vmmcall",
-                "pop rbx",
-                b = in(reg) a1,
-                in("rax") nr, in("rcx") a2, in("rdx") a3, in("rsi") a4,
-                lateout("rax") ret,
-            );
-        } else {
-            core::arch::asm!(
-                "push rbx",
-                "mov rbx, {b}",
-                "vmcall",
-                "pop rbx",
-                b = in(reg) a1,
-                in("rax") nr, in("rcx") a2, in("rdx") a3, in("rsi") a4,
-                lateout("rax") ret,
-            );
-        }
-        ret
-    }
-    let vmmcall = KVM_HC_VMMCALL.load(Ordering::Acquire);
-    // SAFETY: register-only protocol, see hc.
-    let ret = unsafe { hc(KVM_HC_SEND_IPI, 1, 0, dest as u64, vector as u64, vmmcall) };
-    ret == 0
-}
 
 /// Send an INIT-deassert... not needed on anything modern; kept for the
 /// classic bring-up sequence shape.  Sends INIT assert.
@@ -1428,7 +1344,7 @@ fn send_icr(dest: u32, cmd: u32) {
         // posted; back-to-back MSR writes serialize sufficiently.
         let icr = ((dest as u64) << 32) | cmd as u64;
         // SAFETY: x2APIC ICR write.
-        unsafe { wrmsr(X2APIC_ICR, icr) };
+        crate::drivers::r#unsafe::apic_x2apic_icr_write(icr);
     } else {
         // Wait for Delivery Status (bit 12) to clear.
         while reg_read(XAPIC_ICR_LO, X2APIC_ICR) & (1 << 12) != 0 {
@@ -1629,13 +1545,7 @@ fn tick_arm_ra() -> u64 {
     {
         let ra: u64;
         // SAFETY: pure register-relative read, no side effects.
-        unsafe {
-            core::arch::asm!(
-                "mov {}, qword ptr [rbp + 8]",
-                out(reg) ra,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
+        ra = crate::drivers::r#unsafe::tick_arm_ra_read();
         ra
     }
     #[cfg(not(feature = "x86_64"))]
@@ -2080,14 +1990,7 @@ fn ensure_phys_mapped(phys: usize, len: usize) {
     let page_offset = crate::arch::mm::memory_layout::PAGE_OFFSET as u64;
     // SAFETY: kernel-only linear-map VAs for firmware table regions;
     // the regions are reserved (never handed to the page allocator).
-    unsafe {
-        crate::arch::mm::mmu_init::map_kernel_region(
-            page_offset + start as u64,
-            start as u64,
-            (end - start) as u64,
-            flags,
-        );
-    }
+    crate::drivers::r#unsafe::map_firmware_range_linear(page_offset, start, end, flags);
     LAST_MAPPED_START.store(start as u64, Ordering::Release);
     LAST_MAPPED_END.store(end as u64, Ordering::Release);
 }
@@ -2358,7 +2261,7 @@ fn parse_madt(madt_phys: usize) -> usize {
 fn this_lapic_id_raw() -> u32 {
     if X2APIC.load(Ordering::Acquire) {
         // SAFETY: x2APIC enabled by init_x2apic_or_mmio before this runs.
-        unsafe { rdmsr(X2APIC_ID) as u32 }
+        crate::drivers::r#unsafe::apic_read_id_raw()
     } else {
         reg_read(XAPIC_ID, X2APIC_ID) >> 24
     }
@@ -2400,28 +2303,18 @@ fn init_x2apic_or_mmio() -> bool {
         && crate::cmdline::get_param("apic").as_deref() != Some("xapic");
 
     // SAFETY: IA32_APIC_BASE programming of this CPU.
-    unsafe {
-        let base = rdmsr(MSR_IA32_APIC_BASE);
-        let mut new = base | APIC_BASE_ENABLE;
-        if has_x2 {
-            new |= APIC_BASE_X2APIC;
-        }
-        wrmsr(MSR_IA32_APIC_BASE, new);
-    }
+    crate::drivers::r#unsafe::apic_base_enable_extd(has_x2);
 
     if has_x2 {
         // Verify the MSR interface actually responds before committing
         // to it: any functioning APIC reads SVR nonzero (reset 0xFF);
         // an unbacked range reads 0.
         // SAFETY: x2APIC MSR read gated on the EXTD write above.
-        let svr = unsafe { rdmsr(X2APIC_SVR) };
+        let svr = crate::drivers::r#unsafe::apic_svr_read();
         if svr == 0 {
             // Fall back to MMIO xAPIC: clear EXTD, keep global enable.
             // SAFETY: IA32_APIC_BASE programming of this CPU.
-            unsafe {
-                let base = rdmsr(MSR_IA32_APIC_BASE);
-                wrmsr(MSR_IA32_APIC_BASE, base & !APIC_BASE_X2APIC | APIC_BASE_ENABLE);
-            }
+            crate::drivers::r#unsafe::apic_base_clear_extd();
             return false;
         }
     }
@@ -2483,12 +2376,7 @@ pub fn init() {
 /// with IF clear until the caller enables interrupts).
 pub fn init_secondary() {
     // SAFETY: IA32_APIC_BASE programming of this CPU.
-    unsafe {
-        let base = rdmsr(MSR_IA32_APIC_BASE)
-            | APIC_BASE_ENABLE
-            | if X2APIC.load(Ordering::Acquire) { APIC_BASE_X2APIC } else { 0 };
-        wrmsr(MSR_IA32_APIC_BASE, base);
-    }
+    crate::drivers::r#unsafe::apic_init_secondary_base();
     READY.store(true, Ordering::Release);
 
     reg_write(XAPIC_SVR, X2APIC_SVR, SPURIOUS_VECTOR | 0x100);
@@ -2666,13 +2554,7 @@ pub fn monotonic_ns_since_boot() -> u64 {
 /// This is more direct than SBI and avoids potential issues
 #[inline]
 fn set_timer_stimecmp(deadline: u64) {
-    unsafe {
-        asm!(
-            "csrw stimecmp, {0}",
-            in(reg) deadline,
-            options(nomem, nostack)
-        );
-    }
+    crate::drivers::r#unsafe::timer_riscv64_stimecmp_set(deadline);
 }
 
 /// Set timer using SBI call (fallback)
@@ -2808,12 +2690,12 @@ pub const HZ: u64 = crate::config::KERNEL_HZ as u64;
 const TIME_SLICE_TICKS: u64 = CLOCK_FREQ / HZ;
 
 /// PIT I/O ports (channel 0 data, mode/command register)
-const PIT_CH0_DATA: u16 = 0x40;
-const PIT_MODE_CMD: u16 = 0x43;
+pub(crate) const PIT_CH0_DATA: u16 = 0x40;
+pub(crate) const PIT_MODE_CMD: u16 = 0x43;
 
 /// Mode/command byte: channel 0, lobyte/hibyte access, mode 3 (square wave),
 /// binary count.
-const PIT_CH0_MODE3_BIN: u8 = 0x36;
+pub(crate) const PIT_CH0_MODE3_BIN: u8 = 0x36;
 
 /// Fractional shift used by the TSC -> nominal-domain mapping (pub for
 /// hpet::calibrate_tsc — keep in sync with the promotion math).
@@ -3183,13 +3065,7 @@ pub fn init() {
     let divisor = (PIT_INPUT_FREQ / HZ) as u16;
     // SAFETY: ports 0x40/0x43 are the fixed 8254 channel-0 data and
     // mode/command registers; this is the standard programming sequence.
-    unsafe {
-        outb(PIT_MODE_CMD, PIT_CH0_MODE3_BIN);
-        io_wait();
-        outb(PIT_CH0_DATA, (divisor & 0xff) as u8);
-        io_wait();
-        outb(PIT_CH0_DATA, (divisor >> 8) as u8);
-    }
+    crate::drivers::r#unsafe::pit_ch0_square_wave_init(divisor);
 }
 
 /// Arm the LAPIC timer in one-shot mode at the absolute nominal-domain
@@ -4016,15 +3892,7 @@ pub fn monotonic_ns_since_boot() -> u64 {
 pub fn set_timer(deadline: u64) {
     // SAFETY: writing the virtual-timer compare/enable registers arms the
     // per-cpu timer; the only side effect is the future PPI interrupt.
-    unsafe {
-        core::arch::asm!(
-            "msr cntv_cval_el0, {d}",
-            "msr cntv_ctl_el0, {e}",
-            d = in(reg) deadline,
-            e = in(reg) 1u64, // enable, unmasked
-            options(nomem, nostack)
-        );
-    }
+    crate::drivers::r#unsafe::timer_aarch64_arm(deadline);
 }
 
 /// Set next timer interrupt, aligned to the NOMINAL tick grid but never
@@ -4140,7 +4008,7 @@ const REG_TIME_HIGH: u64 = 0x04;
 #[inline]
 fn read_reg(offset: u64) -> u32 {
     let va = GOLDFISH_RTC_VA.load(core::sync::atomic::Ordering::Relaxed);
-    unsafe { core::ptr::read_volatile((va + offset) as *const u32) }
+    crate::drivers::r#unsafe::goldfish_rtc_reg_read(va, offset)
 }
 
 /// Resolve the device page into the kernel-half dynamic alias arena.
@@ -4254,8 +4122,6 @@ pub fn cached_wall_secs() -> u32 {
 // - `struct request_queue`: Request queue
 // - `struct bio`: I/O descriptor
 
-unsafe impl Send for GenDisk {}
-unsafe impl Sync for GenDisk {}
 
 impl GenDisk {
     /// Create new block device
@@ -4309,7 +4175,7 @@ impl GenDisk {
         // SAFETY: INV-BLKDEV-3 — drivers store an init-time, machine-
         // lifetime object in the slot; the shared borrow here never
         // outlives the disk's registration.
-        self.private_data.map(|p| unsafe { &*(p as *const T) })
+        self.private_data.map(|p| crate::drivers::r#unsafe::gen_disk_private_ref(p))
     }
 
     /// Set request handler function
@@ -4380,8 +4246,6 @@ pub fn kick_all_pending_disks() {
     }
 }
 
-unsafe impl Send for BlockDeviceManager {}
-unsafe impl Sync for BlockDeviceManager {}
 
 impl BlockDeviceManager {
     const fn new() -> Self {
@@ -4424,7 +4288,7 @@ impl BlockDeviceManager {
                 if gd.major == major {
                     // SAFETY: INV-BLKDEV-1 above — the Box outlives the
                     // lock and the machine; the allocation is stable.
-                    return Some(unsafe { &*(gd.as_ref() as *const GenDisk) });
+                    return Some(crate::drivers::r#unsafe::gen_disk_ref(gd.as_ref()));
                 }
             }
         }
@@ -5446,10 +5310,6 @@ pub fn enumerate_virtio_devices() -> usize {
 // SAFETY: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks
 // serialize all mutable access to shared fields.
 
-unsafe impl Send for VirtIOBlkDevice {}
-// SAFETY: All shared state is protected by Spinlocks (irqsafe where needed),
-// ensuring no data races across threads/CPUs.
-unsafe impl Sync for VirtIOBlkDevice {}
 
 impl VirtIOBlkDevice {
     /// Create new VirtIO block device
@@ -6425,11 +6285,14 @@ pub const MAX_PCI_BLK_DISKS: usize = 8;
 // ============================================================================
 
 /// Size/align of the pooled io_buf (the R17-C header+resp block).
-const IO_BUF_LAYOUT: alloc::alloc::Layout = unsafe {
-    // SAFETY: 64 with align 16 is a valid layout (const-stable unwrap on
-    // an infallible constructor).
-    alloc::alloc::Layout::from_size_align_unchecked(64, 16)
-};
+pub(crate) const IO_BUF_LAYOUT: alloc::alloc::Layout =
+    // 64/16 is valid: PROVEN at compile time here instead of
+    // asserted with from_size_align_unchecked (pass-3 drivers
+    // collection; the check is const-evaluated, zero runtime cost).
+    match alloc::alloc::Layout::from_size_align(64, 16) {
+        Ok(l) => l,
+        Err(_) => panic!("IO_BUF_LAYOUT: 64/16 is a valid layout"),
+    };
 /// Per-CPU pool depth cap. Deep enough to ride out bursty windows
 /// (a 64-request read window submits 64 chains from one CPU) without
 // unbounded retention; excess frees go to the heap.
@@ -6454,13 +6317,13 @@ pub(crate) fn io_buf_alloc() -> *mut u8 {
             // SAFETY: parked buffers were allocated with IO_BUF_LAYOUT;
             // the first 8 bytes hold the intrusive next pointer.
             let p = pl.head as *mut u8;
-            pl.head = unsafe { *(p as *mut usize) };
+            pl.head = crate::drivers::r#unsafe::io_buf_park_pop_head(p);
             pl.count -= 1;
             return p;
         }
     }
     // SAFETY: IO_BUF_LAYOUT is a non-zero-size valid layout.
-    unsafe { alloc::alloc::alloc(IO_BUF_LAYOUT) }
+    crate::drivers::r#unsafe::io_buf_heap_alloc()
 }
 
 /// Return one 64-byte io_buf: per-CPU pool while under the cap, heap
@@ -6475,14 +6338,14 @@ pub(crate) fn io_buf_free(p: *mut u8) {
             // SAFETY: p is a live 64-byte, 16-aligned block; parking the
             // next pointer in its first 8 bytes is safe because every
             // consumer re-initializes the header before use.
-            unsafe { *(p as *mut usize) = pl.head };
+            crate::drivers::r#unsafe::io_buf_park_store_head(p, pl.head);
             pl.head = p as usize;
             pl.count += 1;
             return;
         }
     }
     // SAFETY: p was allocated with IO_BUF_LAYOUT.
-    unsafe { alloc::alloc::dealloc(p, IO_BUF_LAYOUT) };
+    crate::drivers::r#unsafe::io_buf_heap_dealloc(p);
 }
 
 /// Split one pooled 64-byte io_buf into its typed halves and
@@ -6497,17 +6360,7 @@ pub(crate) fn io_buf_init(
     // SAFETY: io_buf is non-null (callers check), 64 bytes, 16-aligned;
     // +48 leaves 16 bytes for the response — both in bounds. The
     // initializations follow immediately.
-    unsafe {
-        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-        let resp_ptr = io_buf.add(48) as *mut VirtIOBlkResp;
-        *header_ptr = VirtIOBlkReqHeader {
-            type_,
-            reserved: 0,
-            sector,
-        };
-        (*resp_ptr).status = 0xFF;
-        (header_ptr, resp_ptr)
-    }
+    crate::drivers::r#unsafe::io_buf_split_init(io_buf, type_, sector)
 }
 
 /// Release a pending entry's io block: the per-CPU pool when the layout
@@ -6523,7 +6376,7 @@ pub(crate) fn io_buf_release(ptr: *mut u8, layout: alloc::alloc::Layout) {
     } else {
         // SAFETY: dealloc with the exact layout the submitter allocated
         // with (non-pool shape).
-        unsafe { alloc::alloc::dealloc(ptr, layout) };
+        crate::drivers::r#unsafe::io_buf_nonpool_dealloc(ptr, layout);
     }
 }
 
@@ -6536,7 +6389,7 @@ pub(crate) fn io_buf_release(ptr: *mut u8, layout: alloc::alloc::Layout) {
 pub(crate) fn begin_delivery(completion: *mut crate::fs::types::IoCompletion) {
     // SAFETY: the count protocol keeps the IoCompletion alive; callers
     // hold the pending-table lock that serializes the handshake.
-    unsafe { (*completion).begin_delivery(); }
+    crate::drivers::r#unsafe::completion_begin_delivery(completion);
 }
 
 pub(crate) fn deliver_completion(
@@ -6545,10 +6398,7 @@ pub(crate) fn deliver_completion(
     token: usize,
 ) {
     // SAFETY: see doc — count protocol + retire order.
-    unsafe {
-        (*completion).complete_with_token(status, token);
-        (*completion).end_delivery();
-    }
+    crate::drivers::r#unsafe::completion_deliver(completion, status, token);
 }
 
 /// PCI virtio-blk devices (one per slot; slot 0 is the boot disk when the
@@ -6627,14 +6477,14 @@ fn pci_blk_acquire_site() -> usize {
     let ra: usize;
     #[cfg(feature = "riscv64")]
     // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
+    {
+        ra = crate::drivers::r#unsafe::pciblk_site_ra_riscv64();
     }
     #[cfg(feature = "x86_64")]
     // SAFETY: frame pointers are forced on, so [rbp+8] is this inlined
     // helper's caller's return address.
-    unsafe {
-        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
+    {
+        ra = crate::drivers::r#unsafe::pciblk_site_ra_x86_64();
     }
     #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
     {
@@ -6649,7 +6499,7 @@ fn pci_blk_acquire_site() -> usize {
 fn wedge_put(b: u8) {
     // SAFETY: putchar_no_lock is a byte-wise polling UART write usable
     // from any context, including with interrupts disabled.
-    unsafe { crate::console::putchar_no_lock(b) }
+    crate::drivers::r#unsafe::wedge_console_put(b)
 }
 
 /// Lock-free hex printer (usize, no leading zeros beyond the top nibble
@@ -6926,9 +6776,6 @@ static VIRTIO_MMIO_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync
 const MAX_PENDING_IO: usize = 16;
 
 
-// SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
-// from IRQ/softirq context; raw pointers within are not shared across threads.
-unsafe impl Send for PendingIo {}
 
 /// Pending async I/O requests for MMIO VirtIO block device.
 /// Indexed by (expected_used_idx % MAX_PENDING_IO).
@@ -7103,7 +6950,7 @@ pub fn assert_no_virtio_lock(what: &str) {
 /// Pending async I/O slots for the PCI VirtIO block device.
 /// Must exceed the maximum in-flight chains (queue_size / 3 descriptors);
 /// QEMU's virtio-blk-pci default queue size is 128 → 41 chains max.
-const MAX_PENDING_IO_PCI: usize = 64;
+pub(crate) const MAX_PENDING_IO_PCI: usize = 64;
 
 /// Upper bound on data segments in one SG chain. Well under QEMU's
 /// seg_max (queue_size - 2; 254 on a 256-deep queue) and keeps a fused
@@ -7165,7 +7012,7 @@ pub const MAX_SG_SEGS_PER_CHAIN: usize = 16;
 /// because ordinal N+64 cannot publish until entry N was walked, the
 /// walker can never trail far enough for the used ring (queue_size deep)
 /// to overwrite an unconsumed entry.
-static PCI_BLK_PENDING: [Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]>; MAX_PCI_BLK_DISKS] =
+pub(crate) static PCI_BLK_PENDING: [Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]>; MAX_PCI_BLK_DISKS] =
     [const { Spinlock::new([const { None }; MAX_PENDING_IO_PCI]) }; MAX_PCI_BLK_DISKS];
 
 /// Last used-ring index processed by the async completion walker, per slot.
@@ -7279,7 +7126,7 @@ pub fn pci_pending_slot_reservable_len(
     // a redundant second acquisition inside that window (one of the 5
     // per-submit acquisitions the dio-conc open list named).
     // SAFETY: BLK lock held by the caller on this disk.
-    let table = unsafe { PCI_BLK_PENDING[disk].get_ref() };
+    let table = crate::drivers::r#unsafe::pci_pending_table_ref(disk);
     if table[slot].is_some() {
         return false;
     }
@@ -7319,7 +7166,7 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
     // SUBMIT-2X: BLK lock held by the caller serializes the table —
     // direct access, no second lock acquisition inside the window.
     // SAFETY: BLK lock held by the caller on this disk.
-    let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
+    let table = crate::drivers::r#unsafe::pci_pending_table_mut(disk);
     debug_assert!(
         table[slot].is_none()
             || !table.iter().any(|e| match e {
@@ -7366,7 +7213,7 @@ pub fn pci_flag_sync_tombstone_timed_out(disk: usize, ordinal: u16) {
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
     // SUBMIT-2X: caller holds the BLK lock (see pci_publish_sync_chain).
     // SAFETY: BLK lock held by the caller on this disk.
-    let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
+    let table = crate::drivers::r#unsafe::pci_pending_table_mut(disk);
     if let Some(p) = table[slot].as_mut() {
         if p.completion.is_null() {
             p.timed_out = true;
@@ -7428,7 +7275,7 @@ pub fn abandon_pending_completion(
     for disk in 0..MAX_PCI_BLK_DISKS {
         let _blk = pci_blk_lock(disk);
         // SAFETY: BLK lock held on this disk; abandon only tombstones.
-        let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
+        let table = crate::drivers::r#unsafe::pci_pending_table_mut(disk);
         for slot in table.iter_mut() {
             if let Some(p) = slot {
                 if p.completion == comp && !p.completion.is_null() {
@@ -7520,7 +7367,7 @@ pub fn abandon_pending_completion(
     // IoCompletion usually lives on its kernel stack: without this
     // handoff, a late complete() fired into the recycled stack page was
     // the wandering corruption behind ftest01's cross-file bad-verify.
-    if !unsafe { (*comp).wait_deliveries() } {
+    if !crate::drivers::r#unsafe::completion_wait_deliveries(comp) {
         crate::pr_err!(
             "virtio: delivery handoff overran spin budget during abandon"
         );
@@ -7770,7 +7617,7 @@ fn pci_submit_data_async_sg(
                     // second table lock (was one of the 5 per-submit
                     // acquisitions).
                     // SAFETY: BLK lock held (the _guard above).
-                    let table = unsafe { PCI_BLK_PENDING[slot].get_mut_unchecked() };
+                    let table = crate::drivers::r#unsafe::pci_pending_table_mut(slot);
                     table[prev_expected as usize % MAX_PENDING_IO_PCI] = Some(PendingIo {
                         completion: completion as *const _ as *mut _,
                         resp_ptr: resp_ptr as *mut u8,
@@ -8383,7 +8230,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                     // takes the same lock) — direct access, no second
                     // table-lock acquisition per completed chain.
                     // SAFETY: BLK lock held (the _guard above).
-                    let table = unsafe { PCI_BLK_PENDING[slot].get_mut_unchecked() };
+                    let table = crate::drivers::r#unsafe::pci_pending_table_mut(slot);
                     let positional_match = match table[ordinal_slot].as_ref() {
                         Some(p) => p.head_desc == entry_id,
                         None => false,
@@ -8418,9 +8265,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                     // ftest01 "2048*25 bad verify" wandering corruption).
                     if let Some(p) = fired.as_ref() {
                         if !p.completion.is_null() {
-                            unsafe {
-                                (*p.completion).begin_delivery();
-                            }
+                            crate::drivers::r#unsafe::pending_begin_delivery_walk(p.completion);
                         }
                     }
                 }
@@ -8992,7 +8837,7 @@ pub fn get_pci_gen_disk_at(slot: usize) -> Option<&'static GenDisk> {
         return None;
     }
     // SAFETY: get_disk returns a valid raw pointer to a registered GenDisk.
-    crate::drivers::hotpath::get_disk(8 + slot as u32).map(|ptr| unsafe { &*ptr })
+    crate::drivers::hotpath::get_disk(8 + slot as u32).map(|ptr| crate::drivers::r#unsafe::gen_disk_ref(ptr))
 }
 
 /// Resolve a vdX disk NAME to its GenDisk ("vdb" -> slot 1). Returns None
@@ -9370,8 +9215,6 @@ pub fn virtio_blk_enable_device_interrupt(base_addr: u64) {
 //
 // Queue implementation fully compliant with VirtIO specification
 
-unsafe impl Send for VirtQueue {}
-unsafe impl Sync for VirtQueue {}
 
 // ---- Safe used-ring / response readers (safe-call discipline,
 // INV-SAFECALL-1..3): the ONE audited volatile edge per shape; every
@@ -9389,7 +9232,7 @@ pub fn used_ring_idx(used_ring: *const UsedRing) -> u16 {
     // SAFETY: the invariant above — a live vring's used ring; the u16
     // at +2 is within the allocation; volatile because the device
     // writes it (INV-DMA-3).
-    unsafe { core::ptr::read_volatile((used_ring as usize + 2) as *const u16) }
+    crate::drivers::r#unsafe::vring_used_idx(used_ring)
 }
 
 /// Read a used-ring entry's descriptor id (device-written) volatily.
@@ -9402,9 +9245,7 @@ pub fn used_ring_elem_id(used_ring: *const UsedRing, slot: usize) -> u32 {
     }
     // SAFETY: live used ring; the entry at +4+slot*8 is within the
     // allocation for slot < queue_size; volatile device-written memory.
-    unsafe {
-        core::ptr::read_volatile((used_ring as usize + 4 + slot * 8) as *const u32)
-    }
+    crate::drivers::r#unsafe::vring_used_elem_id(used_ring, slot)
 }
 
 /// True once the device has written THIS request's response byte.
@@ -9424,7 +9265,7 @@ pub fn resp_status_byte(resp_status: *const u8) -> u8 {
     }
     // SAFETY: caller-owned response byte of a live request; volatile
     // so each poll re-reads DMA memory (INV-DMA-3).
-    unsafe { core::ptr::read_volatile(resp_status) }
+    crate::drivers::r#unsafe::resp_status_read(resp_status)
 }
 
 /// r-strand instrument (lat_fs conviction round, 2026-11-19): the sync
@@ -9636,15 +9477,8 @@ pub fn notify(&self) {
         #[cfg(feature = "riscv64")]
         // SAFETY: reading sie and clearing SEIE (bit 9) via a register-based
         // csrc is valid in S-mode; the mask register is a scratch local.
-        unsafe {
-            core::arch::asm!(
-                "csrr {sie}, sie",
-                "li {mask}, {seie}",
-                "csrc sie, {mask}",
-                sie = out(reg) sie_backup,
-                mask = out(reg) _,
-                seie = const 1 << 9,
-            );
+        {
+            sie_backup = crate::drivers::r#unsafe::virtio_notify_sie_save();
         }
 
         // RISC-V MMIO fence: fence w, o
@@ -9652,26 +9486,13 @@ pub fn notify(&self) {
         // are visible before the MMIO write to the notify register.
         // MMIO write fence: RISCV_FENCE(w, o)
         #[cfg(feature = "riscv64")]
-        unsafe {
-            core::arch::asm!("fence w, o");
+        {
+            crate::drivers::r#unsafe::virtio_notify_fence_wo();
         }
 
         // SAFETY: queue_notify is a valid MMIO address for the VirtIO notify register;
         // volatile write ensures the store reaches the device.
-        unsafe {
-            match self.notify_width {
-                NotifyWidth::W16 => {
-                    // virtio-pci notify capability (matches Linux iowrite16)
-                    let queue_notify = self.queue_notify as *mut u16;
-                    core::ptr::write_volatile(queue_notify, self.queue_index);
-                }
-                NotifyWidth::W32 => {
-                    // virtio-mmio QueueNotify: QEMU drops any access != 4 bytes
-                    let queue_notify = self.queue_notify as *mut u32;
-                    core::ptr::write_volatile(queue_notify, self.queue_index as u32);
-                }
-            }
-        }
+        crate::drivers::r#unsafe::virtio_notify_mmio(self.notify_width, self.queue_notify, self.queue_index);
 
         // RISC-V MMIO fence after write: fence iorw, iorw
         // This is the WRITE-side device fence (Linux __io_aw(): "fence
@@ -9682,18 +9503,15 @@ pub fn notify(&self) {
         // fetch and did not order the notify store at all (review ARCH:
         // fence i,ir 用反, weakly-ordered platform risk).
         #[cfg(feature = "riscv64")]
-        unsafe {
-            core::arch::asm!("fence iorw, iorw");
+        {
+            crate::drivers::r#unsafe::virtio_notify_fence_iorw();
         }
 
         // Restore interrupts
         #[cfg(feature = "riscv64")]
         // SAFETY: writing sie CSR to restore the previous interrupt-enable state is valid on S-mode.
-        unsafe {
-            core::arch::asm!(
-                "csrw sie, {sie}",
-                sie = in(reg) sie_backup,
-            );
+        {
+            crate::drivers::r#unsafe::virtio_notify_sie_restore(sie_backup);
         }
     }
 
@@ -10674,7 +10492,7 @@ break 'wait_done prev_used;
             // SAFETY: idx bounds-checked above; the slot's range is
             // disjoint from every other slot (INV-DMA-2); caller's
             // device lock provides the exclusion.
-            Some(unsafe { &mut *base.add(idx as usize) })
+            Some(crate::drivers::r#unsafe::vq_desc_mut(base, idx))
         } else {
             None
         }
@@ -10687,7 +10505,7 @@ break 'wait_done prev_used;
         let base = vr.avail.as_ptr();
         // SAFETY: disjoint slot (INV-DMA-2); the avail header is
         // driver-written; caller's device lock serializes.
-        Some(unsafe { &mut *base })
+        Some(crate::drivers::r#unsafe::vq_avail_mut(base))
     }
 
     /// Volatile write of avail ring slot `ring_idx` (device reads).
@@ -12874,12 +12692,6 @@ pub use self::get_net_device as get_virtio_net_device_net;
 // (was net/space.rs)
 // Network device base class
 
-unsafe impl Send for NetDevice {}
-// SAFETY (round-5): NetDevice's cross-thread state (stats, flags) is
-// mutated under the NetRx softirq / syscall discipline each op
-// documents; the priv_ raw slot is driver-owned and set before
-// registration. Sync was implicit in the old `static mut` usage.
-unsafe impl Sync for NetDevice {}
 
 /// Device status flags
 pub mod dev_flags {
@@ -13038,7 +12850,6 @@ pub fn get_netdevice_count() -> usize {
 // SAFETY: All shared state is protected by Spinlocks (irqsave where needed),
 // ensuring no data races across threads/CPUs.
 
-unsafe impl Send for VirtIONetDevice {}
 
 impl VirtIONetDevice {
     /// Create new VirtIO network device
@@ -13530,9 +13341,7 @@ impl VirtIONetDevice {
         // SAFETY: buf_virt is the linear-mapping address of the device-completed
         // RX buffer of total_len bytes; the buffer remains valid until after
         // this function returns.
-        let hdr_and_data = unsafe {
-            core::slice::from_raw_parts(buf_virt as *const u8, total_len)
-        };
+        let hdr_and_data = crate::drivers::r#unsafe::rx_hdr_slice(buf_virt, total_len);
 
         // Skip VirtIO-Net header, keep only Ethernet frame
         let eth_data = &hdr_and_data[core::mem::size_of::<VirtIONetHdr>()..];
@@ -13598,13 +13407,7 @@ impl VirtIONetDevice {
         let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
         // SAFETY: Buffer was allocated with identical layout in refill_rx_buffers();
         // from_size_align cannot fail because buf_size and align are the same constants.
-        unsafe {
-            if let Ok(layout) = alloc::alloc::Layout::from_size_align(buf_size, 64) {
-                alloc::alloc::dealloc(addr as *mut u8, layout);
-            } else {
-                crate::pr_err!("virtio_net: invalid RX dealloc layout buf_size={}", buf_size);
-            }
-        }
+        crate::drivers::r#unsafe::rx_buffer_dealloc(addr, buf_size);
     }
 
     /// Refill RX buffers
@@ -13630,7 +13433,7 @@ impl VirtIONetDevice {
             };
 
             // SAFETY: Layout is valid (checked above); null check follows immediately.
-            let buf_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
+            let buf_ptr = crate::drivers::r#unsafe::rx_buffer_alloc(layout);
             if buf_ptr.is_null() {
                 continue;
             }
@@ -13642,7 +13445,7 @@ impl VirtIONetDevice {
                 Some(idx) => idx,
                 None => {
                     // SAFETY: buf_ptr was just allocated with layout; no submit occurred.
-                    unsafe { alloc::alloc::dealloc(buf_ptr, layout); }
+                    crate::drivers::r#unsafe::layout_dealloc(buf_ptr, layout);
                     continue;
                 }
             };
@@ -14133,7 +13936,7 @@ pub fn flush_framebuffer() -> bool {
             None => return false,
         }
     };
-    unsafe { (*device).flush() };
+    crate::drivers::r#unsafe::gpu_flush(device);
     true
 }
 
@@ -14152,7 +13955,7 @@ pub fn with_gpu_device<R>(f: impl FnOnce(&VirtioGpuDevice) -> R) -> Option<R> {
             None => return None,
         }
     };
-    Some(f(unsafe { &*device }))
+    Some(f(crate::drivers::r#unsafe::gpu_device_ref(device)))
 }
 
 // ════════════════ gpu::framebuffer ════════════════════
@@ -14176,8 +13979,6 @@ pub mod color {
 }
 
 
-unsafe impl Send for FrameBuffer {}
-unsafe impl Sync for FrameBuffer {}
 
 impl FrameBuffer {
     /// Create a new Framebuffer
@@ -14443,8 +14244,6 @@ const CTRL_QUEUE: u16 = 0;   // Control queue
 const CURSOR_QUEUE: u16 = 1; // Cursor queue
 
 
-unsafe impl Send for VirtioGpuDevice {}
-unsafe impl Sync for VirtioGpuDevice {}
 
 impl VirtioGpuDevice {
     /// Create a new VirtIO-GPU device
@@ -14632,7 +14431,7 @@ impl VirtioGpuDevice {
 
         // Step 2: Allocate framebuffer
         let layout = Layout::from_size_align(fb_size, 4096).ok()?;
-        let fb_ptr = unsafe { alloc_zeroed(layout) };
+        let fb_ptr = crate::drivers::r#unsafe::dma_zeroed_alloc(layout);
 
         if fb_ptr.is_null() {
             return None;
@@ -15024,18 +14823,16 @@ impl VirtioGpuDevice {
         let io_layout = Layout::from_size_align(cmd_size + resp_size, 16).ok()?;
         // SAFETY: Layout is non-zero-sized (both parts are >= 24 bytes);
         // null check follows immediately.
-        let io_buf = unsafe { alloc(io_layout) };
+        let io_buf = crate::drivers::r#unsafe::gpu_ctrl_alloc(io_layout);
         if io_buf.is_null() {
             return None;
         }
         let cmd_ptr = io_buf as *const u8;
         // SAFETY: io_buf is cmd_size + resp_size bytes; +cmd_size is in
         // bounds and resp_size bytes remain after it.
-        let resp_ptr = unsafe { io_buf.add(cmd_size) } as *mut u8;
+        let resp_ptr = crate::drivers::r#unsafe::gpu_ctrl_resp_half(io_buf, cmd_size) as *mut u8;
         // SAFETY: cmd references at least cmd_size initialized bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(cmd as *const CMD as *const u8, io_buf, cmd_size);
-        }
+        crate::drivers::r#unsafe::gpu_ctrl_cmd_copy(cmd, cmd_size, io_buf);
 
         // Set by the polling loop below; read after the block is released.
         let mut completed = false;
@@ -15086,8 +14883,8 @@ impl VirtioGpuDevice {
             // RISC-V needs to flush CPU cache to memory
             #[cfg(feature = "riscv64")]
             // SAFETY: bare cache/memory fence instruction, no operands.
-            unsafe {
-                core::arch::asm!("fence");
+            {
+                crate::drivers::r#unsafe::gpu_ctrl_fence_riscv64();
             }
 
             queue.write_avail_idx(((idx as u16).wrapping_add(1)));
@@ -15156,13 +14953,7 @@ impl VirtioGpuDevice {
                 // the caller's buffer before the block is freed.
                 // SAFETY: the device wrote resp_size bytes at resp_ptr
                 // (desc1 was the device-writable half of the chain).
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        resp_ptr,
-                        resp as *mut RESP as *mut u8,
-                        resp_size,
-                    );
-                }
+                crate::drivers::r#unsafe::gpu_ctrl_resp_copy(resp_ptr, resp, resp_size);
             }
         }
 
@@ -15177,7 +14968,7 @@ impl VirtioGpuDevice {
         if completed {
             // SAFETY: io_buf was allocated above with io_layout; the chain is
             // complete, so the device no longer accesses the block.
-            unsafe { dealloc(io_buf, io_layout) };
+            crate::drivers::r#unsafe::layout_dealloc(io_buf, io_layout);
         }
 
         if completed {
@@ -15223,9 +15014,7 @@ impl Drop for VirtioGpuDevice {
     fn drop(&mut self) {
         if !self.fb_ptr.is_null() {
             if let Some(layout) = self.fb_layout {
-                unsafe {
-                    dealloc(self.fb_ptr, layout);
-                }
+                crate::drivers::r#unsafe::layout_dealloc(self.fb_ptr, layout);
             }
         }
     }
@@ -15286,7 +15075,7 @@ pub static INPUT_POINTER: Spinlock<Option<VirtioInputDevice>> = Spinlock::new(No
 /// virtio-input probe, scheduled by the hard-IRQ top half.
 // SAFETY: touched from the probe (single-threaded init context) and from
 // tasklet_schedule in hard-IRQ context, which is the API's designed use.
-static mut INPUT_BH_TASKLET: crate::interrupt::tasklet::TaskletStruct =
+pub(crate) static mut INPUT_BH_TASKLET: crate::interrupt::tasklet::TaskletStruct =
     crate::interrupt::tasklet::TaskletStruct::new();
 
 /// dev_id → ISR capability address for the registered input functions
@@ -15325,7 +15114,7 @@ pub fn input_debug_tick() {
     }
 }
 
-fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {
+pub(crate) fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {
     const BURST: usize = 16;
     const ROUNDS: usize = 8;
     for _ in 0..ROUNDS {
@@ -15472,7 +15261,7 @@ pub fn init_virtio_input() -> (usize, usize) {
 
     // Arm the bottom-half tasklet before any device IRQ is registered
     // (single-threaded kernel-init context).
-    unsafe { INPUT_BH_TASKLET.init(input_bh_run) };
+    crate::drivers::r#unsafe::input_bh_tasklet_init();
 
     // Probe VirtIO Input devices via the shared ECAM walker (0x8000 stride
     // per slot + all 8 functions). The old inline walk here enumerated
@@ -16071,8 +15860,6 @@ const VIRTIO_INPUT_CFG_ABS_INFO: u8 = 0x12;
 // ============================================================================
 
 
-unsafe impl Send for VirtioInputDevice {}
-unsafe impl Sync for VirtioInputDevice {}
 
 impl VirtioInputDevice {
     /// Create new VirtIO Input device
@@ -16149,7 +15936,7 @@ impl VirtioInputDevice {
             4096,
         ).ok()?;
 
-        let event_buffer = unsafe { alloc_zeroed(buffer_layout) };
+        let event_buffer = crate::drivers::r#unsafe::dma_zeroed_alloc(buffer_layout);
         if event_buffer.is_null() {
             return None;
         }
@@ -16346,7 +16133,7 @@ impl VirtioInputDevice {
             // SAFETY: the event buffer is a live registered DMA buffer
             // of queue_size events (INV at init); volatile because the
             // device writes it.
-            let event = unsafe { read_volatile(self.event_buffer.add(desc_idx)) };
+            let event = crate::drivers::r#unsafe::input_event_read(self.event_buffer, desc_idx);
 
             // Resubmit buffer
             let Some(desc) = queue.desc_mut(desc_idx as u16) else {
@@ -16499,9 +16286,7 @@ impl Drop for VirtioInputDevice {
     fn drop(&mut self) {
         if let Some(layout) = self.event_buffer_layout {
             if !self.event_buffer.is_null() {
-                unsafe {
-                    dealloc(self.event_buffer as *mut u8, layout);
-                }
+                crate::drivers::r#unsafe::input_buffer_dealloc(self.event_buffer as *mut u8, layout);
             }
         }
     }
@@ -17063,7 +16848,7 @@ pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
 fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
     let devno = file.private_data_ptr().map(|p| {
         // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime).
-        unsafe { *(p as *const DevNo) }
+        crate::drivers::r#unsafe::devno_of_private(p)
     })?;
     if devno == DEV_EVDEV_KEYBOARD {
         evdev_keyboard()
@@ -17143,7 +16928,7 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
 fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
     let devno = file.private_data_ptr().map(|p| {
         // SAFETY: as device_of_file (Box<DevNo>, file-lifetime).
-        unsafe { *(p as *const DevNo) }
+        crate::drivers::r#unsafe::devno_of_private(p)
     })?;
     if devno == DEV_EVDEV_KEYBOARD {
         evdev_keyboard().map(|d| (d, devno.minor))
@@ -17317,7 +17102,7 @@ fn evdev_file_close(file: &File) -> i32 {
     {
         if let Some(ptr) = file.private_data_ptr() {
             // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime).
-            let devno = unsafe { *(ptr as *const DevNo) };
+            let devno = crate::drivers::r#unsafe::devno_of_private(ptr);
             // The file description is going away — drop its epoll
             // notification registration.
             if let Some(dev) = device_of_devno(devno) {
@@ -17333,7 +17118,7 @@ fn evdev_file_close(file: &File) -> i32 {
                 }
             }
             // SAFETY: the Box<DevNo> devfs_open stored (sole ref).
-            drop(unsafe { Box::from_raw(ptr as *mut DevNo) });
+            drop(crate::drivers::r#unsafe::devno_box_take(ptr as *mut DevNo));
         }
     }
     0
@@ -17419,7 +17204,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::types::Task) -> b
                 if input_echo_budget(n) {
                     // SAFETY: task is the current task parking here (the
                     // wait-queue callback passes current's raw handle).
-                    let pid = unsafe { (*task).pid() };
+                    let pid = crate::drivers::r#unsafe::park_task_pid(task);
                     let mut l = HuntLine::new();
                     l.push(b"INPW[");
                     l.u64(n);
@@ -17464,7 +17249,7 @@ pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::types::Task) {
             let steal = dropped > 1;
             if steal || input_echo_budget(n) {
                 // SAFETY: task is the current task leaving the wait.
-                let pid = unsafe { (*task).pid() };
+                let pid = crate::drivers::r#unsafe::park_task_pid(task);
                 let mut l = HuntLine::new();
                 l.push(b"INPW[");
                 l.u64(n);
@@ -18823,7 +18608,7 @@ fn loop_devno_of(file: &crate::fs::types::File) -> Option<DevNo> {
     file.private_data_ptr().map(|pd| {
         // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime) in the
         // slot; read-only here.
-        unsafe { *(pd.cast_const() as *const DevNo) }
+        crate::drivers::r#unsafe::devno_of_private(pd.cast_const())
     })
 }
 
@@ -18857,11 +18642,7 @@ pub fn loop_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
             None => break,
         };
         // SAFETY: bh from bread; b_data is block_size bytes.
-        unsafe {
-            let data = &(*bh).b_data;
-            buf[done..done + want].copy_from_slice(&data[in_off..in_off + want]);
-            crate::fs::hotpath::brelse(bh);
-        }
+        crate::drivers::r#unsafe::loop_bh_read_into(bh, buf, done, want, in_off);
         done += want;
     }
     if done == 0 {
@@ -18904,17 +18685,8 @@ pub fn loop_file_write(file: &crate::fs::types::File, buf: &[u8]) -> isize {
         // by design (fs/bio.rs, L5's bio lane owns its conversion);
         // b_data writable and block-sized here.
         // SAFETY: as above.
-        unsafe {
-            {
-                let data = &mut (*bh).b_data;
-                data[in_off..in_off + want].copy_from_slice(&buf[done..done + want]);
-            }
-            (*bh).set_state_bit(crate::fs::types::BufferState::BH_Dirty);
-            let r = crate::fs::hotpath::sync_dirty_buffer(bh);
-            crate::fs::hotpath::brelse(bh);
-            if r.is_err() {
-                break;
-            }
+        if !crate::drivers::r#unsafe::loop_bh_write_from(bh, buf, done, want, in_off) {
+            break;
         }
         done += want;
     }
@@ -19026,7 +18798,7 @@ pub fn loop_file_ioctl(
     let Some(pd) = file.private_data_ptr() else { return None };
     // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime) in the
     // slot; read-only here.
-    let devno = unsafe { *(pd.cast_const() as *const DevNo) };
+    let devno = crate::drivers::r#unsafe::devno_of_private(pd.cast_const());
     let is_loop = devno.major == LOOP_MAJOR && (devno.minor as usize) < N_LOOPS;
     let idx = devno.minor as usize;
     // Linux loop_ioctl order: ENXIO for any loop-specific request on an
@@ -19489,7 +19261,7 @@ impl Drop for AshmemPages {
                 true
             } else {
                 // SAFETY: descriptor exists for this in-RAM page.
-                unsafe { (*page).put_page() == 0 }
+                crate::drivers::r#unsafe::page_put_is_last(page)
             };
             if freed_by_us {
                 free_pages(*p, 0);
@@ -19661,9 +19433,7 @@ fn ashmem_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
             .bits() as *const u8;
         // SAFETY: src is the kernel linear map of a live pool page; the
         // destination is the syscall-validated user buffer slice.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.add(in_pg), buf.as_mut_ptr().add(done), chunk);
-        }
+        crate::drivers::r#unsafe::ashmem_read_copy_chunk(src, in_pg, buf.as_mut_ptr(), done, chunk);
         done += chunk;
     }
     file.set_pos((pos + done) as u64);
@@ -20071,7 +19841,7 @@ pub fn ashmem_mmap(
     }
     address_space.add_rss(npages as u64);
     // SAFETY: fresh user PTEs need a flush before first use on any hart.
-    unsafe { crate::arch::mm::asid::flush_tlb_all(); }
+    crate::drivers::r#unsafe::ashmem_flush_tlb_all();
     Ok(placement)
 }
 
@@ -20662,10 +20432,6 @@ const DMA_BUF_IOCTL_SYNC: u32 = 0x4008_6200;
 // ============================================================================
 
 
-// SAFETY: the object's mutable state is a single AtomicU32; kva/phys are
-// stable for the object's lifetime.
-unsafe impl Send for GemObject {}
-unsafe impl Sync for GemObject {}
 
 impl Drop for GemObject {
     fn drop(&mut self) {
@@ -20677,7 +20443,7 @@ impl Drop for GemObject {
         }
         // SAFETY: kva was allocated with exactly this layout in
         // create_dumb and never reallocated.
-        unsafe { dealloc(self.kva, self.layout) };
+        crate::drivers::r#unsafe::layout_dealloc(self.kva, self.layout);
     }
 }
 
@@ -20758,7 +20524,7 @@ fn prime_close(file: &crate::fs::types::File) -> i32 {
     if let Some(ptr) = file.private_data_ptr() {
         file.clear_private_data();
         // SAFETY: the Box<Arc<GemObject>> the export stored (sole ref).
-        drop(unsafe { alloc::boxed::Box::from_raw(ptr as *mut Arc<GemObject>) });
+        drop(crate::drivers::r#unsafe::gem_arc_box_take(ptr as *mut Arc<GemObject>));
     }
     0
 }
@@ -20855,7 +20621,7 @@ fn prime_file_gem(file: &crate::fs::types::File) -> Option<Arc<GemObject>> {
     // one audited deref is the clone).
     let ptr = file.private_data_ptr()?;
     // SAFETY: Box<Arc<GemObject>> stored by the export path.
-    Some(unsafe { (*(ptr as *const Arc<GemObject>)).clone() })
+    Some(crate::drivers::r#unsafe::gem_arc_clone(ptr as *const Arc<GemObject>))
 }
 
 // ============================================================================
@@ -20897,7 +20663,7 @@ mod bytemod {
     pub fn u32_slice_as_bytes(v: &[u32]) -> &[u8] {
         // SAFETY: [u32] and its byte image have identical size/align
         // requirements; the relabel borrows v's own lifetime.
-        unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
+        crate::drivers::r#unsafe::u32_slice_as_u8(v)
     }
 }
 
@@ -21708,7 +21474,7 @@ fn create_dumb(arg: usize) -> i64 {
         Err(_) => return -22,
     };
     // SAFETY: layout has non-zero size; null-checked below.
-    let kva = unsafe { alloc_zeroed(layout) };
+    let kva = crate::drivers::r#unsafe::dma_zeroed_alloc(layout);
     if kva.is_null() {
         return -12; // ENOMEM
     }
@@ -21899,30 +21665,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
             // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
             // an imported smaller buffer made the unclamped reads walk past the
             // allocation).
-            unsafe {
-                let base = gem.kva as *const u32;
-                let words = gem.size / 4;
-                for i in 0..words {
-                    let v = base.add(i).read_volatile();
-                    if v != 0 {
-                        nz += 1;
-                        if v == 0xff00_0000 {
-                            clear += 1;
-                        }
-                    }
-                }
-                let row_words = 983040 / 1280; // pitch/4 for these buffers
-                let s = |off: usize| -> u32 {
-                    if off < words {
-                        base.add(off).read_volatile()
-                    } else {
-                        0
-                    }
-                };
-                samples[0] = s(row_words * 640 + 360);
-                samples[1] = s(row_words * 640 + 200);
-                samples[2] = s(row_words * 300 + 360);
-            }
+            crate::drivers::r#unsafe::drm_scan_screen(&gem, &mut nz, &mut clear, &mut samples);
             crate::pr_warn!(
                 "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
                 it,
@@ -22113,40 +21856,7 @@ fn present_fb(fb_id: u32) -> i64 {
         // word-aligned reads stay inside the allocation (sample offsets are
         // clamped to words — the fixed 720-wide sample geometry only fits
         // full-size frame GEMs).
-        unsafe {
-            let base = gem.kva as *const u32;
-            let words = gem.size / 4;
-            for i in 0..words {
-                let v = base.add(i).read_volatile();
-                if v != 0 {
-                    nz += 1;
-                }
-            }
-            let row_words = (pitch / 4) as usize;
-            let vis_words = width as usize;
-            for row in 0..height as usize {
-                let rowp = base.add(row * row_words);
-                for col in (0..vis_words).step_by(2) {
-                    let v = rowp.add(col).read_volatile();
-                    if v != 0 && v != 0xff00_0000 {
-                        paint += 1;
-                    }
-                }
-            }
-            let mid_row = (height as usize / 2) * row_words;
-            let last_row = (height as usize - 1).saturating_mul(row_words);
-            let s = |off: usize| -> u32 {
-                if off < words {
-                    base.add(off).read_volatile()
-                } else {
-                    0
-                }
-            };
-            samples[0] = s(720 / 4);
-            samples[1] = s(row_words + 720 / 4);
-            samples[2] = s(mid_row + (width as usize / 2));
-            samples[3] = s(last_row + 720 / 4);
-        }
+        crate::drivers::r#unsafe::drm_scan_present(&gem, &mut nz, &mut paint, &mut samples, pitch, width, height);
         crate::pr_warn!(
             "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
             ft,
