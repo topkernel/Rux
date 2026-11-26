@@ -184,7 +184,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::types::RtRunQueue, cpu_id: usize,
                         }
                         crate::sched::r#unsafe::task_shared(task).cpu_allowed(cpu_id)
                             && ownership_ok
-                            && !crate::sched::hotpath::task_cgroup_throttled(task)
+                            && !crate::cgroup_policy::task_cgroup_throttled(task)
                     };
 
                     // Save next before potential dequeue
@@ -229,7 +229,7 @@ pub fn rt_pick_next_cpu(rq: &mut crate::sched::types::RtRunQueue, cpu_id: usize,
                                     .load(Ordering::Relaxed) as u64;
                                 let pk = crate::sched::r#unsafe::task_shared(task).pick_state() as u64;
                                 let throt =
-                                    crate::sched::hotpath::task_cgroup_throttled(task) as u64;
+                                    crate::cgroup_policy::task_cgroup_throttled(task) as u64;
                                 for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }
                                 ph(pid);
                                 for &b in b" jif=" { putchar(b); }

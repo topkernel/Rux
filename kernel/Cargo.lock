@@ -166,6 +166,7 @@ dependencies = [
  "debug",
  "ext4",
  "rux-core",
+ "sched",
 ]
 
 [[package]]
@@ -631,6 +632,7 @@ dependencies = [
  "net",
  "process",
  "rux-core",
+ "sched",
  "sync",
  "timer",
 ]

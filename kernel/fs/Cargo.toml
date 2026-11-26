@@ -22,12 +22,17 @@ debug = { path = "../debug", default-features = false }
 # so the syscall crate's crate::fs::ext4 paths stay valid (the
 # one-way sibling-service dep, the net precedent).
 ext4 = { path = "../ext4", default-features = false }
+# The sched policy crate (shrink-stage sibling dep, same shape as ext4):
+# the cgroupfs presentation layer reaches the moved cgroup policy
+# (cgroup_create/rmdir/lookup_child/attach_pid, subtree_control parse/
+# format, memory accounting readbacks) with direct calls.
+sched = { path = "../sched", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "ext4/riscv64", "debug/riscv64"]
-x86_64 = ["rux/x86_64", "ext4/x86_64", "debug/x86_64"]
-aarch64 = ["rux/aarch64", "ext4/aarch64", "debug/aarch64"]
+riscv64 = ["rux/riscv64", "ext4/riscv64", "debug/riscv64", "sched/riscv64"]
+x86_64 = ["rux/x86_64", "ext4/x86_64", "debug/x86_64", "sched/x86_64"]
+aarch64 = ["rux/aarch64", "ext4/aarch64", "debug/aarch64", "sched/aarch64"]
 # Gates the guest test module + its run entry (make test forwards this
 # from bin's unit-test through the SERVICE-TEST SEAM).
 unit-test = ["rux/unit-test"]

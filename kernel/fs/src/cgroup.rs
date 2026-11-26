@@ -46,6 +46,9 @@ use rux::fs::hotpath::file_type;
 use rux::fs::types::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
 use rux::fs::types::{FileSystemType, SuperBlock};
 use crate::sched::{hotpath, types::CgroupNode, hotpath::LIMIT_MAX};
+// The cgroup POLICY operations moved to the sched service crate
+// (shrink stage, 2026-11-26): direct sibling-crate calls, no hook row.
+use sched::cgroup_policy;
 
 // ============================================================================
 // Control files
@@ -178,7 +181,7 @@ fn generate_controllers() -> Vec<u8> {
 
 fn generate_subtree_control(node: &CgroupNode) -> Vec<u8> {
     let bits = node.controllers.lock_irqsave().subtree_control;
-    let mut s = hotpath::format_subtree_control(bits);
+    let mut s = cgroup_policy::format_subtree_control(bits);
     s.push('\n');
     s.into_bytes()
 }
@@ -230,14 +233,14 @@ fn generate_memory_max(node: &CgroupNode) -> Vec<u8> {
 }
 
 fn generate_memory_current(node: &CgroupNode) -> Vec<u8> {
-    format!("{}\n", hotpath::node_memory_current(node)).into_bytes()
+    format!("{}\n", cgroup_policy::node_memory_current(node)).into_bytes()
 }
 
 /// memory.stat (v2 key names). anon/file carry the real per-class
 /// charges; remaining rows are honest zeros (this kernel does not
 /// account those classes yet).
 fn generate_memory_stat(node: &CgroupNode) -> Vec<u8> {
-    let current = hotpath::node_memory_current(node);
+    let current = cgroup_policy::node_memory_current(node);
     format!(
         "anon 0\nfile 0\nkernel 0\nkernel_stack 0\npagetables 0\n\
          sock 0\nshmem 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\n\
@@ -302,7 +305,7 @@ fn trim(input: &[u8]) -> &str {
 
 fn apply_procs(node: &Arc<CgroupNode>, input: &str) -> i32 {
     match input.parse::<u32>() {
-        Ok(pid) => match hotpath::cgroup_attach_pid(node, pid) {
+        Ok(pid) => match cgroup_policy::cgroup_attach_pid(node, pid) {
             Ok(()) => 0,
             Err(e) => e,
         },
@@ -311,7 +314,7 @@ fn apply_procs(node: &Arc<CgroupNode>, input: &str) -> i32 {
 }
 
 fn apply_subtree_control(node: &CgroupNode, input: &str) -> i32 {
-    match hotpath::parse_subtree_control_tokens(input) {
+    match cgroup_policy::parse_subtree_control_tokens(input) {
         Some((set, clear)) => {
             let mut controllers = node.controllers.lock_irqsave();
             controllers.subtree_control &= !clear;
@@ -378,7 +381,7 @@ fn apply_cpu_max(node: &Arc<CgroupNode>, input: &str) -> i32 {
             node.cpu_throttled.store(false, Ordering::Release);
         }
     }
-    hotpath::note_cpu_limit_changed(node, was_limited, now_limited);
+    cgroup_policy::note_cpu_limit_changed(node, was_limited, now_limited);
     0
 }
 
@@ -693,7 +696,7 @@ fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
         return Ok(ino_of_file(&data.node, kind));
     }
 
-    if let Some(child) = hotpath::cgroup_lookup_child(&data.node, core::str::from_utf8(name).unwrap_or("")) {
+    if let Some(child) = cgroup_policy::cgroup_lookup_child(&data.node, core::str::from_utf8(name).unwrap_or("")) {
         // SAFETY: child is a live Arc.
         return Ok(ino_of_dir(&child));
     }
@@ -713,7 +716,7 @@ fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<Arc<Inod
         return Err(errno::Errno::FileExists);
     }
 
-    let node = hotpath::cgroup_create(&data.node, name_str)?;
+    let node = cgroup_policy::cgroup_create(&data.node, name_str)?;
     Ok(make_dir_inode(node))
 }
 
@@ -729,7 +732,7 @@ fn cgroupfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
         Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
     };
 
-    match hotpath::cgroup_rmdir(&data.node, name_str) {
+    match cgroup_policy::cgroup_rmdir(&data.node, name_str) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -793,7 +796,7 @@ fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, er
 
     // Child cgroup directory (verify against the live hierarchy).
     let name_str = core::str::from_utf8(name).unwrap_or("");
-    if let Some(child) = hotpath::cgroup_lookup_child(&data.node, name_str) {
+    if let Some(child) = cgroup_policy::cgroup_lookup_child(&data.node, name_str) {
         // SAFETY: live Arc.
         let child_ref = &child;
         if ino_of_dir(child_ref) == ino {
