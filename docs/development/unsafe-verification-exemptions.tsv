@@ -125,3 +125,4 @@ kernel/core/src/debug/unsafe.rs	8	0	regions collected by the pass-3 merge (annot
 kernel/core/src/fs/hotpath.rs	246	0	regions collected by the pass-3 merges (annotations carried by id)
 kernel/core/src/sync/hotpath.rs	92	0	regions collected by the pass-3 merges (annotations carried by id)
 kernel/core/src/net/hotpath.rs	29	0	regions collected by the pass-3 merges (annotations carried by id)
+kernel/core/src/process/hotpath.rs	7	0	regions collected by the pass-3 merges (annotations carried by id)

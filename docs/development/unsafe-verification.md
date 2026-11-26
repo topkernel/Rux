@@ -38,7 +38,7 @@ FILE` owns one), and the gate fails on a drop that
 - artifacts kept by id: **1722**
 - recovered from reference versions: **0**
 - references consulted: HEAD, MERGE_HEAD, 795744824
-- annotated regions, baseline -> this bank: **2263 -> 1722**
+- annotated regions, baseline -> this bank: **2270 -> 1722**
 
 ## Per-subsystem
 
@@ -1749,93 +1749,88 @@ FILE` owns one), and the gate fails on a drop that
 
 ## process
 
-### kernel/core/src/process/hotpath.rs (7)
+### kernel/core/src/process/unsafe.rs (78)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 163 | current_pgid | block | - | INV:INV-PROC-BORROW-1 | `044820fcb017` |
-| 184 | find_task_by_pid | block | - | INV:INV-PROC-BORROW-1 | `d0c0b691cdb1` |
-| 5045 | <module> | unsafe-fn | - | INV:INV-TASKREF-1 | `0b0f18e6d190` |
-| 5058 | deref | block | - | INV:INV-TASKREF-1 | `837c6e191b9c` |
-| 5068 | deref_mut | block | - | INV:INV-TASKREF-1 | `63944b509bf3` |
-| 5106 | deref | block | - | INV:INV-TASKREF-1 | `f2d3d21d860a` |
-| 5114 | deref_mut | block | - | INV:INV-TASKREF-1 | `ec03ad8e53c4` |
-
-### kernel/core/src/process/unsafe.rs (71)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 55 | borrow_task | block | - | INV:INV-PROC-BORROW-1 | `67b192449e59` |
-| 72 | borrow_task_mut | block | - | INV:INV-PROC-BORROW-1 | `bd71ad6de7a5` |
-| 107 | place_task | block | - | INV:INV-PROC-PLACE-2 | `d5603ebc5b03` |
-| 148 | dump_read_page | block | - | INV:INV-PROC-COREDUMP-1 | `98b67ace5d00` |
-| 159 | dump_read_page | block | ptr-ops | INV:INV-PROC-COREDUMP-1 | `886d528d3282` |
-| 174 | file_private_data_ref | block | - | INV:INV-PROC-NSFILE-1 | `7a12d86b34a8` |
-| 175 | file_private_data_ref | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `e58b41fa75c1` |
-| 189 | file_private_data_take_boxed | block | - | INV:INV-PROC-NSFILE-2 | `01eb6ee04b35` |
-| 190 | file_private_data_take_boxed | block | ptr-ops | INV:INV-PROC-NSFILE-2 | `a2dca8951246` |
-| 205 | file_private_data_mut | block | - | INV:INV-PROC-NSFILE-1 | `c16b52d6c0d0` |
-| 206 | file_private_data_mut | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `788e70111c5b` |
-| 220 | read_volatile_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `2c0ff4d96c27` |
-| 261 | journal_handle | block | - | INV:INV-PROC-JOURNAL-1 | `b852026b8f76` |
-| 294 | free_fork_pt_regs | block | ptr-ops | INV:INV-PROC-PTREGS-FREE-1 | `c8d205051f55` |
-| 308 | switch_to_kernel_root_on_exit | block | - | INV:INV-PROC-ROOTSWITCH-1 | `08a6d396020d` |
-| 313 | switch_to_kernel_root_on_exit | block | - | INV:INV-PROC-ROOTSWITCH-1 | `6db2c60dcc19` |
-| 327 | apppark_rets | block | - | INV:INV-PROC-APPPARK-1 | `261d36511c92` |
-| 343 | freelist_next | block | ptr-ops | INV:INV-PROC-KSTACK-1 | `12fb2eacd76a` |
-| 353 | freelist_link | block | ptr-ops | INV:INV-PROC-KSTACK-1 | `66173bca9837` |
-| 366 | heap_alloc | block | - | INV:INV-PROC-KSTACK-2 | `a1a98cb4767b` |
-| 376 | heap_dealloc | block | - | INV:INV-PROC-KSTACK-2 | `a43f848d2da4` |
-| 386 | slot_ptr | block | - | INV:INV-PROC-KSTACK-3 | `3d6dc1f3dff6` |
-| 397 | zero_bytes | block | ptr-ops | INV:INV-PROC-KSTACK-3 | `fe2df6a3c95f` |
-| 407 | write_volatile_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `6175e81baf23` |
-| 415 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `bafa10ec53e1` |
-| 419 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `772502082581` |
-| 428 | read_volatile_u32 | block | volatile | INV:INV-PROC-DIAG-1 | `5995cb9bca11` |
-| 443 | borrow_active_mm | block | - | INV:INV-PROC-ACTIVEMM-1 | `57585b69f447` |
-| 462 | list_add_tail | block | - | INV:INV-PROC-LIST-1 | `7d4ddbb8f9db` |
-| 472 | list_del | block | - | INV:INV-PROC-LIST-1 | `dc1c99a6282f` |
-| 486 | list_for_each | block | - | INV:INV-PROC-LIST-1 | `651b0269dabb` |
-| 506 | store_pick_qword | block | ptr-ops | INV:INV-PROC-PICKQWORD-1 | `702136a9cbf4` |
-| 519 | paint_bytes | block | ptr-ops | INV:INV-PROC-KSTACK-3 | `ce96a76b6888` |
-| 539 | frame_mut | block | - | INV:INV-PROC-FRAME-1 | `d224c887ec1e` |
-| 551 | frame_ref | block | - | INV:INV-PROC-FRAME-1 | `c904ee5472b1` |
-| 577 | exec_copy_user_image | block | - | INV:INV-PROC-EXEC-COPY-1 | `280b0eff250f` |
-| 588 | exec_copy_user_image | block | ptr-ops | INV:INV-PROC-EXEC-COPY-1 | `7b93271d03b0` |
-| 609 | exec_phdr_at | block | - | INV:INV-PROC-EXEC-ELF-1 | `dfe061b528c1` |
-| 619 | exec_ehdr_from | block | - | INV:INV-PROC-EXEC-ELF-1 | `44afe162206b` |
-| 631 | exec_map_user_range | block | - | INV:INV-PROC-EXEC-MAP-1 | `f5e6af510611` |
-| 650 | exec_map_user_region_static | block | - | INV:INV-PROC-EXEC-VDSO-1 | `3d70a9ef0432` |
-| 661 | exec_probe_read_u64 | block | - | INV:INV-PROC-EXEC-PROBE-1 | `71bca7da2c26` |
-| 666 | exec_probe_read_u64 | block | volatile,ptr-ops | INV:INV-PROC-EXEC-PROBE-1 | `7a9b10befe26` |
-| 680 | exec_free_user_page_trees | block | - | INV:INV-PROC-EXEC-FREETREE-1 | `0932c8233145` |
-| 698 | exec_write_sigtramp | block | volatile,ptr-ops | INV:INV-PROC-EXEC-TRAMP-1 | `7101dbc4f9e1` |
-| 712 | exec_mm_new_user | block | - | INV:INV-PROC-EXEC-MMNEW-1 | `f583bf0747d8` |
-| 725 | exec_switch_address_space | block | - | INV:INV-PROC-EXEC-SWITCH-1 | `bdcaddddd803` |
-| 760 | exec_set_leaf_flags_range | block | - | INV:INV-LOCK-7 | `a64d8daa9c81` |
-| 807 | exec_set_leaf_flags_range | block | - | INV:INV-LOCK-7 | `ef936ecf5fdb` |
-| 866 | exec_set_leaf_flags_range | block | - | INV:INV-LOCK-7 | `41eb9bd53d45` |
-| 886 | fork_save_parent_fpu | block | - | INV:INV-PROC-FORK-FPU-1 | `84c1d0de38ef` |
-| 897 | fork_save_parent_vstate | block | - | INV:INV-PROC-FORK-FPU-1 | `9c4972a1db8d` |
-| 908 | fork_save_parent_fpu | block | - | INV:INV-PROC-FORK-FPU-1 | `96d969eaedc4` |
-| 917 | fork_fpu_save_for_switch | block | - | INV:INV-PROC-FORK-FPU-1 | `8b3965e31bd6` |
-| 928 | fork_pt_walk | block | - | INV:INV-PROC-FORK-WALK-1 | `310bdebc72d6` |
-| 941 | fork_handle_cow_fault | block | - | INV:INV-PROC-FORK-COW-1 | `d0861acb3385` |
-| 961 | fork_write_child_tid | block | volatile,ptr-ops | INV:INV-PROC-FORK-TIDWRITE-1 | `1215985369c6` |
-| 974 | read_user_tp_register | block | asm | INV:INV-PROC-DIAG-1 | `66defd8834bc` |
-| 994 | page_refcount | block | - | INV:INV-PROC-DIAG-1 | `c4f1c64aa0a3` |
-| 1004 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `ffa567502be7` |
-| 1006 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `343efcc82885` |
-| 1025 | pid_hash_unlink_store | block | - | INV:INV-PROC-PIDHASH-1 | `1dab6431ea79` |
-| 1045 | ptrace_translate | block | - | INV:INV-PROC-PTRACE-WALK-1 | `ac909a56256b` |
-| 1056 | ptrace_read_word | block | volatile,ptr-ops | INV:INV-PROC-PTRACE-MEM-1 | `bf496ea05d15` |
-| 1067 | ptrace_write_word | block | volatile,ptr-ops | INV:INV-PROC-PTRACE-MEM-1 | `5fab594e7758` |
-| 1080 | ptrace_copy_chunk | block | ptr-ops | INV:INV-PROC-PTRACE-MEM-1 | `19a5515fe351` |
-| 1098 | ptrace_flush_icache | block | asm | INV:INV-PROC-PTRACE-ICOH-1 | `3ab6182dc4f6` |
-| 1114 | ptrace_flush_icache | block | asm | INV:INV-PROC-PTRACE-ICOH-1 | `0f1920fa471f` |
-| 1139 | ptrace_read_gregset | block | ptr-ops | INV:INV-PROC-PTRACE-GREG-1 | `7a2ffd2e5118` |
-| 1157 | ptrace_write_gregset | block | ptr-ops | INV:INV-PROC-PTRACE-GREG-1 | `25047740f485` |
-| 1172 | zeroed_siginfo | block | - | INV:INV-PROC-DIAG-1 | `cad0967e9cd2` |
+| 57 | borrow_task | block | - | INV:INV-PROC-BORROW-1 | `a247b3404319` |
+| 74 | borrow_task_mut | block | - | INV:INV-PROC-BORROW-1 | `643b20351cfb` |
+| 109 | place_task | block | - | INV:INV-PROC-PLACE-2 | `7ed073d80a83` |
+| 150 | dump_read_page | block | - | INV:INV-PROC-COREDUMP-1 | `120ccfb259dd` |
+| 161 | dump_read_page | block | ptr-ops | INV:INV-PROC-COREDUMP-1 | `9c5f6dfc8390` |
+| 176 | file_private_data_ref | block | - | INV:INV-PROC-NSFILE-1 | `e5cb24af273a` |
+| 177 | file_private_data_ref | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `8eca6be0e2c1` |
+| 191 | file_private_data_take_boxed | block | - | INV:INV-PROC-NSFILE-2 | `b5e9e6aedaef` |
+| 192 | file_private_data_take_boxed | block | ptr-ops | INV:INV-PROC-NSFILE-2 | `482841980682` |
+| 207 | file_private_data_mut | block | - | INV:INV-PROC-NSFILE-1 | `859f9db80cdc` |
+| 208 | file_private_data_mut | block | ptr-ops | INV:INV-PROC-NSFILE-1 | `c68c840cde03` |
+| 222 | read_volatile_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `1a156f013f59` |
+| 263 | journal_handle | block | - | INV:INV-PROC-JOURNAL-1 | `5700c28e8eaf` |
+| 296 | free_fork_pt_regs | block | ptr-ops | INV:INV-PROC-PTREGS-FREE-1 | `8c1d3b2e981c` |
+| 310 | switch_to_kernel_root_on_exit | block | - | INV:INV-PROC-ROOTSWITCH-1 | `6bca9c24500c` |
+| 315 | switch_to_kernel_root_on_exit | block | - | INV:INV-PROC-ROOTSWITCH-1 | `3c9a91356216` |
+| 329 | apppark_rets | block | - | INV:INV-PROC-APPPARK-1 | `61a41fe012c7` |
+| 345 | freelist_next | block | ptr-ops | INV:INV-PROC-KSTACK-1 | `d2707beb2b06` |
+| 355 | freelist_link | block | ptr-ops | INV:INV-PROC-KSTACK-1 | `9c017465968f` |
+| 368 | heap_alloc | block | - | INV:INV-PROC-KSTACK-2 | `726200509812` |
+| 378 | heap_dealloc | block | - | INV:INV-PROC-KSTACK-2 | `941c205853ed` |
+| 388 | slot_ptr | block | - | INV:INV-PROC-KSTACK-3 | `8d1556711065` |
+| 399 | zero_bytes | block | ptr-ops | INV:INV-PROC-KSTACK-3 | `da69afde0882` |
+| 409 | write_volatile_u64 | block | volatile | INV:INV-PROC-DIAG-1 | `7ae605ac4029` |
+| 417 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `232623fa8a63` |
+| 421 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `69df92e22e41` |
+| 430 | read_volatile_u32 | block | volatile | INV:INV-PROC-DIAG-1 | `6354ac047caf` |
+| 445 | borrow_active_mm | block | - | INV:INV-PROC-ACTIVEMM-1 | `e14f1eae214c` |
+| 464 | list_add_tail | block | - | INV:INV-PROC-LIST-1 | `66d9b757a47e` |
+| 474 | list_del | block | - | INV:INV-PROC-LIST-1 | `f177bc0daeda` |
+| 488 | list_for_each | block | - | INV:INV-PROC-LIST-1 | `35c7aa6f6e0a` |
+| 508 | store_pick_qword | block | ptr-ops | INV:INV-PROC-PICKQWORD-1 | `a3dcb272c044` |
+| 521 | paint_bytes | block | ptr-ops | INV:INV-PROC-KSTACK-3 | `d47cf42a5f73` |
+| 541 | frame_mut | block | - | INV:INV-PROC-FRAME-1 | `532fc49966bd` |
+| 553 | frame_ref | block | - | INV:INV-PROC-FRAME-1 | `76cd7129dea8` |
+| 579 | exec_copy_user_image | block | - | INV:INV-PROC-EXEC-COPY-1 | `7173cc6ae469` |
+| 590 | exec_copy_user_image | block | ptr-ops | INV:INV-PROC-EXEC-COPY-1 | `c3865cb207c4` |
+| 611 | exec_phdr_at | block | - | INV:INV-PROC-EXEC-ELF-1 | `25d3f992ca20` |
+| 621 | exec_ehdr_from | block | - | INV:INV-PROC-EXEC-ELF-1 | `da5467057b15` |
+| 633 | exec_map_user_range | block | - | INV:INV-PROC-EXEC-MAP-1 | `70756eeb5eaf` |
+| 652 | exec_map_user_region_static | block | - | INV:INV-PROC-EXEC-VDSO-1 | `17383b1ec944` |
+| 663 | exec_probe_read_u64 | block | - | INV:INV-PROC-EXEC-PROBE-1 | `ae25beaa643a` |
+| 668 | exec_probe_read_u64 | block | volatile,ptr-ops | INV:INV-PROC-EXEC-PROBE-1 | `310ad79a167b` |
+| 682 | exec_free_user_page_trees | block | - | INV:INV-PROC-EXEC-FREETREE-1 | `a50f2972d545` |
+| 700 | exec_write_sigtramp | block | volatile,ptr-ops | INV:INV-PROC-EXEC-TRAMP-1 | `fd2f805f6fb3` |
+| 714 | exec_mm_new_user | block | - | INV:INV-PROC-EXEC-MMNEW-1 | `6bf23e1712e5` |
+| 727 | exec_switch_address_space | block | - | INV:INV-PROC-EXEC-SWITCH-1 | `2dc9356327ed` |
+| 762 | exec_set_leaf_flags_range | block | - | INV:INV-LOCK-7 | `40a82e6a03f2` |
+| 809 | exec_set_leaf_flags_range | block | - | INV:INV-LOCK-7 | `9a4391349adc` |
+| 868 | exec_set_leaf_flags_range | block | - | INV:INV-LOCK-7 | `1c49a068c1cb` |
+| 888 | fork_save_parent_fpu | block | - | INV:INV-PROC-FORK-FPU-1 | `e370fe066605` |
+| 899 | fork_save_parent_vstate | block | - | INV:INV-PROC-FORK-FPU-1 | `6a892bde7ffe` |
+| 910 | fork_save_parent_fpu | block | - | INV:INV-PROC-FORK-FPU-1 | `584cbf7ffe67` |
+| 919 | fork_fpu_save_for_switch | block | - | INV:INV-PROC-FORK-FPU-1 | `e03d215c2f32` |
+| 930 | fork_pt_walk | block | - | INV:INV-PROC-FORK-WALK-1 | `e1bd99344a24` |
+| 943 | fork_handle_cow_fault | block | - | INV:INV-PROC-FORK-COW-1 | `04620a0803bd` |
+| 963 | fork_write_child_tid | block | volatile,ptr-ops | INV:INV-PROC-FORK-TIDWRITE-1 | `dea84e693e99` |
+| 976 | read_user_tp_register | block | asm | INV:INV-PROC-DIAG-1 | `41eb702f384f` |
+| 996 | page_refcount | block | - | INV:INV-PROC-DIAG-1 | `6cca4e5afb36` |
+| 1006 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `d430ef8e5933` |
+| 1008 | <module> | unsafe-impl | - | INV:INV-PROC-DIAG-1 | `190bcfb143de` |
+| 1027 | pid_hash_unlink_store | block | - | INV:INV-PROC-PIDHASH-1 | `073c4004d3d9` |
+| 1047 | ptrace_translate | block | - | INV:INV-PROC-PTRACE-WALK-1 | `b3d8eca74e47` |
+| 1058 | ptrace_read_word | block | volatile,ptr-ops | INV:INV-PROC-PTRACE-MEM-1 | `5e1aa3c1bcc3` |
+| 1069 | ptrace_write_word | block | volatile,ptr-ops | INV:INV-PROC-PTRACE-MEM-1 | `87dca49e8aac` |
+| 1082 | ptrace_copy_chunk | block | ptr-ops | INV:INV-PROC-PTRACE-MEM-1 | `50a2d07cc487` |
+| 1100 | ptrace_flush_icache | block | asm | INV:INV-PROC-PTRACE-ICOH-1 | `2109bc750e8f` |
+| 1116 | ptrace_flush_icache | block | asm | INV:INV-PROC-PTRACE-ICOH-1 | `785f8bdb4513` |
+| 1141 | ptrace_read_gregset | block | ptr-ops | INV:INV-PROC-PTRACE-GREG-1 | `da3db7a1349e` |
+| 1159 | ptrace_write_gregset | block | ptr-ops | INV:INV-PROC-PTRACE-GREG-1 | `952c929d078f` |
+| 1174 | zeroed_siginfo | block | - | INV:INV-PROC-DIAG-1 | `843152f7668a` |
+| 1198 | <module> | unsafe-fn | - | INV:INV-TASKREF-1 | `6d07bae9fd14` |
+| 1212 | task_borrow_deref | block | - | INV:INV-TASKREF-1 | `44e88b08fd92` |
+| 1224 | task_borrow_deref_mut | block | - | INV:INV-TASKREF-1 | `128ac9ad30b8` |
+| 1235 | task_ref_deref | block | - | INV:INV-TASKREF-1 | `8fabc1d32c95` |
+| 1246 | task_ref_deref_mut | block | - | INV:INV-TASKREF-1 | `ecbe91080f47` |
+| 1261 | task_pgid_raw | block | - | INV:INV-PROC-BORROW-1 | `3509fb4abcb5` |
+| 1276 | task_from_pid_ptr | block | - | INV:INV-PROC-BORROW-1 | `5dcba9d857fe` |
 
 ## tests
 

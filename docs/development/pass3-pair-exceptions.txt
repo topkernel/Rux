@@ -703,3 +703,31 @@ core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
 # forms (scribble:: / closure#N) under the collection; same drift class.
 rux::debug::(hotpath::)?register_debugfs_knobs::\{closure#\d+\}$
 rux::debug::(hotpath::)?scribble::(audit_frames|verify_gs)$
+^rux::mm::vdso_init$
+^rux::mm::meta_audit_inner$
+
+# --- the pass-3 process collection (p23-p3process lane, 2026-11-27) ---
+^rux::process::\{closure\}$
+^rux::process::find_task_by_pid$
+^<rux::process::TaskBorrow as core\[[0-9a-f]+\]::ops::deref::Deref>::deref$
+^<rux::process::TaskBorrow as core\[[0-9a-f]+\]::ops::deref::DerefMut>::deref_mut$
+^<rux::process::TaskRef as core\[[0-9a-f]+\]::ops::deref::Deref>::deref$
+^<rux::process::TaskRef as core\[[0-9a-f]+\]::ops::deref::DerefMut>::deref_mut$
+#   the six process functions whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (task_pgid_raw / task_from_pid_ptr /
+#   task_borrow_deref / task_borrow_deref_mut / task_ref_deref /
+#   task_ref_deref_mut); the {closure} is current_pgid's map_or closure.
+#   Same operation, verbatim body, wrapper inlined back at every call site;
+#   the residual is debug-build instruction-selection drift only (the call
+#   target and its relocation encoding change). Measured (base -> current
+#   bytes, same rig, debug profile):
+#     rv:   {closure} 26->28, find_task_by_pid 58->60, each Deref/DerefMut
+#           body 22->24
+#     x86:  {closure} 23->27, find_task_by_pid 64->68, each Deref/DerefMut
+#           body 25->29
+#     a64:  {closure} 32->112 (the a64 debug inliner materializes the
+#           wrapper body in the closure), find_task_by_pid 156->160, each
+#           Deref/DerefMut body 36->40
+#   every other process symbol pairs 1:1 at equal size on all three arches;
+#   the moved TaskBorrow::from_raw pairs 1:1 at equal size under module-path
+#   normalization (its home moved to process::r#unsafe, body verbatim).
