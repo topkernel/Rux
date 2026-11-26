@@ -218,10 +218,10 @@ pub fn shutdown_cascade(cmd: u32) {
     // debug: final counter dump — short-lived probe boots (lmbench single-
     // case rigs power off at ~35 s, before the 60 s fsw tick) would
     // otherwise never print their accumulators.
-    crate::debug::fsw::dump();
-    crate::debug::cctx::dump();
-    crate::debug::unixrd::dump();
-    crate::debug::hilogcensus::dump();
+    crate::debug::hotpath::fsw_dump();
+    crate::debug::hotpath::cctx_dump();
+    crate::debug::hotpath::unixrd_dump();
+    crate::debug::hotpath::hilogcensus_dump();
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::hotpath::get_current_pid();
@@ -249,9 +249,9 @@ pub fn shutdown_cascade(cmd: u32) {
     // forkprof (cmdline forkprof=1): ride the shutdown cascade — every
     // probe rig ends with reboot(2), so the phase table lands in the
     // serial log without a dedicated reader.
-    crate::debug::forkprof::report();
+    crate::debug::hotpath::forkprof_report();
     // mmprof (cmdline mmprof=1): vm-op stage table, same discipline.
-    crate::debug::mmprof::report_line(0);
+    crate::debug::hotpath::report_line(0);
     if let Err(e) = rux::api::ext4::shutdown_sync() {
         crate::pr_err!("reboot: filesystem sync failed, err={}", e);
     }

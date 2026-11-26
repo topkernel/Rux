@@ -3556,7 +3556,7 @@ fn validated_read_base() -> usize {
 fn guard_armed() -> bool {
     #[cfg(feature = "x86_64")]
     {
-        crate::debug::wildwatch::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
+        crate::debug::hotpath::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
     }
     #[cfg(not(feature = "x86_64"))]
     {
@@ -8228,7 +8228,7 @@ pub fn vw_lag_watchdog(now: u64) {
         static WEDGE_DUMPED: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
         if !WEDGE_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-            crate::debug::taskdump::dump_all_tasks("vw-wedge");
+            crate::debug::hotpath::dump_all_tasks("vw-wedge");
         }
     }
 }
@@ -16765,7 +16765,7 @@ pub fn push_event(&self, event: InputEvent) {
                         event.code,
                         event.value
                     );
-                    crate::debug::taskdump::taskdump_raw_line(line.as_bytes());
+                    crate::debug::hotpath::taskdump_raw_line(line.as_bytes());
                 }
             }
         }
@@ -17302,7 +17302,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
         .collect();
     let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::hotpath::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
     // obs-hygiene: line-atomic funnel instead of per-byte raw writes.
-    crate::debug::taskdump::taskdump_raw_line(s.as_bytes());
+    crate::debug::hotpath::taskdump_raw_line(s.as_bytes());
 }
 
 /// evdev close function
@@ -18228,7 +18228,7 @@ impl HuntLine {
         // obs-hygiene: the burst rides the taskdump funnel's emit-lock
         // coordination (one atomic write vs printk records too — the
         // kmsg-flood splice class), not the bare per-byte raw writes.
-        crate::debug::taskdump::line_atomic_write(&self.buf[..self.n]);
+        crate::debug::hotpath::line_atomic_write(&self.buf[..self.n]);
         self.n = 0;
     }
 }
@@ -18247,7 +18247,7 @@ fn itt_msg(msg: &[u8]) {
         st.buf[at] = b;
         st.n = at + 1;
         if b == b'\n' || st.n == st.buf.len() {
-            crate::debug::taskdump::line_atomic_write(&st.buf[..st.n]);
+            crate::debug::hotpath::line_atomic_write(&st.buf[..st.n]);
             st.n = 0;
         }
     }
@@ -18732,7 +18732,7 @@ fn loop_request_fn(req: &mut Request) {
                     // (the first two occurrences carry the kernel backtrace
                     // — error-path diagnostic, bounded like the print).
                     if n < 2 {
-                        crate::debug::backtrace::dump_stack();
+                        crate::debug::hotpath::dump_stack();
                     }
                 }
                 req.error.store(-35, Ordering::Release); // -EDEADLK
@@ -20948,7 +20948,7 @@ fn trace_seq(request: u32, ret: i64) {
     // 110th: rides the ohhunt gate — the full-sequence handshake trace
     // printed the first 128 drm ioctls (~123 lines pre-launcher) of
     // every perf boot.
-    if !crate::debug::switches::oh_hunt_prints_on() {
+    if !crate::debug::hotpath::oh_hunt_prints_on() {
         return;
     }
     let pid = crate::process::hotpath::current_pid();
@@ -20994,7 +20994,7 @@ fn trace_ioctl(request: u32, ret: i64) {
     // every-100th atomic/dumb milestones — ~130 lines per perf boot in
     // the render window) rides the ohhunt gate like the other drm hunt
     // taps; the counters only feed these prints.
-    if !crate::debug::switches::oh_hunt_prints_on() {
+    if !crate::debug::hotpath::oh_hunt_prints_on() {
         return;
     }
     let (slot, name) = match request {
@@ -22030,7 +22030,7 @@ fn add_fb_common(arg: usize, size: usize, handle: u32, width: u32, height: u32, 
     // 110th: rides the ohhunt gate (~60 lines per perf boot).
     static FB_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let fn_ = FB_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    if fn_ < 60 && crate::debug::switches::oh_hunt_prints_on() {
+    if fn_ < 60 && crate::debug::hotpath::oh_hunt_prints_on() {
         crate::pr_warn!(
             "drm: addfb#{} fb={} gem={} {}x{} pitch={} fourcc={:#x}",
             fn_,
@@ -22100,7 +22100,7 @@ fn present_fb(fb_id: u32) -> i64 {
     // 110th: rides the ohhunt gate — the probe itself (1M+ volatile
     // reads ~ a few ms) ran on the composer's flip path of every perf
     // boot, print on top (~55 lines).
-    if (ft < 40 || ft % 10 == 0) && crate::debug::switches::oh_hunt_prints_on() {
+    if (ft < 40 || ft % 10 == 0) && crate::debug::hotpath::oh_hunt_prints_on() {
         let mut nz: usize = 0;
         let mut paint: usize = 0;
         let mut samples = [0u32; 4];
@@ -22321,7 +22321,7 @@ fn mode_atomic(arg: usize) -> i64 {
     static ATOM_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let at = ATOM_TRACE_N.fetch_add(1, Ordering::Relaxed);
     // 110th: rides the ohhunt gate (~65 lines per perf boot).
-    let trace_on = (at < 60 || at % 25 == 0) && crate::debug::switches::oh_hunt_prints_on();
+    let trace_on = (at < 60 || at % 25 == 0) && crate::debug::hotpath::oh_hunt_prints_on();
     let mut trace = if trace_on {
         alloc::string::String::with_capacity(128)
     } else {
@@ -22507,7 +22507,7 @@ pub fn gem_mmap_resolve(
     // 110th: rides the ohhunt gate (~25 lines per perf boot).
     static MMAP_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let mt = MMAP_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    let trace = mt < 30 && crate::debug::switches::oh_hunt_prints_on();
+    let trace = mt < 30 && crate::debug::hotpath::oh_hunt_prints_on();
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
         let n = len.min(gem.size);

@@ -311,7 +311,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         let cow_res = unsafe {
                             handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                         };
-                        crate::debug::schb::note_cow(cow_j0);
+                        crate::debug::hotpath::note_cow(cow_j0);
                         match cow_res {
                             crate::arch::mm::CowFaultResult::Resolved
                             | crate::arch::mm::CowFaultResult::Retry => {
@@ -560,7 +560,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         // carry rip + the rbp walk into the KERNPANIC dump.
         #[cfg(feature = "x86_64")]
         if (access_type & FaultFlags::WRITE) != 0
-            && crate::debug::wildwatch::is_armed(fault_addr.bits() as usize)
+            && crate::debug::hotpath::is_armed(fault_addr.bits() as usize)
         {
             println!(
                 "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
@@ -619,7 +619,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             let cow_j0 = crate::timer::get_jiffies();
             let cow_res =
                 unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
-            crate::debug::schb::note_cow(cow_j0);
+            crate::debug::hotpath::note_cow(cow_j0);
             match cow_res {
                 crate::arch::mm::CowFaultResult::Resolved => {
                     MmFaultResult::Handled

@@ -732,7 +732,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // leg-33B: slow-kernel-entry audit (rux:slowtask (retired debug=slowtask), self-gated +
             // rate-capped inside) — leaf attribution for nested-call
             // cascades (fs/futex stalls behind reader exhaustion).
-            crate::debug::slowtask::tick();
+            crate::debug::hotpath::slowtask_tick();
             // 17th successor: futex-stuck census (rux:fuxstuck (retired debug=fuxstuck), self-gated
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.
@@ -742,12 +742,12 @@ pub fn timer_softirq_handler(_nr: usize) {
             // a 7.4 s park (hilogd main) is captured with its parked
             // kernel stack while the boot is still young; the khungtaskd
             // 60 s cadence continues afterward.
-            crate::debug::taskdump::sleep_snapshot_early();
+            crate::debug::hotpath::sleep_snapshot_early();
             // 69th (105-family hunt): pid=1 RUNNING-spin watch (rux:
             // pid1spin, self-gated + rate-capped inside) — init going
             // 100%-CPU silent is the sole remaining 105 cause; this
             // names the spin site via the kernel-entry frame.
-            crate::debug::taskdump::pid1spin_audit();
+            crate::debug::hotpath::pid1spin_audit();
             // 99th (§87.8 wait4/SIGCHLD wakeup-loss hunt): wait4-park
             // census — self-gated 1 Hz + anomaly-gated inside (zero
             // serial on healthy boots); a parked waiter with a reapable
@@ -1049,7 +1049,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // a foreign claim onto the linked pickable set. Unpatched kernels
     // must wedge (the g2 stranding reproduced deterministically); kernels
     // with the pick-side stale-claim heal must keep scheduling.
-    if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::ClaimInject)
+    if crate::debug::hotpath::enabled(crate::debug::types::DfxSwitch::ClaimInject)
         && current % 50 == 0
     {
         let n = crate::sched::hotpath::debug_claim_inject();
@@ -1066,7 +1066,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // why=1 forever); kernels with the R85 pick-side ownership
     // adjudication must sweep the poison (STALE-ONCPU-RESET) and keep
     // scheduling.
-    if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::OncpuInject)
+    if crate::debug::hotpath::enabled(crate::debug::types::DfxSwitch::OncpuInject)
         && current % 50 == 0
     {
         let n = crate::sched::hotpath::debug_oncpu_inject();
@@ -1260,13 +1260,13 @@ fn softirq_diagnostics(current: u64) {
         // debug-migrate: rux:taskdump kind=PERIODIC row + the serial dump
         // (echo consumer of the same event).
         crate::trace::trace_taskdump(1, current);
-        crate::debug::taskdump::dump_all_tasks("periodic");
+        crate::debug::hotpath::dump_all_tasks("periodic");
         {
             // R34 direct-console discipline (this runs in the timer
             // softirq; a printk here has been observed dropped).
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             for &b in b"\nVWWAIT ".iter() { putchar(b); }
-            let line = crate::debug::taskdump::vw_wait_counters_line();
+            let line = crate::debug::hotpath::vw_wait_counters_line();
             for &b in line.as_bytes() { putchar(b); }
         }
     }
@@ -1284,7 +1284,7 @@ fn softirq_diagnostics(current: u64) {
     // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
     // tick-mode accounting + kernel-rip histogram dump every 60 s from
     // this softirq. Own cmdline key — no rux:switches (retired debug=switches).rs bit consumed.
-    crate::debug::syscost::tick(current);
+    crate::debug::hotpath::syscost_tick(current);
 
     // fix-backlog lane instrumentation (BRANCH-ONLY): the dispatch
     // preamble arm-firing census, same 60 s cadence.
@@ -1293,7 +1293,7 @@ fn softirq_diagnostics(current: u64) {
 
     // vm-op stage profiler (cmdline `mmprof=1`, oh-launcher perf
     // handoff): mmap/munmap/mprotect stage table, same 60s cadence.
-    crate::debug::mmprof::tick(current);
+    crate::debug::hotpath::mmprof_tick(current);
 
     // perf events (PERF_TYPE_SOFTWARE sampling): charge the tick stash
     // captured by the hard IRQ into the armed events and emit sample
@@ -1302,29 +1302,29 @@ fn softirq_diagnostics(current: u64) {
 
     // perf-audit line (cmdline `fsw=1`): ext4/bio cost-anatomy counters
     // (F4 diagnosis), same 60 s cadence.
-    crate::debug::fsw::tick(current);
+    crate::debug::hotpath::fsw_tick(current);
 
     // rux:monowatch (retired debug=monowatch): ~1 Hz timebase jump tripwire (backward motion or
     // multi-second spikes, clocksource named) — same printk discipline
     // as the periodic dump above.
     if crate::trace::EVENT_MONOWATCH.armed() {
-        crate::debug::monowatch::tick(current);
+        crate::debug::hotpath::monowatch_tick(current);
     }
 
     // rux:wildwatch (retired debug=wildwatch): canary re-verify on a 1 s cadence (DMA-class
     // writers bypass PTEs; the RO trap cannot see them).
-    if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::WildWatch)
+    if crate::debug::hotpath::enabled(crate::debug::types::DfxSwitch::WildWatch)
         && current.saturating_sub(LAST_WILDWATCH_VERIFY.load(Ordering::Relaxed)) >= 100
     {
         LAST_WILDWATCH_VERIFY.store(current, Ordering::Relaxed);
-        crate::debug::wildwatch::verify();
+        crate::debug::hotpath::verify();
     }
 
     // rux:metawatch (retired debug=metawatch): buddy-meta shadow audit on a 10 s cadence (the
     // buddy face of the wild writer — see debug/metawatch.rs). Throttle
     // is internal to the module.
     if crate::trace::EVENT_METAWATCH.armed() {
-        crate::debug::metawatch::tick(current);
+        crate::debug::hotpath::tick(current);
     }
 
     // rux:schedtrace (retired debug=schedtrace) reaper forensics (125th waitid leg): 1 Hz zombie-
@@ -1334,14 +1334,14 @@ fn softirq_diagnostics(current: u64) {
         && current.saturating_sub(LAST_REAPER_SCAN.load(Ordering::Relaxed)) >= 100
     {
         LAST_REAPER_SCAN.store(current, Ordering::Relaxed);
-        crate::debug::reaper::zombie_scan(current);
+        crate::debug::hotpath::zombie_scan(current);
     }
 
     // rux:ledger (retired debug=ledger): run a pending on-demand accounting census latched by the
     // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
     // from IRQ context is the classic self-wedge); this softirq already
     // hosts the periodic dumps, so printk discipline is the same.
-    crate::debug::ledger::run_pending();
+    crate::debug::hotpath::run_pending();
 }
 
 /// Deliver collected expiries. Takes the `SoftirqCtx` capability —
@@ -1380,7 +1380,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                         if late_us > 100
                             && FL_N.fetch_add(1, Ordering::Relaxed) < 12
                         {
-                            use crate::debug::taskdump::putc_brief as putchar;
+                            use crate::debug::hotpath::putc_brief as putchar;
                             fn ph(mut v: u64) {
                                 for _ in 0..16 {
                                     let b = (v >> 60) as u8;
@@ -1876,7 +1876,7 @@ pub fn tick_trap_report(site: &str) {
             WW_TICK_IRQ[me].load(Ordering::Relaxed),
             ww_tick_age_ms(me),
             apic::LAPIC_TIMER_FREQ.load(Ordering::Relaxed),
-            match crate::debug::syscost::open_cli_segment(me) {
+            match crate::debug::hotpath::open_cli_segment(me) {
                 Some((file, line, age_raw)) => alloc::format!(
                     "{}:{} age_ms~{}",
                     file,
@@ -1930,7 +1930,7 @@ pub fn tick_trap_report(site: &str) {
                 apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
                 apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
                 crate::sched::hotpath::sched_cs_phase(cpu),
-                match crate::debug::syscost::open_cli_segment(cpu) {
+                match crate::debug::hotpath::open_cli_segment(cpu) {
                     Some((file, line, age_raw)) => alloc::format!(
                         "{}:{} age_ms~{}",
                         file,

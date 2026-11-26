@@ -187,7 +187,7 @@ pub mod tests;
 // itself still fall through to panic.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
 
     taskdump_raw_line(b"\nALLOCTHROW size=");
     taskdump_dec(layout.size() as u64);
@@ -223,8 +223,8 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // live-per-call-site table is the evidence that names the consumer.
     // Pure atomics and raw UART (see dump_heap_ledger): no allocator lock,
     // no allocation, safe to print while the heap is dead full.
-    if crate::debug::memwatch::armed() {
-        crate::debug::memwatch::dump_heap_ledger();
+    if crate::debug::hotpath::memwatch_armed() {
+        crate::debug::hotpath::dump_heap_ledger();
     }
     // The packing layer's own census (object counts vs pages) — this is
     // the line that proves the 852MB of 4KB-per-object waste is packed.
@@ -975,7 +975,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize DEBUG subsystem (must be after sched::hotpath::init)
         {
-            debug::init();
+            debug::hotpath::init();
             print_status("debug", "diagnostic subsystem", true);
         }
 
@@ -987,8 +987,8 @@ pub fn rust_main_tail() -> ! {
         // trace_event= spec (the canonical arming) can still override
         // what the alias armed.
         {
-            debug::hilogcensus::compat_arm();
-            debug::spinwatch::compat_arm();
+            debug::hotpath::compat_arm();
+            debug::hotpath::spinwatch_compat_arm();
         }
 
         // The reference's trace_event= boot parameter: comma-separated
@@ -1070,10 +1070,10 @@ pub fn rust_main_tail() -> ! {
 
         // Start the hung-task detector kthread here (late boot — after
         // secondaries are online, same context as ksoftirqd; the early
-        // debug::init() slot runs BEFORE start_secondaries so its wake_up
+        // debug::hotpath::init() slot runs BEFORE start_secondaries so its wake_up
         // IPIs could target offline CPUs). Its sleep loop is timer-driven.
         {
-            crate::debug::hung_task::init();
+            crate::debug::hotpath::hung_task_init();
             print_status("debug", "khungtaskd hung-task detector", true);
         }
 
@@ -1091,7 +1091,7 @@ pub fn rust_main_tail() -> ! {
         // sc-series soft-wedge heartbeat (rux:schb (retired debug=schb)): same late-boot slot
         // as khungtaskd — its timer wakeups need secondaries online. The
         // switch gates everything; schbd prints its own armed line.
-        crate::debug::schb::init();
+        crate::debug::hotpath::schb_init();
 
         // Enable external interrupts
         {
@@ -1727,7 +1727,7 @@ pub extern "C" fn rust_main_impl() -> ! {
         {
             let dtb_phys = arch::boot::get_dtb_pointer();
             if let Some((base, size)) =
-                debug::pstore::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
+                debug::hotpath::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
             {
                 mm::hotpath::memblock_reserve(base, size).ok();
             }
@@ -1747,9 +1747,9 @@ pub extern "C" fn rust_main_impl() -> ! {
         {
             let base = arch::mm::kernel_image_phys_end() as usize;
             let overlaps_initrd = crate::initrd::region()
-                .is_some_and(|(s, e)| s < base + debug::pstore::PSTORE_RAM_SIZE && e > base);
+                .is_some_and(|(s, e)| s < base + debug::hotpath::PSTORE_RAM_SIZE && e > base);
             if !overlaps_initrd {
-                if let Some((base, size)) = debug::pstore::reserve_at(base) {
+                if let Some((base, size)) = debug::hotpath::reserve_at(base) {
                     mm::hotpath::memblock_reserve(base, size).ok();
                 }
             }
@@ -1800,7 +1800,7 @@ pub extern "C" fn rust_main_impl() -> ! {
     // record is remembered for sysfs to publish as
     // /sys/fs/pstore/{console,dmesg}-ramoops-0 and the magic is cleared
     // so a clean next boot does not re-expose it.
-    debug::pstore::early_scan();
+    debug::hotpath::early_scan();
 
     // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
     // 4MB heap-backed kernel stack. The whole init chain — including exec's
@@ -1954,7 +1954,7 @@ fn mount_ext4_root_from(disk: &'static drivers::types::GenDisk) {
     }
 }
 
-// Panic handler — uses debug::backtrace for all output
+// Panic handler — uses debug::hotpath::backtrace for all output
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     use core::fmt::Write;
@@ -1963,9 +1963,9 @@ fn panic(info: &PanicInfo) -> ! {
     // console byte the panic report prints is staged for the persistent
     // record (one relaxed load per byte on the disarmed path of every
     // other boot).
-    crate::debug::pstore::arm_sink();
+    crate::debug::hotpath::arm_sink();
 
-    let mut w = debug::backtrace::ConsoleWriter::new();
+    let mut w = debug::types::ConsoleWriter::new();
 
     // Header
     let _ = w.write_str("\n\nKernel panic - not syncing:\n\n");
@@ -2007,9 +2007,9 @@ fn panic(info: &PanicInfo) -> ! {
     }
 
     // Dump CSRs, registers, and stack trace via debug
-    debug::backtrace::dump_csrs();
-    debug::backtrace::dump_regs_inline();
-    debug::backtrace::dump_stack();
+    debug::hotpath::dump_csrs();
+    debug::hotpath::dump_regs_inline();
+    debug::hotpath::dump_stack();
 
     // NOTE: no disk flush here. The old persistent_log_flush call is
     // gone by design: the panic may BE the storage stack, and a sync
@@ -2020,7 +2020,7 @@ fn panic(info: &PanicInfo) -> ! {
     // pstore-lite: write the record (staged sink + console tail) into
     // the reserved RAM region — after the report, before the `panic=`
     // policy fires, so the reboot still finds the bytes in place.
-    crate::debug::pstore::panic_capture(info);
+    crate::debug::hotpath::panic_capture(info);
 
     // What happens next is the `panic=` policy (the reference kernel):
     // halt by default, reboot after N seconds or immediately when the

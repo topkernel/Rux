@@ -95,8 +95,8 @@ pub fn do_execve_elf(
         rux::api::ipc::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
         // OH bundle-name convention); rux:schedtrace (retired debug=schedtrace)-gated (debug/reaper.rs).
-        if crate::debug::reaper::on() {
-            crate::debug::reaper::note_nameset(task.pid(), &name);
+        if crate::debug::hotpath::reaper_on() {
+            crate::debug::hotpath::note_nameset(task.pid(), &name);
         }
         // perf COMM sideband (hiperf process tracking; no-op when no
         // perf event asks for comm records).

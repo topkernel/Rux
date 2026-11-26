@@ -6512,7 +6512,7 @@ impl BufferHead {
                 &self.b_data,
             )?;
             self.clear_state_bit(BufferState::BH_Dirty);
-            crate::debug::fsw::note_dev_write();
+            crate::debug::hotpath::note_dev_write();
         }
         Ok(())
     }
@@ -6908,9 +6908,9 @@ impl BlockCache {
                 {
                     crate::api::ext4::exthunt_evict_done(vkey.2, sync_rc);
                 }
-                crate::debug::fsw::note_evict(true);
+                crate::debug::hotpath::note_evict(true);
             } else {
-                crate::debug::fsw::note_evict(false);
+                crate::debug::hotpath::note_evict(false);
             }
             // SAFETY: victim is unhashed + unlinked + unpinnable; the
             // Box::into_raw from insertion is reclaimed exactly once.
@@ -7001,7 +7001,7 @@ impl BlockCache {
             let mut lru = self.lru.lock_irqsave();
             Self::remove_from_lru(&mut lru, victim);
         }
-        crate::debug::fsw::note_drop_block();
+        crate::debug::hotpath::note_drop_block();
         // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
         unsafe { let _ = Box::from_raw(victim); }
         self.count.fetch_sub(1, Ordering::Release);
@@ -7179,7 +7179,7 @@ impl BlockCache {
             ) {
                 return None;
             }
-            crate::debug::fsw::note_dev_read();
+            crate::debug::hotpath::note_dev_read();
 
             bh.set_device(device);
             bh.set_state_bit(BufferState::BH_Uptodate);
@@ -7708,7 +7708,7 @@ pub fn bh_is_dirty(bh: &*mut BufferHead) -> bool {
 }
 
 pub fn bread(device: &'static crate::drivers::types::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
-    crate::debug::fsw::note_bread();
+    crate::debug::hotpath::note_bread();
     get_block_cache().get(device, blocknr)
 }
 
@@ -9010,10 +9010,10 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     // null-safe outside task ctx).
     let journal_active = !self::current_handle_raw().is_null();
     if journal_active {
-        crate::debug::fsw::note_sync_dirty_skip();
+        crate::debug::hotpath::note_sync_dirty_skip();
         return Ok(());
     }
-    crate::debug::fsw::note_sync_dirty();
+    crate::debug::hotpath::note_sync_dirty();
     // Ordered-publication guard: this buffer may be a pending entry/post
     // block whose order constraints a plain sync would violate. Satisfy
     // THIS block's constraints first (per-block closure — the journal
@@ -9043,7 +9043,7 @@ pub fn sync_buffers() -> Result<(), i32> {
     // Durability point: ordered publications must go out first (a plain
     // hash-order drain could persist an entry block before its metadata).
     let _ = flush_publications();
-    crate::debug::fsw::note_sync_all();
+    crate::debug::hotpath::note_sync_all();
     get_block_cache().sync_all()
 }
 
@@ -9229,7 +9229,7 @@ pub fn publication_batch_drain() {
         !pend.is_empty() && pend.len() >= PUB_BATCH
     };
     if over {
-        crate::debug::fsw::note_pub_batch();
+        crate::debug::hotpath::note_pub_batch();
         // Whole queue, append order (pre -> entry -> post per record).
         // No ext4 locks are held by this path (PENDING is a leaf lock;
         // the I/O runs lock-free), so this cannot deadlock against the
@@ -9286,14 +9286,14 @@ pub fn publication_defer(
             cookie: publication_cookie(),
         });
         over_hiwat = pend.len() > PUB_HIGH_WATER;
-        crate::debug::fsw::note_pub_qmax(pend.len());
+        crate::debug::hotpath::note_pub_qmax(pend.len());
     }
     if over_hiwat {
         // Bounded ordered drain by the backlog's own producer (see
         // PUB_HIGH_WATER). No locks are held here and this runs in the
         // creator's syscall context, exactly where the old synchronous
         // barrier used to run.
-        crate::debug::fsw::note_pub_hiwat();
+        crate::debug::hotpath::note_pub_hiwat();
         let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
     }
     id
@@ -9320,10 +9320,10 @@ pub fn publication_defer_entry_only(
             cookie: publication_cookie(),
         });
         over_hiwat = pend.len() > PUB_HIGH_WATER;
-        crate::debug::fsw::note_pub_qmax(pend.len());
+        crate::debug::hotpath::note_pub_qmax(pend.len());
     }
     if over_hiwat {
-        crate::debug::fsw::note_pub_hiwat();
+        crate::debug::hotpath::note_pub_hiwat();
         let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
     }
     id
@@ -9627,7 +9627,7 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
             }
             return Ok(());
         }
-        crate::debug::fsw::note_pub_scoped(mine.len());
+        crate::debug::hotpath::note_pub_scoped(mine.len());
 
         // One plan per device (a task may publish on several mounted
         // filesystems; blocks and obligations are device-keyed, so the
@@ -9720,7 +9720,7 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
         pend.set_list(snapshot);
         return Ok(());
     }
-    crate::debug::fsw::note_pub_cstr();
+    crate::debug::hotpath::note_pub_cstr();
 
     let mut plan = WritePlan::new();
     plan.note_queue_entries(&snapshot, dev);
@@ -9793,7 +9793,7 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
         if batch.is_empty() {
             return Ok(());
         }
-        crate::debug::fsw::note_pub_flush(batch.len());
+        crate::debug::hotpath::note_pub_flush(batch.len());
         let mut first_err: i32 = 0;
         for p in &batch {
             for &b in &p.pre {
@@ -11173,7 +11173,7 @@ pub fn vfs_bind_mount(
                 // (~229 lines on every perf boot, each costing UART
                 // emit + hilogd drain; the prefix probe walk itself
                 // allocates and re-lookups paths).
-                if !crate::debug::switches::oh_hunt_prints_on() {
+                if !crate::debug::hotpath::oh_hunt_prints_on() {
                     return Err(e);
                 }
                 static BINDWALK_N: core::sync::atomic::AtomicUsize =
@@ -11264,7 +11264,7 @@ pub fn vfs_bind_mount(
     // bindrec (sc37: per-spawn prints x retry storms flooded the UART).
     // 110th: rides the ohhunt gate with the rest of the mount hunt
     // family (build_path walks the dentry chain per line).
-    if sbx_want(target) && crate::debug::switches::oh_hunt_prints_on() {
+    if sbx_want(target) && crate::debug::hotpath::oh_hunt_prints_on() {
         if let Some(ref sd) = src.dentry {
             static SBXBIND_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -11368,7 +11368,7 @@ pub fn vfs_bind_mount(
                 // 110th: "by design" reversed — ~90 lines on every perf
                 // boot, each costing UART emit + hilogd drain; rides the
                 // ohhunt gate with the rest of the mount hunt family.
-                if crate::debug::switches::oh_hunt_prints_on() {
+                if crate::debug::hotpath::oh_hunt_prints_on() {
                     crate::pr_warn!(
                         "bindrec: cloned '/{}' under '{}' (flags {:#x})",
                         rel.join("/"),
@@ -11391,7 +11391,7 @@ pub fn vfs_bind_mount(
             // and paid its whole 3s appspawn watchdog to this probe (the
             // sc37 bindrec lesson, replayed). 110th: default flipped —
             // arms only via rux:ohhunt (retired debug=ohhunt) (or legacy sprobe=1).
-            if crate::debug::switches::oh_hunt_prints_on()
+            if crate::debug::hotpath::oh_hunt_prints_on()
                 && MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
             {
                 crate::pr_debug!(
@@ -12542,9 +12542,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     if pathname.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
-    crate::debug::fsw::note_walk();
+    crate::debug::hotpath::note_walk();
     // pathcost: walk prologue bracket (normalize + root fetch + split).
-    let pc_pre = crate::debug::fsw::pc_now();
+    let pc_pre = crate::debug::hotpath::pc_now();
 
     // Convert to absolute path and normalize. P1 chroot: absolute paths are
     // interpreted in the CURRENT TASK'S namespace (root prefix), and the
@@ -12640,7 +12640,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // 110th: rides the ohhunt gate (the probe takes VFS_STATE +
         // walks root children per hit).
         if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6
-            && crate::debug::switches::oh_hunt_prints_on()
+            && crate::debug::hotpath::oh_hunt_prints_on()
         {
             let (vfs_root_ptr, vfs_root_has_storage, vfs_root_has_mnt) = {
                 let st = VFS_STATE.lock();
@@ -12755,13 +12755,13 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // and the next iteration re-fetches through the mirror.
     let mut cur_inode_raw: *const super::types::Inode = core::ptr::null();
 
-    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_PRE_NS, pc_pre);
-    let pc_loop = crate::debug::fsw::pc_now();
+    crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_PRE_NS, pc_pre);
+    let pc_loop = crate::debug::hotpath::pc_now();
 
     for (ci, component) in components.iter().enumerate() {
         // pathcost: one count per walked component (divisor for A-D).
         if pc_loop != 0 {
-            crate::debug::fsw::WALK_COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::hotpath::WALK_COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         // NAME_MAX check (review 5.5): components longer than 255 bytes can
         // never exist on any of our filesystems — fail with ENAMETOOLONG
@@ -12801,7 +12801,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // removes the per-component get_inode lock pair; (gap-fs lane)
         // the first fetch of a position goes through the lock-free inode
         // pointer mirror instead.
-        let pc_a = crate::debug::fsw::pc_now();
+        let pc_a = crate::debug::hotpath::pc_now();
         if cur_inode_raw.is_null() {
             cur_inode_raw = cur_d.inode_ptr_walk(cl);
         }
@@ -12815,7 +12815,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
             }
         }
-        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_A_NS, pc_a);
+        crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_A_NS, pc_a);
 
         // Skip "." — current directory
         if *component == "." {
@@ -12863,7 +12863,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // = version check + per-slot seqlock pair + one name compare —
         // no lock pair, no Arc traffic; miss falls to the locked map
         // lookup and refills the memo for the next walk.
-        let pc_b = crate::debug::fsw::pc_now();
+        let pc_b = crate::debug::hotpath::pc_now();
         let mut found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
         // (21st successor) STALE negative memo normalization: the parent
         // mutated since the memo was inserted (its mut_gen moved past the
@@ -12880,7 +12880,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // as 87c51458; negstorm 8w+16w rc=0, 568,699 stale hits clean.)
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
-            if (unsafe { &*p }).is_negative() && crate::debug::fsw::negmemo_on() {
+            if (unsafe { &*p }).is_negative() && crate::debug::hotpath::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
                 let parent_gen = if !cur_inode_raw.is_null() {
@@ -12898,7 +12898,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     // Detach and re-resolve from the filesystem — the
                     // reference kernel drops negative dentries on every
                     // parent mutation; ours refreshes lazily here.
-                    crate::debug::fsw::note_negstale();
+                    crate::debug::hotpath::note_negstale();
                     cur_d.remove_child(component);
                     found = None;
                 }
@@ -12952,7 +12952,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 // Not in dentry cache — ask the filesystem to look it up.
                 // (gap-fs lane) this arm can sleep (fs lookup / iget):
                 // materialize the owned position Arc, drop the claim.
-                crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_B_NS, pc_b);
+                crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_B_NS, pc_b);
                 cur_inode_raw = core::ptr::null();
                 current = Some(match current.take() {
                     Some(a) => a,
@@ -12962,8 +12962,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     None => unsafe { self::dentry_arc_from_raw(current_raw) },
                 });
                 drop(claim.take());
-                let pc_m = crate::debug::fsw::pc_now();
-                crate::debug::fsw::note_walk_miss();
+                let pc_m = crate::debug::hotpath::pc_now();
+                crate::debug::hotpath::note_walk_miss();
                 let cur_now = current.as_ref().unwrap();
                 let dir_inode = match cur_now.get_inode() {
                     Some(i) => i,
@@ -13018,12 +13018,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                     // negmemo off this stays the pure re-scan
                                     // it always was.
                                     if e == errno::Errno::NoSuchFileOrDirectory {
-                                        crate::debug::fsw::note_walk_miss_enoent();
+                                        crate::debug::hotpath::note_walk_miss_enoent();
                                         // ext4-only gate: ops.lookup IS
                                         // ext4_lookup's fn pointer for ext4
                                         // directories (dynamic filesystems
                                         // never memo).
-                                        if crate::debug::fsw::negmemo_on()
+                                        if crate::debug::hotpath::negmemo_on()
                                             && crate::api::ext4::is_ext4_lookup(ops)
                                         {
                                             let pgen = dir_inode.dir_mut_gen_load();
@@ -13107,20 +13107,20 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         }
                         current = Some(landed);
                     }
-                    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_MISSCOST_NS, pc_m);
+                    crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_MISSCOST_NS, pc_m);
                     continue;
                 }
             }
         };
 
         // ---- dcache hit ----
-        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_B_NS, pc_b);
+        crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_B_NS, pc_b);
         // SAFETY: child_raw came from lookup_child_walk under the claim
         // (memo slot or the child map — the claim pins its lifetime).
         let c: &Dentry = unsafe { &*child_raw };
         // Negative dentry — file known not to exist
         if c.is_negative() {
-            crate::debug::fsw::note_neghit();
+            crate::debug::hotpath::note_neghit();
             if sbx_tracing {
                 sbx_trace(
                     "walk",
@@ -13172,7 +13172,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // lock pair + Arc churn on EVERY hit of EVERY walk).
         // (gap-fs lane) the cached inode is a raw pointer through
         // the mirror; only an identity change pays the Arc swap.
-        let pc_c = crate::debug::fsw::pc_now();
+        let pc_c = crate::debug::hotpath::pc_now();
         let mut inode_raw: *const super::types::Inode = c.inode_ptr_walk(cl);
         let gen_now = self::icache_regen();
         if c.get_inode_gen() != gen_now {
@@ -13190,8 +13190,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             // later change bumps the generation again.
             c.set_inode_gen(self::icache_regen());
         }
-        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_C_NS, pc_c);
-        crate::debug::fsw::note_walk_hit();
+        crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_C_NS, pc_c);
+        crate::debug::hotpath::note_walk_hit();
 
         // Follow mount point at child, then follow symlink
         // (perf-path lane) has_mount() keeps the common no-mountpoint
@@ -13200,7 +13200,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // (gap-fs lane) the no-hop advance is a RAW pointer move — no
         // Arc clone, no refcount traffic; the mount-hop arm materializes
         // (rare).
-        let pc_d = crate::debug::fsw::pc_now();
+        let pc_d = crate::debug::hotpath::pc_now();
         let hopped = c.has_mount();
         if hopped {
             crossed += 1;
@@ -13259,10 +13259,10 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             // refreshes current_raw from the owned Arc.)
             let _ = pre_ptr;
         }
-        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_D_NS, pc_d);
+        crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_D_NS, pc_d);
     }
-    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_LOOP_NS, pc_loop);
-    let pc_tail = crate::debug::fsw::pc_now();
+    crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_LOOP_NS, pc_loop);
+    let pc_tail = crate::debug::hotpath::pc_now();
 
     // (gap-fs lane) An arm may have dropped the claim on the final
     // component (symlink follow); re-acquire for the tail reads.
@@ -13316,7 +13316,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     {
         return Err(errno::Errno::NotADirectory.as_neg_i32());
     }
-    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_TAIL_NS, pc_tail);
+    crate::debug::hotpath::pc_add(&crate::debug::hotpath::WALK_TAIL_NS, pc_tail);
 
     Ok(VfsPath {
         dentry: Some(dentry),
@@ -23607,7 +23607,7 @@ fn release_page_frame(pfn: usize) {
         && crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64)
     {
         use core::sync::atomic::Ordering::Relaxed;
-        crate::debug::driftwatch::MM_POISON_FREES.fetch_add(1, Relaxed);
+        crate::debug::hotpath::MM_POISON_FREES.fetch_add(1, Relaxed);
         return;
     }
 
@@ -23615,7 +23615,7 @@ fn release_page_frame(pfn: usize) {
         && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
     {
         use core::sync::atomic::Ordering::Relaxed;
-        crate::debug::driftwatch::PCACHE_LIVE_PT_REFUSED
+        crate::debug::hotpath::PCACHE_LIVE_PT_REFUSED
             .fetch_add(1, Relaxed);
         static REPORTS: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -23625,20 +23625,20 @@ fn release_page_frame(pfn: usize) {
                 "page-cache release of LIVE PT frame pfn={:#x} REFUSED — leaking (double-owned cache entry; RAW-FREE cascade guard)",
                 pfn
             );
-            crate::debug::backtrace::dump_stack();
+            crate::debug::hotpath::dump_stack();
         }
         // mmforensics: deep capture at the producer-side refusal (the
         // capture takes no page-cache locks — it only reads descriptors,
         // rings and foreign trees — so running it from this lock-held
         // context is safe).
-        crate::debug::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
+        crate::debug::hotpath::capture_frame(pfn, "pcache-live-pt-refused");
         // QUARANTINE the frame (mmforensics lane): the capture evidence
         // showed such frames keep colliding with re-allocation for the
         // rest of the boot (one frame re-stamped by five trees); the
         // poison bit makes every later free of it impossible, so the
         // surviving references dangle inertly.
         crate::arch::mm::mmu_init::PtLedger::poison_table(pfn as u64);
-        crate::debug::driftwatch::MM_POISONED.fetch_add(1, Relaxed);
+        crate::debug::hotpath::MM_POISONED.fetch_add(1, Relaxed);
         // The caller has already removed the map entry and unlinked the
         // LRU member; the leaked frame is an untracked orphan. Its
         // stale PageCache descriptor is unreachable from the LRU walk,

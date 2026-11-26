@@ -13,8 +13,8 @@
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::debug::backtrace::ConsoleWriter;
-use crate::debug::schb::{PROC_RING, PROC_RING_LEN, PROC_SEQ, pace_snapshot};
+use crate::debug::types::ConsoleWriter;
+use crate::debug::hotpath::{PROC_RING, PROC_RING_LEN, PROC_SEQ, pace_snapshot};
 
 extern crate alloc;
 
@@ -65,7 +65,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// regardless of debug switches (NET_PAGES is always live; the kstack
 /// high-water needs rux:schb (retired debug=schb) to have armed its probe).
 pub fn oom_anat_dump() {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Ordering::AcqRel) {
         return;
@@ -101,8 +101,8 @@ pub fn oom_anat_dump() {
     // >> live procs at the census moment, every spawn strands its
     // AddressSpace (and its VMA tree + vma_files pins ride along).
     {
-        let mn = crate::debug::memwatch::MM_NEWS.load(Ordering::Relaxed) as u64;
-        let md = crate::debug::memwatch::MM_DROPS.load(Ordering::Relaxed) as u64;
+        let mn = crate::debug::hotpath::MM_NEWS.load(Ordering::Relaxed) as u64;
+        let md = crate::debug::hotpath::MM_DROPS.load(Ordering::Relaxed) as u64;
         taskdump_raw_line(b"OOM-ANAT mm: new=");
         taskdump_dec(mn);
         taskdump_raw_line(b" drop=");

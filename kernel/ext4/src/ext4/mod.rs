@@ -557,7 +557,7 @@ impl Ext4FileSystem {
 
     /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
-        crate::debug::fsw::note_read_inode();
+        crate::debug::hotpath::note_read_inode();
         if ino == 0 {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
@@ -729,7 +729,7 @@ impl Ext4FileSystem {
                 b
             }
         };
-        crate::debug::fsw::note_dir_lookup(blocks.len());
+        crate::debug::hotpath::note_dir_lookup(blocks.len());
 
         // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
         // whose block list is absurdly large means a corrupt inode
@@ -824,7 +824,7 @@ impl Ext4FileSystem {
                 b
             }
         };
-        crate::debug::fsw::note_list_dir();
+        crate::debug::hotpath::note_list_dir();
         // Pathology probe — see the twin in lookup().
         if blocks.len() > 1024 {
             crate::pr_err!(
@@ -3653,7 +3653,7 @@ fn ext4_readdir_fill(
             b
         }
     };
-    crate::debug::fsw::note_list_dir();
+    crate::debug::hotpath::note_list_dir();
 
     let mut filled = 0usize;
     let mut cur = pos; // byte offset of the next candidate entry

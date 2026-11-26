@@ -100,7 +100,7 @@ pub fn note_pick_skip(task: *mut Task, reason: u8) {
 /// Print (direct console, GRQ-held discipline) and clear the recorded
 /// skip history of `task`. Called from wakewatch's strand report.
 pub fn print_skip_history(task: *mut Task) {
-    use crate::debug::taskdump::putc_brief as putchar;
+    use crate::debug::hotpath::putc_brief as putchar;
     let s = skip_hist_of(task);
     if s.task.load(Ordering::Acquire) != task as usize as u64 {
         // s16: the 256-slot table is keyed by Task address and msgstress
@@ -128,7 +128,7 @@ pub fn print_skip_history(task: *mut Task) {
     }
     s.task.store(0, Ordering::Release);
     fn pu(mut v: u64) {
-        use crate::debug::taskdump::putc_brief as putchar;
+        use crate::debug::hotpath::putc_brief as putchar;
         let mut buf = [0u8; 20];
         let mut k = 0;
         if v == 0 {
@@ -376,7 +376,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
         crate::sched::hotpath::ww_pick_walk_inc();
         // grq-10ns: cctx walk anatomy (picks entered / candidates
         // consulted — the denominator for the walk-cost evidence).
-        crate::debug::cctx::bump(&crate::debug::cctx::FAIR_PICK_N);
+        crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::FAIR_PICK_N);
         // R7-G1 (GDB capture): this walk once kept a Vec::with_capacity
         // (a HEAP allocation per pick under the GRQ irqsave lock), then
         // a 32-slot stack array initialized on EVERY pick (768 B of
@@ -417,7 +417,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
             // past without any tree mutation.
             // SAFETY: node is in-range; next() reads only link fields.
             node = rq.timeline.next(node);
-            crate::debug::cctx::bump(&crate::debug::cctx::FAIR_WALK_N);
+            crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::FAIR_WALK_N);
 
             // 64th: vruntime sanity canary (see vr_canary) — checked on
             // every candidate the walk consults, decision-time.
@@ -591,9 +591,9 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
                                 static TORN_N: core::sync::atomic::AtomicU32 =
                                     core::sync::atomic::AtomicU32::new(0);
                                 if TORN_N.fetch_add(1, Ordering::Relaxed) < 40 {
-                                    use crate::debug::taskdump::putc_brief as putchar;
+                                    use crate::debug::hotpath::putc_brief as putchar;
                                     fn ph6(mut v: u64) {
-                                        use crate::debug::taskdump::putc_brief as p;
+                                        use crate::debug::hotpath::putc_brief as p;
                                         for sh in (0..16).rev() {
                                             let n = ((v >> (sh * 4)) & 0xF) as u8;
                                             p(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -714,7 +714,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
                                         core::sync::atomic::Ordering::Relaxed,
                                     ) < 400
                                 {
-                                    use crate::debug::taskdump::putc_brief as putchar;
+                                    use crate::debug::hotpath::putc_brief as putchar;
                                     fn ph(mut v: u64) {
                                         for _ in 0..16 {
                                             let n = (v >> 60) as u8;
@@ -935,9 +935,9 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
         // write discipline (R34): we hold the GRQ lock here.
         if result.is_none() && skip_count > 0 {
             PICK_SKIP_ALL.fetch_add(1, Ordering::Relaxed);
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             fn pd(mut v: u64) {
-                use crate::debug::taskdump::putc_brief as putchar;
+                use crate::debug::hotpath::putc_brief as putchar;
                 let mut buf = [0u8; 20];
                 let mut n = 0;
                 if v == 0 {
@@ -956,7 +956,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
             }
             fn ps(s: &[u8]) {
                 for &b in s {
-                    crate::debug::taskdump::putc_brief(b);
+                    crate::debug::hotpath::putc_brief(b);
                 }
             }
             static LAST_REPORT: core::sync::atomic::AtomicU64 =
@@ -1156,7 +1156,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             // owner masks at heal time (both must be 0 — that is the
             // adjudication's precondition; a nonzero mask here names a
             // racing owner).
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             const M: &[u8] = b" st=0x";
             for &b in M {
                 putchar(b);
@@ -1210,9 +1210,9 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         // never scheduled: recycle-residue class) and the jiffy stamp —
         // pairs with ENQ-CLAIMED-SLOTBK jif= lines (same pid+claim).
         if !task.is_null() {
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             fn pdec5(mut v: u64) {
-                use crate::debug::taskdump::putc_brief as p;
+                use crate::debug::hotpath::putc_brief as p;
                 let mut buf = [0u8; 20];
                 let mut n = 0;
                 if v == 0 {
@@ -1263,7 +1263,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
                 pdec5(crate::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
-        crate::debug::taskdump::putc_brief(b'\n');
+        crate::debug::hotpath::putc_brief(b'\n');
     }
 
     /// 64th (EEVDF seed hunt): per-visit vruntime sanity canary. Checks the
@@ -1302,9 +1302,9 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             return;
         }
         VR_TRIP_LAST_JIF.store(now, Ordering::Release);
-        use crate::debug::taskdump::putc_brief as putchar;
+        use crate::debug::hotpath::putc_brief as putchar;
         fn ph(mut v: u64) {
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             putchar(b'0');
             putchar(b'x');
             let mut buf = [0u8; 16];
@@ -1320,7 +1320,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
             }
         }
         fn pd(mut v: u64) {
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             let mut buf = [0u8; 20];
             let mut n = 0;
             if v == 0 {
@@ -1339,7 +1339,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
         }
         fn ps(s: &[u8]) {
             for &b in s {
-                crate::debug::taskdump::putc_brief(b);
+                crate::debug::hotpath::putc_brief(b);
             }
         }
         ps(b"\nVRTRIP site=");

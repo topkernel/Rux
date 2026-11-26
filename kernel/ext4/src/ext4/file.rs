@@ -1032,8 +1032,8 @@ fn ext4_file_read_cached_dst(
         // attribution). The probe's copy bracket is skipped on the
         // user-fault early returns below — a diagnostic undercount on
         // the EFAULT path only, never on the benchmark's fast path.
-        let probe = crate::debug::filerd::on();
-        let t_pin = if probe { crate::debug::filerd::now() } else { 0 };
+        let probe = crate::debug::hotpath::filerd_on();
+        let t_pin = if probe { crate::debug::hotpath::now() } else { 0 };
         // oc-rc: claim the entry ONCE for the pin AND the unpin — the
         // second bank-claim + probe + strong-count pair the old
         // put_range re-paid per run was ~half the pin+unpin cost of a
@@ -1042,10 +1042,10 @@ fn ext4_file_read_cached_dst(
         let (run_len, entry) =
             cache.get_range_with_entry(fs_id, ino, page_index, &mut run[..want]);
         if probe {
-            crate::debug::filerd::charge(&crate::debug::filerd::PIN_CYCLES, t_pin);
+            crate::debug::hotpath::charge(&crate::debug::hotpath::PIN_CYCLES, t_pin);
         }
         if run_len > 0 {
-            let t_copy = if probe { crate::debug::filerd::now() } else { 0 };
+            let t_copy = if probe { crate::debug::hotpath::now() } else { 0 };
             // Copy the run in MERGED groups: physically-contiguous pinned
             // pages (direct-map neighbors, run[j].1 == run[j-1].1 + block)
             // are served by ONE dst.put — one copy_to_user (one AC bracket,
@@ -1137,9 +1137,9 @@ fn ext4_file_read_cached_dst(
                 }
             }
             if probe {
-                crate::debug::filerd::charge(&crate::debug::filerd::COPY_CYCLES, t_copy);
+                crate::debug::hotpath::charge(&crate::debug::hotpath::COPY_CYCLES, t_copy);
             }
-            let t_unpin = if probe { crate::debug::filerd::now() } else { 0 };
+            let t_unpin = if probe { crate::debug::hotpath::now() } else { 0 };
             // run_len > 0 implies get_range_with_entry pinned this run
             // inside `entry` — the Option is always Some on this path
             // (unwrap is the loud failure if that invariant breaks).
@@ -1150,14 +1150,14 @@ fn ext4_file_read_cached_dst(
                 &run[..run_len],
             );
             if probe {
-                crate::debug::filerd::charge(&crate::debug::filerd::UNPIN_CYCLES, t_unpin);
+                crate::debug::hotpath::charge(&crate::debug::hotpath::UNPIN_CYCLES, t_unpin);
             }
             continue;
         }
 
         // rux:filerd (retired debug=filerd): this read call fell off the warm path.
         if probe {
-            crate::debug::filerd::note_miss();
+            crate::debug::hotpath::note_miss();
         }
 
         // Cache miss on the first page: batch-fill from here. The window
@@ -3687,8 +3687,8 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
     // rux:filerd (retired debug=filerd): outer bracket for the whole fast path (the lock /
     // pin / copy / unpin / epilog phases are charged inside; the
     // residue vs their sum is resolution + ra_state + loop scaffolding).
-    let probe = crate::debug::filerd::on();
-    let t_outer = if probe { crate::debug::filerd::now() } else { 0 };
+    let probe = crate::debug::hotpath::filerd_on();
+    let t_outer = if probe { crate::debug::hotpath::now() } else { 0 };
     let Some((inode, fs, ext4_inode)) = file_ext4(file) else {
         if file_inode_missing(file) {
             return errno::Errno::BadFileNumber.as_neg_i32() as isize;
@@ -3696,11 +3696,11 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
         return errno::Errno::IOError.as_neg_i32() as isize;
     };
     // Same pos-race serialization as ext4_file_read_vfs (LTP fork07).
-    let t_lock = if probe { crate::debug::filerd::now() } else { 0 };
+    let t_lock = if probe { crate::debug::hotpath::now() } else { 0 };
     let _pos_guard = file.io_lock.guard();
     let offset = file.get_pos() as u64;
     if probe {
-        crate::debug::filerd::charge(&crate::debug::filerd::LOCK_CYCLES, t_lock);
+        crate::debug::hotpath::charge(&crate::debug::hotpath::LOCK_CYCLES, t_lock);
     }
 
     let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
@@ -3709,7 +3709,7 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
         ReadDst::User(dst, count), ra_state,
     ) {
         Ok(read_bytes) => {
-            let t_ep = if probe { crate::debug::filerd::now() } else { 0 };
+            let t_ep = if probe { crate::debug::hotpath::now() } else { 0 };
             file.set_pos(offset + read_bytes as u64);
             if read_bytes > 0 {
                 // atime via the reference-default relatime gate
@@ -3728,16 +3728,16 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                 );
             }
             if probe {
-                crate::debug::filerd::charge(&crate::debug::filerd::EPILOG_CYCLES, t_ep);
-                crate::debug::filerd::charge(&crate::debug::filerd::OUTER_CYCLES, t_outer);
-                crate::debug::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::debug::hotpath::charge(&crate::debug::hotpath::EPILOG_CYCLES, t_ep);
+                crate::debug::hotpath::charge(&crate::debug::hotpath::OUTER_CYCLES, t_outer);
+                crate::debug::hotpath::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             read_bytes as isize
         }
         Err(e) => {
             if probe {
-                crate::debug::filerd::charge(&crate::debug::filerd::OUTER_CYCLES, t_outer);
-                crate::debug::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::debug::hotpath::charge(&crate::debug::hotpath::OUTER_CYCLES, t_outer);
+                crate::debug::hotpath::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             e as isize
         }

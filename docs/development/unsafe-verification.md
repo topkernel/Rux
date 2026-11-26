@@ -28,26 +28,26 @@ FILE` owns one), and the gate fails on a drop that
 ## Totals
 
 - unsafe regions: **1996**
-- with artifact (non-GAP): **1897** (95.0%)
-- GAP: **99**
+- with artifact (non-GAP): **1898** (95.1%)
+- GAP: **98**
 - by kind: block=1764, unsafe-extern=6, unsafe-fn=97, unsafe-impl=129
 - by category (regions carry 0..n tags): ptr-ops=478, asm=267, volatile=148, raw-construct=31, addr-arith=26, no-preempt=14, ffi=10, static-mut=5, transmute=5, layout-meta=2
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1897**
-- recovered from reference versions: **0**
-- references consulted: HEAD, MERGE_HEAD
-- annotated regions, baseline -> this bank: **2012 -> 1897**
+- artifacts kept by id: **1784**
+- recovered from reference versions: **114** (same-file 47, edited-site 1, file-move 0, moved-item 66)
+- references consulted: HEAD, MERGE_HEAD, 1354d238f
+- annotated regions, baseline -> this bank: **2430 -> 1898**
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
-| arch | 690 | 684 | 6 |
+| arch | 690 | 688 | 2 |
 | fs | 304 | 275 | 29 |
 | drivers | 115 | 76 | 39 |
-| debug | 109 | 109 | 0 |
+| debug | 109 | 106 | 3 |
 | sched | 108 | 101 | 7 |
 | sync | 106 | 103 | 3 |
 | mm | 98 | 98 | 0 |
@@ -440,7 +440,7 @@ FILE` owns one), and the gate fails on a drop that
 | 181 | alloc_page_table | block | ptr-ops,addr-arith | INV:F20 | `2c1f5a2d9525` |
 | 190 | alloc_page_table | block | addr-arith | INV:F20 | `d12af5b67463` |
 | 268 | alloc_page_table | block | asm | INV:F20 | `1bf295ae275a` |
-| 273 | alloc_page_table | block | - | INV:F20 | `e3c2d2f997bc` |
+| 273 | alloc_page_table | block | - | INV:F20 | `5b8086889928` |
 | 282 | alloc_page_table | block | ptr-ops,addr-arith | INV:F20 | `de6a623597b3` |
 | 339 | stamp_kernel_tree_boot | block | - | INV:F20 | `dbdcb9cf61c8` |
 | 381 | free_page_table | block | - | INV:F20 | `8fa336aa1d1e` |
@@ -451,7 +451,7 @@ FILE` owns one), and the gate fails on a drop that
 | 970 | textfree_owner_maps | block | - | INV:F20 | `09882e9db093` |
 | 1024 | release_user_leaf | block | addr-arith | INV:F20 | `3534535c36b3` |
 | 1547 | map_page_noflush | block | asm | INV:F20 | `5598f72b9d6d` |
-| 1552 | map_page_noflush | block | - | INV:F19 | `3e2514eb7efe` |
+| 1552 | map_page_noflush | block | - | INV:F19 | `5459ef587a43` |
 | 1697 | map_page | block | asm | INV:F20 | `214a32de34d9` |
 | 1718 | map_region | block | asm | INV:F20 | `0ccca23d27ca` |
 | 1738 | map_pmd_huge_page | block | asm | INV:F20 | `6e2888f7dce4` |
@@ -844,7 +844,7 @@ FILE` owns one), and the gate fails on a drop that
 | 208 | alloc_page_table | block | ptr-ops | INV:F20 | `9de2dfc28b72` |
 | 235 | alloc_page_table | block | addr-arith | INV:F20 | `6a08f6dce572` |
 | 336 | alloc_page_table | block | asm | INV:F20 | `b35f995af70b` |
-| 343 | alloc_page_table | block | - | INV:F20 | `357f091fe4ec` |
+| 343 | alloc_page_table | block | - | INV:F20 | `52f4ce7ae0a5` |
 | 475 | free_page_table | block | - | INV:F20 | `a2a3e0ac2a3c` |
 | 834 | take | block | - | INV:F20 | `b38a00004818` |
 | 928 | task_pid_alive | block | - | INV:F20 | `ce2a79bdb1b5` |
@@ -976,17 +976,17 @@ FILE` owns one), and the gate fails on a drop that
 | 922 | enable_timer_interrupt | block | asm | INV:F19 | `46619bb6f45f` |
 | 975 | pt_regs_rip_for_cpu | block | - | INV:F19 | `9ebf252864bc` |
 | 983 | current_task_pt_regs | block | ptr-ops | INV:F19 | `3bb7562ce1f1` |
-| 1009 | x86_bad_frame_exit | block | - | INV:F19 | `c8d7704fdd9e` |
+| 1009 | x86_bad_frame_exit | block | - | INV:F19 | `685caa71a9d8` |
 | 1027 | frame_in_task_stack | block | - | INV:F19 | `30ef12cd20d6` |
 | 1102 | trap_handler | block | - | INV:F19 | `5f7964295301` |
 | 1104 | trap_handler | block | - | INV:F19 | `3fe1781d4d32` |
 | 1109 | trap_handler | block | asm | INV:F19 | `cd230a0481cb` |
 | 1129 | trap_handler | block | - | INV:F19 | `2c97682c4125` |
 | 1140 | trap_handler | block | asm | INV:F19 | `66b88fd7fe9b` |
-| 1148 | trap_handler | block | - | GAP | `f5fcb144bba2` |
-| 1275 | trap_handler | block | no-preempt | GAP | `7b83db6e1f5d` |
-| 1289 | trap_handler | block | - | GAP | `3132bf29659c` |
-| 1371 | trap_handler | block | - | GAP | `9f65f47c5f68` |
+| 1148 | trap_handler | block | - | INV:F19 | `f5fcb144bba2` |
+| 1275 | trap_handler | block | no-preempt | INV:F19 | `7b83db6e1f5d` |
+| 1289 | trap_handler | block | - | INV:F19 | `3132bf29659c` |
+| 1371 | trap_handler | block | - | INV:F19 | `9f65f47c5f68` |
 | 1841 | handle_timer_tick | block | volatile | INV:F19 | `bb86fc1bad9c` |
 | 2146 | handle_illegal_instruction | block | - | INV:F19 | `0c2f56350622` |
 | 2162 | handle_illegal_instruction | block | - | INV:F19 | `6d46bfbe393f` |
@@ -1217,7 +1217,7 @@ FILE` owns one), and the gate fails on a drop that
 | 10649 | mount_is_busy | block | - | INV:INV-VFS-WALK-1 | `9310346a2945` |
 | 12792 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `11a86cffafb6` |
 | 12810 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `40ac638ca0d2` |
-| 12883 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `0aafca240335` |
+| 12883 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `a5f72ddb0299` |
 | 12888 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `ddcb98bdef8f` |
 | 12895 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `cb4c8f02ebf7` |
 | 12928 | path_lookup | block | - | INV:INV-VFS-WALK-1 | `bbc29cb27b5a` |
@@ -1493,161 +1493,111 @@ FILE` owns one), and the gate fails on a drop that
 
 ## debug
 
-### kernel/core/src/debug/backtrace.rs (12)
+### kernel/core/src/debug/hotpath.rs (101)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 106 | current_frame_pointer | block | asm | INV:F2 | `b9485c57d0f0` |
-| 111 | current_frame_pointer | block | asm | INV:F2 | `04a2fae816fb` |
-| 116 | current_frame_pointer | block | asm | INV:F2 | `086f8431885e` |
-| 132 | caller_return_address | block | asm | INV:F2 | `164c2ee516b7` |
-| 138 | caller_return_address | block | asm | INV:F2 | `7e00e2363c15` |
-| 143 | caller_return_address | block | asm | INV:F2 | `f1a37294a9ae` |
-| 161 | unwind_frame | block | ptr-ops | INV:F2 | `82bddfa678d0` |
-| 282 | save_regs | block | asm | INV:F2 | `784a8b087665` |
-| 328 | save_regs | block | asm | INV:F2 | `4368e1aa7b4b` |
-| 375 | save_regs | block | asm | INV:F2 | `9a842fdd2725` |
-| 427 | dump_csrs | block | asm | INV:F2 | `fe275eb46406` |
-| 458 | dump_csrs | block | asm | INV:F2 | `a007e1ef04a9` |
-
-### kernel/core/src/debug/hung_task.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 221 | report_hung_task | block | ptr-ops | INV:F18 | `be3ae7a0ee0a` |
-
-### kernel/core/src/debug/leakorigin.rs (17)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 191 | note_acquire | block | volatile,ptr-ops | INV:F1 | `421f9071ba7e` |
-| 236 | note_acquire | block | - | INV:F1 | `08fb244c363f` |
-| 237 | note_acquire | block | - | INV:F1 | `17e7018ae3b5` |
-| 283 | note_acquire | block | - | INV:F1 | `5c954c582765` |
-| 291 | note_acquire | block | - | INV:F1 | `bfc639e7183f` |
-| 349 | report_acquire_divergent | block | ptr-ops,no-preempt | INV:F1 | `8705d0553252` |
-| 554 | note_release | block | ptr-ops,no-preempt | INV:F1 | `900324f3b648` |
-| 665 | note_softirq_acquire | block | volatile,ptr-ops | INV:F1 | `a37875c93f42` |
-| 734 | report_hardirq_origin | block | - | INV:F1 | `008c864c713f` |
-| 805 | report_softirq_origin | block | - | INV:F1 | `32293886fd60` |
-| 809 | report_softirq_origin | block | no-preempt | INV:F1 | `fed3b4858b25` |
-| 860 | check_user_return | block | no-preempt | INV:F1 | `3cf3a45a3bf0` |
-| 921 | report_parked_site | block | no-preempt | INV:F1 | `70374b3f95fa` |
-| 937 | report_parked_site | block | no-preempt | INV:F1 | `56583ed9991d` |
-| 946 | report_incumbent_site | block | no-preempt | INV:F1 | `e88c1b679ccd` |
-| 1002 | report_outermost | block | - | INV:F1 | `b6b978d08d5a` |
-| 1092 | emit | block | - | INV:F1 | `a01de5c89278` |
-
-### kernel/core/src/debug/ledger.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 286 | dump | block | - | INV:F18 | `50bcaca32475` |
-| 321 | dump | block | - | INV:F18 | `35082e49d546` |
-
-### kernel/core/src/debug/memwatch.rs (7)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 183 | <module> | unsafe-fn | volatile,ptr-ops | INV:F3 | `58345774fc2f` |
-| 215 | <module> | unsafe-fn | volatile,ptr-ops | INV:F3 | `f9ff94da6aba` |
-| 236 | <module> | unsafe-fn | volatile,ptr-ops | INV:F3 | `44b6d8d527dc` |
-| 705 | note_page_alloc | block | - | INV:F3 | `3e5af3de5856` |
-| 727 | note_page_free | block | - | INV:F3 | `11be2ea8a0c8` |
-| 734 | note_page_free | block | - | INV:F3 | `363c92baa380` |
-| 782 | kroot_pollution | block | - | INV:F3 | `5f0c8c75fa3e` |
-
-### kernel/core/src/debug/mmforensics.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 102 | note_ref | block | - | INV:F18 | `f7110b9ee27b` |
-| 333 | capture_frame | block | - | INV:F18 | `46518fd55c3d` |
-
-### kernel/core/src/debug/mod.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 280 | register_debugfs_knobs | block | volatile | INV:F10 | `0213c1338954` |
-| 291 | register_debugfs_knobs | block | asm | INV:F10 | `5866f2a04cf8` |
-| 297 | register_debugfs_knobs | block | asm | INV:F10 | `b40633befaf6` |
-| 390 | walk_read | block | - | INV:F10 | `dfe3cc32358b` |
-| 392 | walk_read | block | volatile,ptr-ops | INV:F10 | `334aec47125f` |
-
-### kernel/core/src/debug/oops.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 116 | oops | block | - | INV:F18 | `1c545a66969c` |
-
-### kernel/core/src/debug/pathstash.rs (2)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 80 | stash_file | block | - | INV:F18 | `443ed8e56528` |
-| 110 | lookup_file | block | - | INV:F18 | `191b33974c7c` |
-
-### kernel/core/src/debug/pstore.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 175 | early_scan | block | ptr-ops | INV:F4 | `8cdc1d789c01` |
-| 188 | early_scan | block | volatile,ptr-ops | INV:F4 | `5f85a25cc3ff` |
-| 227 | read_record | block | ptr-ops | INV:F4 | `1d9ac757c5f1` |
-| 229 | read_record | block | raw-construct | INV:F4 | `1c9e9bbd8cc6` |
-| 300 | write_record | block | volatile,ptr-ops | INV:F4 | `f2834df60b02` |
-
-### kernel/core/src/debug/scribble.rs (31)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 228 | audit_frames | block | volatile,ptr-ops | INV:F1 | `75abffe65849` |
-| 394 | task_plausible | block | - | INV:F1 | `2796ce1ffa25` |
-| 441 | double_seed | block | - | INV:F1 | `08f446623515` |
-| 570 | putc | block | - | INV:F1 | `a778f572125a` |
-| 576 | putc | block | - | INV:F1 | `0f1dbe72a284` |
-| 626 | dump_qwords | block | volatile,ptr-ops | INV:F1 | `b9b2f538b02f` |
-| 664 | rd | block | volatile,ptr-ops | INV:F1 | `ee74f3ef3e7a` |
-| 747 | register | block | - | INV:F1 | `4ac218e9ca96` |
-| 752 | register | block | - | INV:F1 | `70eead279f73` |
-| 838 | quiesce | block | - | INV:F1 | `82f73d031df8` |
-| 844 | quiesce | block | volatile,ptr-ops | INV:F1 | `d1740bc17210` |
-| 887 | verify | block | - | INV:F1 | `2446668b012f` |
-| 900 | verify | block | - | INV:F1 | `8c885cca570f` |
-| 925 | verify | block | - | INV:F1 | `1832cd2e676b` |
-| 931 | verify | block | - | INV:F1 | `68daf51673ca` |
-| 937 | verify | block | volatile,ptr-ops | INV:F1 | `50b666cfe794` |
-| 981 | verify | block | volatile,ptr-ops | INV:F1 | `99156564777b` |
-| 992 | verify | block | volatile,ptr-ops | INV:F1 | `e855d3081f29` |
-| 1062 | verify | block | - | INV:F1 | `f4d42caeb458` |
-| 1063 | verify | block | - | INV:F1 | `e4291f46e155` |
-| 1069 | verify | block | - | INV:F1 | `0233ff46bf1c` |
-| 1073 | verify | block | volatile,ptr-ops | INV:F1 | `8a04f36722e6` |
-| 1135 | verify_gs | block | asm | INV:F1 | `2539349ccdbe` |
-| 1189 | verify_consistency | block | - | INV:F1 | `a66eaddd9c55` |
-| 1252 | verify_consistency | block | - | INV:F1 | `ca9404625e4f` |
-| 1269 | verify_consistency | block | - | INV:F1 | `8aea74d4511e` |
-| 1326 | slot_divergence | block | - | INV:F1 | `4ffffae9ceae` |
-| 1448 | <module> | unsafe-impl | - | INV:F1 | `b3617e385d8c` |
-| 1514 | crash_report | block | - | INV:F1 | `099c7bf0df5d` |
-| 1587 | report | block | - | INV:F1 | `bea16f17e77a` |
-| 1628 | report | block | - | INV:F1 | `012faafac083` |
-
-### kernel/core/src/debug/slowtask.rs (1)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 117 | tick | block | - | INV:F18 | `d754dd0ed3cf` |
-
-### kernel/core/src/debug/taskdump.rs (5)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 461 | dump_all_tasks | block | - | INV:F18 | `a102dbcf055f` |
-| 508 | dump_all_tasks | block | - | INV:F18 | `fac241d41942` |
-| 960 | frozen_ipi_probe | block | asm | INV:F18 | `c4722b16b27b` |
-| 982 | frozen_ipi_probe | block | - | INV:F18 | `dbb8f0f956ed` |
-| 1082 | dump_frozen_cpu_truth | block | - | INV:F18 | `8ce4784cf21d` |
+| 272 | register_debugfs_knobs | block | volatile | GAP | `1bde27361095` |
+| 283 | register_debugfs_knobs | block | asm | GAP | `12ade06d877a` |
+| 289 | register_debugfs_knobs | block | asm | GAP | `9ad3cc977661` |
+| 382 | walk_read | block | - | INV:F10 | `951de59e2f8e` |
+| 384 | walk_read | block | volatile,ptr-ops | INV:F10 | `24014cca9ce9` |
+| 475 | note_ref | block | - | INV:F18 | `7fb345159c6a` |
+| 693 | capture_frame | block | - | INV:F18 | `dcbb00e9dfa3` |
+| 1391 | current_frame_pointer | block | asm | INV:F2 | `66f141d5b071` |
+| 1396 | current_frame_pointer | block | asm | INV:F2 | `5babd6cce5b7` |
+| 1401 | current_frame_pointer | block | asm | INV:F2 | `3d9c605c120f` |
+| 1417 | caller_return_address | block | asm | INV:F2 | `53b15dde0def` |
+| 1423 | caller_return_address | block | asm | INV:F2 | `4f1e1a55a95f` |
+| 1428 | caller_return_address | block | asm | INV:F2 | `efabb9155ee3` |
+| 1446 | unwind_frame | block | ptr-ops | INV:F2 | `449988204749` |
+| 1567 | save_regs | block | asm | INV:F2 | `7cc8c9536e74` |
+| 1613 | save_regs | block | asm | INV:F2 | `1459c1cb15e2` |
+| 1660 | save_regs | block | asm | INV:F2 | `6b26596b8147` |
+| 1712 | dump_csrs | block | asm | INV:F2 | `2b0439438b18` |
+| 1743 | dump_csrs | block | asm | INV:F2 | `a3b627ddd40f` |
+| 2269 | report_hung_task | block | ptr-ops | INV:F18 | `49cc724d9349` |
+| 3214 | dump_all_tasks | block | - | INV:F18 | `07b27c25fe7b` |
+| 3261 | dump_all_tasks | block | - | INV:F18 | `9e8ce2be3e8c` |
+| 3700 | frozen_ipi_probe | block | asm | INV:F18 | `7f8965d4b7d1` |
+| 3722 | frozen_ipi_probe | block | - | INV:F18 | `32d50b969c6b` |
+| 3822 | dump_frozen_cpu_truth | block | - | INV:F18 | `ca43e8a03d7f` |
+| 4637 | <module> | unsafe-fn | volatile,ptr-ops | INV:F3 | `216a274febcf` |
+| 4669 | <module> | unsafe-fn | volatile,ptr-ops | INV:F3 | `6e7127d5b2f5` |
+| 4690 | <module> | unsafe-fn | volatile,ptr-ops | INV:F3 | `72cca045f3a2` |
+| 5143 | note_page_alloc | block | - | INV:F3 | `ab246d7bb75c` |
+| 5165 | note_page_free | block | - | INV:F3 | `efe883ef126f` |
+| 5172 | note_page_free | block | - | INV:F3 | `56411083fb75` |
+| 5220 | kroot_pollution | block | - | INV:F3 | `949eb2f9c1df` |
+| 5900 | dump | block | - | INV:F18 | `0f05a6eb9544` |
+| 5935 | dump | block | - | INV:F18 | `0c87195dcbe2` |
+| 6428 | audit_frames | block | volatile,ptr-ops | INV:F1 | `8e409593b00c` |
+| 6594 | task_plausible | block | - | INV:F1 | `e715b9bc1b69` |
+| 6641 | double_seed | block | - | INV:F1 | `8b8a2e515c20` |
+| 6770 | putc | block | - | INV:F1 | `ab3d42ad113b` |
+| 6776 | putc | block | - | INV:F1 | `e808e4cd9dab` |
+| 6826 | dump_qwords | block | volatile,ptr-ops | INV:F1 | `31edfc3f7ed3` |
+| 6864 | rd | block | volatile,ptr-ops | INV:F1 | `3b1c28d14807` |
+| 6947 | register | block | - | INV:F1 | `23abb2f36efa` |
+| 6952 | register | block | - | INV:F1 | `320c06be9dec` |
+| 7038 | quiesce | block | - | INV:F1 | `da1ea2897e07` |
+| 7044 | quiesce | block | volatile,ptr-ops | INV:F1 | `c0d7ec6cf4fe` |
+| 7087 | verify | block | - | INV:F1 | `151bf67e0f02` |
+| 7100 | verify | block | - | INV:F1 | `bfdbca74c4a7` |
+| 7125 | verify | block | - | INV:F1 | `e8550028d62f` |
+| 7131 | verify | block | - | INV:F1 | `582f068cc9f9` |
+| 7137 | verify | block | volatile,ptr-ops | INV:F1 | `1b226145f065` |
+| 7181 | verify | block | volatile,ptr-ops | INV:F1 | `76d54070a0b2` |
+| 7192 | verify | block | volatile,ptr-ops | INV:F1 | `f74398ac305d` |
+| 7262 | verify | block | - | INV:F1 | `5fc8ccfad3dc` |
+| 7263 | verify | block | - | INV:F1 | `231737ad32d0` |
+| 7269 | verify | block | - | INV:F1 | `82bd3c33a54e` |
+| 7273 | verify | block | volatile,ptr-ops | INV:F1 | `fd27de71af94` |
+| 7335 | verify_gs | block | asm | INV:F1 | `c0a2443b6d61` |
+| 7389 | verify_consistency | block | - | INV:F1 | `53af50a68bf1` |
+| 7452 | verify_consistency | block | - | INV:F1 | `306e961e80cd` |
+| 7469 | verify_consistency | block | - | INV:F1 | `e2a122e2e53c` |
+| 7526 | slot_divergence | block | - | INV:F1 | `12a09944e539` |
+| 7647 | <module> | unsafe-impl | - | INV:F1 | `982597398f09` |
+| 7713 | crash_report | block | - | INV:F1 | `0ba53018ba83` |
+| 7786 | report | block | - | INV:F1 | `c281989493f3` |
+| 7827 | report | block | - | INV:F1 | `ba4cdaa7eed9` |
+| 8112 | arm | block | - | INV:F1 | `49fcc98b3a53` |
+| 8170 | arm | block | volatile | INV:F1 | `ad6ccdc68e59` |
+| 8188 | enable_write_protect | block | - | INV:F1 | `bd9b34dac958` |
+| 8206 | fill_canary | block | volatile | INV:F1 | `0ff87b28eb7c` |
+| 8233 | verify | block | volatile | INV:F1 | `ec16fb3a05e8` |
+| 8259 | verify | block | volatile | INV:F1 | `8931216815eb` |
+| 8307 | table_virt | block | - | INV:F1 | `07957e23a93b` |
+| 8313 | table_virt | block | - | INV:F1 | `0816f89fee75` |
+| 8320 | resolve_phys | block | addr-arith | INV:F1 | `c3f0592f6c3e` |
+| 8358 | <module> | unsafe-fn | addr-arith | INV:F1 | `c06ea235a5c9` |
+| 10359 | early_scan | block | ptr-ops | INV:F4 | `681730feb7f8` |
+| 10372 | early_scan | block | volatile,ptr-ops | INV:F4 | `9b9f11f37f57` |
+| 10411 | read_record | block | ptr-ops | INV:F4 | `000311b11ed9` |
+| 10413 | read_record | block | raw-construct | INV:F4 | `a8af52bb1976` |
+| 10484 | write_record | block | volatile,ptr-ops | INV:F4 | `a35739a18b06` |
+| 10639 | oops | block | - | INV:F18 | `b0cb9ae840fb` |
+| 12691 | note_acquire | block | volatile,ptr-ops | INV:F1 | `13276f1f9690` |
+| 12736 | note_acquire | block | - | INV:F1 | `b51e5326c47a` |
+| 12737 | note_acquire | block | - | INV:F1 | `cc48b8a1d6bc` |
+| 12783 | note_acquire | block | - | INV:F1 | `27f415e7f00c` |
+| 12791 | note_acquire | block | - | INV:F1 | `258ce5ff6060` |
+| 12849 | report_acquire_divergent | block | ptr-ops,no-preempt | INV:F1 | `8e0f0c2cbfd9` |
+| 13054 | note_release | block | ptr-ops,no-preempt | INV:F1 | `2c559f88ca70` |
+| 13165 | note_softirq_acquire | block | volatile,ptr-ops | INV:F1 | `f2f01678e69c` |
+| 13234 | report_hardirq_origin | block | - | INV:F1 | `297dcdcad6c6` |
+| 13305 | report_softirq_origin | block | - | INV:F1 | `327f1d194b63` |
+| 13309 | report_softirq_origin | block | no-preempt | INV:F1 | `fef40eb2432d` |
+| 13360 | check_user_return | block | no-preempt | INV:F1 | `91802527fda6` |
+| 13421 | report_parked_site | block | no-preempt | INV:F1 | `fda8a7e448c7` |
+| 13437 | report_parked_site | block | no-preempt | INV:F1 | `1bc05caea2f8` |
+| 13446 | report_incumbent_site | block | no-preempt | INV:F1 | `5f3f83fddaf2` |
+| 13502 | report_outermost | block | - | INV:F1 | `763def664cde` |
+| 13592 | emit | block | - | INV:F1 | `2a5b46d20e08` |
+| 13770 | stash_file | block | - | INV:F18 | `4cfb16082f83` |
+| 13800 | lookup_file | block | - | INV:F18 | `4a42364d6f6f` |
+| 13920 | slowtask_tick | block | - | INV:F18 | `bf8a11e1355e` |
 
 ### kernel/core/src/debug/unsafe.rs (8)
 
@@ -1661,21 +1611,6 @@ FILE` owns one), and the gate fails on a drop that
 | 100 | raw_u32 | block | volatile,ptr-ops | INV:INV-FOR-2 | `5c5c3a6c8b15` |
 | 112 | location | block | ptr-ops | INV:INV-FOR-3 | `b1cad1f0c0ea` |
 | 120 | location_ref | block | - | INV:INV-FOR-3 | `d32cfa7674b0` |
-
-### kernel/core/src/debug/wildwatch.rs (10)
-
-| line | fn | kind | categories | artifact | id |
-|------|----|------|------------|----------|----|
-| 112 | arm | block | - | INV:F1 | `dbe024246f36` |
-| 170 | arm | block | volatile | INV:F1 | `56741b898256` |
-| 188 | enable_write_protect | block | - | INV:F1 | `2a68a271af92` |
-| 206 | fill_canary | block | volatile | INV:F1 | `a13748f9cad6` |
-| 233 | verify | block | volatile | INV:F1 | `010a88c71e51` |
-| 259 | verify | block | volatile | INV:F1 | `c154d72c4159` |
-| 307 | table_virt | block | - | INV:F1 | `c99fb8075939` |
-| 313 | table_virt | block | - | INV:F1 | `fd3d23485ef2` |
-| 320 | resolve_phys | block | addr-arith | INV:F1 | `fca35b6497b2` |
-| 358 | <module> | unsafe-fn | addr-arith | INV:F1 | `f54d2ab50cb9` |
 
 ## sched
 
@@ -1931,12 +1866,12 @@ FILE` owns one), and the gate fails on a drop that
 | 643 | fill_interior_order | block | ptr-ops | INV:INV-HEAP-3 | `0fa9a9283674` |
 | 973 | <module> | unsafe-impl | ptr-ops | INV:INV-HEAP-3 | `7f718da0ff86` |
 | 974 | <module> | unsafe-fn | - | INV:INV-HEAP-3 | `49df818ac8db` |
-| 1059 | alloc | block | - | INV:INV-SMALLALLOC-1 | `db8aa49f4870` |
+| 1059 | alloc | block | - | INV:INV-SMALLALLOC-1 | `35e009867cc9` |
 | 1081 | <module> | unsafe-fn | ptr-ops | INV:INV-SMALLALLOC-1 | `30c38811366f` |
-| 1091 | realloc | block | - | INV:INV-SMALLALLOC-1 | `e503266c881a` |
+| 1091 | realloc | block | - | INV:INV-SMALLALLOC-1 | `7dc950709af7` |
 | 1112 | <module> | unsafe-fn | - | INV:INV-SMALLALLOC-1 | `d245a6b5a2c2` |
-| 1152 | trace_kmalloc_at | block | - | INV:INV-SMALLALLOC-1 | `6014c4e33c14` |
-| 1177 | trace_kfree_at | block | - | INV:INV-SMALLALLOC-1 | `b46d29b273fa` |
+| 1152 | trace_kmalloc_at | block | - | INV:INV-SMALLALLOC-1 | `ae6eba0d3f52` |
+| 1177 | trace_kfree_at | block | - | INV:INV-SMALLALLOC-1 | `e153af0eeea6` |
 | 1491 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `04f3a0651646` |
 | 1492 | <module> | unsafe-impl | - | INV:INV-HEAP-3 | `de7526da0893` |
 | 1521 | meta_audit_inner | block | - | INV:INV-HEAP-3 | `12614798d07a` |
@@ -1984,7 +1919,7 @@ FILE` owns one), and the gate fails on a drop that
 | 74 | page_ref_of | block | - | INV:INV-MM-2 | `ac1a9c0c1c58` |
 | 92 | memblock_ref | block | - | INV:INV-MM-3 | `9eb0ce80bfb2` |
 | 101 | memblock_mut | block | - | INV:INV-MM-2 | `b243282047e3` |
-| 111 | walk_fp_chain | block | - | INV:INV-MM-2 | `2dbd5886037d` |
+| 111 | walk_fp_chain | block | - | INV:INV-MM-2 | `90e3e56fb91e` |
 | 127 | slab_read_freelist_link | block | ptr-ops | INV:INV-MM-4 | `53817e10ad17` |
 | 135 | slab_write_freelist_link | block | ptr-ops | INV:INV-MM-4 | `309659b58aba` |
 | 144 | slab_header_mut | block | ptr-ops | INV:INV-MM-4 | `23785f7619a2` |
@@ -2297,7 +2232,7 @@ FILE` owns one), and the gate fails on a drop that
 | 80 | regions_from_arch_boot | block | - | INV:INV-BOOT-REGIONS-1 | `a5e592994fab` |
 | 90 | regions_from_arch_boot | block | - | INV:INV-BOOT-REGIONS-1 | `9dff7d5441ac` |
 | 103 | panic_hex | block | raw-construct | INV:INV-BOOT-PANICBUF-1 | `fdbd7d505d6e` |
-| 125 | rawframes_line | block | volatile,ptr-ops | INV:INV-BOOT-RAWFRAMES-1 | `134ce5c14e1d` |
+| 125 | rawframes_line | block | volatile,ptr-ops | INV:INV-BOOT-RAWFRAMES-1 | `e94bfed60857` |
 | 171 | x86_panic_reset | block | asm | INV:INV-SYSC-4 | `2f92f522ffac` |
 | 202 | x86_reboot_pulse | block | - | INV:INV-SYSC-4 | `6bed9c96c8ff` |
 | 215 | sbi_shutdown_ecall | block | asm | INV:INV-SYSC-4 | `1858d44c159d` |
@@ -2718,7 +2653,7 @@ FILE` owns one), and the gate fails on a drop that
 |------|----|------|------------|----------|----|
 | 563 | __do_softirq | block | no-preempt | INV:INV-KTASK-1 | `29a2721f7951` |
 | 571 | __do_softirq | block | - | INV:INV-KTASK-1 | `193b0dba6a50` |
-| 572 | __do_softirq | block | - | INV:INV-KTASK-1 | `431f1c609f76` |
+| 572 | __do_softirq | block | - | INV:INV-KTASK-1 | `87355ca4b649` |
 
 ### kernel/core/src/interrupt/tasklet.rs (12)
 

@@ -1323,7 +1323,7 @@ fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
                 sock as *const _ as usize,
                 prev,
                 v,
-                crate::debug::backtrace::caller_return_address() as usize
+                crate::debug::hotpath::caller_return_address() as usize
             );
         }
     }
@@ -1399,7 +1399,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     // unconditional per-bind print of every /run/ socket name (15 lines
     // per ub2404 boot, unbounded on a busy /run). Behind the existing OH
     // hunt-print master gate (rux:ohhunt (retired debug=ohhunt)) and budgeted.
-    if crate::debug::switches::oh_hunt_prints_on()
+    if crate::debug::hotpath::oh_hunt_prints_on()
         && addr.key.len() > 1
         && !addr.key.starts_with("\0")
         && addr.key.contains("/run/")
@@ -1547,7 +1547,7 @@ pub fn unix_connect(
     // every /run/ socket name (338 lines per ub2404 boot: journal,
     // nscd, userdb). Behind the existing OH hunt-print master gate
     // (rux:ohhunt (retired debug=ohhunt)) and budgeted.
-    if crate::debug::switches::oh_hunt_prints_on()
+    if crate::debug::hotpath::oh_hunt_prints_on()
         && addr.key.len() > 1
         && !addr.key.starts_with(' ')
         && addr.key.contains("/run/")
@@ -1871,7 +1871,7 @@ impl ErrLatch {
                         self as *const _ as usize,
                         prev,
                         v,
-                        crate::debug::backtrace::caller_return_address() as usize
+                        crate::debug::hotpath::caller_return_address() as usize
                     );
                 }
             }
@@ -3239,10 +3239,10 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
 pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     use crate::arch::uaccess::copy_from_user;
     // cctx probe (closegap lane): whole-op send sum for lat_unix.
-    let cc_t = crate::debug::cctx::now();
-    crate::debug::cctx::bump(&crate::debug::cctx::UW_N);
+    let cc_t = crate::debug::hotpath::cctx_now();
+    crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::UW_N);
     let cc_out = |r: isize| -> isize {
-        crate::debug::cctx::add(&crate::debug::cctx::UW_NS, cc_t);
+        crate::debug::hotpath::cctx_add(&crate::debug::hotpath::UW_NS, cc_t);
         r
     };
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
@@ -3380,10 +3380,10 @@ const READ_BOUNCE: usize = 1024;
 pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op recv sum for lat_unix (the
     // body has many return points — wrap instead of threading stamps).
-    let cc_t = crate::debug::cctx::now();
-    crate::debug::cctx::bump(&crate::debug::cctx::UR_N);
+    let cc_t = crate::debug::hotpath::cctx_now();
+    crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::UR_N);
     let r = unix_read_user_inner(file, dst, count);
-    crate::debug::cctx::add(&crate::debug::cctx::UR_NS, cc_t);
+    crate::debug::hotpath::cctx_add(&crate::debug::hotpath::UR_NS, cc_t);
     r
 }
 

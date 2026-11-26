@@ -1453,7 +1453,7 @@ fn devfs_open(inode: &Inode, file: &rux::fs::types::File) -> i32 {
     // perf boot).
     if (entry.devno == crate::drivers::hotpath::DEV_DRM_CARD0
         || entry.devno == crate::drivers::hotpath::DEV_DRM_RENDER)
-        && crate::debug::switches::oh_hunt_prints_on()
+        && crate::debug::hotpath::oh_hunt_prints_on()
     {
         static DRM_OPENS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = DRM_OPENS.fetch_add(1, Ordering::Relaxed);

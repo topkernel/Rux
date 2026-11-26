@@ -503,7 +503,7 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
 pub fn enable_irq() {
     // syscost probe: pre-sti edge (reads the flag BEFORE the asm so the
     // close/heal decision sees the pre-sti state); no-op when off.
-    crate::debug::syscost::irq_note_on();
+    crate::debug::hotpath::irq_note_on();
     // SAFETY: setting IF is safe at any point the caller wants IRQs on.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
 }
@@ -515,7 +515,7 @@ pub fn disable_irq() {
     // syscost probe: pre-cli edge; Location::caller() propagates
     // through the #[track_caller] chain (save_and_disable_irq /
     // irq_save / lock_irq*) to the critical-section owner.
-    crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
+    crate::debug::hotpath::irq_note_off(Some(core::panic::Location::caller()));
     // SAFETY: clearing IF is always safe.
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
 }

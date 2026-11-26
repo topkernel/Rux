@@ -616,7 +616,7 @@ pub extern "C" fn ap_entry64() -> ! {
     // touch this CPU's watchdog so the boot-time gap (idle task created
     // on the BSP seconds ago under TCG) cannot read as a lockup.
     crate::arch::cpu::set_thread_id(crate::sched::hotpath::idle_task_ptr(cpu) as u64);
-    crate::debug::softlockup::touch(cpu);
+    crate::debug::hotpath::touch(cpu);
 
     PER_CPU[cpu].cpu_online.store(1, Ordering::Release);
     PER_CPU[cpu].started.store(1, Ordering::Release);

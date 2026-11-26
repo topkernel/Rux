@@ -613,7 +613,7 @@ pub fn fuxwatch_parse() {
             // never queued one before the wedge window, so the watch
             // words never armed (0 FW lines with FUXWATCH2-AUTO armed).
             // Spawn censusd now (parse runs in early-boot task context).
-            crate::debug::taskdump::ensure_defer_thread();
+            crate::debug::hotpath::ensure_defer_thread();
         }
     }
     fuxwatch2_parse();
@@ -633,7 +633,7 @@ pub fn fuxwatch2_parse() {
             // HOTPATH-PRINT: switch/cmdline-gated (off by default).
             crate::pr_warn!("fuxwatch2 armed target={:#x}", a);
             // sc58: censusd must exist for the arm rounds (see slot 1).
-            crate::debug::taskdump::ensure_defer_thread();
+            crate::debug::hotpath::ensure_defer_thread();
         }
     }
 }
@@ -2216,7 +2216,7 @@ pub fn sqwalk_step_deep(tgid: u32, word: u64, deep: bool) {
         if !drained {
             return;
         }
-        let mut dw = crate::debug::backtrace::ConsoleWriter::new();
+        let mut dw = crate::debug::types::ConsoleWriter::new();
         use core::fmt::Write as _;
         let _ = writeln!(
             dw,
@@ -2355,7 +2355,7 @@ pub fn sqwalk_slice() {
         SQW_RN.store(regions.len() as u32, Relaxed);
         if SQW_TRUNC.load(Relaxed) != 0 {
             use core::fmt::Write as _;
-            let mut tw = crate::debug::backtrace::ConsoleWriter::new();
+            let mut tw = crate::debug::types::ConsoleWriter::new();
             let _ = writeln!(
                 tw,
                 "SQW-TRUNC tgid={} regions hit the 512 cap — tail VMAs dropped",
@@ -2385,7 +2385,7 @@ pub fn sqwalk_slice() {
     let rd32 = |va: u64| -> Option<u32> {
         rd(va & !7).map(|w| (w >> ((va & 4) * 8)) as u32)
     };
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
 
     // ---- 83rd: RAW phase — after the shape pass completes, scan the
     // SAME window for the lock word VALUE (±0x400 owner neighborhood).
@@ -2624,7 +2624,7 @@ pub fn sqwalk_slice() {
     // Decode one task: returns the printed line; `lockw` match appends
     // the READER marker with the saved-stack offsets that carry the
     // lock pointer (the critical-section evidence).
-    let print_task = |tp: u64, tag: &str, w: &mut crate::debug::backtrace::ConsoleWriter| {
+    let print_task = |tp: u64, tag: &str, w: &mut crate::debug::types::ConsoleWriter| {
         if !sqw_canon(tp) {
             return;
         }
@@ -2727,7 +2727,7 @@ pub fn sqwalk_slice() {
 
     // Queue summary: whenMap size + head entries, headTaskVec batch,
     // handler curTaskVec (dedup of task prints is by explicit lists).
-    let print_queue = |q: u64, w: &mut crate::debug::backtrace::ConsoleWriter| {
+    let print_queue = |q: u64, w: &mut crate::debug::types::ConsoleWriter| {
         let qname = label_of(q + 200);
         let wm_sz = rd(q + 96).unwrap_or(0);
         let _ = write!(
@@ -3875,7 +3875,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
     const FUTEX_SYSNO: u64 = 202;
     #[cfg(not(feature = "x86_64"))]
     const FUTEX_SYSNO: u64 = 0;
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     let mut hits = 0u32;
     let _ = writeln!(w, "RWFRZ-READERS tgid={} word={:#x}:", tgid, word);
     // ohw139 lesson: for_each_task runs the callback under the pid-hash
@@ -3997,7 +3997,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
     // entire hunt out of release builds. 64-bit page mask, plain literal.
     #[cfg(target_arch = "x86_64")]
     if word & 0xffff_ffff_f000 == 0x3fbf_13e000 {
-        let mut w2 = crate::debug::backtrace::ConsoleWriter::new();
+        let mut w2 = crate::debug::types::ConsoleWriter::new();
         let _ = writeln!(w2, "MHUNT-CANARY2 word={:#x}", word);
         let _ = writeln!(w2, "MHUNT tgid={} word={:#x}:", tgid, word);
         let mut rows = 0u32;
@@ -4228,7 +4228,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
     const FUTEX_SYSNO: u64 = 202;
     #[cfg(not(feature = "x86_64"))]
     const FUTEX_SYSNO: u64 = 0;
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     let _ = writeln!(w, "MHUNT tgid={} word={:#x}:", tgid, word);
     let mut rows = 0u32;
     let mut waiters = 0u32;
@@ -4434,7 +4434,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
     if !claimed {
         return;
     }
-    let mut w = crate::debug::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::types::ConsoleWriter::new();
     let _ = writeln!(
         w,
         "CTD-HEAD {} tgid={} word={:#x} jif={}",
@@ -5979,7 +5979,7 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
     }
     // ---- watch-slot assignment (sticky, per tgid) ----
     let arm_print = |slot: u8, w: u64| {
-        let mut cw = crate::debug::backtrace::ConsoleWriter::new();
+        let mut cw = crate::debug::types::ConsoleWriter::new();
         use core::fmt::Write as _;
         let _ = writeln!(
             cw,
@@ -5990,7 +5990,7 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
             tgid,
             if slot == 1 { "" } else { ", sticky" }
         );
-        crate::debug::taskdump::ensure_defer_thread();
+        crate::debug::hotpath::ensure_defer_thread();
     };
     let reopen_done_set = || {
         for d in FUXWATCH_MM_DONE.iter() {

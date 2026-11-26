@@ -1697,7 +1697,7 @@ pub fn handle_cow_fault(
     // mapping reference.  Without dec_mapcount the count leaks across
     // COW cycles and eventually corrupts page reclaim / rmap decisions.
     if let Some(op) = old_page {
-        let after = op.put_page_site(crate::debug::driftwatch::S_COW_RV);
+        let after = op.put_page_site(crate::debug::hotpath::S_COW_RV);
         op.dec_mapcount();
         // Stamp lifecycle (gnome-sigill): the faulting process no longer
         // maps the OLD frame — if it owned the text stamp, drop it, or

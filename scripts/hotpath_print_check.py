@@ -58,6 +58,7 @@ HOT_FILES = [
     "kernel/core/src/mm/pglist.rs",
     "kernel/core/src/signal.rs",
     "kernel/core/src/sched/hotpath.rs",
+    "kernel/core/src/debug/hotpath.rs",
     "kernel/core/src/arch/riscv64/trap.rs",
     "kernel/core/src/arch/x86_64/trap.rs",
 ]

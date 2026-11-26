@@ -232,7 +232,7 @@ d42d3e8172d5	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	156	pt
 2c1f5a2d9525	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	181	ptr-ops,addr-arith	INV:F20
 d12af5b67463	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	190	addr-arith	INV:F20
 1bf295ae275a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	268	asm	INV:F20
-e3c2d2f997bc	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	273		INV:F20
+5b8086889928	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	273		INV:F20
 de6a623597b3	kernel/core/src/arch/riscv64/mm/mmu_init.rs	alloc_page_table	282	ptr-ops,addr-arith	INV:F20
 dbdcb9cf61c8	kernel/core/src/arch/riscv64/mm/mmu_init.rs	stamp_kernel_tree_boot	339		INV:F20
 8fa336aa1d1e	kernel/core/src/arch/riscv64/mm/mmu_init.rs	free_page_table	381		INV:F20
@@ -243,7 +243,7 @@ a335b814499a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	965
 09882e9db093	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	970		INV:F20
 3534535c36b3	kernel/core/src/arch/riscv64/mm/mmu_init.rs	release_user_leaf	1024	addr-arith	INV:F20
 5598f72b9d6d	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page_noflush	1547	asm	INV:F20
-3e2514eb7efe	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page_noflush	1552		INV:F19
+5459ef587a43	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page_noflush	1552		INV:F19
 214a32de34d9	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page	1697	asm	INV:F20
 0ccca23d27ca	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_region	1718	asm	INV:F20
 6e2888f7dce4	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_pmd_huge_page	1738	asm	INV:F20
@@ -531,7 +531,7 @@ c29c4122d3ef	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	204		IN
 9de2dfc28b72	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	208	ptr-ops	INV:F20
 6a08f6dce572	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	235	addr-arith	INV:F20
 b35f995af70b	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	336	asm	INV:F20
-357f091fe4ec	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	343		INV:F20
+52f4ce7ae0a5	kernel/core/src/arch/x86_64/mm/mmu_init.rs	alloc_page_table	343		INV:F20
 a2a3e0ac2a3c	kernel/core/src/arch/x86_64/mm/mmu_init.rs	free_page_table	475		INV:F20
 b38a00004818	kernel/core/src/arch/x86_64/mm/mmu_init.rs	take	834		INV:F20
 ce2a79bdb1b5	kernel/core/src/arch/x86_64/mm/mmu_init.rs	task_pid_alive	928		INV:F20
@@ -623,17 +623,17 @@ b75e66ea9327	kernel/core/src/arch/x86_64/trap.rs	spawn_intx_irq_thread	833	raw-c
 46619bb6f45f	kernel/core/src/arch/x86_64/trap.rs	enable_timer_interrupt	922	asm	INV:F19
 9ebf252864bc	kernel/core/src/arch/x86_64/trap.rs	pt_regs_rip_for_cpu	975		INV:F19
 3bb7562ce1f1	kernel/core/src/arch/x86_64/trap.rs	current_task_pt_regs	983	ptr-ops	INV:F19
-c8d7704fdd9e	kernel/core/src/arch/x86_64/trap.rs	x86_bad_frame_exit	1009		INV:F19
+685caa71a9d8	kernel/core/src/arch/x86_64/trap.rs	x86_bad_frame_exit	1009		INV:F19
 30ef12cd20d6	kernel/core/src/arch/x86_64/trap.rs	frame_in_task_stack	1027		INV:F19
 5f7964295301	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1102		INV:F19
 3fe1781d4d32	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1104		INV:F19
 cd230a0481cb	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1109	asm	INV:F19
 2c97682c4125	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1129		INV:F19
 66b88fd7fe9b	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1140	asm	INV:F19
-f5fcb144bba2	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1148		GAP
-7b83db6e1f5d	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1275	no-preempt	GAP
-3132bf29659c	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1289		GAP
-9f65f47c5f68	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1371		GAP
+f5fcb144bba2	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1148		INV:F19
+7b83db6e1f5d	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1275	no-preempt	INV:F19
+3132bf29659c	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1289		INV:F19
+9f65f47c5f68	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1371		INV:F19
 bb86fc1bad9c	kernel/core/src/arch/x86_64/trap.rs	handle_timer_tick	1841	volatile	INV:F19
 0c2f56350622	kernel/core/src/arch/x86_64/trap.rs	handle_illegal_instruction	2146		INV:F19
 6d46bfbe393f	kernel/core/src/arch/x86_64/trap.rs	handle_illegal_instruction	2162		INV:F19
@@ -696,7 +696,7 @@ e750287f0251	kernel/core/src/boot_edges.rs	zeropage_initrd_hint	50	volatile,ptr-
 a5e592994fab	kernel/core/src/boot_edges.rs	regions_from_arch_boot	80		INV:INV-BOOT-REGIONS-1
 9dff7d5441ac	kernel/core/src/boot_edges.rs	regions_from_arch_boot	90		INV:INV-BOOT-REGIONS-1
 fdbd7d505d6e	kernel/core/src/boot_edges.rs	panic_hex	103	raw-construct	INV:INV-BOOT-PANICBUF-1
-134ce5c14e1d	kernel/core/src/boot_edges.rs	rawframes_line	125	volatile,ptr-ops	INV:INV-BOOT-RAWFRAMES-1
+e94bfed60857	kernel/core/src/boot_edges.rs	rawframes_line	125	volatile,ptr-ops	INV:INV-BOOT-RAWFRAMES-1
 2f92f522ffac	kernel/core/src/boot_edges.rs	x86_panic_reset	171	asm	INV:INV-SYSC-4
 6bed9c96c8ff	kernel/core/src/boot_edges.rs	x86_reboot_pulse	202		INV:INV-SYSC-4
 1858d44c159d	kernel/core/src/boot_edges.rs	sbi_shutdown_ecall	215	asm	INV:INV-SYSC-4
@@ -713,97 +713,107 @@ f222321d0a4e	kernel/core/src/console.rs	puts_batch	373	asm	INV:F14
 3d2f0732d243	kernel/core/src/console.rs	read_reg	639		INV:INV-MMIO-1
 8c88bb2eb68e	kernel/core/src/console.rs	uart_data_ready	958	asm	INV:F14
 59f4fb2098e9	kernel/core/src/cov.rs	capture_profile	77		INV:INV-COV-1
-b9485c57d0f0	kernel/core/src/debug/backtrace.rs	current_frame_pointer	106	asm	INV:F2
-04a2fae816fb	kernel/core/src/debug/backtrace.rs	current_frame_pointer	111	asm	INV:F2
-086f8431885e	kernel/core/src/debug/backtrace.rs	current_frame_pointer	116	asm	INV:F2
-164c2ee516b7	kernel/core/src/debug/backtrace.rs	caller_return_address	132	asm	INV:F2
-7e00e2363c15	kernel/core/src/debug/backtrace.rs	caller_return_address	138	asm	INV:F2
-f1a37294a9ae	kernel/core/src/debug/backtrace.rs	caller_return_address	143	asm	INV:F2
-82bddfa678d0	kernel/core/src/debug/backtrace.rs	unwind_frame	161	ptr-ops	INV:F2
-784a8b087665	kernel/core/src/debug/backtrace.rs	save_regs	282	asm	INV:F2
-4368e1aa7b4b	kernel/core/src/debug/backtrace.rs	save_regs	328	asm	INV:F2
-9a842fdd2725	kernel/core/src/debug/backtrace.rs	save_regs	375	asm	INV:F2
-fe275eb46406	kernel/core/src/debug/backtrace.rs	dump_csrs	427	asm	INV:F2
-a007e1ef04a9	kernel/core/src/debug/backtrace.rs	dump_csrs	458	asm	INV:F2
-be3ae7a0ee0a	kernel/core/src/debug/hung_task.rs	report_hung_task	221	ptr-ops	INV:F18
-421f9071ba7e	kernel/core/src/debug/leakorigin.rs	note_acquire	191	volatile,ptr-ops	INV:F1
-08fb244c363f	kernel/core/src/debug/leakorigin.rs	note_acquire	236		INV:F1
-17e7018ae3b5	kernel/core/src/debug/leakorigin.rs	note_acquire	237		INV:F1
-5c954c582765	kernel/core/src/debug/leakorigin.rs	note_acquire	283		INV:F1
-bfc639e7183f	kernel/core/src/debug/leakorigin.rs	note_acquire	291		INV:F1
-8705d0553252	kernel/core/src/debug/leakorigin.rs	report_acquire_divergent	349	ptr-ops,no-preempt	INV:F1
-900324f3b648	kernel/core/src/debug/leakorigin.rs	note_release	554	ptr-ops,no-preempt	INV:F1
-a37875c93f42	kernel/core/src/debug/leakorigin.rs	note_softirq_acquire	665	volatile,ptr-ops	INV:F1
-008c864c713f	kernel/core/src/debug/leakorigin.rs	report_hardirq_origin	734		INV:F1
-32293886fd60	kernel/core/src/debug/leakorigin.rs	report_softirq_origin	805		INV:F1
-fed3b4858b25	kernel/core/src/debug/leakorigin.rs	report_softirq_origin	809	no-preempt	INV:F1
-3cf3a45a3bf0	kernel/core/src/debug/leakorigin.rs	check_user_return	860	no-preempt	INV:F1
-70374b3f95fa	kernel/core/src/debug/leakorigin.rs	report_parked_site	921	no-preempt	INV:F1
-56583ed9991d	kernel/core/src/debug/leakorigin.rs	report_parked_site	937	no-preempt	INV:F1
-e88c1b679ccd	kernel/core/src/debug/leakorigin.rs	report_incumbent_site	946	no-preempt	INV:F1
-b6b978d08d5a	kernel/core/src/debug/leakorigin.rs	report_outermost	1002		INV:F1
-a01de5c89278	kernel/core/src/debug/leakorigin.rs	emit	1092		INV:F1
-50bcaca32475	kernel/core/src/debug/ledger.rs	dump	286		INV:F18
-35082e49d546	kernel/core/src/debug/ledger.rs	dump	321		INV:F18
-58345774fc2f	kernel/core/src/debug/memwatch.rs	<module>	183	volatile,ptr-ops	INV:F3
-f9ff94da6aba	kernel/core/src/debug/memwatch.rs	<module>	215	volatile,ptr-ops	INV:F3
-44b6d8d527dc	kernel/core/src/debug/memwatch.rs	<module>	236	volatile,ptr-ops	INV:F3
-3e5af3de5856	kernel/core/src/debug/memwatch.rs	note_page_alloc	705		INV:F3
-11be2ea8a0c8	kernel/core/src/debug/memwatch.rs	note_page_free	727		INV:F3
-363c92baa380	kernel/core/src/debug/memwatch.rs	note_page_free	734		INV:F3
-5f0c8c75fa3e	kernel/core/src/debug/memwatch.rs	kroot_pollution	782		INV:F3
-f7110b9ee27b	kernel/core/src/debug/mmforensics.rs	note_ref	102		INV:F18
-46518fd55c3d	kernel/core/src/debug/mmforensics.rs	capture_frame	333		INV:F18
-0213c1338954	kernel/core/src/debug/mod.rs	register_debugfs_knobs	280	volatile	INV:F10
-5866f2a04cf8	kernel/core/src/debug/mod.rs	register_debugfs_knobs	291	asm	INV:F10
-b40633befaf6	kernel/core/src/debug/mod.rs	register_debugfs_knobs	297	asm	INV:F10
-dfe3cc32358b	kernel/core/src/debug/mod.rs	walk_read	390		INV:F10
-334aec47125f	kernel/core/src/debug/mod.rs	walk_read	392	volatile,ptr-ops	INV:F10
-1c545a66969c	kernel/core/src/debug/oops.rs	oops	116		INV:F18
-443ed8e56528	kernel/core/src/debug/pathstash.rs	stash_file	80		INV:F18
-191b33974c7c	kernel/core/src/debug/pathstash.rs	lookup_file	110		INV:F18
-8cdc1d789c01	kernel/core/src/debug/pstore.rs	early_scan	175	ptr-ops	INV:F4
-5f85a25cc3ff	kernel/core/src/debug/pstore.rs	early_scan	188	volatile,ptr-ops	INV:F4
-1d9ac757c5f1	kernel/core/src/debug/pstore.rs	read_record	227	ptr-ops	INV:F4
-1c9e9bbd8cc6	kernel/core/src/debug/pstore.rs	read_record	229	raw-construct	INV:F4
-f2834df60b02	kernel/core/src/debug/pstore.rs	write_record	300	volatile,ptr-ops	INV:F4
-75abffe65849	kernel/core/src/debug/scribble.rs	audit_frames	228	volatile,ptr-ops	INV:F1
-2796ce1ffa25	kernel/core/src/debug/scribble.rs	task_plausible	394		INV:F1
-08f446623515	kernel/core/src/debug/scribble.rs	double_seed	441		INV:F1
-a778f572125a	kernel/core/src/debug/scribble.rs	putc	570		INV:F1
-0f1dbe72a284	kernel/core/src/debug/scribble.rs	putc	576		INV:F1
-b9b2f538b02f	kernel/core/src/debug/scribble.rs	dump_qwords	626	volatile,ptr-ops	INV:F1
-ee74f3ef3e7a	kernel/core/src/debug/scribble.rs	rd	664	volatile,ptr-ops	INV:F1
-4ac218e9ca96	kernel/core/src/debug/scribble.rs	register	747		INV:F1
-70eead279f73	kernel/core/src/debug/scribble.rs	register	752		INV:F1
-82f73d031df8	kernel/core/src/debug/scribble.rs	quiesce	838		INV:F1
-d1740bc17210	kernel/core/src/debug/scribble.rs	quiesce	844	volatile,ptr-ops	INV:F1
-2446668b012f	kernel/core/src/debug/scribble.rs	verify	887		INV:F1
-8c885cca570f	kernel/core/src/debug/scribble.rs	verify	900		INV:F1
-1832cd2e676b	kernel/core/src/debug/scribble.rs	verify	925		INV:F1
-68daf51673ca	kernel/core/src/debug/scribble.rs	verify	931		INV:F1
-50b666cfe794	kernel/core/src/debug/scribble.rs	verify	937	volatile,ptr-ops	INV:F1
-99156564777b	kernel/core/src/debug/scribble.rs	verify	981	volatile,ptr-ops	INV:F1
-e855d3081f29	kernel/core/src/debug/scribble.rs	verify	992	volatile,ptr-ops	INV:F1
-f4d42caeb458	kernel/core/src/debug/scribble.rs	verify	1062		INV:F1
-e4291f46e155	kernel/core/src/debug/scribble.rs	verify	1063		INV:F1
-0233ff46bf1c	kernel/core/src/debug/scribble.rs	verify	1069		INV:F1
-8a04f36722e6	kernel/core/src/debug/scribble.rs	verify	1073	volatile,ptr-ops	INV:F1
-2539349ccdbe	kernel/core/src/debug/scribble.rs	verify_gs	1135	asm	INV:F1
-a66eaddd9c55	kernel/core/src/debug/scribble.rs	verify_consistency	1189		INV:F1
-ca9404625e4f	kernel/core/src/debug/scribble.rs	verify_consistency	1252		INV:F1
-8aea74d4511e	kernel/core/src/debug/scribble.rs	verify_consistency	1269		INV:F1
-4ffffae9ceae	kernel/core/src/debug/scribble.rs	slot_divergence	1326		INV:F1
-b3617e385d8c	kernel/core/src/debug/scribble.rs	<module>	1448		INV:F1
-099c7bf0df5d	kernel/core/src/debug/scribble.rs	crash_report	1514		INV:F1
-bea16f17e77a	kernel/core/src/debug/scribble.rs	report	1587		INV:F1
-012faafac083	kernel/core/src/debug/scribble.rs	report	1628		INV:F1
-d754dd0ed3cf	kernel/core/src/debug/slowtask.rs	tick	117		INV:F18
-a102dbcf055f	kernel/core/src/debug/taskdump.rs	dump_all_tasks	461		INV:F18
-fac241d41942	kernel/core/src/debug/taskdump.rs	dump_all_tasks	508		INV:F18
-c4722b16b27b	kernel/core/src/debug/taskdump.rs	frozen_ipi_probe	960	asm	INV:F18
-dbb8f0f956ed	kernel/core/src/debug/taskdump.rs	frozen_ipi_probe	982		INV:F18
-8ce4784cf21d	kernel/core/src/debug/taskdump.rs	dump_frozen_cpu_truth	1082		INV:F18
+1bde27361095	kernel/core/src/debug/hotpath.rs	register_debugfs_knobs	272	volatile	GAP
+12ade06d877a	kernel/core/src/debug/hotpath.rs	register_debugfs_knobs	283	asm	GAP
+9ad3cc977661	kernel/core/src/debug/hotpath.rs	register_debugfs_knobs	289	asm	GAP
+951de59e2f8e	kernel/core/src/debug/hotpath.rs	walk_read	382		INV:F10
+24014cca9ce9	kernel/core/src/debug/hotpath.rs	walk_read	384	volatile,ptr-ops	INV:F10
+7fb345159c6a	kernel/core/src/debug/hotpath.rs	note_ref	475		INV:F18
+dcbb00e9dfa3	kernel/core/src/debug/hotpath.rs	capture_frame	693		INV:F18
+66f141d5b071	kernel/core/src/debug/hotpath.rs	current_frame_pointer	1391	asm	INV:F2
+5babd6cce5b7	kernel/core/src/debug/hotpath.rs	current_frame_pointer	1396	asm	INV:F2
+3d9c605c120f	kernel/core/src/debug/hotpath.rs	current_frame_pointer	1401	asm	INV:F2
+53b15dde0def	kernel/core/src/debug/hotpath.rs	caller_return_address	1417	asm	INV:F2
+4f1e1a55a95f	kernel/core/src/debug/hotpath.rs	caller_return_address	1423	asm	INV:F2
+efabb9155ee3	kernel/core/src/debug/hotpath.rs	caller_return_address	1428	asm	INV:F2
+449988204749	kernel/core/src/debug/hotpath.rs	unwind_frame	1446	ptr-ops	INV:F2
+7cc8c9536e74	kernel/core/src/debug/hotpath.rs	save_regs	1567	asm	INV:F2
+1459c1cb15e2	kernel/core/src/debug/hotpath.rs	save_regs	1613	asm	INV:F2
+6b26596b8147	kernel/core/src/debug/hotpath.rs	save_regs	1660	asm	INV:F2
+2b0439438b18	kernel/core/src/debug/hotpath.rs	dump_csrs	1712	asm	INV:F2
+a3b627ddd40f	kernel/core/src/debug/hotpath.rs	dump_csrs	1743	asm	INV:F2
+49cc724d9349	kernel/core/src/debug/hotpath.rs	report_hung_task	2269	ptr-ops	INV:F18
+07b27c25fe7b	kernel/core/src/debug/hotpath.rs	dump_all_tasks	3214		INV:F18
+9e8ce2be3e8c	kernel/core/src/debug/hotpath.rs	dump_all_tasks	3261		INV:F18
+7f8965d4b7d1	kernel/core/src/debug/hotpath.rs	frozen_ipi_probe	3700	asm	INV:F18
+32d50b969c6b	kernel/core/src/debug/hotpath.rs	frozen_ipi_probe	3722		INV:F18
+ca43e8a03d7f	kernel/core/src/debug/hotpath.rs	dump_frozen_cpu_truth	3822		INV:F18
+216a274febcf	kernel/core/src/debug/hotpath.rs	<module>	4637	volatile,ptr-ops	INV:F3
+6e7127d5b2f5	kernel/core/src/debug/hotpath.rs	<module>	4669	volatile,ptr-ops	INV:F3
+72cca045f3a2	kernel/core/src/debug/hotpath.rs	<module>	4690	volatile,ptr-ops	INV:F3
+ab246d7bb75c	kernel/core/src/debug/hotpath.rs	note_page_alloc	5143		INV:F3
+efe883ef126f	kernel/core/src/debug/hotpath.rs	note_page_free	5165		INV:F3
+56411083fb75	kernel/core/src/debug/hotpath.rs	note_page_free	5172		INV:F3
+949eb2f9c1df	kernel/core/src/debug/hotpath.rs	kroot_pollution	5220		INV:F3
+0f05a6eb9544	kernel/core/src/debug/hotpath.rs	dump	5900		INV:F18
+0c87195dcbe2	kernel/core/src/debug/hotpath.rs	dump	5935		INV:F18
+8e409593b00c	kernel/core/src/debug/hotpath.rs	audit_frames	6428	volatile,ptr-ops	INV:F1
+e715b9bc1b69	kernel/core/src/debug/hotpath.rs	task_plausible	6594		INV:F1
+8b8a2e515c20	kernel/core/src/debug/hotpath.rs	double_seed	6641		INV:F1
+ab3d42ad113b	kernel/core/src/debug/hotpath.rs	putc	6770		INV:F1
+e808e4cd9dab	kernel/core/src/debug/hotpath.rs	putc	6776		INV:F1
+31edfc3f7ed3	kernel/core/src/debug/hotpath.rs	dump_qwords	6826	volatile,ptr-ops	INV:F1
+3b1c28d14807	kernel/core/src/debug/hotpath.rs	rd	6864	volatile,ptr-ops	INV:F1
+23abb2f36efa	kernel/core/src/debug/hotpath.rs	register	6947		INV:F1
+320c06be9dec	kernel/core/src/debug/hotpath.rs	register	6952		INV:F1
+da1ea2897e07	kernel/core/src/debug/hotpath.rs	quiesce	7038		INV:F1
+c0d7ec6cf4fe	kernel/core/src/debug/hotpath.rs	quiesce	7044	volatile,ptr-ops	INV:F1
+151bf67e0f02	kernel/core/src/debug/hotpath.rs	verify	7087		INV:F1
+bfdbca74c4a7	kernel/core/src/debug/hotpath.rs	verify	7100		INV:F1
+e8550028d62f	kernel/core/src/debug/hotpath.rs	verify	7125		INV:F1
+582f068cc9f9	kernel/core/src/debug/hotpath.rs	verify	7131		INV:F1
+1b226145f065	kernel/core/src/debug/hotpath.rs	verify	7137	volatile,ptr-ops	INV:F1
+76d54070a0b2	kernel/core/src/debug/hotpath.rs	verify	7181	volatile,ptr-ops	INV:F1
+f74398ac305d	kernel/core/src/debug/hotpath.rs	verify	7192	volatile,ptr-ops	INV:F1
+5fc8ccfad3dc	kernel/core/src/debug/hotpath.rs	verify	7262		INV:F1
+231737ad32d0	kernel/core/src/debug/hotpath.rs	verify	7263		INV:F1
+82bd3c33a54e	kernel/core/src/debug/hotpath.rs	verify	7269		INV:F1
+fd27de71af94	kernel/core/src/debug/hotpath.rs	verify	7273	volatile,ptr-ops	INV:F1
+c0a2443b6d61	kernel/core/src/debug/hotpath.rs	verify_gs	7335	asm	INV:F1
+53af50a68bf1	kernel/core/src/debug/hotpath.rs	verify_consistency	7389		INV:F1
+306e961e80cd	kernel/core/src/debug/hotpath.rs	verify_consistency	7452		INV:F1
+e2a122e2e53c	kernel/core/src/debug/hotpath.rs	verify_consistency	7469		INV:F1
+12a09944e539	kernel/core/src/debug/hotpath.rs	slot_divergence	7526		INV:F1
+982597398f09	kernel/core/src/debug/hotpath.rs	<module>	7647		INV:F1
+0ba53018ba83	kernel/core/src/debug/hotpath.rs	crash_report	7713		INV:F1
+c281989493f3	kernel/core/src/debug/hotpath.rs	report	7786		INV:F1
+ba4cdaa7eed9	kernel/core/src/debug/hotpath.rs	report	7827		INV:F1
+49fcc98b3a53	kernel/core/src/debug/hotpath.rs	arm	8112		INV:F1
+ad6ccdc68e59	kernel/core/src/debug/hotpath.rs	arm	8170	volatile	INV:F1
+bd9b34dac958	kernel/core/src/debug/hotpath.rs	enable_write_protect	8188		INV:F1
+0ff87b28eb7c	kernel/core/src/debug/hotpath.rs	fill_canary	8206	volatile	INV:F1
+ec16fb3a05e8	kernel/core/src/debug/hotpath.rs	verify	8233	volatile	INV:F1
+8931216815eb	kernel/core/src/debug/hotpath.rs	verify	8259	volatile	INV:F1
+07957e23a93b	kernel/core/src/debug/hotpath.rs	table_virt	8307		INV:F1
+0816f89fee75	kernel/core/src/debug/hotpath.rs	table_virt	8313		INV:F1
+c3f0592f6c3e	kernel/core/src/debug/hotpath.rs	resolve_phys	8320	addr-arith	INV:F1
+c06ea235a5c9	kernel/core/src/debug/hotpath.rs	<module>	8358	addr-arith	INV:F1
+681730feb7f8	kernel/core/src/debug/hotpath.rs	early_scan	10359	ptr-ops	INV:F4
+9b9f11f37f57	kernel/core/src/debug/hotpath.rs	early_scan	10372	volatile,ptr-ops	INV:F4
+000311b11ed9	kernel/core/src/debug/hotpath.rs	read_record	10411	ptr-ops	INV:F4
+a8af52bb1976	kernel/core/src/debug/hotpath.rs	read_record	10413	raw-construct	INV:F4
+a35739a18b06	kernel/core/src/debug/hotpath.rs	write_record	10484	volatile,ptr-ops	INV:F4
+b0cb9ae840fb	kernel/core/src/debug/hotpath.rs	oops	10639		INV:F18
+13276f1f9690	kernel/core/src/debug/hotpath.rs	note_acquire	12691	volatile,ptr-ops	INV:F1
+b51e5326c47a	kernel/core/src/debug/hotpath.rs	note_acquire	12736		INV:F1
+cc48b8a1d6bc	kernel/core/src/debug/hotpath.rs	note_acquire	12737		INV:F1
+27f415e7f00c	kernel/core/src/debug/hotpath.rs	note_acquire	12783		INV:F1
+258ce5ff6060	kernel/core/src/debug/hotpath.rs	note_acquire	12791		INV:F1
+8e0f0c2cbfd9	kernel/core/src/debug/hotpath.rs	report_acquire_divergent	12849	ptr-ops,no-preempt	INV:F1
+2c559f88ca70	kernel/core/src/debug/hotpath.rs	note_release	13054	ptr-ops,no-preempt	INV:F1
+f2f01678e69c	kernel/core/src/debug/hotpath.rs	note_softirq_acquire	13165	volatile,ptr-ops	INV:F1
+297dcdcad6c6	kernel/core/src/debug/hotpath.rs	report_hardirq_origin	13234		INV:F1
+327f1d194b63	kernel/core/src/debug/hotpath.rs	report_softirq_origin	13305		INV:F1
+fef40eb2432d	kernel/core/src/debug/hotpath.rs	report_softirq_origin	13309	no-preempt	INV:F1
+91802527fda6	kernel/core/src/debug/hotpath.rs	check_user_return	13360	no-preempt	INV:F1
+fda8a7e448c7	kernel/core/src/debug/hotpath.rs	report_parked_site	13421	no-preempt	INV:F1
+1bc05caea2f8	kernel/core/src/debug/hotpath.rs	report_parked_site	13437	no-preempt	INV:F1
+5f3f83fddaf2	kernel/core/src/debug/hotpath.rs	report_incumbent_site	13446	no-preempt	INV:F1
+763def664cde	kernel/core/src/debug/hotpath.rs	report_outermost	13502		INV:F1
+2a5b46d20e08	kernel/core/src/debug/hotpath.rs	emit	13592		INV:F1
+4cfb16082f83	kernel/core/src/debug/hotpath.rs	stash_file	13770		INV:F18
+4a42364d6f6f	kernel/core/src/debug/hotpath.rs	lookup_file	13800		INV:F18
+bf8a11e1355e	kernel/core/src/debug/hotpath.rs	slowtask_tick	13920		INV:F18
 c6e56b2404de	kernel/core/src/debug/unsafe.rs	adopt_task	53		INV:INV-FOR-1
 a4cea2feb42b	kernel/core/src/debug/unsafe.rs	t_pid	60		INV:INV-FOR-1
 c0781bed3fa2	kernel/core/src/debug/unsafe.rs	t_comm	67		INV:INV-FOR-1
@@ -812,16 +822,6 @@ a969a89e1d2f	kernel/core/src/debug/unsafe.rs	raw_qword	89	volatile,ptr-ops	INV:I
 5c5c3a6c8b15	kernel/core/src/debug/unsafe.rs	raw_u32	100	volatile,ptr-ops	INV:INV-FOR-2
 b1cad1f0c0ea	kernel/core/src/debug/unsafe.rs	location	112	ptr-ops	INV:INV-FOR-3
 d32cfa7674b0	kernel/core/src/debug/unsafe.rs	location_ref	120		INV:INV-FOR-3
-dbe024246f36	kernel/core/src/debug/wildwatch.rs	arm	112		INV:F1
-56741b898256	kernel/core/src/debug/wildwatch.rs	arm	170	volatile	INV:F1
-2a68a271af92	kernel/core/src/debug/wildwatch.rs	enable_write_protect	188		INV:F1
-a13748f9cad6	kernel/core/src/debug/wildwatch.rs	fill_canary	206	volatile	INV:F1
-010a88c71e51	kernel/core/src/debug/wildwatch.rs	verify	233	volatile	INV:F1
-c154d72c4159	kernel/core/src/debug/wildwatch.rs	verify	259	volatile	INV:F1
-c99fb8075939	kernel/core/src/debug/wildwatch.rs	table_virt	307		INV:F1
-fd3d23485ef2	kernel/core/src/debug/wildwatch.rs	table_virt	313		INV:F1
-fca35b6497b2	kernel/core/src/debug/wildwatch.rs	resolve_phys	320	addr-arith	INV:F1
-f54d2ab50cb9	kernel/core/src/debug/wildwatch.rs	<module>	358	addr-arith	INV:F1
 0d264deae088	kernel/core/src/drivers/hotpath.rs	iar1_read	233	asm	INV:INV-MMIO-1
 70b1af9dbc02	kernel/core/src/drivers/hotpath.rs	eoir1_write	242	asm	INV:INV-MMIO-1
 d164ed8443ef	kernel/core/src/drivers/hotpath.rs	send_sgi	262	asm	INV:INV-MMIO-1
@@ -1095,7 +1095,7 @@ e93af702e9d2	kernel/core/src/fs/hotpath.rs	sync_dirty_blocks_batched	8956		INV:F
 9310346a2945	kernel/core/src/fs/hotpath.rs	mount_is_busy	10649		INV:INV-VFS-WALK-1
 11a86cffafb6	kernel/core/src/fs/hotpath.rs	path_lookup	12792		INV:INV-VFS-WALK-1
 40ac638ca0d2	kernel/core/src/fs/hotpath.rs	path_lookup	12810		INV:INV-VFS-WALK-1
-0aafca240335	kernel/core/src/fs/hotpath.rs	path_lookup	12883		INV:INV-VFS-WALK-1
+a5f72ddb0299	kernel/core/src/fs/hotpath.rs	path_lookup	12883		INV:INV-VFS-WALK-1
 ddcb98bdef8f	kernel/core/src/fs/hotpath.rs	path_lookup	12888		INV:INV-VFS-WALK-1
 cb4c8f02ebf7	kernel/core/src/fs/hotpath.rs	path_lookup	12895		INV:INV-VFS-WALK-1
 bbc29cb27b5a	kernel/core/src/fs/hotpath.rs	path_lookup	12928		INV:INV-VFS-WALK-1
@@ -1251,7 +1251,7 @@ a9946d5d237a	kernel/core/src/init.rs	load_and_setup_elf	427	ffi	INV:F12
 dbf87486dd23	kernel/core/src/interrupt/irqdesc.rs	handle_fasteoi_nmi	776	transmute	INV:F19
 29a2721f7951	kernel/core/src/interrupt/softirq.rs	__do_softirq	563	no-preempt	INV:INV-KTASK-1
 193b0dba6a50	kernel/core/src/interrupt/softirq.rs	__do_softirq	571		INV:INV-KTASK-1
-431f1c609f76	kernel/core/src/interrupt/softirq.rs	__do_softirq	572		INV:INV-KTASK-1
+87355ca4b649	kernel/core/src/interrupt/softirq.rs	__do_softirq	572		INV:INV-KTASK-1
 a9ff5e46a7e6	kernel/core/src/interrupt/tasklet.rs	tasklet_schedule	138	ptr-ops	INV:INV-TASKLET-1
 043dfb9dd81f	kernel/core/src/interrupt/tasklet.rs	tasklet_hi_schedule	161	ptr-ops	INV:INV-TASKLET-1
 0b0b9462f478	kernel/core/src/interrupt/tasklet.rs	tasklet_kill	188		INV:INV-TASKLET-1
@@ -1352,12 +1352,12 @@ d0995e1356b2	kernel/core/src/mm/hotpath.rs	<module>	459		INV:INV-HEAP-3
 0fa9a9283674	kernel/core/src/mm/hotpath.rs	fill_interior_order	643	ptr-ops	INV:INV-HEAP-3
 7f718da0ff86	kernel/core/src/mm/hotpath.rs	<module>	973	ptr-ops	INV:INV-HEAP-3
 49df818ac8db	kernel/core/src/mm/hotpath.rs	<module>	974		INV:INV-HEAP-3
-db8aa49f4870	kernel/core/src/mm/hotpath.rs	alloc	1059		INV:INV-SMALLALLOC-1
+35e009867cc9	kernel/core/src/mm/hotpath.rs	alloc	1059		INV:INV-SMALLALLOC-1
 30c38811366f	kernel/core/src/mm/hotpath.rs	<module>	1081	ptr-ops	INV:INV-SMALLALLOC-1
-e503266c881a	kernel/core/src/mm/hotpath.rs	realloc	1091		INV:INV-SMALLALLOC-1
+7dc950709af7	kernel/core/src/mm/hotpath.rs	realloc	1091		INV:INV-SMALLALLOC-1
 d245a6b5a2c2	kernel/core/src/mm/hotpath.rs	<module>	1112		INV:INV-SMALLALLOC-1
-6014c4e33c14	kernel/core/src/mm/hotpath.rs	trace_kmalloc_at	1152		INV:INV-SMALLALLOC-1
-b46d29b273fa	kernel/core/src/mm/hotpath.rs	trace_kfree_at	1177		INV:INV-SMALLALLOC-1
+ae6eba0d3f52	kernel/core/src/mm/hotpath.rs	trace_kmalloc_at	1152		INV:INV-SMALLALLOC-1
+e153af0eeea6	kernel/core/src/mm/hotpath.rs	trace_kfree_at	1177		INV:INV-SMALLALLOC-1
 04f3a0651646	kernel/core/src/mm/hotpath.rs	<module>	1491		INV:INV-HEAP-3
 de7526da0893	kernel/core/src/mm/hotpath.rs	<module>	1492		INV:INV-HEAP-3
 12614798d07a	kernel/core/src/mm/hotpath.rs	meta_audit_inner	1521		INV:INV-HEAP-3
@@ -1400,7 +1400,7 @@ ba9137ff7b39	kernel/core/src/mm/unsafe.rs	first_node_mut	40		INV:INV-MM-1
 ac1a9c0c1c58	kernel/core/src/mm/unsafe.rs	page_ref_of	74		INV:INV-MM-2
 9eb0ce80bfb2	kernel/core/src/mm/unsafe.rs	memblock_ref	92		INV:INV-MM-3
 b243282047e3	kernel/core/src/mm/unsafe.rs	memblock_mut	101		INV:INV-MM-2
-2dbd5886037d	kernel/core/src/mm/unsafe.rs	walk_fp_chain	111		INV:INV-MM-2
+90e3e56fb91e	kernel/core/src/mm/unsafe.rs	walk_fp_chain	111		INV:INV-MM-2
 53817e10ad17	kernel/core/src/mm/unsafe.rs	slab_read_freelist_link	127	ptr-ops	INV:INV-MM-4
 309659b58aba	kernel/core/src/mm/unsafe.rs	slab_write_freelist_link	135	ptr-ops	INV:INV-MM-4
 23785f7619a2	kernel/core/src/mm/unsafe.rs	slab_header_mut	144	ptr-ops	INV:INV-MM-4

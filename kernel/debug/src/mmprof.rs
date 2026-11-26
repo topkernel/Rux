@@ -12,7 +12,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::debug::mmprof::{
+use crate::debug::hotpath::{
     BUCKETS, COMMS, SCALARS, STATS, B_N, B_NAMES, M_ADD, M_FIXEDMUN, M_FINDFREE, M_LOCKWAIT,
     M_TOTAL, MP_COVER, MP_LOCK, MP_PTE, MP_TOTAL, MU_BODY, MU_SURG, MU_TLB, MU_WALK, MU_YIELD,
     S_ANON0, S_FIXED, S_HINT, S_MUNLOOPS, S_UNPAGES, S_UNEMPTY,
@@ -96,7 +96,7 @@ fn stat(i: usize) -> (u64, u64, u64) {
 /// multi-line burst loses all but 1-2 lines (lb332 evidence). One
 /// short line per dump survives; the full table completes every 3 min.
 pub fn report_line(k: u64) {
-    if !crate::debug::mmprof::on() {
+    if !crate::debug::hotpath::mmprof_on() {
         return;
     }
     #[cfg(feature = "x86_64")]

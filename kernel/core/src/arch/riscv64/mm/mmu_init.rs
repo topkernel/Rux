@@ -260,9 +260,9 @@ pub fn alloc_page_table() -> Option<u64> {
             // (direct zone.alloc_pages above) — feed them to the page-level
             // site table from THIS frame so the chain names the mapping
             // path (map_page_noflush / create_user_address_space / ...).
-            if crate::debug::memwatch::armed() {
-                let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
-                    [0; crate::debug::memwatch::SITE_FRAMES];
+            if crate::debug::hotpath::memwatch_armed() {
+                let mut mw_frames: [u64; crate::debug::types::SITE_FRAMES] =
+                    [0; crate::debug::types::SITE_FRAMES];
                 // SAFETY: register-only read of s0; the chain walk is the
                 // debug stack-forensics edge.
                 let mw_s0: u64 = unsafe {
@@ -270,8 +270,8 @@ pub fn alloc_page_table() -> Option<u64> {
                     core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
                     v
                 };
-                unsafe { crate::debug::memwatch::walk_fp_chain(mw_s0, &mut mw_frames) };
-                crate::debug::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
+                unsafe { crate::debug::hotpath::walk_fp_chain(mw_s0, &mut mw_frames) };
+                crate::debug::hotpath::note_page_alloc(phys_addr as usize, 0, &mw_frames);
             }
 
             // FORENSIC ledger: stamp every Late-stage table allocation.
@@ -299,7 +299,7 @@ fn free_page_table_checked(phys_addr: u64, site: &str) {
                     // rather than wired into two live trees
         }
     }
-    crate::debug::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::hotpath::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     free_page_table(phys_addr)
 }
 
@@ -635,7 +635,7 @@ impl PtLedger {
         }
         // mmforensics: deep capture at the double/foreign free refusal
         // (x86_64 parity; own cap + switch gate).
-        crate::debug::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
+        crate::debug::hotpath::capture_frame(ppn as usize, "ptledger-double-free");
         // Double-tracked frame: quarantine.
         Self::poison_table(ppn);
         false
@@ -998,7 +998,7 @@ pub(crate) fn release_user_leaf(
     if page.is_mapped() {
         crate::mm::hotpath::page_remove_rmap(page);
     }
-    let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
+    let new_ref = page.put_page_site(crate::debug::hotpath::S_TEARDOWN_RV);
     let dying = crate::process::hotpath::current_pid() as u32;
     if stamp.is_some() {
         crate::mm::hotpath::text_stamp_note(pfn, dying, 'T', new_ref);
@@ -1149,7 +1149,7 @@ pub(crate) fn release_user_leaf(
         crate::mm::hotpath::pcache_leaf_phantom_zero_put(pfn << 12, "rv-release-user-leaf");
         return false;
     }
-    crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::hotpath::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     free_pages(pfn << 12, 0);
     true
 }
@@ -1173,7 +1173,7 @@ pub fn free_user_page_tables(
     _vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::{hotpath::{self, page_desc}, hotpath::phys_to_pfn, hotpath::phys_valid, types::PageFlag, hotpath::free_pages};
-    crate::debug::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::hotpath::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data (the corruption family
@@ -1482,7 +1482,7 @@ pub fn free_user_page_tables(
     // mmforensics: deep capture naming the first stale table frame (the
     // stale-tree census witness — x86_64 parity).
     if stale_count > 0 {
-        crate::debug::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
+        crate::debug::hotpath::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
     }
 
     // Free root table (L2)
@@ -1538,7 +1538,7 @@ pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u6
     // non-leaf entry that lands at vpn2[0..1] of the kernel root is cloned
     // into EVERY future address space by copy_kernel_mappings (the
     // exec-leak amplifier). One-shot caller chain, raw UART.
-    if vpn2 < 2 && root_ppn == root_page_table_ppn() && crate::debug::memwatch::armed() {
+    if vpn2 < 2 && root_ppn == root_page_table_ppn() && crate::debug::hotpath::memwatch_armed() {
         static POLLUTED: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if POLLUTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
@@ -1549,26 +1549,26 @@ pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u6
                 core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
                 v
             };
-            unsafe { crate::debug::memwatch::walk_fp_chain(s0, &mut frames) };
-            crate::debug::taskdump::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
+            unsafe { crate::debug::hotpath::walk_fp_chain(s0, &mut frames) };
+            crate::debug::hotpath::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
             let mut sh: i32 = 64;
             while sh > 0 {
                 sh -= 4;
                 let nb = ((virt_addr >> sh) & 0xF) as u8;
-                crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                crate::debug::hotpath::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
             }
             for f in frames.iter() {
                 if *f == 0 { break; }
-                crate::debug::taskdump::taskdump_raw_line(b" ");
+                crate::debug::hotpath::taskdump_raw_line(b" ");
                 let mut sh2: i32 = 64;
-                crate::debug::taskdump::taskdump_raw_line(b"0x");
+                crate::debug::hotpath::taskdump_raw_line(b"0x");
                 while sh2 > 0 {
                     sh2 -= 4;
                     let nb = ((*f >> sh2) & 0xF) as u8;
-                    crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                    crate::debug::hotpath::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
                 }
             }
-            crate::debug::taskdump::taskdump_raw_line(b"\n");
+            crate::debug::hotpath::taskdump_raw_line(b"\n");
         }
     }
 
@@ -2311,7 +2311,7 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 /// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
 pub fn forensics_scan_trees(
     target_ppn: u64,
-    out: &mut [crate::debug::mmforensics::TreeHit],
+    out: &mut [crate::debug::types::TreeHit],
 ) -> (usize, usize, usize, usize) {
     const MAX_TASKS: usize = 128;
     let mut roots = [(0u32, 0u64); MAX_TASKS];
@@ -2343,7 +2343,7 @@ pub fn forensics_scan_trees(
 
     let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
         if nh < out.len() {
-            out[nh] = crate::debug::mmforensics::TreeHit {
+            out[nh] = crate::debug::types::TreeHit {
                 pid,
                 root_ppn: root,
                 level,

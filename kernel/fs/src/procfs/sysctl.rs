@@ -143,7 +143,7 @@ pub fn generate_ostype() -> Vec<u8> {
 /// detect kernel bugs (timerfd_settime02 aborts TBROK when the file is
 /// missing).
 pub fn generate_tainted() -> Vec<u8> {
-    alloc::format!("{}\n", crate::debug::taint::get_taints()).into_bytes()
+    alloc::format!("{}\n", crate::debug::hotpath::get_taints()).into_bytes()
 }
 
 
@@ -154,7 +154,7 @@ pub fn generate_tainted() -> Vec<u8> {
 pub fn generate_panic_on_oops() -> Vec<u8> {
     alloc::format!(
         "{}\n",
-        if crate::debug::oops::panic_on_oops() { 1 } else { 0 }
+        if crate::debug::hotpath::panic_on_oops() { 1 } else { 0 }
     )
     .into_bytes()
 }
@@ -175,7 +175,7 @@ pub fn write_cov_dump(input: &[u8]) -> i32 {
 pub fn write_panic_on_oops(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v @ 0..=1) => {
-            crate::debug::oops::set_panic_on_oops(v == 1);
+            crate::debug::hotpath::set_panic_on_oops(v == 1);
             0
         }
         _ => -(crate::errno::constants::EINVAL as i32),

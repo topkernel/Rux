@@ -160,7 +160,7 @@ pub fn jbd2_journal_start(journal: &Arc<Journal>, nblocks: i32) -> Result<Handle
     if journal.is_aborted() {
         return Err(EROFS);
     }
-    crate::debug::fsw::note_j_start();
+    crate::debug::hotpath::note_j_start();
 
     // Check for nested handle
     // Check current journal info
@@ -206,7 +206,7 @@ pub fn jbd2__journal_start(
 /// buffer credits to the transaction. On single-core, we always
 /// commit synchronously when the last handle stops.
 pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
-    crate::debug::fsw::note_j_stop();
+    crate::debug::hotpath::note_j_stop();
     // Decrement reference count
     if handle.h_ref > 1 {
         handle.h_ref -= 1;
@@ -291,7 +291,7 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
         if dirty_len < lazy_commit_max_buffers && revoke_len < LAZY_COMMIT_MAX_REVOKES {
             // Leave j_running_transaction in place: the next
             // start_this_handle joins this transaction.
-            crate::debug::fsw::note_j_lazy();
+            crate::debug::hotpath::note_j_lazy();
             handle.h_transaction = None;
             return Ok(());
         }
@@ -407,10 +407,10 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut rux::fs::
         // linear already-tracked walk that grew with the lazy-commit
         // batch (see the field doc on Transaction::t_dirty_buffers).
         if dirty_bufs.contains_key(&blocknr) {
-            crate::debug::fsw::note_j_dedup(1);
+            crate::debug::hotpath::note_j_dedup(1);
             return Ok(()); // Already tracked
         }
-        crate::debug::fsw::note_j_dedup(1);
+        crate::debug::hotpath::note_j_dedup(1);
         // R3FIX: no data clone — the commit paths read the live
         // buffer-cache content through the block number (see
         // Transaction::t_dirty_buffers).
@@ -462,7 +462,7 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut rux::fs::ty
         let blocknr = rux::fs::hotpath::bh_blocknr(&bio_bh);
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
-        crate::debug::fsw::note_j_dedup(1);
+        crate::debug::hotpath::note_j_dedup(1);
         // Flips a prior Created entry to Live, or registers fresh
         // (keyed map — no scan; see the field doc on t_dirty_buffers).
         dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Live);

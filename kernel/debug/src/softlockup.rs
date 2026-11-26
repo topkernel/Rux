@@ -12,9 +12,8 @@
 
 use core::fmt::Write;
 
-use crate::debug::backtrace;
-use crate::debug::backtrace::ConsoleWriter;
-use crate::debug::taint;
+use crate::debug::hotpath;
+use crate::debug::types::ConsoleWriter;
 
 /// The lockup report (see the module doc). `timer_cnt` is the stuck
 /// CPU's timer-IRQ count read by the caller for the report line.
@@ -46,19 +45,19 @@ pub fn report(cpu: usize, elapsed_secs: u64, timer_cnt: u64) {
         // the stuck task is pinned by the wedged CPU's sched slot
         // (same read discipline as the pid above). All three are
         // budgeted and no-op unless rux:leakhunt (retired debug=leakhunt) is armed.
-        crate::debug::leakorigin::report_hardirq_origin(
+        crate::debug::hotpath::report_hardirq_origin(
             b"LOCKUP-HARDIRQ", stuck_task,
         );
-        crate::debug::leakorigin::report_softirq_origin(
+        crate::debug::hotpath::report_softirq_origin(
             b"LOCKUP-SOFTIRQ", stuck_task,
         );
-        crate::debug::leakorigin::report_outermost(
+        crate::debug::hotpath::report_outermost(
             b"LOCKUP-OUTER", stuck_task,
         );
     }
 
     // Stack trace
-    backtrace::dump_stack();
+    hotpath::dump_stack();
 
     // oh-crash 91st: the DETECTOR's own chain (above) is not the
     // stuck CPU's. Poke the stuck CPU over the IRQ_WORK IPI and
@@ -72,5 +71,5 @@ pub fn report(cpu: usize, elapsed_secs: u64, timer_cnt: u64) {
     }
 
     // Taint kernel
-    taint::add_taint(taint::TaintFlags::SOFTLOCKUP);
+    hotpath::add_taint(rux::debug::types::TaintFlags::SOFTLOCKUP);
 }

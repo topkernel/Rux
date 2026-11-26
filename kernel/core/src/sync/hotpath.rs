@@ -1034,7 +1034,7 @@ fn current_futex_mm_id() -> usize {
 /// DEBUG futex protocol tracer (feature `debug-futex-trace`).
 #[cfg(feature = "debug-futex-trace")]
 fn ftx_trace(tag: &[u8], uaddr: usize, a: u64, b: u64) {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
     let pid = crate::sched::hotpath::current().map(|t| crate::sched::r#unsafe::task_shared(t).pid() as u64).unwrap_or(0);
     taskdump_raw_line(b"FTX ");
     taskdump_raw_line(tag);
@@ -3900,7 +3900,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         static FWW: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         if FWW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 128 {
-            use crate::debug::taskdump::putc_brief as putchar;
+            use crate::debug::hotpath::putc_brief as putchar;
             fn ph(mut v: u64) {
                 for _ in 0..16 {
                     let n = (v >> 60) as u8;
@@ -4275,7 +4275,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 static FWT: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if FWT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    use crate::debug::taskdump::putc_brief as putchar;
+                    use crate::debug::hotpath::putc_brief as putchar;
                     fn ph(mut v: u64) {
                         for _ in 0..16 {
                             let n = (v >> 60) as u8;
@@ -5187,8 +5187,8 @@ pub fn futex_wake_op(
 /// DEBUG: dump the live state of a futex word + its waiter chain.
 #[cfg(feature = "debug-futex-trace")]
 pub fn debug_dump_futex_state(uaddr: usize, parked_pid: u32) {
-    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
-    use crate::debug::taskdump::dump_syscall_ring_for;
+    use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::hotpath::dump_syscall_ring_for;
     let bucket = uaddr % HASH_SIZE;
     taskdump_raw_line(b"FTX-STATE u=");
     taskdump_dec(uaddr as u64);
@@ -5510,12 +5510,12 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 let s1 = FUXWATCH_ADDR.load(Relaxed);
                 if s1 == 0 {
                     FUXWATCH_ADDR.store(uaddr as u64, Relaxed);
-                    crate::debug::taskdump::ensure_defer_thread();
+                    crate::debug::hotpath::ensure_defer_thread();
                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("FXDV-ARM slot1={:#x} jif={}", uaddr, crate::timer::get_jiffies());
                 } else if (s1 as usize) != uaddr && FUXWATCH2_ADDR.load(Relaxed) == 0 {
                     FUXWATCH2_ADDR.store(uaddr as u64, Relaxed);
-                    crate::debug::taskdump::ensure_defer_thread();
+                    crate::debug::hotpath::ensure_defer_thread();
                     // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
                     crate::pr_warn!("FXDV-ARM slot2={:#x} jif={}", uaddr, crate::timer::get_jiffies());
                 }
@@ -5662,7 +5662,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     #[cfg(feature = "debug-futex-trace")]
     {
         let pid = crate::sched::hotpath::current().map(|t| crate::sched::r#unsafe::task_shared(t).pid() as u64).unwrap_or(0);
-        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ENTER pid=");
         taskdump_dec(pid);
         taskdump_raw_line(b" op=");
@@ -6848,7 +6848,7 @@ pub fn rwfz_emit_prio(s: &str, prio: bool) {
                     cut = sp;
                 }
             }
-            crate::debug::taskdump::defer_emit_line(alloc::format!(
+            crate::debug::hotpath::defer_emit_line(alloc::format!(
                 "{}:{} {}",
                 tag,
                 part,
@@ -8863,7 +8863,7 @@ impl SleepMutex {
     fn lock_inner(&'static self, killable: bool) -> Option<SleepMutexGuard> {
         let pid = crate::process::hotpath::current_pid();
         if self.fsw_notes {
-            crate::debug::fsw::note_biglock();
+            crate::debug::hotpath::note_biglock();
         }
 
         // Adaptive optimistic spin (reference mutex discipline): the
@@ -8916,7 +8916,7 @@ impl SleepMutex {
         let can_sleep = crate::sched::hotpath::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
         if self.fsw_notes {
-            crate::debug::fsw::note_biglock_contend();
+            crate::debug::hotpath::note_biglock_contend();
         }
         let cur = match crate::sched::hotpath::current() {
             Some(t) if can_sleep => t,
@@ -9413,7 +9413,7 @@ impl SleepMutex {
     /// D-parked). Try-locks only (taskdump context may be the watchdog);
     /// busy locks print as '?' fields, never block.
     pub fn debug_census_line(&'static self) {
-        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::hotpath::{taskdump_dec, taskdump_raw_line};
         let (locked, owner, depth, waiters, epoch) = match self.state.try_lock() {
             Some(st) => (st.locked, st.owner, st.depth, st.waiters, st.handoff_epoch),
             None => (false, u32::MAX, 0, u32::MAX, u64::MAX),
@@ -10155,7 +10155,7 @@ impl RawSpinlock {
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::trace::EVENT_TASKDUMP.armed() {
             crate::trace::trace_taskdump(2, 0);
-            crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
+            crate::debug::hotpath::dump_all_tasks("deadlock-watchdog");
         }
     }
 
@@ -13286,9 +13286,9 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     }
                 }
                 if stuck != usize::MAX {
-                    crate::debug::taskdump::dump_frozen_cpu_truth(stuck);
+                    crate::debug::hotpath::dump_frozen_cpu_truth(stuck);
                 }
-                crate::debug::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
+                crate::debug::hotpath::dump_all_tasks("rcu-gp-frozen-cpu");
             }
             return false;
         }
@@ -13693,7 +13693,7 @@ impl<T, const N: usize> CpuLocal<T, N> {
             // count + taint: this is a call-site bug of the r8final
             // class, and the taint names it instead of absorbing it.
             REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             crate::arch::cpu::restore_irq(flags);
             return None;
         }
@@ -13759,7 +13759,7 @@ impl<T, const N: usize> CpuLocal<T, N> {
         if unsafe { *in_use } {
             // Same refusal semantics as `with` (see there).
             REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
+            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
             crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
             return None;
         }

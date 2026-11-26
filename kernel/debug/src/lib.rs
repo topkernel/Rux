@@ -15,7 +15,7 @@
 //! DOWN into the framework for the statics (pub peek surfaces) and is
 //! called UP only through kernel/core/src/api/debug.rs — 18 cold rows
 //! (boot init, shutdown/cadence dumps, procfs readers, arm-gated event
-//! prints) — plus the direct sibling-dep surface debug::scmtap.
+//! prints) — plus the direct sibling-dep surface scmtap (this crate's own module).
 //!
 //! Sole-copy state: the moved code lives in this crate; the framework
 //! files keep only the hot halves and the historical-name wrappers

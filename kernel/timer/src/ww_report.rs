@@ -86,9 +86,9 @@ pub fn ww_heartbeat(now_time: u64) {
     // total arms ever; fires + live entries + cancels must cover it. A
     // gap = entries vanishing unfired.
     {
-        use crate::debug::taskdump::putc_brief as putchar;
+        use crate::debug::hotpath::putc_brief as putchar;
         fn pdec9(mut v: u64) {
-            use crate::debug::taskdump::putc_brief as p;
+            use crate::debug::hotpath::putc_brief as p;
             let mut buf = [0u8; 20];
             let mut n = 0;
             if v == 0 { p(b'0'); return; }
@@ -115,9 +115,9 @@ pub fn ww_heartbeat(now_time: u64) {
     // (jiffies), ownership qword, pk, linked, state. A frozen task names
     // its terminal phase directly.
     {
-        use crate::debug::taskdump::putc_brief as putchar;
+        use crate::debug::hotpath::putc_brief as putchar;
         fn pdec(mut v: u64) {
-            use crate::debug::taskdump::putc_brief as p;
+            use crate::debug::hotpath::putc_brief as p;
             let mut buf = [0u8; 20];
             let mut n = 0;
             if v == 0 { p(b'0'); return; }

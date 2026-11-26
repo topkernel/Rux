@@ -16,8 +16,11 @@ use core::sync::atomic::Ordering;
 
 use alloc::string::ToString;
 
-use crate::debug::syscost::*;
-use crate::debug::syscost::zone_cur;
+use crate::debug::hotpath::*;
+// UART_HIST (named by the report's histogram row) lives in types.rs now — the
+// old per-topic glob over the framework half covered it, the hotpath glob does not.
+use crate::debug::types::UART_HIST;
+use crate::debug::hotpath::zone_cur;
 
 /// Print the full report (also usable from a debug trigger).
 pub fn dump() {
@@ -27,7 +30,7 @@ pub fn dump() {
 
     // 39th: AF_UNIX hot-path phase anatomy rides the same dump cadence
     // (no-op unless the unixrd=1 cmdline param is armed).
-    crate::debug::unixrd::dump();
+    crate::debug::hotpath::unixrd_dump();
     // hilog-flood lane: OH log-fabric per-caller census (no-op unless
     // the hilogcensus=1 cmdline param is armed).
     crate::hilogcensus::dump();

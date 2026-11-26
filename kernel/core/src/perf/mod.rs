@@ -905,7 +905,7 @@ fn kernel_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
                 core::ptr::read_volatile(bp as *const u64),
             )
         };
-        if crate::debug::ksyms::lookup(ret).is_none() {
+        if crate::debug::hotpath::lookup(ret).is_none() {
             break; // not a kernel-text return address
         }
         out[n] = ret;

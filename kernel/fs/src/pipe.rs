@@ -811,10 +811,10 @@ pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// pipe_file_read — the caller must have access_ok-validated `dst`.
 pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op read sum for lat_pipe.
-    let cc_t = crate::debug::cctx::now();
-    crate::debug::cctx::bump(&crate::debug::cctx::PR_N);
+    let cc_t = crate::debug::hotpath::cctx_now();
+    crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::PR_N);
     let r = pipe_read_common(file, dst, count, true);
-    crate::debug::cctx::add(&crate::debug::cctx::PR_NS, cc_t);
+    crate::debug::hotpath::cctx_add(&crate::debug::hotpath::PR_NS, cc_t);
     r
 }
 
@@ -952,10 +952,10 @@ pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 /// pipe_read_user). The caller must have access_ok-validated `src`.
 pub fn pipe_write_user(file: &File, src: *const u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op write sum for lat_pipe.
-    let cc_t = crate::debug::cctx::now();
-    crate::debug::cctx::bump(&crate::debug::cctx::PW_N);
+    let cc_t = crate::debug::hotpath::cctx_now();
+    crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::PW_N);
     let r = pipe_write_common(file, src as usize, count, true);
-    crate::debug::cctx::add(&crate::debug::cctx::PW_NS, cc_t);
+    crate::debug::hotpath::cctx_add(&crate::debug::hotpath::PW_NS, cc_t);
     r
 }
 

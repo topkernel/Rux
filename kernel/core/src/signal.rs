@@ -3152,8 +3152,8 @@ fn is_unkillable_init(t: &crate::process::types::Task) -> bool {
 #[no_mangle]
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     // forkprof trace: the trap-exit signal gate (every user return).
-    if crate::debug::forkprof::trace_on() {
-        crate::debug::forkprof::trace(13, crate::sched::hotpath::get_current_pid()); // T_SIGCHECK
+    if crate::debug::hotpath::trace_on() {
+        crate::debug::hotpath::trace(13, crate::sched::hotpath::get_current_pid()); // T_SIGCHECK
     }
     use crate::sched;
 

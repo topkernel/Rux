@@ -9,14 +9,14 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::debug::driftwatch::*;
+use crate::debug::hotpath::*;
 
 /// One line per nonzero counter (printk path — ledger context only).
 pub fn report() {
     for (i, c) in ZERO_PUT.iter().enumerate() {
         let v = c.load(Ordering::Relaxed);
         if v != 0 {
-            crate::println!("DRIFTWATCH zero_put[{}] {}={}", i, SITE_NAMES[i], v);
+            crate::println!("DRIFTWATCH zero_put[{}] {}={}", i, DRIFTWATCH_SITE_NAMES[i], v);
         }
     }
     let v = FREE_OK.load(Ordering::Relaxed);

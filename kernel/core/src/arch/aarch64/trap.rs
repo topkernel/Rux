@@ -280,9 +280,9 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
                 "aarch64: unexpected HVC at pc={:#x} (PSCI runs through EL2 and should not land here)",
                 regs_ref.pc
             );
-            crate::debug::oops::oops(
-                crate::debug::oops::Kind::UnknownException { cause: esr },
-                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+            crate::debug::hotpath::oops(
+                crate::debug::types::Kind::UnknownException { cause: esr },
+                &|w: &mut crate::debug::types::ConsoleWriter| {
                     oops_show_regs(w, regs_ref);
                 },
             );
@@ -335,9 +335,9 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
                 "aarch64: SError at pc={:#x} far={:#x} esr={:#x}",
                 regs_ref.pc, regs_ref.far, esr
             );
-            crate::debug::oops::oops(
-                crate::debug::oops::Kind::UnknownException { cause: esr },
-                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+            crate::debug::hotpath::oops(
+                crate::debug::types::Kind::UnknownException { cause: esr },
+                &|w: &mut crate::debug::types::ConsoleWriter| {
                     oops_show_regs(w, regs_ref);
                 },
             );
@@ -349,9 +349,9 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
             if regs_ref.user_mode() {
                 handle_illegal_instruction(regs_ref);
             } else {
-                crate::debug::oops::oops(
-                    crate::debug::oops::Kind::IllegalInstruction,
-                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                crate::debug::hotpath::oops(
+                    crate::debug::types::Kind::IllegalInstruction,
+                    &|w: &mut crate::debug::types::ConsoleWriter| {
                         oops_show_regs(w, regs_ref);
                     },
                 );
@@ -367,9 +367,9 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
             if regs_ref.user_mode() {
                 handle_illegal_instruction(regs_ref);
             } else {
-                crate::debug::oops::oops(
-                    crate::debug::oops::Kind::UnknownException { cause: esr },
-                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                crate::debug::hotpath::oops(
+                    crate::debug::types::Kind::UnknownException { cause: esr },
+                    &|w: &mut crate::debug::types::ConsoleWriter| {
                         oops_show_regs(w, regs_ref);
                     },
                 );
@@ -383,12 +383,12 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
     // Leak-origin tripwire (riscv64 twin): a user-return frame must
     // carry preempt_count == 0.
     if regs_ref.user_mode() {
-        crate::debug::leakorigin::check_user_return();
+        crate::debug::hotpath::check_user_return();
     }
 }
 
 /// Register dump for the oops paths
-fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs) {
+fn oops_show_regs(w: &mut crate::debug::types::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let _ = write!(
         w,
@@ -529,20 +529,20 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
-                    crate::debug::syscost::tick_user();
+                    crate::debug::hotpath::tick_user();
                     crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
-                    crate::debug::syscost::tick_kern(regs.pc);
+                    crate::debug::hotpath::tick_kern(regs.pc);
                     crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
                 }
             } else {
-                crate::debug::syscost::tick_idle();
+                crate::debug::hotpath::tick_idle();
                 crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
             }
         }
     } else {
-        crate::debug::syscost::tick_idle();
+        crate::debug::hotpath::tick_idle();
         crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
     }
 
@@ -553,7 +553,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     crate::sched::hotpath::scheduler_tick();
 
     // 3. Check for soft lockups
-    crate::debug::softlockup::check();
+    crate::debug::hotpath::check();
 
     // 4. Reschedule if needed
     if crate::sched::hotpath::need_resched() && crate::interrupt::preempt::preemptible() {
@@ -747,9 +747,9 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     fault_addr as u64,
                 );
             } else {
-                crate::debug::oops::oops(
-                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                crate::debug::hotpath::oops(
+                    crate::debug::types::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::types::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -780,9 +780,9 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             } else {
-                crate::debug::oops::oops(
-                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                crate::debug::hotpath::oops(
+                    crate::debug::types::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::types::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -804,18 +804,18 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 );
                 crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGKILL as i32));
             } else {
-                crate::debug::oops::oops(
-                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                crate::debug::hotpath::oops(
+                    crate::debug::types::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::types::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
             }
         }
         MmFaultResult::KernelPanic => {
-            crate::debug::oops::oops(
-                crate::debug::oops::Kind::PageFault { addr: fault_addr },
-                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+            crate::debug::hotpath::oops(
+                crate::debug::types::Kind::PageFault { addr: fault_addr },
+                &|w: &mut crate::debug::types::ConsoleWriter| {
                     oops_show_regs(w, regs);
                 },
             );
