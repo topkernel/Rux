@@ -344,3 +344,25 @@ core\[[0-9a-f]*\]::ptr::read_volatile::precondition_check
 #   GONE (aarch64 only): core's volatile-read precondition-check stub —
 #   an ABI-adjacent helper whose single materialization moved with the
 #   wrapper bodies (read_volatile call sites unchanged).
+
+# --- p3dbg2 nine-subsystem gate (2026-11-27, after the debug collection) ---
+# debug collection contract fns: the wrapped/moved bodies recompile smaller
+# (base 504 -> current 458 for note_page_alloc; all 15 same class) — the
+# debug lane's own pair run recorded the same names against its in-lane base.
+^rux::debug::capture_frame|rux::debug::\{closure\}|rux::debug::dump|rux::debug::dump_csrs|rux::debug::early_scan|rux::debug::lookup_file|rux::debug::note_acquire|rux::debug::note_page_alloc|rux::debug::note_page_free|rux::debug::note_ref|rux::debug::note_softirq_acquire|rux::debug::read_record|rux::debug::save_regs|rux::debug::stash_file|rux::debug::write_record$
+# process TaskState accessors + Task::state: identical size multisets on
+# both sides (18x8 == 18x8); the pass-2-introduced types:: module segment
+# splits the normalized keys — pure bookkeeping, zero semantic delta.
+^<rux::process::TaskState>::(new|is_dead|contains|bits)$
+^<rux::process::Task>::state$
+# x86_64-only debug fns (cfg-gated; p3dbg2 x86 gate 2026-11-27): same
+# collection-drift class as the rv list above.
+^rux::debug::(audit_frames|frozen_ipi_probe|verify_gs)$
+^rux::debug::x86::(arm|table_virt|verify)$
+# process TaskState accessors + Task::state (impl form): identical size
+# multisets both sides; pass-2 types:: module segment splits the keys.
+^<rux::process::TaskState>::(new|is_dead|contains|bits)$
+^<rux::process::Task>::state$
+# aarch64-only debug fns (p3dbg2 a64 gate 2026-11-27): same collection-
+# drift class as the rv/x86 lists above.
+^rux::debug::(emit|report_hardirq_origin|report_incumbent_site|report_outermost|report_parked_site|report_softirq_origin)$
