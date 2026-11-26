@@ -157,7 +157,8 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and masked[j:j + 5] in ("impl ", "fn ", "trai", "exter"):
+        elif j < len(masked) and masked[j:j + 5].startswith(
+                ("impl ", "impl<", "fn ", "trai", "exter")):
             brace = find_body_brace(masked, j)
             if brace >= 0:
                 hits.append((m.start(), match_brace(masked, brace) + 1))
@@ -180,6 +181,19 @@ def fn_span_from(text, masked, inner_char):
             continue
         if best is None or m.start() > best[0]:
             best = (m.start(), end)
+    if best is None:
+        # unsafe-fn region: inner_char sits at the `unsafe` keyword BEFORE
+        # the `fn` token, outside every fn's body brace — take the fn
+        # whose declaration line holds it.
+        decl_line = char_to_line(text, inner_char)
+        for m in FN_SPAN.finditer(masked):
+            brace = find_body_brace(masked, m.start())
+            if brace < 0 or char_to_line(text, m.start()) != decl_line:
+                continue
+            end = match_brace(masked, brace)
+            if end >= inner_char:
+                best = (m.start(), end)
+                break
     if best is None:
         raise SystemExit(f"pass3: no enclosing fn at char {inner_char}")
     lines = text.split("\n")
@@ -557,8 +571,12 @@ def verify(sub, base_rev, manifest_path):
         for l in m.get("fn_lines", []):
             claimed_added[l.rstrip()] += 1
     for e in man["file_edits"]:
-        claimed_removed[e["find"].rstrip()] += 1
-        claimed_added[e["replace"].rstrip()] += 1
+        # finds/replaces may be multi-line — the claims live in the same
+        # per-line currency as the observed aggregate
+        for l in e["find"].split("\n"):
+            claimed_removed[l.rstrip()] += 1
+        for l in e["replace"].split("\n"):
+            claimed_added[l.rstrip()] += 1
     for l in man["imports_rs"]:
         claimed_added[l.rstrip()] += 1
     claimed_added["#![forbid(unsafe_code)]"] += len(man["forbid"])
