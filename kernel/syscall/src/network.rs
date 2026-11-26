@@ -198,7 +198,7 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     // Linux bind(2) checks the fd BEFORE any address parsing: a fd that is
     // not open at all is EBADF, an open-but-not-a-socket fd is ENOTSOCK
     // (LTP bind01: "sockfd is not a valid file descriptor" → EBADF).
-    match rux::sched::get_current_fdtable() {
+    match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => {
             if ft.get_file(fd as usize).is_none() {
                 return -(errno::EBADF as i64);
@@ -399,7 +399,7 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
     // Linux sockfd_lookup runs BEFORE any protocol dispatch: a fd that is
     // not open at all is EBADF, an open non-socket is ENOTSOCK (LTP
     // listen01 case 1 passes a never-opened fd and expects EBADF).
-    match rux::sched::get_current_fdtable() {
+    match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => {
             if ft.get_file(fd).is_none() {
                 return -(errno::EBADF as i64);
@@ -575,7 +575,7 @@ fn parse_unix_cmsgs(
     {
         return Err(-(errno::EFAULT as i64));
     }
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => return Err(-(errno::EBADF as i64)),
     };
@@ -679,7 +679,7 @@ fn deliver_unix_cmsgs(
         let _ = ua::write_user::<usize>(msg_ptr as usize + 40, cmsg.len());
         return Ok(cmsg.len());
     }
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => return Err(-(errno::EBADF as i64)),
     };
@@ -835,7 +835,7 @@ fn deliver_netlink_cred_cmsg(msg_ptr: *mut u8) -> Result<usize, i64> {
 }
 
 fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
-    let fdtable = rux::sched::get_current_fdtable()?;
+    let fdtable = rux::sched::hotpath::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     socket_file_ref(&file)
 }
@@ -854,7 +854,7 @@ fn socket_file_ref(file: &alloc::sync::Arc<crate::fs::file::File>) -> Option<(al
 /// and expect EBADF).
 fn socket_file_of_checked(fd: i32) -> Result<(alloc::sync::Arc<crate::net::socket::Socket>, bool), i64> {
     // Leg-52 lever A: one fdtable lookup for both classifications.
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => return Err(-(errno::EBADF as i64)),
     };
@@ -890,7 +890,7 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
             return -(errno::EINVAL as i64);
         }
         let file_nonblock = {
-            let fdtable = match rux::sched::get_current_fdtable() {
+            let fdtable = match rux::sched::hotpath::get_current_fdtable() {
                 Some(t) => t,
                 None => return -(errno::EBADF as i64),
             };
@@ -948,7 +948,7 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
             // Distinguish EBADF (fd not open at all — Linux sockfd_lookup)
             // from ENOTSOCK (fd open but not a socket). LTP accept01 case 1
             // passes a never-opened fd and expects EBADF.
-            match rux::sched::get_current_fdtable() {
+            match rux::sched::hotpath::get_current_fdtable() {
                 Some(ft) => match ft.get_file(fd) {
                     None => return -(errno::EBADF as i64),
                     // O_PATH descriptors reject every operation that
@@ -1104,7 +1104,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     // Linux sockfd_lookup runs before any address parsing: a fd that is
     // not open at all is EBADF (LTP connect01 case 1 passes a
     // never-opened fd and expects EBADF), an open non-socket is ENOTSOCK.
-    match rux::sched::get_current_fdtable() {
+    match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => {
             if ft.get_file(fd as usize).is_none() {
                 return -(errno::EBADF as i64);
@@ -1210,7 +1210,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
         // O_NONBLOCK differentiates EINPROGRESS from a blocking wait for
         // an in-flight handshake (same file-flags source as recv/send).
-        let nonblock = rux::sched::get_current_fdtable()
+        let nonblock = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(fd as usize))
             .map(|f| (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0)
             .unwrap_or(false);
@@ -1562,7 +1562,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // Send data (W3: through the blocking send engine — blocking sends
     // complete the whole buffer; MSG_DONTWAIT / O_NONBLOCK differentiate).
     let file_nonblock = {
-        let fdtable = match rux::sched::get_current_fdtable() {
+        let fdtable = match rux::sched::hotpath::get_current_fdtable() {
             Some(t) => t,
             None => return -(errno::EBADF as i64),
         };
@@ -3991,7 +3991,7 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     // single-message sys_sendmsg (an mmsghdr's first 56 bytes ARE an
     // msghdr; msg_len is written back at offset 56).
     // Leg-52 lever A: one lookup shared by both family probes.
-    let fam_file = rux::sched::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
+    let fam_file = rux::sched::hotpath::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
     if fam_file.as_ref().and_then(crate::net::unix::unix_file_of_file).is_some()
         || fam_file.as_ref().and_then(crate::net::netlink::netlink_file_of_file).is_some()
     {
@@ -4203,7 +4203,7 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
     // single-message sys_recvmsg (msg_len written back at offset 56; the
     // recvmmsg batch timeout is approximated by SO_RCVTIMEO here).
     // Leg-52 lever A: one lookup shared by both family probes.
-    let fam_file = rux::sched::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
+    let fam_file = rux::sched::hotpath::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
     if fam_file.as_ref().and_then(crate::net::unix::unix_file_of_file).is_some()
         || fam_file.as_ref().and_then(crate::net::netlink::netlink_file_of_file).is_some()
     {
@@ -4726,7 +4726,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // W3: blocking / MSG_DONTWAIT / O_NONBLOCK semantics (the socket used
     // to be permanently non-blocking — recvfrom returned EAGAIN forever).
     let file_nonblock = {
-        let fdtable = match rux::sched::get_current_fdtable() {
+        let fdtable = match rux::sched::hotpath::get_current_fdtable() {
             Some(t) => t,
             None => return -(errno::EBADF as i64),
         };

@@ -1424,7 +1424,7 @@ impl PciBlkGuard {
     fn arm(slot: usize, inner: SpinlockIrqGuard<'static, ()>, site: usize) -> Self {
         use core::sync::atomic::Ordering;
         PCI_BLK_HOLDER_CPU[slot].store(crate::arch::smp::cpu_id() as usize + 1, Ordering::Release);
-        PCI_BLK_HOLDER_PID[slot].store(crate::sched::get_current_pid(), Ordering::Release);
+        PCI_BLK_HOLDER_PID[slot].store(crate::sched::hotpath::get_current_pid(), Ordering::Release);
         PCI_BLK_HOLDER_RA[slot].store(site, Ordering::Release);
         let mut ctx = 0u32;
         if crate::interrupt::preempt::in_irq() {

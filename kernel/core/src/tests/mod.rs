@@ -497,7 +497,7 @@ pub mod timer_wheel;
 fn setup_boot_task_fdtable() {
     use alloc::sync::Arc;
 
-    let Some(task) = crate::sched::current() else {
+    let Some(task) = crate::sched::hotpath::current() else {
         return;
     };
     // SAFETY: we hold the sole &'static mut to the current task for the

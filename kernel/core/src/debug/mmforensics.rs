@@ -130,7 +130,7 @@ pub struct TreeHit {
 
 /// Current task's page-table root (0 when the context has no user mm).
 fn current_root_ppn() -> u64 {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.address_space_arc())
         .map(|mm| mm.root_ppn())
         .unwrap_or(0)

@@ -13,11 +13,15 @@
 // The core half's items (bare names stay valid through the glob; the
 // visibility of private core items the policy needs is pub(crate) —
 // the carve's fixer loop bumped exactly those).
-use crate::sched::sched::*;
-use crate::sched::entities::W2RefusalCensus;
+use crate::sched::hotpath::*;
+use crate::sched::types::W2RefusalCensus;
+// Two definitions this file reached through the glob above while they lived
+// in the core's sched module. A definition sits in types now, which the glob
+// over hotpath does not cover, so they are named.
+use crate::sched::types::{GlobalRunQueue, GrqPendingReport};
 // Devirt lane: the shared observability state moved framework-side
 // (sched/entities.rs); this crate's census readers keep the bare names.
-use crate::sched::entities::{CLASS_NONEMPTY, SCHED_CALLS};
+use crate::sched::hotpath::{CLASS_NONEMPTY, SCHED_CALLS};
 use rux::api::sched::{
     CLASS_DL_BIT,
     CLASS_RT_BIT,
@@ -52,7 +56,7 @@ use crate::debug;
 use crate::sync;
 use crate::trace;
 use crate::sched::r#unsafe;
-use crate::sched::class;
+use crate::sched::hotpath;
 
 
 /// Convert a nanosecond delta (sched_clock domain) to a jiffies count for
@@ -79,7 +83,7 @@ fn arm_dl_replenish_timer(task: *mut Task) {
         if cur != 0 && crate::timer::timer_pending(cur) {
             return;
         }
-        let now = crate::sched::entities::sched_clock();
+        let now = crate::sched::hotpath::sched_clock();
         let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
         let delta_ns = deadline.saturating_sub(now);
         let expires = crate::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
@@ -586,7 +590,7 @@ pub fn preempt_check_wake(task: *mut Task) {
                 // the last run is µs-to-ms against a 6 ms threshold.
                 let se = crate::sched::r#unsafe::task_shared(task).sched_entity();
                 let exec_start = se.exec_start.load(core::sync::atomic::Ordering::Acquire);
-                let waited = crate::sched::entities::sched_clock().saturating_sub(exec_start);
+                let waited = crate::sched::hotpath::sched_clock().saturating_sub(exec_start);
                 // RT-plan R3 (docs/development/rt-kernel-plan.md): the D-14
                 // batch window was one full scheduling-latency window
                 // (6 ms), which quantized every fair wake that lost the
@@ -605,7 +609,7 @@ pub fn preempt_check_wake(task: *mut Task) {
                 // median 28,135 -> 150 us (187x); quiet 43 -> 31 us;
                 // p1_null/p2_ctxsw/p5b_dgram flat.
                 if exec_start != 0
-                    && waited < crate::sched::entities::SCHED_MIN_GRANULARITY_NS
+                    && waited < crate::sched::hotpath::SCHED_MIN_GRANULARITY_NS
                 {
                     return;
                 }
@@ -666,7 +670,7 @@ pub fn sched_hist_link(task: *mut Task) {
     t.wake_last_jif
         .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     t.wait_open_ns
-        .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Relaxed);
+        .store(crate::sched::hotpath::sched_clock(), core::sync::atomic::Ordering::Relaxed);
     sched_hist_ring(t, 1, 0, crate::arch::cpu_id() as u64 & 0xF);
 }
 
@@ -680,7 +684,7 @@ pub fn sched_hist_pick(task: *mut Task, cpu: usize) {
         .store(crate::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
     let open = t.wait_open_ns.swap(0, core::sync::atomic::Ordering::Relaxed);
     if open != 0 {
-        let d = crate::sched::entities::sched_clock().saturating_sub(open);
+        let d = crate::sched::hotpath::sched_clock().saturating_sub(open);
         t.wait_last_ns.store(d, core::sync::atomic::Ordering::Relaxed);
         t.wait_sum_ns.fetch_add(d, core::sync::atomic::Ordering::Relaxed);
         t.wait_max_ns.fetch_max(d, core::sync::atomic::Ordering::Relaxed);
@@ -862,7 +866,7 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
                 let curr_vruntime = crate::sched::r#unsafe::task_shared(running).sched_entity().get_vruntime();
                 if se_vruntime < curr_vruntime {
                     let delta = curr_vruntime - se_vruntime;
-                    if delta > crate::sched::entities::SCHED_MIN_GRANULARITY_NS {
+                    if delta > crate::sched::hotpath::SCHED_MIN_GRANULARITY_NS {
                         resched_cpu(this_cpu);
                     }
                 }
@@ -935,7 +939,7 @@ pub(crate) fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut
                 crate::sched::r#unsafe::task_shared(task)
                     .dl_entity()
                     .exec_start
-                    .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Release);
+                    .store(crate::sched::hotpath::sched_clock(), core::sync::atomic::Ordering::Release);
                 // R7-B5: pick removes the task from the queue — pair the count.
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -1588,7 +1592,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
             // the old unconditional replenish on every requeue is exactly
             // the defeated-CBS bug). Refuse; the replenish timer owns the
             // re-link. State stays SLEEPING — honest and still wakeable.
-            let now = crate::sched::entities::sched_clock();
+            let now = crate::sched::hotpath::sched_clock();
             let dl = task.dl_entity();
             let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
             if dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire) && now < deadline {
@@ -1641,7 +1645,7 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         SchedPolicy::Idle => {
             // SCHED_IDLE uses CFS with low weight
             let se = task.sched_entity_mut();
-            se.load = crate::sched::entities::LoadWeight::new(crate::fair::WEIGHT_IDLEPRIO);
+            se.load = crate::sched::types::LoadWeight::new(crate::fair::WEIGHT_IDLEPRIO);
             grq.cfs_rq.enqueue(task_ptr)
         }
     };
@@ -1765,10 +1769,10 @@ pub(crate) fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> 
         // Per-task schedstat (T7): open the wait window — the pick edge
         // in __schedule closes it into schedstat_wait_ns. GRQ is held
         // here and there, so the stamp needs no lock of its own.
-        if crate::sched::sched::enabled() && task.pid() != 0 {
+        if crate::sched::hotpath::enabled() && task.pid() != 0 {
             crate::sched::r#unsafe::task_shared(task)
                 .schedstat_wait_start
-                .store(crate::sched::entities::sched_clock(), core::sync::atomic::Ordering::Relaxed);
+                .store(crate::sched::hotpath::sched_clock(), core::sync::atomic::Ordering::Relaxed);
         }
     }
     inserted
@@ -2353,7 +2357,7 @@ pub fn runq_strand_census(now_j: u64) {
     // Phase A: snapshot every pickable-shaped runnable task.
     let mut cands: [(usize, u64); SLOTS] = [(0, 0); SLOTS];
     let mut nc = 0usize;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         if nc >= SLOTS {
             return;
         }
@@ -2449,7 +2453,7 @@ pub fn runq_strand_census(now_j: u64) {
             Some(v) => v as u8,
             None => 2,
         };
-        let throttled = crate::sched::cgroup::task_cgroup_throttled(task as *const Task);
+        let throttled = crate::sched::hotpath::task_cgroup_throttled(task as *const Task);
         let vr = tk.sched_entity().get_vruntime();
         // 63rd: the pick-path's decision-time history, now persistent on
         // the task (never refused = pick_visit_n 0; the old peek's None
@@ -2573,8 +2577,8 @@ pub fn runq_strand_census(now_j: u64) {
             // The wall: up to 8 entries sorting before the victim.
             {
                 use core::fmt::Write as _;
-                let mut rows: [crate::sched::entities::StrandWallRow; 8] = [
-                    crate::sched::entities::StrandWallRow {
+                let mut rows: [crate::sched::types::StrandWallRow; 8] = [
+                    crate::sched::types::StrandWallRow {
                         vruntime: 0,
                         pid: 0,
                         policy: 0,
@@ -2713,7 +2717,7 @@ pub fn ffrt_wait_census() {
     let mut sum = 0u64;
     let mut cnt = 0u64;
     let mut mx = 0u64;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         if ns >= SCAN {
             return;
         }
@@ -2862,7 +2866,7 @@ pub(crate) fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
             let curr_vruntime = incumbent.sched_entity().get_vruntime();
             if se_vruntime < curr_vruntime {
                 let delta = curr_vruntime - se_vruntime;
-                if delta > crate::sched::entities::SCHED_MIN_GRANULARITY_NS {
+                if delta > crate::sched::hotpath::SCHED_MIN_GRANULARITY_NS {
                     resched_cpu(cpu);
                     return;
                 }
@@ -3193,7 +3197,7 @@ pub fn yield_cpu() {
         if matches!(policy, SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle) {
             let task_ptr = cur as *mut Task;
             let mut grq_guard = grq().lock_irqsave();
-            let now = crate::sched::entities::sched_clock();
+            let now = crate::sched::hotpath::sched_clock();
             let se = cur.sched_entity();
             if grq_guard.cfs_rq.get_curr() == task_ptr {
                 grq_guard.cfs_rq.update_curr(now);

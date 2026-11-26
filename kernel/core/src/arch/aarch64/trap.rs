@@ -147,7 +147,7 @@ pub fn current_pt_regs() -> *const PtRegs {
 
 /// Current task's PtRegs (kernel stack top - sizeof(PtRegs))
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
-    use crate::sched::current;
+    use crate::sched::hotpath::current;
 
     // SAFETY: pt_regs lives at the fixed offset from the task's kernel
     // stack top established by the trap entry path.
@@ -168,7 +168,7 @@ pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
     let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
     if p.is_null()
         || (p as u64) < 0xffff_8000_0000_0000
-        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+        || !crate::sched::hotpath::kernel_ptr_canonical(p as *const u8)
     {
         return 0;
     }
@@ -512,7 +512,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
 
     // Skip scheduler/schedule logic during early boot (TPIDR holds the
     // cpu index, no current task yet — riscv64 twin guard).
-    if crate::sched::current().is_none() {
+    if crate::sched::hotpath::current().is_none() {
         return;
     }
 
@@ -521,7 +521,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
 
     // 0b. CPU-time accounting: user or system time by the mode the
     // timer hit; idle accounting for kthreads.
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         // SAFETY: current() returned a live task pointer; only per-task
         // atomic counters are touched (riscv64/x86_64 twins).
         unsafe {
@@ -550,14 +550,14 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     crate::drivers::timer::timer_interrupt_handler();
 
     // 2. Scheduler tick
-    crate::sched::scheduler_tick();
+    crate::sched::hotpath::scheduler_tick();
 
     // 3. Check for soft lockups
     crate::debug::softlockup::check();
 
     // 4. Reschedule if needed
-    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
-        crate::sched::schedule();
+    if crate::sched::hotpath::need_resched() && crate::interrupt::preempt::preemptible() {
+        crate::sched::hotpath::schedule();
     }
 }
 
@@ -567,7 +567,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
 fn handle_illegal_instruction(regs: &mut PtRegs) {
     crate::pr_err!(
         "aarch64: illegal instruction pid={} pc={:#x} esr={:#x}",
-        crate::sched::get_current_pid(),
+        crate::sched::hotpath::get_current_pid(),
         regs.pc,
         regs.esr
     );
@@ -588,7 +588,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 
 /// True when the CURRENT task has a user handler installed for `signo`.
 fn sig_has_handler(signo: usize) -> bool {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(signo as i32)) })
         .map(|a| a.is_some_and(|a| a.has_handler()))
         .unwrap_or(false)
@@ -599,7 +599,7 @@ fn sig_has_handler(signo: usize) -> bool {
 /// synchronous fault on a blocked handler-signal kills the task;
 /// unblocking alone would re-enter the handler and fault forever).
 fn sig_blocked_current(signo: usize) -> bool {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .map(|t| (*t).sigmask & (1u64 << signo) != 0)
         .unwrap_or(false)
 }
@@ -662,7 +662,7 @@ pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> ! {
     if let Some(regs) = current_task_pt_regs() {
         crate::pr_err!(
             "trap: BADFRAME pid={} pc={:#x} sp={:#x} pstate={:#x}",
-            crate::sched::get_current_pid(),
+            crate::sched::hotpath::get_current_pid(),
             regs.pc,
             regs.sp,
             regs.pstate
@@ -729,7 +729,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 regs.pc,
                 regs.regs[30],
                 regs.sp,
-                crate::sched::get_current_pid(),
+                crate::sched::hotpath::get_current_pid(),
                 if regs.kernel_mode() { "kernel" } else { "user" }
             );
             if regs.user_mode() {
@@ -759,7 +759,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::pr_err!(
                 "pagefault: Bus error (past EOF) at {:#x}, pid={}",
                 fault_addr,
-                crate::sched::get_current_pid()
+                crate::sched::hotpath::get_current_pid()
             );
             if regs.user_mode() {
                 let pid = crate::process::current_pid();
@@ -792,7 +792,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::pr_err!(
                 "pagefault: Out of memory at {:#x}, pid={}",
                 fault_addr,
-                crate::sched::get_current_pid()
+                crate::sched::hotpath::get_current_pid()
             );
             if regs.user_mode() {
                 // Generic OOM kill policy (riscv64 parity): SIGKILL the

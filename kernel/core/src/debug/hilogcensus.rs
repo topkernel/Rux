@@ -112,7 +112,7 @@ pub fn kmsg_write(buf: &[u8]) {
     if !on() {
         return;
     }
-    let (spid, scomm): (u32, [u8; COMM]) = match crate::sched::current() {
+    let (spid, scomm): (u32, [u8; COMM]) = match crate::sched::hotpath::current() {
         // sched::current() returns a typed &mut Task reference.
         Some(t) => (t.pid() as u32, *t.comm()),
         None => return,

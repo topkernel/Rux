@@ -32,7 +32,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
-    let (sender_pid, sender_uid) = match crate::sched::current() {
+    let (sender_pid, sender_uid) = match crate::sched::hotpath::current() {
         Some(t) => (t.pid(), t.cred().uid),
         None => (0, 0),
     };
@@ -45,7 +45,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
         static K9_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if K9_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-            let scomm = crate::sched::current()
+            let scomm = crate::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
@@ -95,7 +95,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         if crate::trace::EVENT_SIGTRACE.armed()
             && TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
         {
-            let (cp, cc) = crate::sched::current()
+            let (cp, cc) = crate::sched::hotpath::current()
                 .map(|t| (t.pid(), alloc::string::String::from(t.comm_str())))
                 .unwrap_or((0, alloc::string::String::from("kernel")));
             crate::pr_err!(
@@ -134,7 +134,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             // dfx-migrate: the abort also records into the unified
             // framework (rux:ohhunt kind=SIGABRT — the event is also
             // the family's arm switch). a=the dying tid, b=the raiser.
-            let raiser = crate::sched::current().map(|t| t.pid() as u64).unwrap_or(0);
+            let raiser = crate::sched::hotpath::current().map(|t| t.pid() as u64).unwrap_or(0);
             crate::trace::trace_ohhunt(3, tid, raiser, 0);
             crate::signal_unsafe::abort_reason_dump(tid);
         }
@@ -142,7 +142,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
-    let (sender_pid, sender_uid) = match crate::sched::current() {
+    let (sender_pid, sender_uid) = match crate::sched::hotpath::current() {
         Some(t) => (t.pid(), t.cred().uid),
         None => (0, 0),
     };
@@ -152,7 +152,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         static K9T_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if K9T_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-            let scomm = crate::sched::current()
+            let scomm = crate::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
@@ -184,7 +184,7 @@ pub fn force_unblock_current(sig: i32) {
     if !(1..=64).contains(&sig) {
         return;
     }
-    if let Some(t) = crate::sched::current() {
+    if let Some(t) = crate::sched::hotpath::current() {
         t.sigmask &= !(1u64 << (sig - 1));
     }
 }
@@ -315,7 +315,7 @@ pub fn send_signal_core(
     {
         static KILLTRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if let Some(cur) = crate::sched::current() {
+        if let Some(cur) = crate::sched::hotpath::current() {
             {
                 let same_group = cur.tgid() == task.tgid();
                 let s_comm = (*cur).comm();
@@ -560,7 +560,7 @@ pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
     let my_pid = crate::process::current_pid();
-    let my_uid = match crate::sched::current() {
+    let my_uid = match crate::sched::hotpath::current() {
         Some(c) => (*c).cred().uid,
         None => 0,
     };

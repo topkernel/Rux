@@ -132,7 +132,7 @@ pub fn tick_nohz_dep_clear_cpu(cpu: usize, bit: u32) {
 }
 
 /// bool sched_can_stop_tick(struct rq *rq) — implemented next to the
-/// run-queue internals (crate::sched::sched::sched_can_stop_tick); the
+/// run-queue internals (crate::sched::hotpath::sched_can_stop_tick); the
 /// GRQ (D-1) is global, so the predicate reads the global counters.
 /// sched_update_tick_dependency (sched.h) — the reference calls it from
 /// add_nr_running()/sub_nr_running() at every rq load change; the GRQ
@@ -149,7 +149,7 @@ pub fn sched_update_tick_dependency_on_load_change() {
     if !NOHZ_FULL_RUNNING.load(Ordering::Acquire) {
         return;
     }
-    if !crate::sched::sched::sched_can_stop_tick() {
+    if !crate::sched::hotpath::sched_can_stop_tick() {
         tick_nohz_full_kick_stopped();
     }
 }
@@ -167,7 +167,7 @@ pub fn tick_nohz_full_kick_cpu(cpu: usize) {
         return;
     }
     if cpu != crate::arch::cpu_id() as usize {
-        crate::sched::sched::resched_cpu(cpu);
+        crate::sched::hotpath::resched_cpu(cpu);
     }
 }
 
@@ -175,7 +175,7 @@ fn tick_nohz_full_kick_stopped() {
     let this = crate::arch::cpu_id() as usize;
     for cpu in 0..crate::config::MAX_CPUS {
         if cpu != this && TICK_CPU_SCHED[cpu].tick_stopped.load(Ordering::Acquire) {
-            crate::sched::sched::resched_cpu(cpu);
+            crate::sched::hotpath::resched_cpu(cpu);
         }
     }
 }
@@ -184,7 +184,7 @@ fn tick_nohz_full_kick_all() {
     let this = crate::arch::cpu_id() as usize;
     for cpu in 0..crate::config::MAX_CPUS {
         if cpu != this {
-            crate::sched::sched::resched_cpu(cpu);
+            crate::sched::hotpath::resched_cpu(cpu);
         }
     }
 }
@@ -204,7 +204,7 @@ fn can_stop_full_tick(cpu: usize) -> bool {
     }
     // current->tick_dep_mask / signal->tick_dep_mask equivalent:
     // POSIX CPU timers need the tick to elapse.
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         unsafe {
             let virt = (*task).itimer_virt[0].load(Ordering::Acquire);
             let prof = (*task).itimer_prof[0].load(Ordering::Acquire);
@@ -216,7 +216,7 @@ fn can_stop_full_tick(cpu: usize) -> bool {
     // The SCHED dependency (sched_update_tick_dependency's per-cpu bit
     // in the reference) — the GRQ is global, so this reads the live
     // predicate.
-    if !crate::sched::sched::sched_can_stop_tick() {
+    if !crate::sched::hotpath::sched_can_stop_tick() {
         return false;
     }
     true

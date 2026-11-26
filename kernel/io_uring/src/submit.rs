@@ -75,7 +75,7 @@ pub fn wait_for_cqes(ring: &IoUring, min_complete: u32) -> i32 {
             return -4; // EINTR
         }
 
-        crate::sched::yield_cpu();
+        crate::sched::hotpath::yield_cpu();
     }
 
     // Timeout (should not happen with sync ops)

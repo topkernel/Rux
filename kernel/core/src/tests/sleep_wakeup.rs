@@ -34,16 +34,16 @@ extern "C" fn wake_probe_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 // then returns (switched back in by our picker). The
                 // set_state/schedule pair is the ksoftirqd park idiom —
                 // all safe calls through the sched::current reference.
-                if let Some(cur) = crate::sched::current() {
+                if let Some(cur) = crate::sched::hotpath::current() {
                     cur.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
                 }
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 WAKE_PROBE_PHASE.store(1, Ordering::Release);
             }
             1 => {
                 // Runnable and staying that way: a voluntary yield keeps
                 // the state word RUNNING (linked, never sleeping).
-                crate::sched::yield_cpu();
+                crate::sched::hotpath::yield_cpu();
             }
             _ => return 0,
         }
@@ -117,7 +117,7 @@ pub fn test_sleep_and_wakeup() {
             parked = true;
             break;
         }
-        crate::sched::yield_cpu();
+        crate::sched::hotpath::yield_cpu();
     }
     if !parked {
         test_fail("wake_up sleeping task", "probe never parked");

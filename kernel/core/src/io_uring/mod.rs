@@ -586,7 +586,7 @@ pub fn io_uring_mmap_handler(
         return Err(-22);
     }
 
-    let current_task = crate::sched::current().ok_or(-12)?; // ENOMEM
+    let current_task = crate::sched::hotpath::current().ok_or(-12)?; // ENOMEM
     let addr_space = current_task.address_space().ok_or(-12)?;
     let user_ppn = addr_space.root_ppn();
 

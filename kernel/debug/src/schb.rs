@@ -197,7 +197,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // --- Periodic sleep (khungtaskd discipline: arm a one-shot timer
         // as the only waker, mark INTERRUPTIBLE, re-check, then sleep). ---
-        let my_pid = match crate::sched::current() {
+        let my_pid = match crate::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => break,
         };
@@ -206,25 +206,25 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         if timer_id != 0 {
             // Re-derived running-task borrows (never held across
             // schedule() below).
-            crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
+            crate::sched::hotpath::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
             if crate::timer::get_jiffies() >= target {
-                if let Some(t) = crate::sched::current() {
+                if let Some(t) = crate::sched::hotpath::current() {
                     t.set_state(TaskState::new(TaskState::RUNNING));
                     // A racing wake may have enqueued us mid-exit — take
                     // ourselves back off (NEW-C2 discipline).
-                    crate::sched::dequeue_task(t);
+                    crate::sched::hotpath::dequeue_task(t);
                 }
                 crate::timer::del_timer(timer_id);
             } else {
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 if crate::timer::timer_pending(timer_id) {
                     crate::timer::del_timer(timer_id);
                 }
             }
         } else {
             // Timer table full: stay runnable, yield one round, retry.
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
         }
 
         // --- Beat: one task-table walk + one binder count walk. ---
@@ -237,7 +237,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         let mut n_d: usize = 0; // UNINTERRUPTIBLE
         let mut young_pid: u32 = 0;
         let mut young_comm = [0u8; 16];
-        crate::sched::for_each_task(|task| {
+        crate::sched::hotpath::for_each_task(|task| {
             // The walk hands &Task under the bucket lock; plain-field
             // reads only (same contract as khungtaskd's check_tasks).
             {
@@ -433,7 +433,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
         ti_cpu: i32,
     }
     let mut snaps: alloc::vec::Vec<Snap> = alloc::vec::Vec::new();
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         // Plain-field reads under the bucket lock (khungtaskd contract).
         {
             let t = task;
@@ -460,7 +460,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
             let linked_str = if linked.is_none() {
                 "gone"
             } else {
-                match crate::sched::sched::grq_diag_cfs_linked(linked.unwrap().as_ptr()) {
+                match crate::sched::hotpath::grq_diag_cfs_linked(linked.unwrap().as_ptr()) {
                     Some(true) => "1",
                     Some(false) => "0",
                     None => "n/a",

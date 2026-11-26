@@ -22,9 +22,9 @@ pub fn test_preemptive_scheduler() {
     }
 
     // Test 2: need_resched flag
-    let _initial_resched = crate::sched::need_resched();
-    crate::sched::set_need_resched();
-    let after_set = crate::sched::need_resched();
+    let _initial_resched = crate::sched::hotpath::need_resched();
+    crate::sched::hotpath::set_need_resched();
+    let after_set = crate::sched::hotpath::need_resched();
     if after_set {
         test_pass("need_resched flag");
     } else {
@@ -32,7 +32,7 @@ pub fn test_preemptive_scheduler() {
     }
 
     // Test 3: Time slice management
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             let task_ref = unsafe { &mut *(task as *mut crate::process::Task) };
             let initial_slice = task_ref.get_time_slice();

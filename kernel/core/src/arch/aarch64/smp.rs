@@ -553,10 +553,10 @@ pub extern "C" fn secondary_cpu_entry(cpu: usize) -> ! {
     }
 
     // Boot CPU has finished init — safe to call kmalloc now.
-    crate::sched::init_secondary(cpu);
+    crate::sched::hotpath::init_secondary(cpu);
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
-    crate::sched::cpu_idle_loop();
+    crate::sched::hotpath::cpu_idle_loop();
 }
 
 pub fn num_started_cpus() -> usize {

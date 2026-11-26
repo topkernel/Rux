@@ -238,10 +238,10 @@ dbdcb9cf61c8	kernel/core/src/arch/riscv64/mm/mmu_init.rs	stamp_kernel_tree_boot	
 8fa336aa1d1e	kernel/core/src/arch/riscv64/mm/mmu_init.rs	free_page_table	381		INV:F20
 a20c1217972a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	take	611		INV:F20
 540eea1fc3e7	kernel/core/src/arch/riscv64/mm/mmu_init.rs	task_pid_alive	709		INV:F20
-57ac120eb6f9	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	965		INV:F20
+a335b814499a	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	965		INV:F20
 350d746d6739	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	966		INV:F20
 09882e9db093	kernel/core/src/arch/riscv64/mm/mmu_init.rs	textfree_owner_maps	970		INV:F20
-faf00db86778	kernel/core/src/arch/riscv64/mm/mmu_init.rs	release_user_leaf	1024	addr-arith	INV:F20
+3534535c36b3	kernel/core/src/arch/riscv64/mm/mmu_init.rs	release_user_leaf	1024	addr-arith	INV:F20
 5598f72b9d6d	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page_noflush	1547	asm	INV:F20
 3e2514eb7efe	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page_noflush	1552		INV:F19
 214a32de34d9	kernel/core/src/arch/riscv64/mm/mmu_init.rs	map_page	1697	asm	INV:F20
@@ -633,7 +633,7 @@ cd230a0481cb	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1109	asm	INV:F19
 f5fcb144bba2	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1148		GAP
 7b83db6e1f5d	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1275	no-preempt	GAP
 3132bf29659c	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1289		GAP
-712f0dfd453d	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1371		GAP
+9f65f47c5f68	kernel/core/src/arch/x86_64/trap.rs	trap_handler	1371		GAP
 bb86fc1bad9c	kernel/core/src/arch/x86_64/trap.rs	handle_timer_tick	1841	volatile	INV:F19
 0c2f56350622	kernel/core/src/arch/x86_64/trap.rs	handle_illegal_instruction	2146		INV:F19
 6d46bfbe393f	kernel/core/src/arch/x86_64/trap.rs	handle_illegal_instruction	2162		INV:F19
@@ -726,14 +726,14 @@ f1a37294a9ae	kernel/core/src/debug/backtrace.rs	caller_return_address	143	asm	IN
 fe275eb46406	kernel/core/src/debug/backtrace.rs	dump_csrs	427	asm	INV:F2
 a007e1ef04a9	kernel/core/src/debug/backtrace.rs	dump_csrs	458	asm	INV:F2
 9ee365b174db	kernel/core/src/debug/hung_task.rs	report_hung_task	221	ptr-ops	INV:F18
-92d54b841df7	kernel/core/src/debug/leakorigin.rs	note_acquire	191	volatile,ptr-ops	INV:F1
+421f9071ba7e	kernel/core/src/debug/leakorigin.rs	note_acquire	191	volatile,ptr-ops	INV:F1
 08fb244c363f	kernel/core/src/debug/leakorigin.rs	note_acquire	236		INV:F1
-0b3d7d669f53	kernel/core/src/debug/leakorigin.rs	note_acquire	237		INV:F1
+17e7018ae3b5	kernel/core/src/debug/leakorigin.rs	note_acquire	237		INV:F1
 5c954c582765	kernel/core/src/debug/leakorigin.rs	note_acquire	283		INV:F1
 bfc639e7183f	kernel/core/src/debug/leakorigin.rs	note_acquire	291		INV:F1
 8705d0553252	kernel/core/src/debug/leakorigin.rs	report_acquire_divergent	349	ptr-ops,no-preempt	INV:F1
 cc05f0a0e738	kernel/core/src/debug/leakorigin.rs	note_release	554	ptr-ops,no-preempt	INV:F1
-ef54acbd2230	kernel/core/src/debug/leakorigin.rs	note_softirq_acquire	665	volatile,ptr-ops	INV:F1
+a37875c93f42	kernel/core/src/debug/leakorigin.rs	note_softirq_acquire	665	volatile,ptr-ops	INV:F1
 008c864c713f	kernel/core/src/debug/leakorigin.rs	report_hardirq_origin	734		INV:F1
 32293886fd60	kernel/core/src/debug/leakorigin.rs	report_softirq_origin	805		INV:F1
 fed3b4858b25	kernel/core/src/debug/leakorigin.rs	report_softirq_origin	809	no-preempt	INV:F1
@@ -768,7 +768,7 @@ dfe3cc32358b	kernel/core/src/debug/mod.rs	walk_read	390		INV:F10
 1c9e9bbd8cc6	kernel/core/src/debug/pstore.rs	read_record	229	raw-construct	INV:F4
 f2834df60b02	kernel/core/src/debug/pstore.rs	write_record	300	volatile,ptr-ops	INV:F4
 75abffe65849	kernel/core/src/debug/scribble.rs	audit_frames	228	volatile,ptr-ops	INV:F1
-c1f61a88f5ba	kernel/core/src/debug/scribble.rs	task_plausible	394		INV:F1
+2796ce1ffa25	kernel/core/src/debug/scribble.rs	task_plausible	394		INV:F1
 08f446623515	kernel/core/src/debug/scribble.rs	double_seed	441		INV:F1
 a778f572125a	kernel/core/src/debug/scribble.rs	putc	570		INV:F1
 0f1dbe72a284	kernel/core/src/debug/scribble.rs	putc	576		INV:F1
@@ -1659,23 +1659,23 @@ d24f73957def	kernel/core/src/safety/slot.rs	get	93		INV:INV-SLOT-1
 1a2f60f52721	kernel/core/src/safety/slot.rs	get_mut_locked	108		INV:INV-SLOT-1
 13bd250ef78b	kernel/core/src/sbi.rs	sbi_system_reset	62	asm	INV:F16
 c330d3bb7877	kernel/core/src/sbi.rs	send_ipi	98	asm	INV:F16
-56a152b32910	kernel/core/src/sched/reapdrain.rs	task	152		INV:INV-SCE-2
-94dcf6f8e44d	kernel/core/src/sched/reapdrain.rs	<module>	211		INV:INV-RD-CLAIM
-1e769f0192d1	kernel/core/src/sched/sched.rs	<module>	2135		INV:INV-SENDSYNC-1
-b7e55c8238d8	kernel/core/src/sched/sched.rs	grq_current_fp	2647	asm	INV:INV-SCE-3
-2369dab99593	kernel/core/src/sched/sched.rs	grq_current_fp	2652	asm	INV:INV-SCE-3
-660fb9c7fcd1	kernel/core/src/sched/sched.rs	grq_current_fp	2657	asm	INV:INV-SCE-3
-8ade5260f3e0	kernel/core/src/sched/sched.rs	clear_trap_scratch	3967	asm	INV:INV-SCE-10
-38f7c039868a	kernel/core/src/sched/sched.rs	init	4000		INV:INV-SCE-4
-b717386984cd	kernel/core/src/sched/sched.rs	alloc_task_slot	4155	ptr-ops	INV:INV-TL-1
-f1b6c33e09bb	kernel/core/src/sched/sched.rs	alloc_task_slot	4165	ptr-ops	INV:INV-TL-1
-e3556ee47f83	kernel/core/src/sched/sched.rs	alloc_task_slot	4172		INV:INV-TL-1
-47ece0eaa764	kernel/core/src/sched/sched.rs	free_task_slot	4584		INV:INV-TL-2
-631cc192226e	kernel/core/src/sched/sched.rs	free_task_slot	4597	volatile,ptr-ops	GAP
-faf9a423bd9f	kernel/core/src/sched/sched.rs	scheduler_tick	7499	volatile,ptr-ops	INV:INV-SCE-1
-c6407362f24a	kernel/core/src/sched/sched.rs	idle_guard_sp	9115	asm	INV:INV-SCE-1
-f49e5332f417	kernel/core/src/sched/sched.rs	idle_guard_sp	9122	asm	INV:INV-SCE-1
-3ebd4a0ae3db	kernel/core/src/sched/sched.rs	idle_guard_sp	9129	asm	INV:INV-SCE-1
+d0e3ad9d40cd	kernel/core/src/sched/hotpath.rs	task	3140		INV:INV-SCE-2
+4405781e4629	kernel/core/src/sched/hotpath.rs	<module>	3171		INV:INV-RD-CLAIM
+f87e25390061	kernel/core/src/sched/hotpath.rs	<module>	5620		INV:INV-SENDSYNC-1
+c79b33f13d4f	kernel/core/src/sched/hotpath.rs	grq_current_fp	6084	asm	INV:INV-SCE-3
+c2e2172c221f	kernel/core/src/sched/hotpath.rs	grq_current_fp	6089	asm	INV:INV-SCE-3
+3e0709ca40ff	kernel/core/src/sched/hotpath.rs	grq_current_fp	6094	asm	INV:INV-SCE-3
+2ba80962d86a	kernel/core/src/sched/hotpath.rs	clear_trap_scratch	7401	asm	INV:INV-SCE-10
+d11d0bc6c937	kernel/core/src/sched/hotpath.rs	init	7434		INV:INV-SCE-4
+4be52eaa7455	kernel/core/src/sched/hotpath.rs	alloc_task_slot	7589	ptr-ops	INV:INV-TL-1
+ec8d090e5f5c	kernel/core/src/sched/hotpath.rs	alloc_task_slot	7599	ptr-ops	INV:INV-TL-1
+018d0a73c2ef	kernel/core/src/sched/hotpath.rs	alloc_task_slot	7606		INV:INV-TL-1
+233ea92ad9fc	kernel/core/src/sched/hotpath.rs	free_task_slot	8018		INV:INV-TL-2
+4cc09ac957f5	kernel/core/src/sched/hotpath.rs	free_task_slot	8031	volatile,ptr-ops	GAP
+e5e9604b1a44	kernel/core/src/sched/hotpath.rs	scheduler_tick	10931	volatile,ptr-ops	INV:INV-SCE-1
+a3b9f6d66557	kernel/core/src/sched/hotpath.rs	idle_guard_sp	12547	asm	INV:INV-SCE-1
+38e77e20c54f	kernel/core/src/sched/hotpath.rs	idle_guard_sp	12554	asm	INV:INV-SCE-1
+9013c4d1ac95	kernel/core/src/sched/hotpath.rs	idle_guard_sp	12561	asm	INV:INV-SCE-1
 32b7c5cbc3b4	kernel/core/src/sched/unsafe.rs	idle_task_ptr	53		INV:INV-SCE-4
 e60b37709add	kernel/core/src/sched/unsafe.rs	idle_task_storage_base	62		INV:INV-SCE-4
 e0cbddd56e69	kernel/core/src/sched/unsafe.rs	task_mut	92		INV:INV-SCE-1
@@ -1762,8 +1762,8 @@ c8ee81d524b2	kernel/core/src/sched/unsafe.rs	per_cpu_mut	1173		INV:INV-SCE-10
 3c7ba3cdf4cf	kernel/core/src/sched/unsafe.rs	secondary_idle_publish	1190		INV:INV-SCE-4
 716cc69baac7	kernel/core/src/sched/unsafe.rs	secondary_idle_table_base	1197		INV:INV-SCE-4
 454df1c16a83	kernel/core/src/sched/unsafe.rs	secondary_idle_task	1203		INV:INV-SCE-4
-268a38228591	kernel/core/src/sched/unsafe.rs	<module>	1230		GAP
-a5e8f2be8eba	kernel/core/src/sched/unsafe.rs	<module>	1232		GAP
+1e1b6cf41dc4	kernel/core/src/sched/unsafe.rs	<module>	1230		GAP
+664bbf5753e9	kernel/core/src/sched/unsafe.rs	<module>	1232		GAP
 d1096a2a47c2	kernel/core/src/sched/unsafe.rs	evring_slot_mut	1250		INV:INV-SCHED-EVRING-1
 5ec0131706a1	kernel/core/src/sched/unsafe.rs	evring_slot_ref	1265		INV:INV-SCHED-EVRING-1
 794fb5e978ec	kernel/core/src/sched/unsafe.rs	<module>	1283		GAP
@@ -1860,7 +1860,7 @@ cb061c367765	kernel/core/src/sync/seqlock.rs	deref	237		INV:INV-SEQLOCK-1
 18c6f8017495	kernel/core/src/sync/spinlock.rs	caller_return_address	186	asm	INV:INV-SPIN-1
 4129a8e40be3	kernel/core/src/sync/spinlock.rs	deadlock_warn	531		INV:INV-SPIN-1
 52be73333847	kernel/core/src/sync/spinlock.rs	deadlock_warn	561		INV:INV-SPIN-1
-feffd54857a5	kernel/core/src/sync/spinlock.rs	deadlock_warn	581		INV:INV-SPIN-1
+b03fabb0d205	kernel/core/src/sync/spinlock.rs	deadlock_warn	581		INV:INV-SPIN-1
 d1fa26daed5e	kernel/core/src/sync/spinlock.rs	deadlock_warn	584		INV:INV-SPIN-1
 293fb6233756	kernel/core/src/sync/spinlock.rs	deadlock_warn	591		INV:INV-SPIN-1
 face59f815a2	kernel/core/src/sync/spinlock.rs	deadlock_warn	606		INV:INV-SPIN-1
@@ -1945,8 +1945,8 @@ c8edb5d94463	kernel/core/src/tests/reparent_safety.rs	test_claim_child	182		INV:
 5ba636e27bf2	kernel/core/src/tests/reparent_safety.rs	test_megapage_demotion	384		INV:INV-TESTHARNESS-1
 aef76bd7e6bc	kernel/core/src/tests/safety_primitives.rs	test_safety_primitives	53		INV:INV-KPTR-4
 848f37f7679c	kernel/core/src/tests/safety_primitives.rs	test_safety_primitives_frame_run	345	volatile	GAP
-a82d30e116ba	kernel/core/src/tests/scheduler.rs	test_scheduler	50		INV:INV-TESTHARNESS-1
-1fe525b135c3	kernel/core/src/tests/scheduler.rs	test_scheduler	58		INV:INV-TESTHARNESS-1
+ec20757f6f4e	kernel/core/src/tests/scheduler.rs	test_scheduler	50		INV:INV-TESTHARNESS-1
+d5288bdbe88e	kernel/core/src/tests/scheduler.rs	test_scheduler	58		INV:INV-TESTHARNESS-1
 182e73be54f8	kernel/core/src/tests/small_alloc.rs	test_small_alloc	62	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 0c2d61732312	kernel/core/src/tests/small_alloc.rs	test_small_alloc	80	volatile,ptr-ops	INV:INV-TESTHARNESS-1
 50de66e4791a	kernel/core/src/tests/small_alloc.rs	test_small_alloc	110	volatile,ptr-ops	INV:INV-TESTHARNESS-1

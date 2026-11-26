@@ -352,7 +352,7 @@ pub fn note_alloc(ptr: *mut u8, heap_start: usize, size: usize, frames: &[u64; S
         let pos = BIG_RING_POS.fetch_add(1, Ordering::Relaxed) % 32;
         BIG_RING[pos].size.store(size, Ordering::Relaxed);
         BIG_RING[pos].ptr.store(ptr as usize, Ordering::Relaxed);
-        BIG_RING[pos].pid.store(crate::sched::get_current_pid() as usize, Ordering::Relaxed);
+        BIG_RING[pos].pid.store(crate::sched::hotpath::get_current_pid() as usize, Ordering::Relaxed);
         for i in 0..4.min(frames.len()) {
             BIG_RING[pos].frames[i].store(frames[i] as usize, Ordering::Relaxed);
         }

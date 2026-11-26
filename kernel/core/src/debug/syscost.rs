@@ -814,7 +814,7 @@ fn pr_slot() -> Option<&'static PrSlot> {
     let comm: [u8; 16] = if irq_ctx {
         *b"<irq>\0\0\0\0\0\0\0\0\0\0\0"
     } else {
-        match crate::sched::current() {
+        match crate::sched::hotpath::current() {
             Some(t) => *t.comm(),
             None => *b"<nointask>\0\0\0\0\0\0",
         }
@@ -963,7 +963,7 @@ pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
     if !on() {
         return;
     }
-    let comm: [u8; 16] = match crate::sched::current() {
+    let comm: [u8; 16] = match crate::sched::hotpath::current() {
         Some(t) => *t.comm(),
         None => return,
     };
@@ -1060,7 +1060,7 @@ pub fn note_read_fail(fd: usize, ret: i64) {
     if !on() {
         return;
     }
-    let comm: [u8; 16] = match crate::sched::current() {
+    let comm: [u8; 16] = match crate::sched::hotpath::current() {
         Some(t) => *t.comm(),
         None => return,
     };
@@ -1186,7 +1186,7 @@ pub fn note_errno(nr: usize, ret: i64, a0: u64, a1: u64) {
     // Create phase: claim the first free cell (a racy double-claim only
     // wastes a slot; the count stays right because the loser matches on
     // the next call).
-    let comm: [u8; 16] = match crate::sched::current() {
+    let comm: [u8; 16] = match crate::sched::hotpath::current() {
         // SAFETY: current task; comm is a fixed-size field.
         Some(t) => *t.comm(),
         None => [0; 16],
@@ -1232,7 +1232,7 @@ pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
     if !on() {
         return;
     }
-    let comm: [u8; 16] = match crate::sched::current() {
+    let comm: [u8; 16] = match crate::sched::hotpath::current() {
         // SAFETY: current task; comm is a fixed-size field.
         Some(t) => *t.comm(),
         None => return,
@@ -1337,7 +1337,7 @@ pub fn note_read_eof(file: &crate::fs::File) {
     if !on() {
         return;
     }
-    let comm: [u8; 16] = match crate::sched::current() {
+    let comm: [u8; 16] = match crate::sched::hotpath::current() {
         // SAFETY: current task; comm is a fixed-size field.
         Some(t) => *t.comm(),
         None => return,
@@ -1389,7 +1389,7 @@ pub fn note_read_eof(file: &crate::fs::File) {
 /// note_read_eof (pipe/sockets never reach the generic EOF census).
 pub fn note_read_eagain(file: &crate::fs::File) {
     use core::sync::atomic::Ordering::Relaxed;
-    let comm: [u8; 16] = match crate::sched::current() {
+    let comm: [u8; 16] = match crate::sched::hotpath::current() {
         // SAFETY: current task; comm is a fixed-size field.
         Some(t) => *t.comm(),
         None => return,
@@ -1464,7 +1464,7 @@ fn flood_account(nr: usize) {
         Some(i) => i,
         None => return,
     };
-    let comm: &[u8; 16] = match crate::sched::current() {
+    let comm: &[u8; 16] = match crate::sched::hotpath::current() {
         Some(t) => t.comm(),
         None => return,
     };
@@ -1527,7 +1527,7 @@ pub fn exit(nr: usize, t0: Option<u64>) {
         let i = SLOW_IDX.fetch_add(1, Ordering::Relaxed) % SLOW_RING;
         SLOW[i].nr.store(nr as u64, Ordering::Relaxed);
         SLOW[i].cyc.store(dt, Ordering::Relaxed);
-        if let Some(t) = crate::sched::current() {
+        if let Some(t) = crate::sched::hotpath::current() {
             let c = *t.comm();
             for j in 0..16 {
                 SLOW[i].comm[j].store(c[j], Ordering::Relaxed);
@@ -1577,7 +1577,7 @@ pub fn tick_idle() {
 /// whole boot crowd shares one table).
 #[inline]
 fn rip_sample(rip: u64) {
-    let (lo, hi) = crate::sched::sched::kernel_text_window();
+    let (lo, hi) = crate::sched::hotpath::kernel_text_window();
     if rip < lo || rip >= hi {
         return;
     }

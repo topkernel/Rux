@@ -313,7 +313,7 @@ fn fault_in_write(start: *mut u8, len: usize) -> bool {
     use crate::arch::mm::PageTableEntry;
     use crate::arch::mm::mm_ops::PageTableWalker;
 
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return false,
     };

@@ -615,8 +615,8 @@ impl BuddyAllocator {
                 // probe read a table nobody wrote and never fired), so the
                 // event is also recorded with a caller backtrace for the
                 // deferred audit printer in rux:scribble (retired debug=scribble) mode.
-                if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
-                    && crate::sched::sched::task_page_is_owned(addr as *const u8)
+                if !crate::sched::hotpath::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
+                    && crate::sched::hotpath::task_page_is_owned(addr as *const u8)
                 {
                     // R69: also record the event with a caller backtrace
                     // for the deferred audit printer (rux:scribble (retired debug=scribble),
@@ -1045,8 +1045,8 @@ impl BuddyAllocator {
         // IN_TASK_FREE marks the legitimate release path.
         #[cfg(feature = "x86_64")]
         if crate::trace::EVENT_SCRIBBLE.armed()
-            && !crate::sched::sched::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
-            && crate::sched::sched::task_page_is_owned(ptr)
+            && !crate::sched::hotpath::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
+            && crate::sched::hotpath::task_page_is_owned(ptr)
         {
             let frames = crate::debug::scribble::audit_frames();
             crate::debug::scribble::audit_record(

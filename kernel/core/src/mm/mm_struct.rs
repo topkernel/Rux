@@ -1440,7 +1440,7 @@ impl Drop for MmStruct {
             // refcount itself is corrupt — the real UAF signal).
             {
                 let owner = self.owner_pid();
-                let cur = crate::sched::get_current_pid() as i32;
+                let cur = crate::sched::hotpath::get_current_pid() as i32;
                 let owner_live = crate::process::find_task_by_pid(owner as u32)
                     .map(|t| {
                         let st = t.state();

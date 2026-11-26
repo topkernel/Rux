@@ -126,7 +126,7 @@ impl MsgQueue {
 // ============================================================================
 
 fn get_current_pid() -> u32 {
-    crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
+    crate::sched::hotpath::current().map(|t| t.pid() as u32).unwrap_or(0)
 }
 
 static MSG_IDS: IpcIds<MsgQueue> = IpcIds::new();
@@ -275,7 +275,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
-                    let cred = crate::sched::current().map(|t| t.cred());
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
                             c.euid == entry.inner.perm.uid
@@ -359,7 +359,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
-                    let cred = crate::sched::current().map(|t| t.cred());
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
                             c.euid == entry.inner.perm.uid
@@ -699,7 +699,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 if entry.deleted {
                     return -(errno::EIDRM as i64);
                 }
-                let current = match crate::sched::current() {
+                let current = match crate::sched::hotpath::current() {
                     Some(t) => t,
                     None => return -(errno::ESRCH as i64),
                 };
@@ -742,7 +742,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 }
             }
             if sent {
-                let current = crate::sched::current().unwrap();
+                let current = crate::sched::hotpath::current().unwrap();
                 {
                     let slots = MSG_IDS.slots.lock();
                     if let Some(ref entry) = slots[idx] {
@@ -754,7 +754,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 current.set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 return 0;
             }
         }
@@ -762,7 +762,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
         // R22-1: signal delivered while still RUNNING → no wakeup; recheck
         // or the blocked send/receive is unkillable.
         if crate::signal::signal_pending() {
-            let cur = crate::sched::current().unwrap();
+            let cur = crate::sched::hotpath::current().unwrap();
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
@@ -771,14 +771,14 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                 }
             }
             (*cur).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
-            crate::sched::dequeue_task(&*cur);
+            crate::sched::hotpath::dequeue_task(&*cur);
             return -(errno::EINTR as i64);
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         // Clean up wait queue entry after wakeup
         {
-            let current = crate::sched::current().unwrap();
+            let current = crate::sched::hotpath::current().unwrap();
             let slots = MSG_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 entry.inner.wq_send.remove(current as *mut _);
@@ -938,7 +938,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 if entry.deleted {
                     return -(errno::EIDRM as i64);
                 }
-                let current = match crate::sched::current() {
+                let current = match crate::sched::hotpath::current() {
                     Some(t) => t,
                     None => return -(errno::ESRCH as i64),
                 };
@@ -968,7 +968,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 }
             }
             if retry_now {
-                let current = crate::sched::current().unwrap();
+                let current = crate::sched::hotpath::current().unwrap();
                 {
                     let slots = MSG_IDS.slots.lock();
                     if let Some(ref entry) = slots[idx] {
@@ -980,7 +980,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 current.set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 continue;
             }
         }
@@ -988,7 +988,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
         // R22-1: signal delivered while still RUNNING → no wakeup; recheck
         // or the blocked send/receive is unkillable.
         if crate::signal::signal_pending() {
-            let cur = crate::sched::current().unwrap();
+            let cur = crate::sched::hotpath::current().unwrap();
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
@@ -997,14 +997,14 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 }
             }
             (*cur).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
-            crate::sched::dequeue_task(&*cur);
+            crate::sched::hotpath::dequeue_task(&*cur);
             return -(errno::EINTR as i64);
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         // Clean up wait queue entry after wakeup
         {
-            let current = crate::sched::current().unwrap();
+            let current = crate::sched::hotpath::current().unwrap();
             let slots = MSG_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 entry.inner.wq_recv.remove(current as *mut _);

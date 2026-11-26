@@ -498,7 +498,7 @@ pub fn handle_fasteoi_irq(irq: u32) {
             desc.pending.store(true, Ordering::Release);
             // Set once at spawn, never cleared; wake_up_process takes the
             // raw handle (sched's own audited contract).
-            crate::sched::wake_up_process(tp as *mut Task);
+            crate::sched::hotpath::wake_up_process(tp as *mut Task);
             return;
         }
         // The thread has not spawned (registration raced the IRQ): run
@@ -603,13 +603,13 @@ extern "C" fn irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
         }
         // Park: the kthread owns itself — the scheduler's current()
         // handle is this thread's task.
-        let Some(cur) = crate::sched::current() else { return 0 };
+        let Some(cur) = crate::sched::hotpath::current() else { return 0 };
         cur.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         if desc.pending.swap(false, Ordering::AcqRel) {
             cur.set_state(TaskState::new(TaskState::RUNNING));
             continue;
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
     0
 }
@@ -626,7 +626,7 @@ fn irq_thread_wake(irq: u32) {
     }
     // Set once at spawn and never cleared; the raw-handle wake is
     // sched's audited contract.
-    crate::sched::wake_up_process(ptr as *mut Task);
+    crate::sched::hotpath::wake_up_process(ptr as *mut Task);
 }
 
 /// Spawn the per-IRQ thread (called from request_irq's first-action arm
@@ -675,7 +675,7 @@ fn irq_thread_spawn(irq: u32, name: &'static str) {
         irq as *mut core::ffi::c_void,
         tname,
     ) {
-        crate::sched::sched::change_task_policy(
+        crate::sched::hotpath::change_task_policy(
             t,
             crate::process::task::SchedPolicy::Fifo,
             50,

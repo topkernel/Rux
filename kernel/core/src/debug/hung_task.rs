@@ -78,7 +78,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // tasks were detected minutes late or never). Mirror the
         // nanosleep_impl state-first discipline: arm a one-shot timer for
         // our pid, mark INTERRUPTIBLE, re-check, then sleep.
-        let my_pid = match crate::sched::current() {
+        let my_pid = match crate::sched::hotpath::current() {
             Some(t) => t.pid(),
             None => break,
         };
@@ -89,22 +89,22 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             // Re-derived running-task borrows (never held across
             // schedule() below — the discipline that replaces the raw
             // pointer this loop carried).
-            crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
+            crate::sched::hotpath::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
             // Re-check AFTER marking sleeping: the one-shot timer may have
             // fired between arming and set_state — either its wake captured
             // the INTERRUPTIBLE state, or the deadline is already visible.
             if crate::timer::get_jiffies() >= target {
-                if let Some(t) = crate::sched::current() {
+                if let Some(t) = crate::sched::hotpath::current() {
                     t.set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while we
                     // are still executing — take ourselves back off.
-                    crate::sched::dequeue_task(t);
+                    crate::sched::hotpath::dequeue_task(t);
                 }
                 crate::timer::del_timer(timer_id);
             } else {
                 // Enable interrupts so the tick can reach us, then sleep.
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 // Spurious wake before the deadline: drop the timer and
                 // loop (re-armed next iteration).
                 if crate::timer::timer_pending(timer_id) {
@@ -114,7 +114,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         } else {
             // Timer table full — stay runnable, yield one scheduling round
             // and retry the arm.
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
         }
 
         // Scan all tasks
@@ -147,7 +147,7 @@ fn check_tasks() {
     let now = now_ns();
     let timeout_ns = HUNG_TASK_TIMEOUT_SECS * 1_000_000_000;
 
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         // The walk hands &Task under the bucket lock; reads and atomic
         // stores on the task's own hung_task_since field only.
         {

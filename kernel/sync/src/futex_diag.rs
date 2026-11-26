@@ -131,7 +131,7 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
                         let t = crate::sched::r#unsafe::task_shared(w.task).pid();
                         let live = core::ptr::eq(
                             // SAFETY: diagnostic pid-hash lookup.
-                            crate::sched::find_task_by_pid(t),
+                            crate::sched::hotpath::find_task_by_pid(t),
                             w.task,
                         );
                         let hit = live && (crate::sched::r#unsafe::task_shared(w.task).tgid() as u32 == tgid);
@@ -923,7 +923,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
     let hi = lock + 0x28;
     let mut out = alloc::string::String::new();
     let mut scanned_regions = 0usize;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         if scanned_regions > 0 {
             return;
         }
@@ -1221,7 +1221,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
     }
     let mut out = alloc::string::String::new();
     let mut done = false;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: diagnostic read-only walk under the for_each contract.
         let tk = crate::sched::r#unsafe::task_shared(task);
         if done || tk.tgid() as u32 != tgid {
@@ -1469,7 +1469,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
         OH68_ROOT.store(0, Relaxed);
         OH68_ROOT_TGID.store(tgid, Relaxed);
     }
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         if OH68_ROOT.load(Relaxed) != 0 {
             return;
         }
@@ -1500,7 +1500,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     let mut exec_vmas: alloc::vec::Vec<(u64, u64, u64, alloc::string::String)> =
         alloc::vec::Vec::new();
     if root != 0 {
-        crate::sched::for_each_task_try(|task| {
+        crate::sched::hotpath::for_each_task_try(|task| {
             if !exec_vmas.is_empty() || exec_vmas.len() >= 48 {
                 return;
             }
@@ -1552,7 +1552,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     // Worker sweep: every thread's ctx->task. Thread-mode holders show
     // task != 0; the park word for a ThreadWait is ctx+224 (wn.cv+8).
     let mut swept = 0u32;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         if swept >= 24 {
             return;
         }
@@ -1749,7 +1749,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                 if let Some(rip) = rd(co + 24 + 56) {
                     if word_off(rip).is_none() {
                         let mut named = false;
-                        crate::sched::for_each_task_try(|task| {
+                        crate::sched::hotpath::for_each_task_try(|task| {
                             if named {
                                 return;
                             }
@@ -2283,7 +2283,7 @@ pub fn sqwalk_slice() {
         alloc::vec::Vec::new();
     // non-exec RW regions, (start,end), ascending insertion
     let mut regions: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
         let tk = crate::sched::r#unsafe::task_shared(task);
         if root != 0 || tk.tgid() as u32 != tgid {
@@ -2425,7 +2425,7 @@ pub fn sqwalk_slice() {
                         // Once per 8 hits (the same stack repeats).
                         if SQW_RAWHITS.load(Relaxed) % 8 == 1 {
                             let hit = rcur;
-                            crate::sched::for_each_task_try(|t| {
+                            crate::sched::hotpath::for_each_task_try(|t| {
                                 // SAFETY: diagnostic read, pt_regs only.
                                 let tk = crate::sched::r#unsafe::task_shared(t);
                                 if tk.tgid() as u32 != tgid {
@@ -2976,7 +2976,7 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
     // every mutexPrivate of that .so).
     let mut sig: u64 = 0;
     let mut root: u64 = 0;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
         let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid || sig != 0 {
@@ -3011,7 +3011,7 @@ pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String 
     let mut found = HM_FOUND.load(Relaxed) as usize;
     let mut scanned: u64 = 0;
     let mut finished = true;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: walker-only reads of the tgid's frozen mm.
         let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
@@ -3123,7 +3123,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
     // (common values across threads name the container base).
     let lo = lock.saturating_sub(0x180);
     let hi = lock + 0x28;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = crate::sched::r#unsafe::task_shared(task);
         if tk.tgid() as u32 != tgid {
@@ -3331,7 +3331,7 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
     // page walk must not take pid-hash locks; PageTableWalker does not).
     let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
     if uaddr != 0 && tgid == RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed) {
-        let t = crate::sched::find_task_by_pid(pid);
+        let t = crate::sched::hotpath::find_task_by_pid(pid);
         if !t.is_null() {
             let tk = crate::sched::r#unsafe::task_shared(t);
             let comm = tk.comm();
@@ -3400,7 +3400,7 @@ pub fn kill_dump_tgid(tgid: u32) {
     // (sc244, t=1466, pidmax 4834). try_pin under the bucket lock is
     // the documented pin discipline; task_put at the end.
     let threads_cell = core::cell::RefCell::new(alloc::vec::Vec::<*mut Task>::new());
-    crate::sched::for_each_task(|t| {
+    crate::sched::hotpath::for_each_task(|t| {
         if t.tgid() as u32 == tgid {
             let t = t as *const Task as *mut Task;
             if crate::process::task::Task::try_pin(t) {
@@ -3578,7 +3578,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     // busy loop) or the task burns kernel time in a non-sleeping loop, or
     // it was set runnable but never linked/scheduled (wake-loss family).
     // utime vs stime names the burn mode; tiny both = never scheduled.
-    let linked = match crate::sched::sched::grq_diag_cfs_linked(t) {
+    let linked = match crate::sched::hotpath::grq_diag_cfs_linked(t) {
         Some(b) => {
             if b { "1" } else { "0" }
         }
@@ -3712,7 +3712,7 @@ fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                             if pipe_ptr != 0 {
                                 let holders_cell =
                                     core::cell::RefCell::new(alloc::string::String::new());
-                                crate::sched::for_each_task(|ht| {
+                                crate::sched::hotpath::for_each_task(|ht| {
                                     let hk = crate::sched::r#unsafe::task_shared(ht);
                                     if hk.pid() == 0 {
                                         return;
@@ -3883,7 +3883,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
     // soft-locked CPU#1 for 10 s+ and killed the console mid-print.
     // for_each_task_try is the diagnostic contract the oh68 sweeps use
     // (no bucket lock held across the walk).
-    crate::sched::for_each_task_try(|t| {
+    crate::sched::hotpath::for_each_task_try(|t| {
         if hits >= 24 {
             return;
         }
@@ -4005,7 +4005,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         let mut v_rec: Option<u64> = None;
         let mut v_stuck: Option<(u64, u64, u64)> = None;
         let musl = musl_anchor(tgid);
-        crate::sched::for_each_task_try(|t| {
+        crate::sched::hotpath::for_each_task_try(|t| {
             if rows >= 24 {
                 return;
             }
@@ -4162,7 +4162,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
 ///                                  waiters' saved rip lands here)
 pub fn musl_anchor(tgid: u32) -> Option<(u64, u64)> {
     let mut anchor: Option<(u64, u64)> = None;
-    crate::sched::for_each_task_try(|task| {
+    crate::sched::hotpath::for_each_task_try(|task| {
         if anchor.is_some() {
             return;
         }
@@ -4235,7 +4235,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
     let mut verdict_recursive: Option<u64> = None;
     let mut verdict_stuck: Option<(u64, u64, u64)> = None;
     let musl = musl_anchor(tgid);
-    crate::sched::for_each_task_try(|t| {
+    crate::sched::hotpath::for_each_task_try(|t| {
         if rows >= 24 {
             return;
         }
@@ -4451,7 +4451,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
     {
         // Phase 0: any same-tgid root (address spaces are shared).
         let mut root: u64 = 0;
-        crate::sched::for_each_task_try(|task| {
+        crate::sched::hotpath::for_each_task_try(|task| {
             if root != 0 {
                 return;
             }
@@ -4478,7 +4478,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
         // task's map (all threads share it).
         let mut exec_vmas: alloc::vec::Vec<(u64, u64, u64, alloc::string::String)> =
             alloc::vec::Vec::new();
-        crate::sched::for_each_task_try(|task| {
+        crate::sched::hotpath::for_each_task_try(|task| {
             if !exec_vmas.is_empty() {
                 return;
             }
@@ -4569,7 +4569,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
         let mut anchors: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
         let mut nthreads = 0u32;
         let mut alloc_rip_tids: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
-        crate::sched::for_each_task_try(|task| {
+        crate::sched::hotpath::for_each_task_try(|task| {
             if nthreads >= 40 {
                 return;
             }
@@ -4990,7 +4990,7 @@ fn waiter_clusters(min: usize) -> alloc::vec::Vec<WordCluster> {
                         let t = w.task;
                         let pid = crate::sched::r#unsafe::task_shared(t).pid();
                         let live = core::ptr::eq(
-                            crate::sched::find_task_by_pid(pid),
+                            crate::sched::hotpath::find_task_by_pid(pid),
                             t,
                         );
                         if live {
@@ -5140,7 +5140,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             // The process name: the tgid leader's comm
                             // (thread comms like 'pool-spawner' name the
                             // GLib role, the leader names the daemon).
-                            let lead = crate::sched::find_task_by_pid(c.tgid);
+                            let lead = crate::sched::hotpath::find_task_by_pid(c.tgid);
                             let leader_comm = if lead.is_null() {
                                 "?"
                             } else {
@@ -5562,7 +5562,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     {
         let seen_cell: core::cell::RefCell<(usize, [u32; 64])> =
             core::cell::RefCell::new((0, [0; 64]));
-        crate::sched::for_each_task(|t| {
+        crate::sched::hotpath::for_each_task(|t| {
             // SAFETY: callback runs under the pid-hash bucket lock (same
             // contract as sleep_snapshot); reads confined to pid fields.
             let tk = crate::sched::r#unsafe::task_shared(t);
@@ -5763,7 +5763,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
     const FUTEX_SYSNO: u64 = 98;
     #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
     const FUTEX_SYSNO: u64 = 0;
-    crate::sched::for_each_task(|t| {
+    crate::sched::hotpath::for_each_task(|t| {
         // SAFETY: same contract as rwfz_dump_tgid (pid-hash walk, reads
         // confined to the pt-regs entry frame).
         let tk = crate::sched::r#unsafe::task_shared(t);
@@ -5900,7 +5900,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
 /// byte-verified user-stack frames per thread). Pure diagnostics.
 pub fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
     let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
-    crate::sched::for_each_task(|t| {
+    crate::sched::hotpath::for_each_task(|t| {
         // SAFETY: same contract as sleep_snapshot.
         let tk = crate::sched::r#unsafe::task_shared(t);
         if tk.tgid() as u32 != tgid || count_cell.get() >= max_tasks {

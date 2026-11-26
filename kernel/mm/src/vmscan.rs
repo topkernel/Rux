@@ -308,7 +308,7 @@ pub fn balance_pgdat(order: i32) -> usize {
         // holder completed rounds for minutes after the OOM kill).
         // kswapd shares this entry point and is never "dying" short of
         // kthread_stop.
-        if crate::sched::current_is_dying() {
+        if crate::sched::hotpath::current_is_dying() {
             break;
         }
         sc.priority = priority;
@@ -410,7 +410,7 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
         // burned minutes on the wedge boots — unwind on a fatal signal
         // (kthreads are never "dying" short of kthread_stop, so kswapd's
         // shared entry here is unaffected).
-        if crate::sched::current_is_dying() {
+        if crate::sched::hotpath::current_is_dying() {
             break;
         }
         passes += 1;

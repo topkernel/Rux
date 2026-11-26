@@ -1741,7 +1741,7 @@ fn prime_handle_to_fd(arg: usize, size: usize) -> i64 {
     };
     let Some(gem) = gem else { return -22 };
 
-    let fdt = match crate::sched::get_current_fdtable() {
+    let fdt = match crate::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => return -9,
     };
@@ -2337,7 +2337,7 @@ fn sleep_until_ns(deadline_ns: u64) -> bool {
     if crate::drivers::timer::monotonic_ns_since_boot() >= deadline_ns {
         return true;
     }
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return true,
     };
@@ -2360,17 +2360,17 @@ fn sleep_until_ns(deadline_ns: u64) -> bool {
             current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             if crate::drivers::timer::get_jiffies() >= target {
                 current.set_state(TaskState::new(TaskState::RUNNING));
-                crate::sched::dequeue_task(current);
+                crate::sched::hotpath::dequeue_task(current);
                 crate::timer::del_timer(timer_id);
             } else {
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 if crate::timer::timer_pending(timer_id) {
                     crate::timer::del_timer(timer_id);
                 }
             }
         } else {
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
         }
     }
 }

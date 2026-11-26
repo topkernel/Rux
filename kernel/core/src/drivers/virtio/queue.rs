@@ -660,7 +660,7 @@ pub fn notify(&self) {
         // use synchronous polling with a large timeout (matching the MMIO
         // path's budget). The normal path relies on interrupt-driven wakeup
         // with a 10s wall-clock deadline.
-        let is_early_boot = match crate::sched::current() {
+        let is_early_boot = match crate::sched::hotpath::current() {
             Some(task) if task.pid() != 0 => false,
             _ => true,
         };
@@ -750,7 +750,7 @@ pub fn notify(&self) {
         if !poll_only {
             deadline = crate::drivers::timer::get_jiffies()
                 .saturating_add(crate::drivers::timer::msecs_to_jiffies(10_000));
-            let pid = crate::sched::get_current_pid();
+            let pid = crate::sched::hotpath::get_current_pid();
             deadline_timer = crate::timer::add_timer_wakeup(deadline, pid);
             if deadline_timer == 0 {
                 poll_fallback = true;
@@ -834,7 +834,7 @@ pub fn notify(&self) {
                 // Normal path: get current task and sleep on wait queue.
                 // The idle task has SchedPolicy::Idle which enqueue_task() ignores,
                 // so sleeping would be a permanent deadlock.
-                let current = match crate::sched::current() {
+                let current = match crate::sched::hotpath::current() {
                     Some(task) if task.pid() != 0 => task,
                     _ => {
                         core::hint::spin_loop();
@@ -911,7 +911,7 @@ pub fn notify(&self) {
                     // racing fire may have enqueued us between prepare and
                     // finish — take ourselves back off the GRQ or nr_running
                     // stays inflated until our next context switch.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     break 'wait_done used_ring_idx(used_ring);
                 }
 
@@ -924,7 +924,7 @@ pub fn notify(&self) {
                 {
                     wait_queue.finish_wait(current);
                     // Same R36-B2 compensation as above.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     // Final chance: a lost KICK (quiet batch submit nobody
                     // drained) recovers here — kick and walk once, then
                     // re-check before reporting the timeout sentinel.
@@ -944,7 +944,7 @@ break 'wait_done prev_used;
                 if poll_fallback {
                     // Re-arm a 1-jiffy wake so the deadline check above runs
                     // every jiffy even without a completion wake.
-                    let pid = crate::sched::get_current_pid();
+                    let pid = crate::sched::hotpath::get_current_pid();
                     let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
                     let id = crate::timer::add_timer_wakeup(dl, pid);
                     if id != 0 {
@@ -953,7 +953,7 @@ break 'wait_done prev_used;
                         // discipline) so ticks/IPIs reach this CPU across the
                         // wait loop.
                         crate::arch::cpu::restore_irq(true);
-                        crate::sched::schedule();
+                        crate::sched::hotpath::schedule();
                         VW_WAIT_SCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         crate::timer::del_timer(id);
                     } else {
@@ -983,14 +983,14 @@ break 'wait_done prev_used;
                     // degrades to the old behavior (wait-queue + 10s
                     // deadline) — never worse than before.
                     let rid = {
-                        let pid = crate::sched::get_current_pid();
+                        let pid = crate::sched::hotpath::get_current_pid();
                         let at = crate::drivers::timer::get_jiffies().saturating_add(
                             crate::drivers::timer::msecs_to_jiffies(SLEEP_RECOVER_MS),
                         );
                         crate::timer::add_timer_wakeup(at, pid)
                     };
                     crate::arch::cpu::restore_irq(true);
-                    crate::sched::schedule();
+                    crate::sched::hotpath::schedule();
                     VW_WAIT_SCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if rid != 0 {
                         crate::timer::del_timer(rid);
@@ -1057,7 +1057,7 @@ break 'wait_done prev_used;
         }
 
         // Detect early boot phase (same logic as wait_for_used_interruptible)
-        let is_early_boot = match crate::sched::current() {
+        let is_early_boot = match crate::sched::hotpath::current() {
             Some(task) if task.pid() != 0 => false,
             _ => true,
         };
@@ -1092,7 +1092,7 @@ break 'wait_done prev_used;
             }
 
             // Normal path: check scheduler availability
-            let current = match crate::sched::current() {
+            let current = match crate::sched::hotpath::current() {
                 Some(task) if task.pid() != 0 => task,
                 _ => {
                     core::hint::spin_loop();
@@ -1122,7 +1122,7 @@ break 'wait_done prev_used;
                     // while we never slept — take ourselves back off the GRQ
                     // or nr_running stays inflated until our next context
                     // switch. dequeue_task is a no-op when nothing enqueued us.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::hotpath::dequeue_task(&*current);
                     return true;
                 }
                 si = si.wrapping_add(1);
@@ -1131,7 +1131,7 @@ break 'wait_done prev_used;
             // Sleep until woken by interrupt
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             wait_queue.finish_wait(current);
         }
 

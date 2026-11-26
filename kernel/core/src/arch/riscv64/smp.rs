@@ -299,7 +299,7 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     }
 
     // Boot CPU has finished init — safe to call kmalloc now.
-    crate::sched::init_secondary(hart_id);
+    crate::sched::hotpath::init_secondary(hart_id);
 
     // Now that PER_CPU[hart] is published, this hart may take
     // interrupts and enter the scheduler (R87: enabling the timer
@@ -320,7 +320,7 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     crate::arch::ipi::per_hart_enable_ssoftware();
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
-    crate::sched::cpu_idle_loop();
+    crate::sched::hotpath::cpu_idle_loop();
 }
 
 pub fn num_started_cpus() -> usize {

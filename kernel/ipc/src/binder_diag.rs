@@ -555,7 +555,7 @@ pub fn sleep_snapshot() {
     static UFW_GEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     let ufw_gen = UFW_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) & 0xff;
     use core::fmt::Write as _;
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         // Callback runs under the pid-hash bucket lock (same contract
         // as hung_task's check_tasks); reads are confined to the task's
         // own fields and its mapped kernel stack. oh67_poll_decode
@@ -1411,7 +1411,7 @@ pub fn txn_hang_audit() {
                     use core::fmt::Write;
                     let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let mut n = 0usize;
-                    crate::sched::for_each_task_try(|task| {
+                    crate::sched::hotpath::for_each_task_try(|task| {
                         // SAFETY: diagnostic reads under the
                         // for_each_task contract.
                         let tk = { &*task };
@@ -1538,7 +1538,7 @@ pub fn txn_hang_audit() {
                     // NONSPINNABLE).
                     {
                         let mut done = false;
-                        crate::sched::for_each_task_try(|task| {
+                        crate::sched::hotpath::for_each_task_try(|task| {
                             if done {
                                 return;
                             }
@@ -1645,7 +1645,7 @@ pub fn txn_hang_audit() {
         // running server (exec advancing between 5s censuses).
         if !srv_raw.is_null() {
             let tk = srv.as_deref().expect("srv_raw non-null implies Some");
-            let linked = crate::sched::sched::grq_diag_cfs_linked(srv_raw);
+            let linked = crate::sched::hotpath::grq_diag_cfs_linked(srv_raw);
             let onrq = tk.sched_entity().is_on_rq();
             let oncpu = tk.on_cpu();
             let claim = tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
@@ -1656,10 +1656,10 @@ pub fn txn_hang_audit() {
             let mut slot = -1i32;
             let mut swout = -1i32;
             for c in 0..crate::config::MAX_CPUS {
-                if crate::sched::sched::cpu_state(c).current == srv_raw {
+                if crate::sched::hotpath::cpu_state(c).current == srv_raw {
                     slot = c as i32;
                 }
-                if crate::sched::sched::switching_out_mask(srv_raw) & (1u32 << c) != 0 {
+                if crate::sched::hotpath::switching_out_mask(srv_raw) & (1u32 << c) != 0 {
                     swout = c as i32;
                 }
             }
@@ -3675,7 +3675,7 @@ pub fn stall_report() {
                                 .unwrap_or(core::ptr::null_mut());
                             if !task_raw.is_null() {
                                 let tk = task.as_deref().expect("task_raw non-null");
-                                let linked = match crate::sched::sched::grq_diag_cfs_linked(task_raw) {
+                                let linked = match crate::sched::hotpath::grq_diag_cfs_linked(task_raw) {
                                     Some(b) => {
                                         if b { "1" } else { "0" }
                                     }
@@ -3692,7 +3692,7 @@ pub fn stall_report() {
                                 // that never idles strands the task forever.
                                 let mut slots = alloc::string::String::from(" slots=");
                                 for (pid, idle, cur) in
-                                    crate::sched::sched::grq_diag_cpu_currents().iter()
+                                    crate::sched::hotpath::grq_diag_cpu_currents().iter()
                                 {
                                     if *pid == u32::MAX {
                                         continue;
@@ -3793,13 +3793,13 @@ pub fn stall_report() {
                                 let _ = writeln!(out, "binder-stall:{}", slots);
                                 // Watch this victim from now on — the ring
                                 // retains its events between censuses.
-                                crate::sched::sched::ww_watch_add(task_raw);
+                                crate::sched::hotpath::ww_watch_add(task_raw);
                                 // Wakewatch tail: which scheduler stage last
                                 // touched the victim and when (W wake-ok,
                                 // L link, P unlink-pick, S unlink-sched,
                                 // D unlink-deq, K pick-publish, A affirm,
                                 // R refused; @jiffies-ago).
-                                crate::sched::sched::ww_append_dump(&mut out, task_raw, now);
+                                crate::sched::hotpath::ww_append_dump(&mut out, task_raw, now);
                                 // WW-PROBE: re-issue the wake RIGHT HERE and
                                 // read back linkage+state in the same breath.
                                 // If wake_up_process returns true while
@@ -3807,9 +3807,9 @@ pub fn stall_report() {
                                 // links and the NEXT census still shows
                                 // unlinked+never-run, something unlinked a
                                 // parked task without running it.
-                                let pre_linked = crate::sched::sched::grq_diag_cfs_linked(task_raw);
-                                let probe_ret = crate::sched::wake_up_process(task_raw);
-                                let post_linked = crate::sched::sched::grq_diag_cfs_linked(task_raw);
+                                let pre_linked = crate::sched::hotpath::grq_diag_cfs_linked(task_raw);
+                                let probe_ret = crate::sched::hotpath::wake_up_process(task_raw);
+                                let post_linked = crate::sched::hotpath::grq_diag_cfs_linked(task_raw);
                                 let post_state = tk.state();
                                 let _ = writeln!(
                                     out,

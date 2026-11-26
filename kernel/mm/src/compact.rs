@@ -338,7 +338,7 @@ fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     // runs the schedulable teardown), walk them after. Cell::take: the
     // walker takes F: Fn.
     let flag_mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::mm_struct::MmStruct>>::new());
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         if let Some(mm_arc) = task.address_space_arc() {
             let mut pins = flag_mm_pins.take();
             pins.push(mm_arc);
@@ -473,7 +473,7 @@ fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
     // schedulable mm teardown under the spinlock), then remap after.
     // Cell::take: the walker takes F: Fn.
     let mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<rux::mm::mm_struct::MmStruct>>::new());
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         if let Some(mm_arc) = task.address_space_arc() {
             let mut pins = mm_pins.take();
             pins.push(mm_arc);

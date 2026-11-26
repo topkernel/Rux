@@ -271,7 +271,7 @@ fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
                 "PT-FREE-REFUSED: ppn={:#x} site={} pid={} (no live Late stamp — leaked)",
                 phys_addr >> PAGE_SHIFT,
                 site,
-                crate::sched::get_current_pid()
+                crate::sched::hotpath::get_current_pid()
             );
         }
         return false;

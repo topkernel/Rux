@@ -20,7 +20,7 @@ pub fn sigill_mapping_forensics(pid: usize, epc: usize) {
         crate::arch::riscv64::r#unsafe::diag_volatile_read_u64(addr as usize)
     }
 
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return,
     };

@@ -74,7 +74,7 @@ pub fn exception_table_count() -> usize {
 /// Send a signal to the current process with si_code provenance (twin
 /// contract: a fatal hardware-fault death prints a real origin).
 fn send_signal(sig: i32, code: i32, _addr: u64, _access_type: u32) {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         let pid = current.pid();
         crate::signal::send_signal_with_info_directed(
             pid,
@@ -125,7 +125,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // /proc/vmstat pgfault + the per-task minflt counter (user mode only)
     crate::mm::vmstat::note_fault();
     if regs.user_mode() {
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             // SAFETY: current() returned a live task pointer; per-task
             // atomic counter only.
             unsafe {
@@ -144,7 +144,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         if regs.kernel_mode() { "kernel" } else { "user" }
     );
 
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return no_context(regs, fault_addr),
     };

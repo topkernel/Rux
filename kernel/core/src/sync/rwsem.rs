@@ -439,7 +439,7 @@ impl RwSemaphore {
         // Wakes strictly outside wait_lock (SleepMutex discipline:
         // never hold the state spinlock across the wake path).
         for t in wakers {
-            crate::sched::wake_up_process(t);
+            crate::sched::hotpath::wake_up_process(t);
         }
     }
 
@@ -605,7 +605,7 @@ impl RwSemaphore {
 
     /// rwsem_can_spin_on_owner (rwsem.c:705-730).
     fn can_spin_on_owner(&self) -> bool {
-        if crate::sched::need_resched() {
+        if crate::sched::hotpath::need_resched() {
             return false;
         }
         let v = self.owner_value();
@@ -641,7 +641,7 @@ impl RwSemaphore {
                 state = self.owner_state_of(v);
                 break;
             }
-            if crate::sched::need_resched() {
+            if crate::sched::hotpath::need_resched() {
                 state = OwnerState::Nonspinnable;
                 break;
             }
@@ -737,14 +737,14 @@ impl RwSemaphore {
             }
 
             // need_resched check for non-writer owners (rwsem.c:914).
-            if owner_state != OwnerState::Writer && crate::sched::need_resched() {
+            if owner_state != OwnerState::Writer && crate::sched::hotpath::need_resched() {
                 break 'outer;
             }
             prev_owner_state = owner_state;
 
             for _ in 0..64 {
                 core::hint::spin_loop();
-                if crate::sched::need_resched() {
+                if crate::sched::hotpath::need_resched() {
                     break 'outer;
                 }
             }
@@ -783,7 +783,7 @@ impl RwSemaphore {
                     }
                 }
                 for t in wakers {
-                    crate::sched::wake_up_process(t);
+                    crate::sched::hotpath::wake_up_process(t);
                 }
             }
             preempt_enable();
@@ -795,7 +795,7 @@ impl RwSemaphore {
         // caller state (not our fast-path section) decides sleep.
         preempt_enable();
 
-        let cur = match crate::sched::current() {
+        let cur = match crate::sched::hotpath::current() {
             Some(t) => t as *mut crate::process::Task,
             None => {
                 // Degradation (SleepMutex parity): no task context
@@ -858,14 +858,14 @@ impl RwSemaphore {
                 }
             }
             for t in wakers {
-                crate::sched::wake_up_process(t);
+                crate::sched::hotpath::wake_up_process(t);
             }
 
             if granted {
                 self.set_reader_owned(crate::process::current_pid());
                 // A concurrent grant's wake may have enqueued us
                 // while we never slept — undo (no-op otherwise).
-                crate::sched::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
+                crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
                 return;
             }
 
@@ -906,12 +906,12 @@ impl RwSemaphore {
                     ));
                 }
                 self.set_reader_owned(crate::process::current_pid());
-                crate::sched::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
+                crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
                 return;
             }
 
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             // Woken (or spurious) — state is RUNNING again; loop.
         }
     }
@@ -947,7 +947,7 @@ impl RwSemaphore {
             return;
         }
 
-        let cur = match crate::sched::current() {
+        let cur = match crate::sched::hotpath::current() {
             Some(t) => t as *mut crate::process::Task,
             None => {
                 // Degradation: no task context — pure spin.
@@ -993,12 +993,12 @@ impl RwSemaphore {
                 acquired = self.try_write_lock(&mut list, index);
             }
             for t in wakers {
-                crate::sched::wake_up_process(t);
+                crate::sched::hotpath::wake_up_process(t);
             }
             if acquired {
                 // try_write_lock removed our entry and published us
                 // as owner. Undo a concurrent wake's enqueue if any.
-                crate::sched::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
+                crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
                 return;
             }
 
@@ -1053,12 +1053,12 @@ impl RwSemaphore {
                         crate::process::task::TaskState::RUNNING,
                     ));
                 }
-                crate::sched::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
+                crate::sched::hotpath::dequeue_task(crate::sched::r#unsafe::task_shared(cur));
                 return;
             }
 
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             // Woken: loop re-runs the queued acquire.
         }
     }

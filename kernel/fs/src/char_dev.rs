@@ -104,7 +104,7 @@ pub fn uart_write_kernel(slice: &[u8]) -> isize {
             uart.puts_batch(&slice[idx..end]);
         }
         idx = end;
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
     }
     slice.len() as isize
 }

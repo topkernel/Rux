@@ -1233,7 +1233,7 @@ fn socket_connect_ready(socket: &Socket) -> bool {
 /// Err(errno) to abort the syscall (EINTR, SO_RCVTIMEO/SO_SNDTIMEO expiry
 /// as EAGAIN, timer-pool exhaustion as ENOMEM).
 fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> Result<(), i32> {
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return Err(-11), // no task context — behave non-blocking
     };
@@ -1272,7 +1272,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
         socket.wait_queue.finish_wait(current);
         // R36-B2: take ourselves back off the GRQ — we never slept, but a
         // concurrent wake may have enqueued us.
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Ok(());
     }
 
@@ -1280,25 +1280,25 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
     // without this recheck we would sleep on a pending SIGKILL.
     if crate::signal::signal_pending() {
         socket.wait_queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-4); // EINTR
     }
 
     // Timed wait: the one-shot timer wakes this task at the deadline.
     let timer_id = deadline
-        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::hotpath::get_current_pid()))
         .unwrap_or(0);
     if deadline.is_some() && timer_id == 0 {
         // Timer pool exhausted — a timed wait would sleep forever.
         socket.wait_queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-12); // ENOMEM
     }
 
     // R54: schedule() restores the caller's SIE state; re-arm IRQs so
     // ticks/IPIs reach this CPU across the wait.
     crate::arch::cpu::restore_irq(true);
-    crate::sched::schedule();
+    crate::sched::hotpath::schedule();
     crate::trace::trace_net_sock_wait(tpid, tfd, tkind, 1, 1);
 
     if timer_id != 0 {
@@ -1453,7 +1453,7 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
         static BAD_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         if BAD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
-            let cur = crate::sched::current();
+            let cur = crate::sched::hotpath::current();
             let (pid, comm) = match cur {
                 // current() returns the running task; comm reads its own
                 // fixed comm buffer (no unsafe deref needed).
@@ -2098,7 +2098,7 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
 
     // R14-14 (MED-10): unwind the proto slot and the raw Arc reference on
     // fdtable failures — each error exit used to leak BOTH permanently.
-    let fdtable = match crate::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => {
             unwind_socket_creation(&file, sock_type, proto_fd);
@@ -2217,7 +2217,7 @@ pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
 
     // R22-5: unwind on fdtable failures — the raw Arc + the protocol-
     // slot pin (R21-N4) leak on every error exit otherwise.
-    let fdtable = match crate::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => {
             unwind_accepted(&file, tcp_fd);
@@ -2275,7 +2275,7 @@ fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
 
 /// Get socket from file descriptor (via File private_data)
 pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
-    let fdtable = crate::sched::get_current_fdtable()?;
+    let fdtable = crate::sched::hotpath::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     socket_of_arc(&file)
 }
@@ -2349,7 +2349,7 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
     }
 
     let target = timer::get_jiffies() + timer::msecs_to_jiffies(secs as u64 * 1000);
-    let Some(current) = crate::sched::current() else {
+    let Some(current) = crate::sched::hotpath::current() else {
         return; // no task context: cannot sleep
     };
     // current() is the safe handle to the running task (we are it).
@@ -2365,13 +2365,13 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
             crate::process::task::TaskState::INTERRUPTIBLE,
         ));
         if drained(tcp_fd) || timer::get_jiffies() >= target {
-            crate::sched::dequeue_task(current);
+            crate::sched::hotpath::dequeue_task(current);
             crate::timer::del_timer(timer_id);
             return;
         }
         // R54: re-arm IRQs so the timer tick reaches this CPU.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
     }
 }
 

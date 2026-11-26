@@ -120,7 +120,7 @@ impl Semaphore {
         // invariant. The R7-B6b lost-wake window stays closed by the
         // post-registration recheck; R8-6's exclusive/FIFO registration
         // discipline is unchanged.
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => {
                 // No current task (early boot / IRQ context): fall back to
@@ -149,12 +149,12 @@ impl Semaphore {
                 // have seen us queued+sleeping and enqueued us (NEW-C2
                 // family) — undo that (per-class on_rq guards make it a
                 // no-op otherwise).
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 return;
             }
 
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             self.wait.finish_wait(current);
             // R77: loop and retry — do NOT trust the wake source.
         }
@@ -197,7 +197,7 @@ impl Semaphore {
         // signal path keeps its exact semantics: pending signal after a
         // wake (or before sleeping) returns Err with NO count side
         // effects (there is no reservation to roll back anymore).
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => {
                 // No current task (early boot / IRQ context): cannot block.
@@ -221,7 +221,7 @@ impl Semaphore {
             // us queued).
             if cas_take(&self.count) {
                 self.wait.finish_wait(current);
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 return Ok(());
             }
 
@@ -231,12 +231,12 @@ impl Semaphore {
                 self.wait.finish_wait(current);
                 // R9-17: NEW-C2 discipline for the signal path too — undo a
                 // concurrent wake enqueue before returning.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 return Err(());
             }
 
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             self.wait.finish_wait(current);
 
             // Interrupted by a signal rather than up(): report EINTR to
@@ -244,7 +244,7 @@ impl Semaphore {
             // discipline took nothing); if an up() raced the signal its +1
             // stays in the count for the next down — no token is lost.
             if crate::signal::signal_pending() {
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 return Err(());
             }
             // R77: otherwise loop and retry the acquire — the wake alone is

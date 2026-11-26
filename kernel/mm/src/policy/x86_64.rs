@@ -2802,7 +2802,7 @@ fn handle_swap_fault(
                 }
                 drop(_pte_guard);
                 drop(vma_mgr);
-                crate::sched::cond_resched();
+                crate::sched::hotpath::cond_resched();
 
                 crate::arch::ipi::flush_tlb_others_mm(
                     mm.tlb_cpu_mask(),
@@ -2881,7 +2881,7 @@ fn handle_swap_fault(
             // Drop the guard BEFORE yielding: the write lock must never
             // be held across schedule().
             drop(vma_mgr);
-            crate::sched::cond_resched();
+            crate::sched::hotpath::cond_resched();
             cur = chunk_end;
         }
 

@@ -103,7 +103,7 @@ impl PosixMq {
     fn new(name: &[u8], mode: u16, attr: Option<&MqAttr>) -> Self {
         let default_attr = MqAttr::default();
         let mq_attr = attr.unwrap_or(&default_attr);
-        let cred = crate::sched::current().map(|t| (t.cred().uid, t.cred().gid));
+        let cred = crate::sched::hotpath::current().map(|t| (t.cred().uid, t.cred().gid));
         let (uid, gid) = cred.unwrap_or((0, 0));
 
         Self {
@@ -437,7 +437,7 @@ pub fn sys_mq_unlink(args: [u64; 6]) -> i64 {
             if !mq.is_unlinked() && mq.name == name {
                 // Permission check (review IPC: mq_unlink 无权限): the
                 // caller needs write access to the queue, or CAP_SYS_ADMIN.
-                let cred_ok = crate::sched::current().map(|t| {
+                let cred_ok = crate::sched::hotpath::current().map(|t| {
                     t.cred().euid == mq.uid
                         || ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2)
                 }).unwrap_or(false);
@@ -619,7 +619,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                         // helper, which sigwaits it) decode all of them
                         // (LTP mq_notify01 cmp_ok).
                         let sival = mq.notify_value.load(Ordering::Relaxed);
-                        let (spid, suid) = match crate::sched::current() {
+                        let (spid, suid) = match crate::sched::hotpath::current() {
                             Some(t) => (t.pid() as u32, t.cred().uid),
                             None => (0, 0),
                         };
@@ -662,7 +662,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         // woken) while Task::wake_up dropped it (target still RUNNING);
         // with no message-recheck before schedule() the receiver then
         // blocked forever despite a message being present.
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return -(errno::ESRCH as i64),
         };
@@ -683,16 +683,16 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                 let _messages = mq.messages.lock();
                 mq.wq_send.remove(current as *mut _);
             }
-            if let Some(cur) = crate::sched::current() {
+            if let Some(cur) = crate::sched::hotpath::current() {
                 (*cur).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
-                crate::sched::dequeue_task(&*cur);
+                crate::sched::hotpath::dequeue_task(&*cur);
             }
             return -(errno::EINTR as i64);
         }
         let timer_id = deadline
-            .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+            .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::hotpath::get_current_pid()))
             .unwrap_or(0);
         // R32 (NEW-3 twin): timer pool exhausted — a timed send would sleep
         // forever on a full queue. Remove the wait entry and fail instead.
@@ -704,10 +704,10 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
             (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::RUNNING,
             ));
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return -(errno::ENOMEM as i64);
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
         }
@@ -818,7 +818,7 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
 
         // R39: atomic register + INTERRUPTIBLE under the WQ lock — same
         // lost-wakeup closure as mq_timedsend above.
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return -(errno::ESRCH as i64),
         };
@@ -838,16 +838,16 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
                 let _messages = mq.messages.lock();
                 mq.wq_recv.remove(current as *mut _);
             }
-            if let Some(cur) = crate::sched::current() {
+            if let Some(cur) = crate::sched::hotpath::current() {
                 (*cur).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
-                crate::sched::dequeue_task(&*cur);
+                crate::sched::hotpath::dequeue_task(&*cur);
             }
             return -(errno::EINTR as i64);
         }
         let timer_id = deadline
-            .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+            .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::hotpath::get_current_pid()))
             .unwrap_or(0);
         // R32 (NEW-3 twin): timer pool exhausted — a timed receive would
         // sleep forever on an empty queue. Remove the wait entry and fail.
@@ -859,10 +859,10 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
             (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::RUNNING,
             ));
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return -(errno::ENOMEM as i64);
         }
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
         }
@@ -977,7 +977,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // SIGEV_NONE REGISTERS (Linux do_mq_notify): ANY existing
         // registration (even SIGEV_NONE, even own) blocks a new one with
         // EBUSY; nothing fires on send. Only a NULL sevp deregisters.
-        let my_pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
+        let my_pid = crate::sched::hotpath::current().map(|t| t.pid() as i32).unwrap_or(0);
         let old_pid = mq.notify_pid.swap(my_pid, Ordering::Relaxed);
         if old_pid != 0 {
             mq.notify_pid.store(old_pid, Ordering::Relaxed);
@@ -992,7 +992,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // Linux: ANY existing registration blocks a new one (EBUSY),
         // regardless of owner.
         let old_pid = mq.notify_pid.load(Ordering::Relaxed);
-        let my_pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
+        let my_pid = crate::sched::hotpath::current().map(|t| t.pid() as i32).unwrap_or(0);
         if old_pid != 0 {
             return -(errno::EBUSY as i64);
         }
@@ -1002,7 +1002,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         // The helper's netlink socket, kept alive by its File (the
         // ops-identity probe decides netlink vs other file vs bad fd —
         // the same EINVAL/EBADF split Linux's sockfd_lookup makes).
-        let sock_file = crate::sched::get_current_fdtable()
+        let sock_file = crate::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(sev.sigev_signo as usize))
             .filter(|f| f.get_ops().map(|o| rux::api::net::is_netlink_ops(o)).unwrap_or(false));
         match sock_file {
@@ -1014,7 +1014,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
                 return 0;
             }
             None => {
-                let exists = crate::sched::get_current_fdtable()
+                let exists = crate::sched::hotpath::get_current_fdtable()
                     .map(|ft| ft.get_file(sev.sigev_signo as usize).is_some())
                     .unwrap_or(false);
                 return if exists {
@@ -1037,7 +1037,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
             }
             tid
         } else {
-            crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0)
+            crate::sched::hotpath::current().map(|t| t.pid() as i32).unwrap_or(0)
         };
         // Linux: ANY existing registration blocks a new one (EBUSY).
         let old_pid = mq.notify_pid.swap(pid, Ordering::Relaxed);
@@ -1110,7 +1110,7 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
 
 /// Check POSIX MQ permissions (similar to file permission check).
 fn ipc_check_permissions_mq(uid: u32, gid: u32, mode: u16, desired: u16) -> bool {
-    let cred = match crate::sched::current() {
+    let cred = match crate::sched::hotpath::current() {
         Some(t) => t.cred(),
         None => return false,
     };
@@ -1157,11 +1157,11 @@ static MQ_FD_TABLE: Spinlock<[Option<MqFdSlot>; MQ_FDS_MAX]> =
 /// Allocate a file descriptor number for a POSIX MQ and store the queue
 /// reference in one critical section (see R32 NEW-6 note in sys_mq_open).
 fn allocate_and_store_mq_fd(mq: alloc::sync::Arc<PosixMq>) -> Option<i32> {
-    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    let pid = crate::sched::hotpath::current().map(|t| t.pid() as u32).unwrap_or(0);
     // RLIMIT_NOFILE applies to POSIX mq descriptors too (they are real
     // fds on Linux; LTP mq_open01 lowers the soft limit to 0 and expects
     // EMFILE).
-    let nofile = crate::sched::current()
+    let nofile = crate::sched::hotpath::current()
         .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
         .unwrap_or(u64::MAX);
     let mut table = MQ_FD_TABLE.lock();
@@ -1190,7 +1190,7 @@ fn get_mq_fd(fd: usize) -> Option<alloc::sync::Arc<PosixMq>> {
     // use them (libc's mq_notify SIGEV_THREAD helper issues the syscall
     // from its own thread — tid != tgid). Match the owner pid against
     // both the caller's tgid and tid.
-    let (pid, tgid) = crate::sched::current()
+    let (pid, tgid) = crate::sched::hotpath::current()
         .map(|t| (t.pid() as u32, t.tgid() as u32))
         .unwrap_or((0, 0));
     let table = MQ_FD_TABLE.lock();
@@ -1264,7 +1264,7 @@ pub fn close_mq_fd(fd: i32) -> i32 {
     if idx >= MQ_FDS_MAX {
         return -errno::EBADF;
     }
-    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    let pid = crate::sched::hotpath::current().map(|t| t.pid() as u32).unwrap_or(0);
     let mut table = MQ_FD_TABLE.lock();
     match table[idx].take() {
         Some(slot) if slot.pid == pid => {

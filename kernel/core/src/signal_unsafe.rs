@@ -18,7 +18,7 @@
 pub fn abort_reason_dump(leader_tid: u32) {
 
 
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return,
     };

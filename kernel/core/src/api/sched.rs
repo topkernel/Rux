@@ -29,9 +29,9 @@
 
 #![forbid(unsafe_code)]
 use crate::process::task::{Task, SchedPolicy};
-use crate::sched::class::SchedClass;
-use crate::sched::sched::{GlobalRunQueue, GrqPendingReport};
-use crate::sched::entities::W2RefusalCensus;
+use crate::sched::hotpath::SchedClass;
+use crate::sched::types::{GlobalRunQueue, GrqPendingReport};
+use crate::sched::types::W2RefusalCensus;
 use crate::config::MAX_CPUS;
 
 // ---- The data contract (S1b): shared event codes / slot tags ----
@@ -155,7 +155,7 @@ pub struct SchedHooks {
     pub stop_sched_class: fn() -> &'static dyn SchedClass,
 
     pub sched_ev: fn(tag: u32, pid: u32, a: u64, b: u64),
-    pub vr_canary: fn(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64),
+    pub vr_canary: fn(rq: &mut crate::sched::types::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64),
     pub stale_oncpu_healed: fn(tag: &[u8], cpu_id: usize, task: *mut Task, claim: i32, pk: u32),
 
 
@@ -164,7 +164,7 @@ pub struct SchedHooks {
 impl SchedHooks {
     pub const EMPTY: SchedHooks = SchedHooks {
         r56_print_pid: |prefix, pid, suffix| Default::default(),
-        sched_clock: || crate::sched::entities::sched_clock(),
+        sched_clock: || crate::sched::hotpath::sched_clock(),
         change_task_policy: |task, new_policy, rt_prio| Default::default(),
         ww_record: |task, code| Default::default(),
         orphan_watch_confirm: |task, pid, now, threshold| Default::default(),
@@ -210,7 +210,7 @@ impl SchedHooks {
         g_diag_idle_bit: |cpu| Default::default(),
         cpu_tick_stale_ms: |cpu| Default::default(),
         lp_idle_lie_report: |cpu| Default::default(),
-        sched_slice_to_ms: |slice_ns| crate::sched::entities::sched_slice_to_ms(slice_ns),
+        sched_slice_to_ms: |slice_ns| crate::sched::hotpath::sched_slice_to_ms(slice_ns),
         sched_ev_drain: |budget| Default::default(),
         note_task_freed: |task| Default::default(),
         report_poisoned_rq_entry: |cpu, raw| Default::default(),
@@ -522,8 +522,8 @@ pub fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut Task, claim: i32
 /// FRAMEWORK-side condition and skips the seam entirely. Armed boots
 /// dispatch exactly as before.
 #[inline]
-pub fn vr_canary(rq: &mut crate::sched::entities::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64) {
-    if !crate::sched::sched::sched_hist_armed() {
+pub fn vr_canary(rq: &mut crate::sched::types::CfsRunQueue, task: *mut Task, site: &[u8; 3], vr: u64) {
+    if !crate::sched::hotpath::sched_hist_armed() {
         return;
     }
     (hooks().vr_canary)(rq, task, site, vr)

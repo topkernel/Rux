@@ -193,7 +193,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     taskdump_dec(layout.size() as u64);
     taskdump_raw_line(b" align=");
     taskdump_dec(layout.align() as u64);
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         taskdump_raw_line(b" comm=");
         let comm = task.comm();
         let end = comm.iter().position(|&c| c == 0).unwrap_or(16);
@@ -249,7 +249,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // task-kill defense.
     let kill_self = crate::interrupt::preempt::in_task()
         && crate::arch::cpu::get_interrupts_state()
-        && match crate::sched::current() {
+        && match crate::sched::hotpath::current() {
             Some(task) => {
                 use crate::process::task::TIF_MEMDIE;
                 if task.test_ti_flag(TIF_MEMDIE) {
@@ -957,7 +957,7 @@ pub fn rust_main_tail() -> ! {
         // Initialize process scheduler
         {
             crate::process::pid_hash::init();
-            sched::init();
+            sched::hotpath::init();
             print_status("sched", "CFS scheduler v1", true);
             print_status("sched", "runqueue per-CPU", true);
             print_status("sched", "PID allocator init", true);
@@ -973,7 +973,7 @@ pub fn rust_main_tail() -> ! {
             print_status("mm", "kswapd reclaim thread", true);
         }
 
-        // Initialize DEBUG subsystem (must be after sched::init)
+        // Initialize DEBUG subsystem (must be after sched::hotpath::init)
         {
             debug::init();
             print_status("debug", "diagnostic subsystem", true);
@@ -1013,7 +1013,7 @@ pub fn rust_main_tail() -> ! {
         // cannot: a power loss (RAM contents die) and early-boot
         // deaths before pstore arms. The disk is NEVER written from
         // the panic path — the panic may be the storage stack itself.
-        // (After sched::init — the klogd kthread enqueues onto the
+        // (After sched::hotpath::init — the klogd kthread enqueues onto the
         // GRQ; the ext4 root has been up since mount_root_filesystem.)
         {
             printk::persistent_log_init();
@@ -1060,7 +1060,7 @@ pub fn rust_main_tail() -> ! {
         }
 
         // RT-plan R5: activate forced per-IRQ threading. IRQ
-        // registrations run long before sched::init (the serial line,
+        // registrations run long before sched::hotpath::init (the serial line,
         // the virtio probes), so their per-IRQ threads deferred to here;
         // until this point the dispatchers' inline fallbacks ran every
         // action in hardirq. No-op unless irqthread=1.
@@ -1289,7 +1289,7 @@ pub fn rust_main_tail() -> ! {
         // Console loglevel is DEFAULT_CONSOLE_LOGLEVEL (KERN_INFO = 6).
 
         // Boot hart enters idle loop, participates in task scheduling
-        sched::cpu_idle_loop();
+        sched::hotpath::cpu_idle_loop();
     }
 }
 

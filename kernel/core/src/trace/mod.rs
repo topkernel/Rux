@@ -2815,7 +2815,7 @@ fn event_pid_passes() -> bool {
     if n == 0 {
         return true; // no filter armed — everything passes
     }
-    let (tid, tgid) = match crate::sched::current() {
+    let (tid, tgid) = match crate::sched::hotpath::current() {
         Some(cur) => (cur.pid() as u32, cur.tgid() as u32),
         None => return false, // no task context (early IRQ) — filtered
     };
@@ -3137,7 +3137,7 @@ pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
     // TASK-PID column — the renderer handles the column name.
     let mut comm = [0u8; COMM_LEN];
     let mut pid = 0u32;
-    if let Some(cur) = crate::sched::current() {
+    if let Some(cur) = crate::sched::hotpath::current() {
         comm = *cur.comm();
         pid = cur.pid() as u32;
     }

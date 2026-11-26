@@ -420,7 +420,7 @@ pub fn push_event(&self, event: InputEvent) {
                     }
                 }
             };
-            let linked = match crate::sched::sched::grq_diag_cfs_linked(*task) {
+            let linked = match crate::sched::hotpath::grq_diag_cfs_linked(*task) {
                 Some(true) => 1,
                 Some(false) => 0,
                 None => 2,
@@ -616,7 +616,7 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
     let target =
         crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
 
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(c) => c,
         None => return false,
     };
@@ -648,7 +648,7 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
             current.set_state(TaskState::new(TaskState::RUNNING));
             // A racing wake may have enqueued us while still executing —
             // take ourselves back off (NEW-C2 discipline).
-            crate::sched::dequeue_task(current);
+            crate::sched::hotpath::dequeue_task(current);
             crate::timer::del_timer(timer_id);
             return true;
         }
@@ -656,7 +656,7 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
         // Syscall context runs with SIE=0 — re-arm so the timer tick can
         // reach this CPU and wake us.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         // Woke up (timer expiry or signal): loop tail re-checks and exits.
     }
 }
@@ -778,7 +778,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                 }
                 if !sleep_ms_interruptible(EVDEV_READ_POLL_MS) {
                     // No timer slot: yield rather than burn the CPU.
-                    crate::sched::yield_cpu();
+                    crate::sched::hotpath::yield_cpu();
                 }
             }
         }
@@ -1830,7 +1830,7 @@ fn itt_i64(v: i64) {
 /// (pid 618) was audio_server's thread inside tgid 408; carrying the
 /// tgid in the echo names the process at read/open time directly.
 fn current_pid_tgid() -> (u64, u64) {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         // SAFETY: cur is the running task; pid/tgid are const reads.
         Some(cur) => (cur.pid() as u64, cur.tgid() as u64),
         None => (0, 0),

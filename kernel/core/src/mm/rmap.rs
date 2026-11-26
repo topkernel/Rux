@@ -354,7 +354,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
     // under the locks (moved into the vector — never dropped there), then
     // walk them with no locks held. RefCell: the walker takes F: Fn.
     let mm_pins = Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         // for_each_task hands out &Task references; the task struct is
         // protected by the task list lock inside for_each_task.
         {

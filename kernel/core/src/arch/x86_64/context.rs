@@ -586,7 +586,7 @@ fn context_switch_body(prev: &mut Task, next: &mut Task) {
     if (*next).pid() != 0 {
         let st = next.pick_state();
         if st != crate::process::task::PICK_PICKED {
-            crate::sched::pick_trace(next as *mut Task, 8);
+            crate::sched::hotpath::pick_trace(next as *mut Task, 8);
             // SAFETY: the early-abort repair edge (nothing switched yet).
             unsafe { x86_switch_abort(prev, next, 0) };
             return;
@@ -899,8 +899,8 @@ pub extern "C" fn x86_switch_abort(
 
     // Sched slot + tripwire.
     let cpu = crate::arch::cpu_id() as usize;
-    crate::sched::sched::republish_current_after_abort(cpu, prev.as_ptr());
-    crate::sched::sched::r56_report_switch_abort(cpu, prev.pid());
+    crate::sched::hotpath::republish_current_after_abort(cpu, prev.as_ptr());
+    crate::sched::hotpath::r56_report_switch_abort(cpu, prev.pid());
 
     // `next` (smp8 orphan-race): the "the steal already re-linked it"
     // assumption holds only for REVOKED aborts. A LIVE-published pick
@@ -911,8 +911,8 @@ pub extern "C" fn x86_switch_abort(
     // termination — consume the publication so a heal-side read cannot
     // name an aborted pick as switchless.
     if !next.is_null() {
-        crate::sched::sched::abort_next_release_orphans(cpu, next);
-        crate::sched::sched::psledger_consume(next);
-        crate::sched::pick_trace(next, 9);
+        crate::sched::hotpath::abort_next_release_orphans(cpu, next);
+        crate::sched::hotpath::psledger_consume(next);
+        crate::sched::hotpath::pick_trace(next, 9);
     }
 }

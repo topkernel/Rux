@@ -456,21 +456,21 @@ fn pi_state_waiter_count(si: usize) -> usize {
 fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
     let cur_policy = crate::sched::r#unsafe::task_shared(task).policy();
     if cur_policy != sv.policy {
-        crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
+        crate::sched::hotpath::change_task_policy(task, sv.policy, sv.rt_prio);
         // change_task_policy does not restore the nice (it only moves
         // class/priority) — a boosted-then-converted owner returns to
         // its CFS weight here.
-        crate::sched::sched::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), sv.nice);
+        crate::sched::hotpath::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), sv.nice);
         return;
     }
     if matches!(sv.policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
         if crate::sched::r#unsafe::task_shared(task).rt_priority() != sv.rt_prio {
-            crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
+            crate::sched::hotpath::change_task_policy(task, sv.policy, sv.rt_prio);
         }
         return;
     }
     if crate::sched::r#unsafe::task_shared(task).nice() != sv.nice {
-        crate::sched::sched::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), sv.nice);
+        crate::sched::hotpath::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), sv.nice);
     }
 }
 
@@ -500,7 +500,7 @@ fn pi_adjust_owner_boost(si: usize) {
             None => return,
         }
     };
-    let task = crate::sched::sched::find_task_by_pid(owner_pid);
+    let task = crate::sched::hotpath::find_task_by_pid(owner_pid);
     if task.is_null() {
         // Owner gone (exited between edits): drop the saved slot; a
         // dead task's configuration is moot.
@@ -578,20 +578,20 @@ fn pi_adjust_owner_boost(si: usize) {
                     // Same class, higher priority: the class migration
                     // re-links the priority-array bucket (change_task_policy
                     // keeps the policy when it matches).
-                    crate::sched::sched::change_task_policy(task, crate::sched::r#unsafe::task_shared(task).policy(), p);
+                    crate::sched::hotpath::change_task_policy(task, crate::sched::r#unsafe::task_shared(task).policy(), p);
                 }
             } else {
                 // CFS owner under an RT waiter: convert to FIFO at the
                 // waiter's priority (the reference rt_mutex_setprio
                 // does exactly this via __setscheduler).
-                crate::sched::sched::change_task_policy(task, SchedPolicy::Fifo, p);
+                crate::sched::hotpath::change_task_policy(task, SchedPolicy::Fifo, p);
             }
         }
         None => {
             if !matches!(crate::sched::r#unsafe::task_shared(task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
                 && crate::sched::r#unsafe::task_shared(task).nice() > nice
             {
-                crate::sched::sched::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), nice);
+                crate::sched::hotpath::sched_renice_locked(crate::sched::r#unsafe::task_mut(task), nice);
             }
         }
     }
@@ -610,7 +610,7 @@ fn pi_owner_handoff(si: usize, old_pid: u32) {
         }
     };
     if let Some(sv) = saved {
-        let task = crate::sched::sched::find_task_by_pid(old_pid);
+        let task = crate::sched::hotpath::find_task_by_pid(old_pid);
         if !task.is_null() {
             pi_restore_saved(task, &sv);
         }
@@ -716,7 +716,7 @@ fn pi_chain_walk(owner: *mut Task) {
         if next_pid == 0 {
             return;
         }
-        let next = crate::sched::sched::find_task_by_pid(next_pid);
+        let next = crate::sched::hotpath::find_task_by_pid(next_pid);
         if next.is_null() || crate::sched::r#unsafe::task_shared(next).state().is_dead() {
             return;
         }
@@ -773,7 +773,7 @@ fn pi_chain_hits(start: *mut Task, target_si: usize) -> bool {
         if cur_pid == 0 {
             return false;
         }
-        let cur = crate::sched::sched::find_task_by_pid(cur_pid);
+        let cur = crate::sched::hotpath::find_task_by_pid(cur_pid);
         if cur.is_null() {
             return false;
         }
@@ -796,7 +796,7 @@ fn pi_chain_hits(start: *mut Task, target_si: usize) -> bool {
 // ---------------------------------------------------------------------------
 
 fn my_task() -> Option<*mut Task> {
-    crate::sched::current().map(|t| t as *mut Task)
+    crate::sched::hotpath::current().map(|t| t as *mut Task)
 }
 
 /// Post-handoff user-word fixup (the reference's fixup_owner shape):
@@ -896,7 +896,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         // and returns EOWNERDEAD (the documented death contract robust
         // users recover from).
         let owner_live = {
-            let t = crate::sched::sched::find_task_by_pid(tid as u32);
+            let t = crate::sched::hotpath::find_task_by_pid(tid as u32);
             if t.is_null() {
                 false
             } else {
@@ -978,7 +978,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             // We are committed to park on this state: resolve the owner
             // for the post-publication chain walk (R6) while the state
             // is pinned under the bucket.
-            walk_from = crate::sched::sched::find_task_by_pid(tid);
+            walk_from = crate::sched::hotpath::find_task_by_pid(tid);
 
             // Park. C8 ordering: waiter state + INTERRUPTIBLE published
             // under the bucket lock, then drop, then schedule.
@@ -1000,10 +1000,10 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         let wake = deadline.map(|dl| {
             crate::timer::WakeArmed::arm_jiffy(
                 dl,
-                crate::sched::get_current_pid(),
+                crate::sched::hotpath::get_current_pid(),
             )
         });
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         drop(wake);
 
         if pi_waiter_handed(wi) {
@@ -1042,7 +1042,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
                     // top waiter): if that owner is itself parked on
                     // another PI lock, its stale-high rank there must
                     // relax too — resolve it while the state exists.
-                    walk_from = crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+                    walk_from = crate::sched::hotpath::find_task_by_pid(pi_state_owner(si));
                     pi_state_maybe_free(si);
                 }
             }
@@ -1287,7 +1287,7 @@ pub fn rt_waiter_enter(
             pi_queue_insert(si, wi);
             pi_adjust_owner_boost(si);
             walk_from =
-                crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+                crate::sched::hotpath::find_task_by_pid(pi_state_owner(si));
             Some((si, wi))
         };
         // Upward propagation (reference task_blocks_on_rt_mutex's
@@ -1311,7 +1311,7 @@ pub fn rt_waiter_leave(mutex: usize, si: usize, wi: usize) {
             pi_waiter_free(wi);
             pi_adjust_owner_boost(si);
             walk_from =
-                crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+                crate::sched::hotpath::find_task_by_pid(pi_state_owner(si));
         }
         pi_state_maybe_free(si);
     }
@@ -1392,7 +1392,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
             pi_waiter_free(wi);
             pi_adjust_owner_boost(si);
             walk_from =
-                crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+                crate::sched::hotpath::find_task_by_pid(pi_state_owner(si));
         }
         pi_state_maybe_free(si);
         // R6: the dying waiter's removal DEBOOSTS the owner — propagate

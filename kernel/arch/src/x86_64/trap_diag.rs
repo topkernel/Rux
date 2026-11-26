@@ -20,7 +20,7 @@ use crate::arch::x86_64::pt_regs::PtRegs;
 
 pub fn gp_regmem_dump(regs: &PtRegs) {
     use core::fmt::Write;
-    let Some(tk) = crate::sched::current() else { return };
+    let Some(tk) = crate::sched::hotpath::current() else { return };
     let Some(aspace) = tk.address_space() else { return };
     let root = aspace.root_ppn();
     let ptrs: [(&str, u64); 8] = [
@@ -107,7 +107,7 @@ pub fn gp_mmhistory_dump(regs: &PtRegs) {
     if GPMM_N.fetch_add(1, Relaxed) >= 8 {
         return;
     }
-    let Some(tk) = crate::sched::current() else { return };
+    let Some(tk) = crate::sched::hotpath::current() else { return };
     let dump = |tag: &str, t: &crate::process::task::Task| {
         const N: usize = 16;
         let cur = t.ext.mm_ops_cur.load(Relaxed);
@@ -150,7 +150,7 @@ pub fn gp_mmhistory_dump(regs: &PtRegs) {
     let tgid = tk.tgid();
     let self_ptr = tk as *const crate::process::task::Task;
     let mut sibs = 0usize;
-    let _skipped = crate::sched::for_each_task_try(|t| {
+    let _skipped = crate::sched::hotpath::for_each_task_try(|t| {
         if t.tgid() == tgid && (t as *const crate::process::task::Task) != self_ptr {
             sibs += 1;
             if sibs <= 6 {
@@ -197,7 +197,7 @@ static SEGV_HIST_IX: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 fn segv_hist_note(fault_addr: u64) {
-    let tid = crate::sched::get_current_pid() as u32;
+    let tid = crate::sched::hotpath::get_current_pid() as u32;
     if tid == 0 {
         return;
     }
@@ -271,17 +271,17 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             }
         }
         crate::console::uart_putc_raw(b'\n');
-        crate::sched::sched::terminal_release_grq_if_held();
+        crate::sched::hotpath::terminal_release_grq_if_held();
         crate::arch::cpu::disable_irq();
         // hlt with IF=0 never wakes — the intentional permanent park of
         // a crashed forensic context (the audited diag edge).
         crate::arch::x86_64::r#unsafe::diag_halt_forever();
     }
     segv_hist_note(fault_addr);
-    let pid = crate::sched::get_current_pid();
+    let pid = crate::sched::hotpath::get_current_pid();
     // sc112: name the crashing process — the memfd USB DDK PnP NULL-walk
     // kills an unnamed samgr SA host; comm decides which image cfg to cut.
-    let comm = crate::sched::current()
+    let comm = crate::sched::hotpath::current()
         .map(|t| t.comm())
         .map(|c| core::str::from_utf8(c).unwrap_or(""))
         .unwrap_or("")
@@ -390,7 +390,7 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     // in an error-cleanup list walk right after a call returned -EBUSY
     // (rax pre-fault = -16); this names WHICH syscall returned it. Print
     // path only, same decode format as the futex census park print.
-    if let Some(tk) = crate::sched::current() {
+    if let Some(tk) = crate::sched::hotpath::current() {
         use core::fmt::Write;
         use core::sync::atomic::Ordering::Relaxed;
         let mut s = alloc::string::String::from("USEGV-FOR: fails:");
@@ -475,12 +475,12 @@ fn dump_mm_ops(tag: &str, t: &crate::process::task::Task) {
                 crate::pr_err!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
             }
         }
-        if let Some(tk) = crate::sched::current() {
+        if let Some(tk) = crate::sched::hotpath::current() {
             dump_mm_ops("self", tk);
             let tgid = tk.tgid();
             let self_ptr = tk as *const crate::process::task::Task;
             let mut sibs = 0usize;
-            let skipped = crate::sched::for_each_task_try(|t| {
+            let skipped = crate::sched::hotpath::for_each_task_try(|t| {
                 if t.tgid() == tgid && (t as *const crate::process::task::Task) != self_ptr {
                     sibs += 1;
                     if sibs <= 6 {
@@ -500,7 +500,7 @@ fn dump_mm_ops(tag: &str, t: &crate::process::task::Task) {
     }
 
     // VMA covering the faulting rip (which library / JIT region ran).
-    let addr_space = crate::sched::current().and_then(|t| t.address_space());
+    let addr_space = crate::sched::hotpath::current().and_then(|t| t.address_space());
     if let Some(aspace) = addr_space.as_ref() {
         let vmas = aspace.vma_read();
         // leg-27: also name the INDIRECT-CALL TARGET (rax at a CFI
@@ -704,7 +704,7 @@ fn dump_mm_ops(tag: &str, t: &crate::process::task::Task) {
             // stack; if rsp sits inside it, the fault happened in a
             // signal handler and the KERNEL's frame placement (top of
             // ss region minus SIGNAL_FRAME_SIZE) is in the causal chain.
-            if let Some(tk) = crate::sched::current() {
+            if let Some(tk) = crate::sched::hotpath::current() {
                 // Read-only fields of the current task (typed handle).
                 let ss = &tk.sigstack;
                 let ss_on = !ss.is_disabled() && ss.ss_sp != 0;

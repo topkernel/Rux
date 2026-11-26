@@ -50,7 +50,7 @@ pub fn enabled() -> bool {
 /// Current task's (pid, comm) for the tap lines; (0, "?") outside
 /// task context.
 fn who() -> (u32, &'static str) {
-    let comm = crate::sched::current()
+    let comm = crate::sched::hotpath::current()
         .map(|t| {
             core::str::from_utf8(t.comm())
                 .unwrap_or("?")

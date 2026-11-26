@@ -249,7 +249,7 @@ pub fn shm_id_removed(shmid: i32) -> bool {
 }
 
 fn get_current_pid() -> u32 {
-    crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
+    crate::sched::hotpath::current().map(|t| t.pid() as u32).unwrap_or(0)
 }
 
 // (Kernel-chosen shmat placement now goes through AddressSpace::
@@ -374,7 +374,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
-                    let cred = crate::sched::current().map(|t| t.cred());
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
                             c.euid == entry.inner.perm.uid
@@ -466,7 +466,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
-                    let cred = crate::sched::current().map(|t| t.cred());
+                    let cred = crate::sched::hotpath::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
                             c.euid == entry.inner.perm.uid
@@ -826,7 +826,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     // SHMTRAC (corruption hunt): shmat overwrote live ELF data pages in
     // gnome-shell (PTE-OVERWRITE-LIVE ctx=1) — log every attach's inputs
     // and chosen address to pin the bad placement source.
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -1083,7 +1083,7 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };

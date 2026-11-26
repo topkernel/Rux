@@ -182,7 +182,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     // then retried forever (b5). Linux's drivers/accesstokenid keys by
     // task_struct of the process; mirror the drivers/access_tokenid.rs
     // port which already uses task.tgid().
-    let pid = crate::sched::current()
+    let pid = crate::sched::hotpath::current()
         .map(|t| t.tgid() as u32)
         .unwrap_or_else(crate::process::current_pid);
     // rux:syscalltrace (retired debug=syscalltrace): the per-ioctl trace. Ungated this is the

@@ -10,7 +10,7 @@
 use crate::println;
 use crate::process::Task;
 use crate::process::task::SchedPolicy;
-use crate::sched::sched::TASK_POISON;
+use crate::sched::hotpath::TASK_POISON;
 use alloc::boxed::Box;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 

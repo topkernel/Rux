@@ -241,7 +241,7 @@ fn journal_forget_row(handle: *mut (), bh: *mut bio::BufferHead) {
 /// The exit-path journal unwind (the old exit.rs body): drop this
 /// task's transaction refcount and clear the slot (INV-PROC-JOURNAL-1).
 fn exit_journal_unwind_row() {
-    let Some(cur) = crate::sched::current() else { return };
+    let Some(cur) = crate::sched::hotpath::current() else { return };
     if let Some(handle) = proc_edges::journal_handle::<jbd2::journal::Handle>(cur) {
         if let Some(txn) = handle.h_transaction.clone() {
             txn.t_updates.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);

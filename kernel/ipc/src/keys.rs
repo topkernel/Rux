@@ -292,26 +292,26 @@ fn possessed_by(serial: u32, cred: &Cred) -> bool {
 /// Kernel-context (no current task) answers root, like the boot-time
 /// callers.
 fn current_cred() -> Cred {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(t) => t.cred().clone(),
         None => Cred::new_init(),
     }
 }
 
 fn set_session_slot(serial: u32) {
-    if let Some(t) = crate::sched::current() {
+    if let Some(t) = crate::sched::hotpath::current() {
         t.cred_mut().session_keyring = Some(serial);
     }
 }
 
 fn set_thread_slot(serial: u32) {
-    if let Some(t) = crate::sched::current() {
+    if let Some(t) = crate::sched::hotpath::current() {
         t.cred_mut().thread_keyring = Some(serial);
     }
 }
 
 fn set_process_slot(serial: u32) {
-    if let Some(t) = crate::sched::current() {
+    if let Some(t) = crate::sched::hotpath::current() {
         t.cred_mut().process_keyring = Some(serial);
     }
 }
@@ -319,7 +319,7 @@ fn set_process_slot(serial: u32) {
 /// Called from execve (setup_new_exec): the thread keyring is cleared on
 /// exec (reference exec_keys()); process and session keyrings persist.
 pub fn exec_clear_thread_keyring() {
-    if let Some(t) = crate::sched::current() {
+    if let Some(t) = crate::sched::hotpath::current() {
         t.cred_mut().thread_keyring = None;
     }
 }
@@ -1264,7 +1264,7 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 }
                 _ => {}
             }
-            if let Some(t) = crate::sched::current() {
+            if let Some(t) = crate::sched::hotpath::current() {
                 // SAFETY: sched::current() returns the running task.
                 t.cred_mut().reqkey_defl = option;
             }

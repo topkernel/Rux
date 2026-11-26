@@ -42,7 +42,7 @@ core::arch::global_asm!(
 /// This is more reliable than using ti_kernel_sp, which can get stale
 /// when a task is preempted in kernel mode.
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
-    use crate::sched::current;
+    use crate::sched::hotpath::current;
     use crate::process::task::Task;
 
     // SAFETY: stack_top is the kernel stack base allocated by the task; pt_regs lives
@@ -92,7 +92,7 @@ pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
     // deref it.
     if p.is_null()
         || (p as u64) < 0xffff_8000_0000_0000
-        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+        || !crate::sched::hotpath::kernel_ptr_canonical(p as *const u8)
     {
         return 0;
     }
@@ -302,7 +302,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 // schedule ran between irq_enter and irq_exit — the
                 // count-migration producer class). epc_ctx names where the
                 // tick landed on the entry task.
-                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                let cs_entry = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 let epc_ctx = regs_ref.epc;
                 // s15 (A2 idle-mark/WFI hunt): the x86_64 tick path's twin
@@ -317,7 +317,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     crate::timer::ww_note_tick_arrival(cpu_id);
                     if tp_entry != cs_entry {
-                        crate::sched::sched::ww_note_slot_mismatch(cpu_id);
+                        crate::sched::hotpath::ww_note_slot_mismatch(cpu_id);
                     }
                 }
                 // Session-6 discriminator: snapshot the interrupted
@@ -326,7 +326,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 // print splits the observed 0x10001 shape into
                 // leaked-PREEMPT-bit vs stranded-hardirq-bit producers.
                 if cpu_id < crate::config::MAX_CPUS {
-                    if let Some(t) = crate::sched::current() {
+                    if let Some(t) = crate::sched::hotpath::current() {
                         crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id]
                             .store(t.preempt_count() as u32,
                                    core::sync::atomic::Ordering::Relaxed);
@@ -361,7 +361,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 // stranded-hardirq-bit face) with tp UNCHANGED — invisible
                 // to the tp compare. Compare the slot too; when=slot
                 // names exactly that producer.
-                let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
+                let cs_exit = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 if tp_entry != tp_exit || cs_entry != cs_exit {
                     let a = tp_entry as *mut crate::process::task::Task;
@@ -404,14 +404,14 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
             // Software interrupt (IPI)
             Cause::SupervisorSoft => {
                 let tp_entry = crate::arch::cpu::get_thread_id() as usize;
-                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                let cs_entry = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_software_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
                 irq_exit_maybe_preempt_kernel(regs_ref);
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
-                let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
+                let cs_exit = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 if tp_entry != tp_exit || cs_entry != cs_exit {
                     let a = tp_entry as *mut crate::process::task::Task;
@@ -435,13 +435,13 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
             // External interrupt
             Cause::SupervisorExternal => {
                 let tp_entry = crate::arch::cpu::get_thread_id() as usize;
-                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                let cs_entry = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_external_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
-                let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
+                let cs_exit = crate::sched::hotpath::cpu_state(cpu_id).current
                     as usize;
                 if tp_entry != tp_exit || cs_entry != cs_exit {
                     let a = tp_entry as *mut crate::process::task::Task;
@@ -642,14 +642,14 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
         _ => {}
     }
     // Early-boot secondaries have no current task: nothing to preempt.
-    let cur = match crate::sched::current() {
+    let cur = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return,
     };
     if regs.user_mode() {
         return; // user path: ret_from_exception asm owns preemption
     }
-    if !crate::sched::need_resched() {
+    if !crate::sched::hotpath::need_resched() {
         return;
     }
     if !crate::interrupt::preempt::preemptible() {
@@ -662,7 +662,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     // discipline); re-disable after so the remaining handler frames and
     // the sret ritual run SIE=0 (R53 form-B window).
     crate::arch::cpu::restore_irq(true);
-    crate::sched::schedule();
+    crate::sched::hotpath::schedule();
     crate::arch::cpu::restore_irq(false);
 }
 
@@ -678,7 +678,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // no current task).  scheduler_tick() may call wake_up_process() which
     // interacts with the runqueue; schedule() with null current returns
     // early but the intermediate state can be inconsistent.
-    if crate::sched::current().is_none() {
+    if crate::sched::hotpath::current().is_none() {
         return;
     }
 
@@ -692,7 +692,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // tick to the interrupted task as user or system time depending on
     // the privilege mode the timer hit. Only user tasks are charged
     // (kthreads are born without an address space).
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         // SAFETY: current() returned a live task pointer; we only touch
         // per-task atomic counters, no teardown race on these fields.
         unsafe {
@@ -723,14 +723,14 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     crate::drivers::timer::timer_interrupt_handler();
 
     // 2. Scheduler tick
-    crate::sched::scheduler_tick();
+    crate::sched::hotpath::scheduler_tick();
 
     // 3. Check for soft lockups
     crate::debug::softlockup::check();
 
     // 4. Reschedule if needed
-    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
-        crate::sched::schedule();
+    if crate::sched::hotpath::need_resched() && crate::interrupt::preempt::preemptible() {
+        crate::sched::hotpath::schedule();
     }
 }
 
@@ -996,7 +996,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         let instr32: u32 = u32::from_ne_bytes(insn_buf);
         if super::vext::is_vector_instr32(instr32) {
             let mut ok = false;
-            if let Some(task) = crate::sched::current() {
+            if let Some(task) = crate::sched::hotpath::current() {
                 // SAFETY: task is the current task; the trap path
                 // holds it on this hart with IRQs disabled.
                 unsafe {
@@ -1023,7 +1023,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     // traced to a c.zext.w (Zcb) halfword from an unpinned libgcc member.
     if regs.user_mode() {
         static EMPTY_COMM: [u8; 16] = [0u8; 16];
-        let (pid, comm) = crate::sched::current()
+        let (pid, comm) = crate::sched::hotpath::current()
             .map(|t| unsafe { ((*t).pid(), (*t).comm()) })
             .unwrap_or((0, &EMPTY_COMM));
         let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
@@ -1079,7 +1079,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         // merge): an untraced user ebreak is a silent SIGTRAP death
         // otherwise (gdm-session-worker died this way at gdmr27 with no
         // diagnostic). Print the epc so the site can be symbolized.
-        let comm_now = crate::sched::current()
+        let comm_now = crate::sched::hotpath::current()
             .map(|t| {
                 let c = t.comm();
                 let len = c.iter().position(|&b| b == 0).unwrap_or(c.len());
@@ -1090,7 +1090,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         // restore the original instruction and report the step to the
         // tracer (or pend SIGTRAP when nobody traces). epc is NOT
         // advanced: the restored instruction re-executes on resume.
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             if (*task).single_step_active() && regs.epc == (*task).single_step_addr() {
                 let saved = (*task).single_step_saved_insn();
                 let restored = crate::process::ptrace_core::write_target_word(
@@ -1180,7 +1180,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 /// (used by the page-fault termination paths to decide between "pend the
 /// signal and let do_signal deliver it to the handler" and "kill now").
 fn sigsegv_has_handler() -> bool {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(11)) })
         .map(|a| a.is_some_and(|a| a.has_handler()))
         .unwrap_or(false)
@@ -1194,13 +1194,13 @@ fn sigsegv_has_handler() -> bool {
 /// alone re-enters the handler and faults forever (see the x86_64 twin:
 /// OH's DFX_SignalHandler faulting inside itself starved the machine).
 fn sigsegv_blocked_current() -> bool {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .map(|t| (*t).sigmask & (1u64 << 10) != 0)
         .unwrap_or(false)
 }
 
 fn sigbus_has_handler() -> bool {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(7)) })
         .map(|a| a.is_some_and(|a| a.has_handler()))
         .unwrap_or(false)
@@ -1217,7 +1217,7 @@ pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> ! {
     {
 
     for &b in b"trap: BADFRAME pid=0x" { putb(b); }
-    let pid = crate::sched::get_current_pid() as u64;
+    let pid = crate::sched::hotpath::get_current_pid() as u64;
     for sh in (0..32).step_by(4).rev() {
         let n = ((pid >> sh) & 0xF) as u8;
         putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -1330,7 +1330,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
 crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
                     fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
-                    crate::sched::get_current_pid(),
+                    crate::sched::hotpath::get_current_pid(),
                     "user");
                 }
                 // User-fault VMA forensics: name the mappings the fault
@@ -1340,7 +1340,7 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                 // bare epc could not name; this pins the crashing
                 // library/executable directly. Best-effort — resolution
                 // failures still print the range and perms.
-                if let Some(task) = crate::sched::current() {
+                if let Some(task) = crate::sched::hotpath::current() {
                     // Current is the faulting task itself (typed handle).
                     if let Some(mm) = task.address_space_arc() {
                         for a in [fault_addr, regs.epc] {
@@ -1427,7 +1427,7 @@ crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6=
                 if SEGV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
 crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
                     fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
-                    crate::sched::get_current_pid(),
+                    crate::sched::hotpath::get_current_pid(),
                     "kernel");
                 }
             }
@@ -1529,7 +1529,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             {
 
             for &b in b"trap: PF-OOM pid=0x" { putb(b); }
-            let pid = crate::sched::get_current_pid() as u64;
+            let pid = crate::sched::hotpath::get_current_pid() as u64;
             for sh in (0..32).step_by(4).rev() {
                 let n = ((pid >> sh) & 0xF) as u8;
                 putb(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -1607,7 +1607,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
                 // single authority) BEFORE halting, or every later GRQ
                 // acquirer spins behind the parked CPU forever. The x86_64
                 // twin's re-entry arm has carried this since gw2.
-                crate::sched::sched::terminal_release_grq_if_held();
+                crate::sched::hotpath::terminal_release_grq_if_held();
                 // R11 (the parked-CPU interrupt strand, x86_64 twin's fr7
                 // conviction): park with interrupts DISABLED — an
                 // interrupt-enabled park wakes on the next timer tick and
@@ -1650,7 +1650,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             // print/read recursion the KP_DUMP_ENTERED latch above
             // exists to stop.
             if regs.kernel_mode() {
-                let kstack_top: usize = crate::sched::current()
+                let kstack_top: usize = crate::sched::hotpath::current()
                     .map(|t| unsafe { (*t).kernel_stack_top() })
                     .unwrap_or((regs.sp as usize | 0x3fff) + 1);
                 putfrag(b"trap: stack:");
@@ -1706,7 +1706,7 @@ crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             // recurring NULL-walk corruption must be photographed at
             // the instant it faults (other CPUs sanitize the list if
             // we wait for GDB). Offsets via offset_of!, SBI output.
-            if let Some(task) = crate::sched::current() {
+            if let Some(task) = crate::sched::hotpath::current() {
                 // Offsets derived from the live Task layout via
                 // offset_of! (task.rs::task_offsets). The previous
                 // hardcoded 0x48/0x4c/0x758/0x768 all drifted by +8 when

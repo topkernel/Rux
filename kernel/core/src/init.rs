@@ -203,7 +203,7 @@ fn create_and_start_init_process(
         // children's) membership and memory usage are visible from
         // /sys/fs/cgroup from the first moment; systemd later moves itself
         // into /init.scope by writing cgroup.procs.
-        crate::sched::cgroup::attach_init_to_root(task_ptr);
+        crate::sched::hotpath::attach_init_to_root(task_ptr);
 
         // Create and initialize file descriptor table
         let fdtable = alloc::sync::Arc::new(FdTable::new());
@@ -254,7 +254,7 @@ fn create_and_start_init_process(
         // Add init process to run queue
         // R52: check the insert. INIT_TASK_STORAGE is a static (not heap)
         // and the pid is fixed — on refusal just fail boot; nothing to free.
-        if !sched::sched::enqueue_task(&mut *task_ptr) {
+        if !sched::hotpath::enqueue_task(&mut *task_ptr) {
             println!("init: enqueue refused for pid 1 (R52 tripwire)");
             return None;
         }

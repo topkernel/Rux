@@ -226,7 +226,7 @@ pub fn ns_track_vfsmount(mnt: Arc<crate::fs::dentry::VfsMountInternal>) {
 /// made there must NOT pollute private namespaces' teardown lists (they
 /// are tracked in the init ns, which never drops) and vice versa.
 pub fn in_init_mnt_ns() -> bool {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_mount.clone())
         .map(|ns| Arc::ptr_eq(&ns, &init_mnt_ns()))
         .unwrap_or(true)
@@ -471,41 +471,41 @@ pub fn translate_sender_pid_ns(sender_global_pid: u32, receiver_ns: Option<&Arc<
 use crate::process::task::Task;
 
 pub fn current_uts_ns() -> Arc<UtsNamespace> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_uts.clone())
         .unwrap_or_else(init_uts_ns)
 }
 
 pub fn current_mnt_ns() -> Arc<MountNamespace> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_mount.clone())
         .unwrap_or_else(init_mnt_ns)
 }
 
 /// Pid namespace of the current task (never None).
 pub fn current_pid_ns() -> Arc<PidNamespace> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_pid.clone())
         .unwrap_or_else(init_pid_ns)
 }
 
 #[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
 pub fn current_net_ns() -> Arc<NetNamespace> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_net.clone())
         .unwrap_or_else(init_net_ns)
 }
 
 #[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
 pub fn current_ipc_ns() -> Arc<IpcNamespace> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_ipc.clone())
         .unwrap_or_else(init_ipc_ns)
 }
 
 #[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
 pub fn current_user_ns() -> Arc<UserNamespace> {
-    crate::sched::current()
+    crate::sched::hotpath::current()
         .and_then(|t| t.ns_user.clone())
         .unwrap_or_else(init_user_ns)
 }
@@ -825,7 +825,7 @@ pub fn unshare_namespaces(flags: u64) -> Result<(), i32> {
     }
     check_ns_capability(nsflags)?;
 
-    let Some(task) = crate::sched::current() else {
+    let Some(task) = crate::sched::hotpath::current() else {
         return Err(-1); // EPERM
     };
 
@@ -1237,7 +1237,7 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
         return Err(crate::errno::Errno::BadFileNumber.as_neg_i32());
     }
 
-    let Some(task) = crate::sched::current() else {
+    let Some(task) = crate::sched::hotpath::current() else {
         return Err(crate::errno::Errno::OperationNotPermitted.as_neg_i32());
     };
 

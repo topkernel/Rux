@@ -42,7 +42,7 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
         }
 
         // --- Periodic sleep with a real waker (khungtaskd discipline). ---
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => break,
         };
@@ -55,17 +55,17 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
             current.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             if rux::drivers::timer::get_jiffies() >= target {
                 current.set_state(TaskState::new(TaskState::RUNNING));
-                crate::sched::dequeue_task(current);
+                crate::sched::hotpath::dequeue_task(current);
                 crate::timer::del_timer(timer_id);
             } else {
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 if crate::timer::timer_pending(timer_id) {
                     crate::timer::del_timer(timer_id);
                 }
             }
         } else {
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
         }
 
         if FB_USER_MAPPED.load(Ordering::Acquire) {

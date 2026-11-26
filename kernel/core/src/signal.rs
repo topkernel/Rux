@@ -1317,7 +1317,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     use crate::sched;
     use crate::process::task::TaskState;
 
-    let current = match sched::current() {
+    let current = match sched::hotpath::current() {
         Some(c) => c,
         None => return false,
     };
@@ -1574,7 +1574,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     let task_state = current.state();
     if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
         // Set need_resched flag - schedule() will be called in trap.S
-        crate::sched::set_need_resched();
+        crate::sched::hotpath::set_need_resched();
     }
 
         return true;
@@ -2739,9 +2739,9 @@ fn handle_default_signal(sig: i32) {
         // arms only read it while the task is STOPPED, so the sentinel
         // is invisible to them), stop_reported re-armed = unreported.
         crate::api::signal::DefaultActionClass::Continue => {
-            // SAFETY: current is a valid task pointer from sched::current().
+            // SAFETY: current is a valid task pointer from sched::hotpath::current().
             {
-                if let Some(current) = sched::current() {
+                if let Some(current) = sched::hotpath::current() {
                     // "Resuming from a job-control stop" = stopped right
                     // now, OR woken from the stop by this signal's own
                     // send path — signal_wake_up's Task::wake_up already
@@ -2796,9 +2796,9 @@ fn handle_default_signal(sig: i32) {
         // Stop process: SIGSTOP(19), SIGTSTP(20), SIGTTIN(21), SIGTTOU(22)
         crate::api::signal::DefaultActionClass::GroupStop => {
             // SIGSTOP, SIGTSTP - stop process
-            // SAFETY: current is a valid task pointer from sched::current().
+            // SAFETY: current is a valid task pointer from sched::hotpath::current().
             {
-                if let Some(current) = sched::current() {
+                if let Some(current) = sched::hotpath::current() {
                     (*current).set_stop_signal(sig);
                     (*current).stop_reported.store(false, core::sync::atomic::Ordering::Release);
                     (*current).set_state(TaskState::new(TaskState::STOPPED));
@@ -2831,7 +2831,7 @@ fn handle_default_signal(sig: i32) {
                     }
                     // The actual park happens in do_signal's group-stop
                     // branch (park_stopped_task).
-                    sched::set_need_resched();
+                    sched::hotpath::set_need_resched();
                 }
             }
         }
@@ -2851,7 +2851,7 @@ fn handle_default_signal(sig: i32) {
             // SIGKILL came from exit_group's sibling stop — the member
             // must report the group's exit STATUS, not its own signal
             // death (Linux do_group_exit reads signal_group_exit).
-            let group_code = crate::sched::current()
+            let group_code = crate::sched::hotpath::current()
                 .and_then(|c| (*c).signal_arc())
                 .and_then(|ss| {
                 if ss.group_exiting.load(core::sync::atomic::Ordering::Acquire) {
@@ -2965,7 +2965,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
         if crate::trace::EVENT_SIGTRACE.armed()
             && KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
         {
-            let (cp, cc) = crate::sched::current()
+            let (cp, cc) = crate::sched::hotpath::current()
                 .map(|t| (t.pid(), alloc::string::String::from(t.comm_str())))
                 .unwrap_or((0, alloc::string::String::from("kernel")));
             crate::pr_debug!(
@@ -3054,7 +3054,7 @@ pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
         static SWI_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if SWI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-            let (cp, cc) = crate::sched::current()
+            let (cp, cc) = crate::sched::hotpath::current()
                 .map(|t| (t.pid(), alloc::string::String::from(t.comm_str())))
                 .unwrap_or((0, alloc::string::String::from("kernel")));
             crate::pr_debug!(
@@ -3118,7 +3118,7 @@ pub fn park_stopped_task(task: *mut crate::process::task::Task) {
     // blocking syscall re-enables IRQs before schedule() (see do_wait).
     crate::arch::cpu::restore_irq(true);
     loop {
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         if t.state().contains(TaskState::STOPPED) {
             // schedule() returned without a resume (preempt refusal /
             // next == prev fast path). Keep parking unless a deliverable
@@ -3153,7 +3153,7 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     // forkprof trace: the trap-exit signal gate (every user return).
     if crate::debug::forkprof::trace_on() {
-        crate::debug::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
+        crate::debug::forkprof::trace(13, crate::sched::hotpath::get_current_pid()); // T_SIGCHECK
     }
     use crate::sched;
 
@@ -3169,13 +3169,13 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
     crate::api::process::cad_deliver_pending();
 
     // regs is the trap handler's frame pointer (the one frame edge
-    // lives inside do_signal); sched::current() returns a typed &mut.
+    // lives inside do_signal); sched::hotpath::current() returns a typed &mut.
     {
         if regs.is_null() {
             return;
         }
 
-        if let Some(current) = sched::current() {
+        if let Some(current) = sched::hotpath::current() {
             let pending = current.pending().get_all();
             // If there are pending signals, process them
             if pending != 0 {
@@ -3233,8 +3233,8 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
 pub fn fatal_signal_pending() -> bool {
     use crate::sched;
 
-    // sched::current() returns a typed &mut Task reference.
-    if let Some(current) = sched::current() {
+    // sched::hotpath::current() returns a typed &mut Task reference.
+    if let Some(current) = sched::hotpath::current() {
         let pending = current.pending.get_all();
         const SIGKILL_BIT: u64 = 1 << 8; // signal 9
         (pending & !current.sigmask & SIGKILL_BIT) != 0
@@ -3260,8 +3260,8 @@ pub fn fatal_signal_pending() -> bool {
 pub fn signal_pending() -> bool {
     use crate::sched;
 
-    // sched::current() returns a typed &mut Task reference.
-    if let Some(current) = sched::current() {
+    // sched::hotpath::current() returns a typed &mut Task reference.
+    if let Some(current) = sched::hotpath::current() {
         // Get pending signals
         let pending_signals = current.pending.get_all();
 

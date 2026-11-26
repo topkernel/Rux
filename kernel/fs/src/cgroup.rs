@@ -45,7 +45,7 @@ use crate::errno;
 use rux::fs::inode::file_type;
 use rux::fs::inode::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
 use rux::fs::superblock::{FileSystemType, SuperBlock};
-use crate::sched::cgroup::{self, CgroupNode, LIMIT_MAX};
+use crate::sched::{hotpath, types::CgroupNode, hotpath::LIMIT_MAX};
 
 // ============================================================================
 // Control files
@@ -167,7 +167,7 @@ fn generate_procs(node: &CgroupNode) -> Vec<u8> {
 
 fn generate_controllers() -> Vec<u8> {
     let mut s = String::new();
-    for name in cgroup::CONTROLLER_NAMES {
+    for name in hotpath::CONTROLLER_NAMES {
         s.push_str(name);
         s.push(' ');
     }
@@ -178,7 +178,7 @@ fn generate_controllers() -> Vec<u8> {
 
 fn generate_subtree_control(node: &CgroupNode) -> Vec<u8> {
     let bits = node.controllers.lock_irqsave().subtree_control;
-    let mut s = cgroup::format_subtree_control(bits);
+    let mut s = hotpath::format_subtree_control(bits);
     s.push('\n');
     s.into_bytes()
 }
@@ -230,14 +230,14 @@ fn generate_memory_max(node: &CgroupNode) -> Vec<u8> {
 }
 
 fn generate_memory_current(node: &CgroupNode) -> Vec<u8> {
-    format!("{}\n", cgroup::node_memory_current(node)).into_bytes()
+    format!("{}\n", hotpath::node_memory_current(node)).into_bytes()
 }
 
 /// memory.stat (v2 key names). anon/file carry the real per-class
 /// charges; remaining rows are honest zeros (this kernel does not
 /// account those classes yet).
 fn generate_memory_stat(node: &CgroupNode) -> Vec<u8> {
-    let current = cgroup::node_memory_current(node);
+    let current = hotpath::node_memory_current(node);
     format!(
         "anon 0\nfile 0\nkernel 0\nkernel_stack 0\npagetables 0\n\
          sock 0\nshmem 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\n\
@@ -302,7 +302,7 @@ fn trim(input: &[u8]) -> &str {
 
 fn apply_procs(node: &Arc<CgroupNode>, input: &str) -> i32 {
     match input.parse::<u32>() {
-        Ok(pid) => match cgroup::cgroup_attach_pid(node, pid) {
+        Ok(pid) => match hotpath::cgroup_attach_pid(node, pid) {
             Ok(()) => 0,
             Err(e) => e,
         },
@@ -311,13 +311,13 @@ fn apply_procs(node: &Arc<CgroupNode>, input: &str) -> i32 {
 }
 
 fn apply_subtree_control(node: &CgroupNode, input: &str) -> i32 {
-    match cgroup::parse_subtree_control_tokens(input) {
+    match hotpath::parse_subtree_control_tokens(input) {
         Some((set, clear)) => {
             let mut controllers = node.controllers.lock_irqsave();
             controllers.subtree_control &= !clear;
             controllers.subtree_control |= set;
             // Only real controllers can ever be enabled.
-            controllers.subtree_control &= cgroup::ALL_CONTROLLERS;
+            controllers.subtree_control &= hotpath::ALL_CONTROLLERS;
             0
         }
         None => errno::Errno::InvalidArgument.as_neg_i32(),
@@ -378,7 +378,7 @@ fn apply_cpu_max(node: &Arc<CgroupNode>, input: &str) -> i32 {
             node.cpu_throttled.store(false, Ordering::Release);
         }
     }
-    cgroup::note_cpu_limit_changed(node, was_limited, now_limited);
+    hotpath::note_cpu_limit_changed(node, was_limited, now_limited);
     0
 }
 
@@ -513,7 +513,7 @@ const CGROUP2_MAGIC: u32 = 0x6367_7270;
 /// Initialize the cgroup subsystem and register the cgroup2 fs type.
 pub fn init_cgroupfs() -> Result<(), i32> {
     // Core hierarchy first (root node).
-    cgroup::init_cgroup()?;
+    hotpath::init_cgroup()?;
 
     // Superblock.
     if GLOBAL_CGROUP2_SB.load(Ordering::Acquire).is_null() {
@@ -594,7 +594,7 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
 }
 
 fn cgroup_root_required() -> Result<(), i32> {
-    if cgroup::cgroup_root().is_some() {
+    if hotpath::cgroup_root().is_some() {
         Ok(())
     } else {
         Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32())
@@ -603,13 +603,13 @@ fn cgroup_root_required() -> Result<(), i32> {
 
 /// Build the VFS inode for the cgroupfs root directory.
 pub fn create_root_inode() -> Arc<Inode> {
-    let root = match cgroup::cgroup_root() {
+    let root = match hotpath::cgroup_root() {
         Some(r) => r,
         None => {
             // Defensive: init_cgroupfs() must have run. init_cgroup() is
             // idempotent, so heal instead of failing the mount.
-            let _ = cgroup::init_cgroup();
-            match cgroup::cgroup_root() {
+            let _ = hotpath::init_cgroup();
+            match hotpath::cgroup_root() {
                 Some(r) => r,
                 None => unreachable!("cgroup root cannot fail to initialize"),
             }
@@ -693,7 +693,7 @@ fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
         return Ok(ino_of_file(&data.node, kind));
     }
 
-    if let Some(child) = cgroup::cgroup_lookup_child(&data.node, core::str::from_utf8(name).unwrap_or("")) {
+    if let Some(child) = hotpath::cgroup_lookup_child(&data.node, core::str::from_utf8(name).unwrap_or("")) {
         // SAFETY: child is a live Arc.
         return Ok(ino_of_dir(&child));
     }
@@ -713,7 +713,7 @@ fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<Arc<Inod
         return Err(errno::Errno::FileExists);
     }
 
-    let node = cgroup::cgroup_create(&data.node, name_str)?;
+    let node = hotpath::cgroup_create(&data.node, name_str)?;
     Ok(make_dir_inode(node))
 }
 
@@ -729,7 +729,7 @@ fn cgroupfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
         Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
     };
 
-    match cgroup::cgroup_rmdir(&data.node, name_str) {
+    match hotpath::cgroup_rmdir(&data.node, name_str) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -793,7 +793,7 @@ fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, er
 
     // Child cgroup directory (verify against the live hierarchy).
     let name_str = core::str::from_utf8(name).unwrap_or("");
-    if let Some(child) = cgroup::cgroup_lookup_child(&data.node, name_str) {
+    if let Some(child) = hotpath::cgroup_lookup_child(&data.node, name_str) {
         // SAFETY: live Arc.
         let child_ref = &child;
         if ino_of_dir(child_ref) == ino {

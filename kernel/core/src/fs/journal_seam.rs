@@ -133,7 +133,7 @@ impl JournalCaptureState {
 /// the crate's hook rows; the dirty-mark hot path's unarmed fast path
 /// stays two loads.
 pub fn current_handle_raw() -> *mut () {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(t) => t.journal_handle.get(),
         None => core::ptr::null_mut(),
     }

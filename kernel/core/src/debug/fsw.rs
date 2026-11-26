@@ -226,11 +226,11 @@ pub fn open_exec_stamp() -> (u64, bool) {
         return (0, false);
     }
     let w0 = crate::timer::monotonic_ns_since_boot();
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         None => (w0, false),
         Some(t) => {
             t.sched_entity()
-                .update_exec_runtime(crate::sched::entities::sched_clock());
+                .update_exec_runtime(crate::sched::hotpath::sched_clock());
             (w0, true)
         }
     }
@@ -245,10 +245,10 @@ pub fn open_close(w0: u64, exec_armed: bool) {
     let wall = crate::timer::monotonic_ns_since_boot().saturating_sub(w0);
     max_update(&OPEN_WALL_MAX_NS, wall);
     if exec_armed {
-        if let Some(t) = crate::sched::current() {
+        if let Some(t) = crate::sched::hotpath::current() {
             let d = t
                 .sched_entity()
-                .update_exec_runtime(crate::sched::entities::sched_clock());
+                .update_exec_runtime(crate::sched::hotpath::sched_clock());
             OPEN_EXEC_NS.fetch_add(d, Ordering::Relaxed);
             max_update(&OPEN_EXEC_MAX_NS, d);
         }

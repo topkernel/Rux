@@ -241,7 +241,7 @@ pub fn reclaim_gate_census() {
     // Best-effort holder task read (cross-CPU; the task may be exiting
     // concurrently — same discipline as the parkwalk census).
     let (tstate, tcpu) = {
-        let t = crate::sched::find_task_by_pid(holder as u32);
+        let t = crate::sched::hotpath::find_task_by_pid(holder as u32);
         if t.is_null() {
             (0xFFFFFFFFu32, 0xFFFFu32)
         } else {
@@ -489,7 +489,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         // Reference fatal_signal_pending discipline: a
                         // dying allocator stops waiting (its fault
                         // owner is the kill path, not this loop).
-                        if crate::sched::current_is_dying() {
+                        if crate::sched::hotpath::current_is_dying() {
                             fatal_bail = true;
                             break;
                         }
@@ -523,7 +523,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             prog_last = prog;
                             gate_attempts = 0;
                         }
-                        crate::sched::yield_cpu();
+                        crate::sched::hotpath::yield_cpu();
                         gate_attempts += 1;
                     }
                     GATE_WAITERS.fetch_sub(1, Ordering::Relaxed);
@@ -557,7 +557,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             // holder stops reclaiming — its pages return
                             // at exit and the gate must not be carried
                             // through swap I/O it will never use.
-                            if crate::sched::current_is_dying() {
+                            if crate::sched::hotpath::current_is_dying() {
                                 break;
                             }
                             let freed = crate::api::mm::try_to_free_pages(order as i32);
@@ -596,7 +596,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         let deep_target = shortfall.clamp(32, 8192);
                         // fatal_signal_pending parity (see the rounds
                         // loop): a dying holder skips the deep drain too.
-                        if crate::sched::current_is_dying() {
+                        if crate::sched::hotpath::current_is_dying() {
                             gate_release(holder);
                         } else {
                         gate_note_phase(GATE_PHASE_DEEP);
@@ -1364,7 +1364,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     // witnesses) plus a symbolizable kernel backtrace via
                     // the debug unwinder (printk-free console writer, safe
                     // under the locks this path can hold).
-                    let root = crate::sched::current()
+                    let root = crate::sched::hotpath::current()
                         .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
                         .unwrap_or(0);
                     // HOTPATH-PRINT: allocator diagnostic — gated/budgeted (static-N cap, trace-event, or error-path arm; see the guard above)

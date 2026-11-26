@@ -66,7 +66,7 @@ pub fn total_forks() -> u64 {
 
 /// Number of runnable tasks (Linux "procs_running").
 fn procs_running() -> u64 {
-    crate::sched::sched::grq_diag_counts().0 as u64
+    crate::sched::hotpath::grq_diag_counts().0 as u64
 }
 
 /// Number of tasks blocked on I/O (Linux "procs_blocked": state D).

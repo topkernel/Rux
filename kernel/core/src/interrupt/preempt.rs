@@ -112,7 +112,7 @@ pub static TICK_ENTRY_JIF: [core::sync::atomic::AtomicU64;
 /// Read current task's preempt_count
 #[inline]
 pub fn preempt_count() -> i32 {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => task.preempt_count(),
         None => 0,
     }
@@ -168,7 +168,7 @@ pub fn might_sleep_check(site: &'static str) {
     crate::pr_err!(
         "MIGHT-SLEEP-ATOMIC site={} pid={} pc={:#x} in_softirq={} in_irq={}",
         site,
-        crate::sched::get_current_pid(),
+        crate::sched::hotpath::get_current_pid(),
         preempt_count(),
         in_softirq(),
         in_irq(),
@@ -198,7 +198,7 @@ pub fn preemptible() -> bool {
 #[inline]
 #[track_caller]
 pub fn preempt_count_add(val: i32) {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET || val == SOFTIRQ_OFFSET)
             && crate::trace::EVENT_LEAKHUNT.armed()
         {
@@ -242,7 +242,7 @@ pub fn preempt_count_add_at(
     val: i32,
     loc: &'static core::panic::Location<'static>,
 ) {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
             && crate::trace::EVENT_LEAKHUNT.armed()
         {
@@ -270,7 +270,7 @@ pub fn preempt_count_add_at(
 #[track_caller]
 pub fn preempt_count_sub(val: i32) {
     let loc = core::panic::Location::caller();
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         task.sub_preempt_count_at(val, loc);
     }
 }
@@ -283,7 +283,7 @@ pub fn preempt_count_sub_at(
     val: i32,
     loc: &'static core::panic::Location<'static>,
 ) {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         task.sub_preempt_count_at(val, loc);
     }
 }
@@ -296,7 +296,7 @@ pub fn preempt_count_sub2_at(
     loc: &'static core::panic::Location<'static>,
     site: usize,
 ) {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         task.sub_preempt_count2_at(val, loc, site);
     }
 }
@@ -307,7 +307,7 @@ pub fn preempt_count_sub2_at(
 /// the fault-path corruption self-heal, with a loud print alongside.
 #[inline]
 pub fn preempt_count_reset() {
-    if let Some(task) = crate::sched::current() {
+    if let Some(task) = crate::sched::hotpath::current() {
         task.ti_preempt_count_zero();
     }
 }
@@ -343,7 +343,7 @@ pub fn irq_enter() {
     // 119th: book the task that takes the base (per-CPU depth stack).
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
-        let cur = crate::sched::current()
+        let cur = crate::sched::hotpath::current()
             .map(|t| t as *mut crate::process::task::Task as usize)
             .unwrap_or(0);
         let depth = IRQ_BOOK_DEPTH_CNT[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
@@ -362,7 +362,7 @@ pub fn irq_enter() {
     // inside the hardirq bracket (the only shape that can strand a
     // 0x10000 bit on the enter task).
     if crate::trace::EVENT_LEAKHUNT.armed() {
-        if let Some(task) = crate::sched::current() {
+        if let Some(task) = crate::sched::hotpath::current() {
             let cpu = crate::arch::cpu_id() as usize;
             if cpu < crate::config::MAX_CPUS {
                 IRQ_PAIR_TASK[cpu].store(
@@ -436,7 +436,7 @@ pub fn irq_exit() {
         if cpu < crate::config::MAX_CPUS {
             let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
             if booked != 0 {
-                if let Some(cur) = crate::sched::current() {
+                if let Some(cur) = crate::sched::hotpath::current() {
                     let cur_ptr = cur as *mut crate::process::task::Task as usize;
                     if cur_ptr != booked {
                         irq_pair_report(cpu, booked, cur_ptr);
@@ -465,7 +465,7 @@ pub fn irq_exit() {
         }
     }
     if booked != 0 {
-        let cur = crate::sched::current()
+        let cur = crate::sched::hotpath::current()
             .map(|t| t as *mut crate::process::task::Task as usize)
             .unwrap_or(0);
         if cur == booked {
@@ -521,7 +521,7 @@ pub fn irq_exit() {
                     for &b in M3 {
                         putchar(b);
                     }
-                    let cpid = crate::sched::get_current_pid();
+                    let cpid = crate::sched::hotpath::get_current_pid();
                     pd(cpid as u64);
                     const M4: &[u8] = b" released=";
                     for &b in M4 {
@@ -590,7 +590,7 @@ pub fn irq_exit() {
     // of protected deferral is exactly the case the old behavior wedged
     // on; every shorter hold — the overwhelming majority — keeps the
     // protection.
-    if crate::sched::current().is_some() {
+    if crate::sched::hotpath::current().is_some() {
         let cpu = crate::arch::cpu_id() as usize;
         let mut starved = false;
         if cpu < crate::config::MAX_CPUS {
@@ -686,7 +686,7 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     if !soft_orphan && !hard_orphan {
         return;
     }
-    let Some(task) = crate::sched::current() else {
+    let Some(task) = crate::sched::hotpath::current() else {
         return;
     };
     static LAST: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
@@ -730,7 +730,7 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     }
     let pc_now = task.preempt_count();
     let pid = task.pid();
-    let slot_task = crate::sched::sched::cpu_state(cpu_id).current as usize;
+    let slot_task = crate::sched::hotpath::cpu_state(cpu_id).current as usize;
     let slot_pid = if slot_task >= 0x8000_0000_0000_0000 {
         // Diagnostic scalar read of the sched slot's task (the forensics
         // stale-handle edge — it was this CPU's published pick).

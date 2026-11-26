@@ -272,7 +272,7 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
         return Err(-(errno::constants::EINVAL as i32)); // no hugetlbfs backing
     }
 
-    let umask = if let Some(task) = crate::sched::current() {
+    let umask = if let Some(task) = crate::sched::hotpath::current() {
         task.get_umask()
     } else {
         0o022
@@ -386,7 +386,7 @@ pub fn get_seals(file: &File) -> Result<u32, i32> {
 /// seals before any mapping exists).
 fn has_writable_shared_mapping(file: &File) -> bool {
     use crate::mm::vma::VmaFlags;
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return false,
     };

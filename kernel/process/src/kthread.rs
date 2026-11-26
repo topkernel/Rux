@@ -62,7 +62,7 @@ pub fn kernel_thread_create(
     name: &'static str,
 ) -> Option<&'static mut Task> {
     // 1. Allocate a task slot (includes kernel stack allocation)
-    let task_ptr = sched::alloc_task_slot()?;
+    let task_ptr = sched::hotpath::alloc_task_slot()?;
     // alloc_task_slot returns a valid, properly aligned slot with an
     // associated kernel stack (INV-PROC-BORROW-1's pre-enqueue arm).
     let task = crate::r#unsafe::borrow_task_mut(task_ptr);
@@ -206,7 +206,7 @@ pub fn kthread_enqueue(task: &'static mut Task) -> Option<&'static mut Task> {
     // R52: CHECK the insert — a refused enqueue must unwind the kthread
     // (hash/pid/slot + the KTHREAD_MAP entry), never leave a
     // constructed-but-unschedulable task behind (fork.rs has the twin).
-    if !sched::enqueue_task(task) {
+    if !sched::hotpath::enqueue_task(task) {
         crate::pr_warn!(
             "kthread: enqueue refused for pid={} — unwinding (R52 tripwire)",
             pid
@@ -222,7 +222,7 @@ pub fn kthread_enqueue(task: &'static mut Task) -> Option<&'static mut Task> {
             crate::pid_hash::pid_hash_remove(pid);
             crate::r#unsafe::borrow_task_mut(task_ptr).free_kernel_stack();
             crate::pid::free_pid(pid);
-            crate::sched::free_task_slot(task_ptr);
+            crate::sched::hotpath::free_task_slot(task_ptr);
         }
         return None;
     }
@@ -328,7 +328,7 @@ pub fn kthread_stop(task: &mut Task) -> i32 {
     // Wait for the thread to reach a terminal state (ZOMBIE or DEAD).
     // Yield CPU each iteration to avoid busy-spinning.
     while !task.state().is_dead() {
-        crate::sched::yield_cpu();
+        crate::sched::hotpath::yield_cpu();
     }
 
     // Clean up KthreadInfo

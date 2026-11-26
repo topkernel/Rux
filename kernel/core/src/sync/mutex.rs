@@ -428,7 +428,7 @@ impl SleepMutex {
                 // wants us (reference: mutex_can_spin_on_owner checks
                 // need_resched before each retry; we check per inner
                 // batch, matching the reference's granularity).
-                if crate::sched::need_resched() {
+                if crate::sched::hotpath::need_resched() {
                     break 'outer;
                 }
             }
@@ -445,12 +445,12 @@ impl SleepMutex {
         // stall-quiet wedge). Spin instead: interrupts stay enabled,
         // the scheduler is never touched, and whichever CPU runs the
         // holder can still take its ticks and release us.
-        let can_sleep = crate::sched::current().is_some()
+        let can_sleep = crate::sched::hotpath::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
         if self.fsw_notes {
             crate::debug::fsw::note_biglock_contend();
         }
-        let cur = match crate::sched::current() {
+        let cur = match crate::sched::hotpath::current() {
             Some(t) if can_sleep => t,
             _ => {
                 loop {
@@ -616,7 +616,7 @@ impl SleepMutex {
                     // registration and the acquire — undo it (the
                     // per-class on_rq guards make it a no-op when we
                     // were not actually enqueued). Mirrors Semaphore::down.
-                    crate::sched::dequeue_task(&*cur);
+                    crate::sched::hotpath::dequeue_task(&*cur);
                     if timer_id != 0 && crate::timer::timer_pending(timer_id) {
                         crate::timer::del_timer(timer_id);
                     }
@@ -736,7 +736,7 @@ impl SleepMutex {
                 pid,
             );
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
             if timer_id != 0 {
                 if crate::timer::timer_pending(timer_id) {
                     crate::timer::del_timer(timer_id);

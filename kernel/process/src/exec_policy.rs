@@ -1008,7 +1008,7 @@ pub fn do_execve_elf(
     // keep mm.stack_limit in sync afterwards (sync_stack_limit in
     // syscall/process.rs uses the same formula).
     let stack_size_limit = {
-        let rlim_cur = crate::sched::current()
+        let rlim_cur = crate::sched::hotpath::current()
             .map(|t| t.rlimit(crate::task::rlimit_res::STACK).0)
             .unwrap_or(STACK_MAX_SIZE);
         rlim_cur.min(STACK_MAX_SIZE)

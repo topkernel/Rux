@@ -655,7 +655,7 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
 
         // Blocking read: wait-queue discipline (prepare_to_wait,
         // recheck, schedule, finish) mirroring pipe_file_read.
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(task) => task,
             None => return 0,
         };
@@ -669,16 +669,16 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
             instance.wait_queue.finish_wait(current);
             // Undo a concurrent event-arrival wake that enqueued us
             // while we never slept (R36-B2 discipline).
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             continue;
         }
         if crate::signal::signal_pending() {
             instance.wait_queue.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return -crate::errno::constants::EINTR as isize;
         }
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         instance.wait_queue.finish_wait(current);
         if crate::signal::signal_pending() {
             return -crate::errno::constants::EINTR as isize;

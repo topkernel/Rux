@@ -187,7 +187,7 @@ impl TmpfsNode {
         };
         // Linux inode_init_owner(): creator's EFFECTIVE filesystem ids, not
         // the real ones (same rule as ext4_new_inode).
-        let (uid, gid) = match crate::sched::current() {
+        let (uid, gid) = match crate::sched::hotpath::current() {
             Some(task) => {
                 // sched::current() yields a valid task reference (its
                 // own safe contract).

@@ -4,7 +4,8 @@
 //!
 //! Kani proof harnesses for SchedClassId ordering and enqueue flags.
 //!
-//! Types copied from: kernel/core/src/sched/class.rs
+//! Types copied from: kernel/core/src/sched/hotpath.rs (the flags) and
+//! kernel/core/src/sched/types.rs (SchedClassId)
 
 #![cfg(kani)]
 

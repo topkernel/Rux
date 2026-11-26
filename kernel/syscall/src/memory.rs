@@ -52,7 +52,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
     let new_brk = args[0] as u64;
 
     // Get current process
-    match sched::current() {
+    match sched::hotpath::current() {
         Some(current_task) => {
             // ===== The break is PER-MM, not per-task =====
             // (GNOME trim face, 2026-11-07, fixed on the gnome-riscv
@@ -316,7 +316,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // hp89: whole-call mm-surgery section (see MmStruct::mm_surgery) —
     // the MAP_FIXED teardown+install arm and the perf/binder ring
     // placement+install run as multi-step surgery.
-    let _surgery = rux::sched::current()
+    let _surgery = rux::sched::hotpath::current()
         .and_then(|t| t.address_space())
         .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mmap_inner(args);
@@ -348,7 +348,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // family mmap (~456 lines in the pre-launcher window alone, each
     // costing UART emit + hilogd drain).
     if ret > 0 && crate::debug::switches::oh_hunt_prints_on() {
-        let comm = rux::sched::current()
+        let comm = rux::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -367,7 +367,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                 static NF: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                    let path = rux::sched::current()
+                    let path = rux::sched::hotpath::current()
                         .and_then(|t| t.try_fdtable().and_then(|fdt| fdt.get_file(fd as usize)))
                         .map(|f| f.path())
                         .unwrap_or_else(|| alloc::string::String::from("?"));
@@ -443,7 +443,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // exec mapping — noted in the posture ledger).
     const READ_IMPLIES_EXEC: u32 = 0x0400_000; // include/uapi personality.h
     if prot_flags & prot::PROT_READ != 0 {
-        if let Some(t) = rux::sched::current() {
+        if let Some(t) = rux::sched::hotpath::current() {
             if t.personality & READ_IMPLIES_EXEC != 0 {
                 prot_flags |= prot::PROT_EXEC;
             }
@@ -579,7 +579,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         if end <= addr {
             return mmap_error::EINVAL;
         }
-        if let Some(task) = rux::sched::current() {
+        if let Some(task) = rux::sched::hotpath::current() {
             if let Some(aspace) = task.address_space() {
                 let test = crate::mm::vma::Vma::new(
                     VirtAddr::new(addr),
@@ -770,7 +770,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     }
 
     // Get current process
-    match rux::sched::current() {
+    match rux::sched::hotpath::current() {
         Some(current_task) => {
             // RLIMIT_AS: the process's total mapped VM (mm.total_vm, in
             // pages, maintained by add_vma/remove_vma accounting) plus
@@ -801,7 +801,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         static NR: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                            let comm = rux::sched::current()
+                            let comm = rux::sched::hotpath::current()
                                 .map(|t| t.comm())
                                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                 .unwrap_or("")
@@ -826,16 +826,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // with ENOMEM, like Linux's memcg charge failure here.
             // Simplification: virtual mapping length is the charge unit
             // (an RSS approximation); uncharge happens at munmap/exit.
-            if !rux::sched::cgroup::cgroup_memory_charge(actual_length) {
+            if !rux::sched::hotpath::cgroup_memory_charge(actual_length) {
                 static NC: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                    let comm = rux::sched::current()
+                    let comm = rux::sched::hotpath::current()
                         .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
-                    rux::sched::cgroup::debug_report_memory_refusal(comm, actual_length);
+                    rux::sched::hotpath::debug_report_memory_refusal(comm, actual_length);
                 }
                 return mmap_error::ENOMEM;
             }
@@ -1450,7 +1450,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         Err(e) => {
                             // cgroup v2 (U1b): the pre-charge above must be
                             // returned when the mapping never happened.
-                            rux::sched::cgroup::cgroup_memory_uncharge(actual_length);
+                            rux::sched::hotpath::cgroup_memory_uncharge(actual_length);
                             let err = match e {
                                 crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
                                 crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
@@ -1464,7 +1464,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 None => {
                     // cgroup v2 (U1b): no address space → no mapping; the
                     // pre-charge must go back.
-                    rux::sched::cgroup::cgroup_memory_uncharge(actual_length);
+                    rux::sched::hotpath::cgroup_memory_uncharge(actual_length);
                     mmap_error::ENOMEM
                 }
             }
@@ -1496,7 +1496,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // the piecewise cursor walk opens consistent holes between pieces;
     // a sibling thread's multi-step surgery must not interleave into
     // them.
-    let _surgery = rux::sched::current()
+    let _surgery = rux::sched::hotpath::current()
         .and_then(|t| t.address_space())
         .map(|mm| mm.mm_surgery_guard());
 
@@ -1532,7 +1532,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     }
 
     // Get current process
-    match rux::sched::current() {
+    match rux::sched::hotpath::current() {
         Some(current_task) => {
             // Check if address space exists
             match current_task.address_space_mut() {
@@ -1542,7 +1542,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
                         Ok(()) => {
                             // cgroup v2 (U1b): give the unmapped length
                             // back to the cgroup memory charge.
-                            rux::sched::cgroup::cgroup_memory_uncharge(length);
+                            rux::sched::hotpath::cgroup_memory_uncharge(length);
                             0
                         }
                         Err(e) => {
@@ -1631,7 +1631,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
 /// Then up to 6 overlapping/adjacent VMAs within +/-32MB, flags/type/
 /// fd/offset/origin — enough to name which operation ate the mapping.
 fn mprotect_fail_forensics(addr: usize, length: usize) {
-    let Some(current_task) = rux::sched::current() else {
+    let Some(current_task) = rux::sched::hotpath::current() else {
         return;
     };
     let Some(addr_space) = current_task.address_space() else {
@@ -1804,7 +1804,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     }
 
     // Get current process
-    match rux::sched::current() {
+    match rux::sched::hotpath::current() {
         Some(current_task) => {
             let addr_space = match current_task.address_space() {
                 Some(a) => a,
@@ -2314,7 +2314,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
     };
 
     // Get current process
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM,
     };
@@ -2599,7 +2599,7 @@ fn copy_old_to_new_pages(
                 page.set_flag(PageFlag::SwapBacked);
                 page.set_index(new_virt as usize / (PAGE_SIZE as usize));
                 page.inc_mapcount();
-                if rux::sched::current().and_then(|t| t.address_space()).is_some() {
+                if rux::sched::hotpath::current().and_then(|t| t.address_space()).is_some() {
                     crate::mm::rmap::page_record_mapping(
                         page,
                         mm as *const _ as usize,
@@ -2681,7 +2681,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     // sibling thread's surgery clear the move SOURCE between the
     // destination install and the copy (zero-fill on refault, the
     // mallocng corruption signature).
-    let _surgery = rux::sched::current()
+    let _surgery = rux::sched::hotpath::current()
         .and_then(|t| t.address_space())
         .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mremap_inner(args);
@@ -2698,7 +2698,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     }
     if crate::trace::EVENT_SYSCALLTRACE.armed() {
         let pid = ::process::current_pid();
-        let comm_bytes = rux::sched::current()
+        let comm_bytes = rux::sched::hotpath::current()
             .map(|t| { (*t).comm() }.to_vec())
             .unwrap_or_default();
         let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
@@ -2780,7 +2780,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     }
 
     // Get current process
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM,
     };
@@ -3077,7 +3077,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
     // zap live PTEs; a sibling mremap move's copy must not race the zap
     // (missing source leaf = silently nothing installed at the move
     // destination = zero-fill on refault).
-    let _surgery = rux::sched::current()
+    let _surgery = rux::sched::hotpath::current()
         .and_then(|t| t.address_space())
         .map(|mm| mm.mm_surgery_guard());
 
@@ -3149,7 +3149,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
     };
 
     // Get current process
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM,
     };
@@ -3363,7 +3363,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     }
 
     // Get current process
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM,
     };
@@ -3434,7 +3434,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
                 {
                     let fd = vma.file_fd();
                     if fd >= 0 {
-                        if let Some(ft) = rux::sched::get_current_fdtable() {
+                        if let Some(ft) = rux::sched::hotpath::get_current_fdtable() {
                             if let Some(file) = ft.get_file(fd as usize) {
                                 // SAFETY: inode written once at open.
                                 if let Some(inode) = file.get_inode() {
@@ -3539,7 +3539,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
         None => return -22_i64,
     };
 
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -12_i64,
     };
@@ -3738,7 +3738,7 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
         None => return -22_i64,
     };
 
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -12_i64,
     };
@@ -3822,7 +3822,7 @@ pub fn sys_mlockall(args: [u64; 6]) -> i64 {
     // P2 mlock: set VM_LOCKED on every CURRENT VMA (MCL_CURRENT).
     // MCL_FUTURE (lock future mappings too) is accepted but not tracked —
     // mmap does not consult a per-mm flag yet (documented limitation).
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -12_i64,
     };
@@ -3898,7 +3898,7 @@ pub fn sys_munlockall(_args: [u64; 6]) -> i64 {
     use crate::mm::vma::VmaFlags;
 
     // P2 mlock: clear VM_LOCKED on every current VMA.
-    let current_task = match rux::sched::current() {
+    let current_task = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -12_i64,
     };
@@ -4187,7 +4187,7 @@ pub fn sys_remap_file_pages(args: [u64; 6]) -> i64 {
         _ => return -errno::EINVAL as i64,
     };
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -errno::EINVAL as i64,
     };

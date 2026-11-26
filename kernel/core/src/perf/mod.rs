@@ -1483,7 +1483,7 @@ pub fn perf_mmap_handler(
         return Err(22);
     }
 
-    let task = crate::sched::current().ok_or(12)?;
+    let task = crate::sched::hotpath::current().ok_or(12)?;
     let addr_space = task.address_space().ok_or(12)?;
     let ev = event_of(file).ok_or(6)?; // ENXIO
 
@@ -1973,7 +1973,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     } else {
         // Task-scoped: pid 0 = self.
         let tid = if pid == 0 {
-            match crate::sched::current() {
+            match crate::sched::hotpath::current() {
                 Some(t) => unsafe { (*t).pid() },
                 None => return -(crate::errno::constants::EINVAL as i64),
             }
@@ -1988,7 +1988,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             if target.is_null() {
                 return -(crate::errno::constants::ESRCH as i64);
             }
-            let ok = if let Some(me) = crate::sched::current() {
+            let ok = if let Some(me) = crate::sched::hotpath::current() {
                 // SAFETY: target's pin (the lookup above) proves liveness;
                 // me is the safe current() handle.
                 let ok = unsafe { (*target).cred().uid == me.cred().uid || me.cred().uid == 0 };
@@ -2011,7 +2011,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     }
 
     // 6. Build + install the fd.
-    let Some(fdtable) = crate::sched::get_current_fdtable() else {
+    let Some(fdtable) = crate::sched::hotpath::get_current_fdtable() else {
         return -(crate::errno::constants::EMFILE as i64);
     };
 

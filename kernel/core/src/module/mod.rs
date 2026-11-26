@@ -363,7 +363,7 @@ pub fn sys_finit_module_impl(fd: usize, _param_flags: u64) -> i64 {
         return -(errno::Errno::OperationNotPermitted.as_i32() as i64);
     }
 
-    let fdtable = match crate::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::Errno::BadFileNumber.as_i32() as i64),
     };

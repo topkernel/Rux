@@ -345,7 +345,7 @@ pub fn alloc_page_table() -> Option<u64> {
             }
 
             // FORENSIC ledger: stamp every Late-stage table allocation.
-            PT_LEDGER.stamp(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid());
+            PT_LEDGER.stamp(phys_addr >> PAGE_SHIFT, crate::sched::hotpath::get_current_pid());
 
             let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
             zero_owned_pages(virt_addr.bits(), PAGE_SIZE as usize);
@@ -370,7 +370,7 @@ fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
         if !PT_LEDGER.take_returns(phys_addr >> PAGE_SHIFT) {
             return; // boot-shared table: never free, never reuse
         }
-        if !PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), site, root_ppn) {
+        if !PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::hotpath::get_current_pid(), site, root_ppn) {
             return; // double/foreign free: refuse, keep the frame leaked
                     // rather than wired into two live trees
         }
@@ -406,7 +406,7 @@ fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
                 phys_addr,
                 site,
                 root_ppn,
-                crate::sched::get_current_pid(),
+                crate::sched::hotpath::get_current_pid(),
                 bad,
                 first
             );
@@ -760,7 +760,7 @@ impl PtLedger {
             PT_STAMP_RING[idx].pid.store(pid, Relaxed);
             PT_STAMP_RING[idx].site.store(b'S' as u64, Relaxed);
             let root = if crate::trace::EVENT_MMFORENSICS.armed() {
-                crate::sched::current()
+                crate::sched::hotpath::current()
                     .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
                     .unwrap_or(0)
             } else {
@@ -925,7 +925,7 @@ fn task_pid_alive(pid: u32) -> bool {
         return false;
     }
     let alive = AtomicBool::new(false);
-    crate::sched::for_each_task(|t| unsafe {
+    crate::sched::hotpath::for_each_task(|t| unsafe {
         if (*t).pid() as u32 == pid {
             // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
             // they stay in the pid hash until reaped but are NOT live
@@ -947,7 +947,7 @@ impl PtLedger {
     /// this stamp the teardown's ledger take() refuses the root free and the
     /// root frame leaks with every mm.
     pub fn stamp_root(&self, ppn: u64) {
-        self.stamp(ppn, crate::sched::get_current_pid());
+        self.stamp(ppn, crate::sched::hotpath::get_current_pid());
     }
 
     /// Read-only: is this frame boot-permanent (shared kernel tree)?
@@ -1135,7 +1135,7 @@ pub fn free_user_page_tables(
                         "FUT: REPEAT teardown of root ppn={:#x} (ring[{}], prev pid={}, now pid={})",
                         root_ppn, k,
                         FUT_RING[k].pid.load(Relaxed),
-                        crate::sched::get_current_pid()
+                        crate::sched::hotpath::get_current_pid()
                     );
                     // debug-migrate: the double-teardown hit also records
                     // into the unified framework (rux:mmforensics
@@ -1144,8 +1144,8 @@ pub fn free_user_page_tables(
                         0,
                         root_ppn,
                         (FUT_RING[k].pid.load(Relaxed) << 32)
-                            | crate::sched::get_current_pid() as u64,
-                        crate::sched::get_current_pid() as u32,
+                            | crate::sched::hotpath::get_current_pid() as u64,
+                        crate::sched::hotpath::get_current_pid() as u32,
                     );
                 }
                 // Consume the matched entry even past the report cap —
@@ -1157,7 +1157,7 @@ pub fn free_user_page_tables(
         }
         let idx = FUT_RING_CURSOR.fetch_add(1, Relaxed) % FUT_RING.len();
         FUT_RING[idx].root.store(root_ppn, Relaxed);
-        FUT_RING[idx].pid.store(crate::sched::get_current_pid() as u64, Relaxed);
+        FUT_RING[idx].pid.store(crate::sched::hotpath::get_current_pid() as u64, Relaxed);
     }
     // FORENSIC: stale-tree census. Every intermediate table frame this walk
     // reaches must carry a LIVE ledger stamp (its allocation incarnation).
@@ -1511,7 +1511,7 @@ pub fn free_user_page_tables(
 
                 // Chunk boundary: no lock held; cond_resched() no-ops unless
                 // fully preemptible (task context, no bh/rcu section).
-                crate::sched::cond_resched();
+                crate::sched::hotpath::cond_resched();
             }
             // FORENSIC: census the PMD table before freeing it.
             if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn2) {
@@ -1528,7 +1528,7 @@ pub fn free_user_page_tables(
                 let _pte_guard = pte.lock();
                 free_page_table_checked_rooted(table2_phys, "l1", root_ppn);
             }
-            crate::sched::cond_resched();
+            crate::sched::hotpath::cond_resched();
         }
         // FORENSIC: census the PUD table before freeing it.
         if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn3) {
@@ -1545,7 +1545,7 @@ pub fn free_user_page_tables(
             let _pte_guard = pte.lock();
             free_page_table_checked_rooted(table3_phys, "l2", root_ppn);
         }
-        crate::sched::cond_resched();
+        crate::sched::hotpath::cond_resched();
     }
 
     if stale_count > 0 {
@@ -1553,7 +1553,7 @@ pub fn free_user_page_tables(
         if STALE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
             crate::pr_err!(
                 "FUT-STALE-TREE: root ppn={:#x} pid={} walks {} foreign/unstamped table frames:",
-                root_ppn, crate::sched::get_current_pid(), stale_count
+                root_ppn, crate::sched::hotpath::get_current_pid(), stale_count
             );
             for i in 0..stale_count.min(stale_tables.len()) {
                 let (lvl, v4, v3, ppn) = stale_tables[i];
@@ -1731,7 +1731,7 @@ pub fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u6
                 phys.bits(),
                 virt.bits(),
                 root_ppn,
-                crate::sched::get_current_pid()
+                crate::sched::hotpath::get_current_pid()
             );
         }
     }
@@ -2751,7 +2751,7 @@ pub fn forensics_scan_trees(
     const MAX_TASKS: usize = 128;
     let mut roots = [(0u32, 0u64); MAX_TASKS];
     let mut tasks = 0usize;
-    let skipped = crate::sched::for_each_task_try(|t| {
+    let skipped = crate::sched::hotpath::for_each_task_try(|t| {
         if tasks >= MAX_TASKS {
             return;
         }

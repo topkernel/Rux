@@ -594,7 +594,7 @@ fn timeout_to_deadline(us: u64) -> Option<u64> {
 
 /// Snapshot the current task's credentials for SO_PEERCRED/SCM_CREDENTIALS.
 fn current_unix_cred() -> UnixCred {
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             let c = task.cred();
             UnixCred {
@@ -947,7 +947,7 @@ fn unix_wait_round(
     ready: &dyn Fn() -> bool,
     deadline: Option<u64>,
 ) -> Result<(), i32> {
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return Err(-11), // no task context — behave non-blocking
     };
@@ -989,30 +989,30 @@ fn unix_wait_round(
         queue.finish_wait(current);
         // R36-B2: take ourselves back off the GRQ — we never slept, but a
         // concurrent wake may have enqueued us.
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Ok(());
     }
 
     if crate::signal::signal_pending() {
         queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-4); // EINTR
     }
 
     let timer_id = deadline
-        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+        .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::hotpath::get_current_pid()))
         .unwrap_or(0);
     if deadline.is_some() && timer_id == 0 {
         // Timer pool exhausted — a timed wait would sleep forever.
         queue.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-12); // ENOMEM
     }
 
     // R54: schedule() restores the caller's SIE state; re-arm IRQs so
     // ticks/IPIs reach this CPU across the wait.
     crate::arch::cpu::restore_irq(true);
-    crate::sched::schedule();
+    crate::sched::hotpath::schedule();
 
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
@@ -3824,7 +3824,7 @@ fn unix_socket_install(
         .file_id
         .store(file.file_id, Ordering::Release);
 
-    let fdtable = match crate::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::hotpath::get_current_fdtable() {
         Some(t) => t,
         None => {
             unwind_unix_file(&file);
@@ -3948,7 +3948,7 @@ pub fn unix_install_accepted(sock: &Arc<UnixSocket>, flags: i32) -> Result<usize
 
 /// Resolve a process fd to its UnixSocket (identity-checked).
 pub fn unix_socket_from_fd(fd: usize) -> Option<Arc<UnixSocket>> {
-    let fdtable = crate::sched::get_current_fdtable()?;
+    let fdtable = crate::sched::hotpath::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     {
         let ops = file.get_ops();
@@ -3964,7 +3964,7 @@ pub fn unix_socket_from_fd(fd: usize) -> Option<Arc<UnixSocket>> {
 
 /// (UnixSocket, file O_NONBLOCK) for a fd.
 pub fn unix_file_of(fd: usize) -> Option<(Arc<UnixSocket>, bool)> {
-    let fdtable = crate::sched::get_current_fdtable()?;
+    let fdtable = crate::sched::hotpath::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
     unix_file_of_file(&file)
 }
@@ -4186,7 +4186,7 @@ pub fn unix_park_audit() {
     }
     use core::fmt::Write as _;
     let mut out = alloc::string::String::new();
-    crate::sched::for_each_task(|task| {
+    crate::sched::hotpath::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
         // contract as sleep_snapshot); reads confined to the task's own
         // fields, its entry frame, its fdtable and the socket objects.

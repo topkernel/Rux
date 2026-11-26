@@ -90,7 +90,7 @@ fn wait_event_open(peer: &FifoPeer, pred: impl Fn() -> bool) -> Result<(), i32> 
         if pred() {
             return Ok(());
         }
-        let current = match crate::sched::current() {
+        let current = match crate::sched::hotpath::current() {
             Some(t) => t,
             None => return Ok(()), // no task context: don't block
         };
@@ -98,17 +98,17 @@ fn wait_event_open(peer: &FifoPeer, pred: impl Fn() -> bool) -> Result<(), i32> 
         // Re-check AFTER registering (lost-wakeup discipline).
         if pred() {
             peer.open_queue.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return Ok(());
         }
         if crate::signal::signal_pending() {
             peer.open_queue.finish_wait(current);
-            crate::sched::dequeue_task(&*current);
+            crate::sched::hotpath::dequeue_task(&*current);
             return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
         }
         // R54: re-arm IRQs across the schedule so timers/IPIs reach this CPU.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         peer.open_queue.finish_wait(current);
         if crate::signal::signal_pending() {
             return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());

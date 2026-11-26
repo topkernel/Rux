@@ -54,7 +54,7 @@ pub fn remote_backtrace(target: usize, why: &str) -> bool {
     let mut w = crate::debug::backtrace::ConsoleWriter::new();
     // Target's current task pid/comm (best-effort; comm is fixed-size
     // bytes, no allocation).
-    let cur = crate::sched::sched::cpu_state(target).current;
+    let cur = crate::sched::hotpath::cpu_state(target).current;
     if cur.is_null() {
         let _ = core::fmt::Write::write_fmt(
             &mut w,

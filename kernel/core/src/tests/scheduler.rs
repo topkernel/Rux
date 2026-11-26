@@ -12,7 +12,7 @@ pub fn test_scheduler() {
     test_group_start("scheduler");
 
     // Test 1: Get current process PID
-    let pid = crate::sched::get_current_pid();
+    let pid = crate::sched::hotpath::get_current_pid();
     if pid == 0 {
         test_pass("get_current_pid (idle task)");
     } else {
@@ -20,11 +20,11 @@ pub fn test_scheduler() {
     }
 
     // Test 2: Get current process PPID
-    let _ppid = crate::sched::get_current_ppid();
+    let _ppid = crate::sched::hotpath::get_current_ppid();
     test_pass("get_current_ppid");
 
     // Test 3: Get current task
-    match crate::sched::current() {
+    match crate::sched::hotpath::current() {
         Some(task) => {
             let task_pid = task.pid();
             let task_state = task.state();
@@ -37,7 +37,7 @@ pub fn test_scheduler() {
     }
 
     // Test 4: Get file descriptor table
-    match crate::sched::get_current_fdtable() {
+    match crate::sched::hotpath::get_current_fdtable() {
         Some(_) => {
             test_pass("get_current_fdtable");
         }
@@ -47,7 +47,7 @@ pub fn test_scheduler() {
     }
 
     // Test 5: Test find_task_by_pid (find idle task)
-    let task_ptr = unsafe { crate::sched::find_task_by_pid(0) };
+    let task_ptr = unsafe { crate::sched::hotpath::find_task_by_pid(0) };
     if !task_ptr.is_null() {
         test_pass("find_task_by_pid(0)");
     } else {
@@ -55,7 +55,7 @@ pub fn test_scheduler() {
     }
 
     // Test 6: Test find_task_by_pid with invalid PID
-    let invalid_ptr = unsafe { crate::sched::find_task_by_pid(99999) };
+    let invalid_ptr = unsafe { crate::sched::hotpath::find_task_by_pid(99999) };
     if invalid_ptr.is_null() {
         test_pass("find_task_by_pid(invalid)");
     } else {
@@ -75,7 +75,7 @@ pub fn test_scheduler() {
     // CPU than a nice 19 task. Inverting the factor starves the
     // low-priority tasks, so the direction is pinned here.
     {
-        use crate::sched::entities::SchedEntity;
+        use crate::sched::types::SchedEntity;
         const DELTA: u64 = 1_000_000; // 1ms
 
         let hi = SchedEntity::from_nice(-20);

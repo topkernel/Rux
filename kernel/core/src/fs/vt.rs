@@ -149,18 +149,18 @@ fn wake_switch_waiters() {
 /// predicate already holds (caller re-checks), Err(EINTR) on a pending
 /// signal. Same discipline as netlink_wait_round.
 fn wait_switch_round() -> Result<(), i32> {
-    let current = match crate::sched::current() {
+    let current = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return Err(-11),
     };
     SWITCH_WAITQ.prepare_to_wait(current, false, true);
     if crate::signal::signal_pending() {
         SWITCH_WAITQ.finish_wait(current);
-        crate::sched::dequeue_task(&*current);
+        crate::sched::hotpath::dequeue_task(&*current);
         return Err(-4); // EINTR
     }
     crate::arch::cpu::restore_irq(true);
-    crate::sched::schedule();
+    crate::sched::hotpath::schedule();
     SWITCH_WAITQ.finish_wait(current);
     if crate::signal::signal_pending() {
         return Err(-4);

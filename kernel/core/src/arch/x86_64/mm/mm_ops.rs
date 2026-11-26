@@ -777,7 +777,7 @@ impl PageTableWalker {
                     crate::pr_err!(
                         "PT-WALK-STALE: root={:#x} va={:#x} ROOT phys {:#x} off-machine, pid={}",
                         user_root_ppn, virt, root_pa,
-                        crate::sched::get_current_pid()
+                        crate::sched::hotpath::get_current_pid()
                     );
                 }
                 return None;
@@ -830,7 +830,7 @@ impl PageTableWalker {
                         crate::pr_err!(
                             "PT-WALK-STALE: root={:#x} va={:#x} lvl={} pte={:#x} -> phys {:#x} off-machine, pid={}",
                             user_root_ppn, virt, level, pte.bits(), pa,
-                            crate::sched::get_current_pid()
+                            crate::sched::hotpath::get_current_pid()
                         );
                     }
                     return None;
@@ -1858,7 +1858,7 @@ pub fn copy_page_table_cow(
                 // preemptible (it no-ops under any lock/bh/rcu section) —
                 // with need_resched set this is what breaks the CPU
                 // monopoly of a large-mm fork walk.
-                crate::sched::cond_resched();
+                crate::sched::hotpath::cond_resched();
             }
         }
     }
@@ -2093,7 +2093,7 @@ pub fn handle_cow_fault(
         // Multi-mapping bookkeeping + RSS: the copy is a new resident page
         // of the faulting address space (the old page remains resident only
         // for its other owners).
-        if let Some(mm) = crate::sched::current().and_then(|t| t.address_space()) {
+        if let Some(mm) = crate::sched::hotpath::current().and_then(|t| t.address_space()) {
             if let Some(np) = new_page {
                 crate::mm::rmap::page_record_mapping(
                     np,

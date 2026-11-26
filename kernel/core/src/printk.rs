@@ -670,7 +670,7 @@ fn printk_should_defer_output() -> bool {
     // later, from a context that holds nothing.
     crate::interrupt::preempt::preempt_count() != 0
         || !crate::arch::cpu::get_interrupts_state()
-        || crate::sched::sched::grq_held_here()
+        || crate::sched::hotpath::grq_held_here()
 }
 
 /// A console line is waiting to be emitted by the drain (set by printk
@@ -1591,7 +1591,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                 }
                 // Block until a record lands. prepare→re-check→schedule
                 // (lost-wake discipline, same as signalfd_read).
-                let current = match crate::sched::current() {
+                let current = match crate::sched::hotpath::current() {
                     Some(t) => t,
                     None => return -(crate::errno::constants::EAGAIN) as isize,
                 };
@@ -1605,13 +1605,13 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                         // Undo a racing wake enqueue (NEW-C2 discipline):
                         // current is the running task reference handed to
                         // prepare_to_wait.
-                        crate::sched::dequeue_task(current);
+                        crate::sched::hotpath::dequeue_task(current);
                         continue;
                     }
                 }
                 KMSG_N_SLEEP.fetch_add(1, Ordering::Relaxed);
                 crate::arch::cpu::restore_irq(true);
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
                 KMSG_READ_WQ.finish_wait(current);
                 continue;
             }
@@ -1989,7 +1989,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
     // held across schedule() — the reborrow discipline that replaces the
     // raw-pointer dodge (two live &mut Task aliases across schedule() were
     // the unsound shape this used to paper over).
-    let pid = match crate::sched::current() {
+    let pid = match crate::sched::hotpath::current() {
         Some(c) => c.pid(),
         None => return false,
     };
@@ -2006,13 +2006,13 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
         }
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
         // lost-wakeup discipline, same as sys_nanosleep).
-        crate::sched::current().map(|c| c.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
+        crate::sched::hotpath::current().map(|c| c.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
         if crate::timer::get_jiffies() >= target || crate::signal::signal_pending() {
-            if let Some(c) = crate::sched::current() {
+            if let Some(c) = crate::sched::hotpath::current() {
                 c.set_state(TaskState::new(TaskState::RUNNING));
                 // A racing wake may have enqueued us while still executing —
                 // take ourselves back off (NEW-C2 discipline).
-                crate::sched::dequeue_task(c);
+                crate::sched::hotpath::dequeue_task(c);
             }
             crate::timer::del_timer(timer_id);
             return true;
@@ -2020,7 +2020,7 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
         // Syscall context runs with SIE=0 — re-arm so the timer tick can
         // reach this CPU and wake us.
         crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
         // Woke up (timer expiry or signal): loop tail re-checks and exits.
     }
 }
@@ -2342,7 +2342,7 @@ mod persistent_log {
             if crate::api::process::kthread_should_stop() {
                 break;
             }
-            let my_pid = match crate::sched::current() {
+            let my_pid = match crate::sched::hotpath::current() {
                 Some(t) => t.pid(),
                 None => break,
             };
@@ -2352,17 +2352,17 @@ mod persistent_log {
                 // Re-derive the running-task borrow per window (never held
                 // across schedule() — the discipline that replaces the raw
                 // pointer this loop used to carry).
-                crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
+                crate::sched::hotpath::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
                 // Re-check AFTER marking sleeping: the one-shot timer may
                 // have fired between arming and set_state — either its wake
                 // captured the INTERRUPTIBLE state, or the deadline is
                 // already visible.
                 if crate::timer::get_jiffies() >= target {
-                    if let Some(t) = crate::sched::current() {
+                    if let Some(t) = crate::sched::hotpath::current() {
                         t.set_state(TaskState::new(TaskState::RUNNING));
                         // NEW-C2: a racing wake may have enqueued us while we
                         // are still executing — take ourselves back off.
-                        crate::sched::dequeue_task(t);
+                        crate::sched::hotpath::dequeue_task(t);
                     }
                     crate::timer::del_timer(timer_id);
                 } else {
@@ -2372,7 +2372,7 @@ mod persistent_log {
                     // 30 s flush never fires; the smoke saw the file stuck
                     // at the init flush, 3 lines, forever).
                     crate::arch::cpu::restore_irq(true);
-                    crate::sched::schedule();
+                    crate::sched::hotpath::schedule();
                     // Spurious wake before the deadline: drop the timer and
                     // loop (re-armed next iteration).
                     if crate::timer::timer_pending(timer_id) {
@@ -2382,7 +2382,7 @@ mod persistent_log {
             } else {
                 // Timer table full — stay runnable, yield one scheduling
                 // round and retry the arm.
-                crate::sched::schedule();
+                crate::sched::hotpath::schedule();
             }
             if crate::api::process::kthread_should_stop() {
                 break;

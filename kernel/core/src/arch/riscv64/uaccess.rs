@@ -154,7 +154,7 @@ fn fault_in_write(start: *mut u8, len: usize) -> bool {
     use crate::mm::page::VirtAddr as PageVirtAddr;
     use crate::arch::mm::memory_layout::VirtAddr as ArchVirtAddr;
 
-    let task = match crate::sched::current() {
+    let task = match crate::sched::hotpath::current() {
         Some(t) => t,
         None => return false,
     };

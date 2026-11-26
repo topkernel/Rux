@@ -694,7 +694,7 @@ impl TtyDevice {
             }
 
             // Blocking read (pipe.rs wait discipline).
-            let current = match crate::sched::current() {
+            let current = match crate::sched::hotpath::current() {
                 Some(task) => task,
                 None => return 0,
             };
@@ -708,20 +708,20 @@ impl TtyDevice {
             };
             if has_data || self.hungup.load(Ordering::Acquire) {
                 self.read_waitq.finish_wait(current);
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 continue;
             }
 
             // A signal that arrived while still RUNNING generated no wakeup.
             if crate::signal::signal_pending() {
                 self.read_waitq.finish_wait(current);
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
                 return -(EINTR as isize);
             }
 
             // R54: re-arm interrupts so ticks/IPIs reach this CPU.
             crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
+            crate::sched::hotpath::schedule();
 
             self.read_waitq.finish_wait(current);
 

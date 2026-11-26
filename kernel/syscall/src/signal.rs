@@ -61,7 +61,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
     };
 
     // Get current process (typed: sched::current() returns &mut Task)
-    let mut current = match rux::sched::current() {
+    let mut current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -229,7 +229,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     }
 
     // Get current process (typed: sched::current() returns &mut Task)
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -338,7 +338,7 @@ let new_action = SigAction {
 /// Returns system call return value before signal interruption
 pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
     // Get current process
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -466,7 +466,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
     }
 
     // Get current process
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -505,7 +505,7 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
     let old_ss_ptr = args[1] as *mut SignalStack;
 
     // Get current process (reference from sched::current()).
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -610,7 +610,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
     // SIGKILL/SIGSTOP can never be blocked, not even via sigsuspend.
     let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -655,12 +655,12 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
                     ::process::task::TaskState::RUNNING
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 current.ext.sigmask_restore = old_mask;
                 current.ext.sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
-            rux::sched::schedule();
+            rux::sched::hotpath::schedule();
         }
     }
 }
@@ -676,7 +676,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
 /// Same sleep-until-signal discipline as sys_rt_sigsuspend, minus the
 /// mask swap: pause never touches the blocked mask.
 pub fn sys_pause(_args: SyscallArgs) -> i64 {
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EINTR as i64),
     };
@@ -702,10 +702,10 @@ pub fn sys_pause(_args: SyscallArgs) -> i64 {
                     ::process::task::TaskState::RUNNING,
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 return -(errno::EINTR as i64);
             }
-            rux::sched::schedule();
+            rux::sched::hotpath::schedule();
         }
     }
 }
@@ -737,7 +737,7 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
 
     // Find target task (also needed for the sig==0 permission probe)
     // find_task_by_pid returns null if tid not found; result checked below.
-    let task = rux::sched::find_task_by_pid(tid);
+    let task = rux::sched::hotpath::find_task_by_pid(tid);
     if task.is_null() {
         return -(errno::ESRCH as i64);
     }

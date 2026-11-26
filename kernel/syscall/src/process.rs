@@ -71,7 +71,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
             core::sync::atomic::AtomicUsize::new(0);
         if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
             let st = crate::mm::buddy_allocator::buddy_stats();
-            let comm = rux::sched::current()
+            let comm = rux::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
@@ -145,14 +145,14 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     if flags & 0x00000100 == 0 /* !CLONE_VM: real fork, stack copied */
         && flags & 0x00010000 == 0 /* !CLONE_THREAD */
     {
-        let comm = rux::sched::current()
+        let comm = rux::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
         if comm == "appspawn" {
             if APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-                if let Some(t) = rux::sched::current() {
+                if let Some(t) = rux::sched::hotpath::current() {
                     // t is the current task's reference.
                     APPSPAWN_TGID.store(
                         t.tgid() as u32,
@@ -175,7 +175,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                 // fork, and what are they doing (holder candidates).
                 let my_pid = ::process::current_pid();
                 let listed_cell = core::cell::Cell::new(0usize);
-                rux::sched::for_each_task(|tk| {
+                rux::sched::hotpath::for_each_task(|tk| {
                     if listed_cell.get() >= 12 {
                         return;
                     }
@@ -220,7 +220,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // "no attempt" (userspace never reaches pthread_create) separates
     // from "success then instant death" (worker fault/exit).
     {
-        let comm = rux::sched::current()
+        let comm = rux::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -277,7 +277,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                             static NPAR: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
                             if NPAR.fetch_add(1, Relaxed) < 2 {
-                                if let Some(t) = rux::sched::current() {
+                                if let Some(t) = rux::sched::hotpath::current() {
                                     {
                                         const RL: usize =
                                             ::process::task::INIT_CALLS_LEN;
@@ -326,7 +326,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                         if flags & 0x00010000 != 0 /* CLONE_THREAD */
                             && APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) != 0
                         {
-                            if let Some(t) = rux::sched::current() {
+                            if let Some(t) = rux::sched::hotpath::current() {
                                 // t is the current (forking) task —
                                 // current() hands out &mut Task directly.
                                 {
@@ -454,7 +454,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                             }
                         }
                         // Parent-namespace view, same as the main return.
-                        let parent_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
+                        let parent_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
                         ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
                     }
                     Err(e) => {
@@ -477,7 +477,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // the global pid made every wait fail ECHILD).
     match do_clone(clone_args) {
         Ok(pid) => {
-            let parent_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
+            let parent_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
             ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }
         Err(e) => {
@@ -488,7 +488,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
             static N2: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N2.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                let comm = rux::sched::current()
+                let comm = rux::sched::hotpath::current()
                     .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
@@ -845,7 +845,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let xt_on = {
         static XT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        let caller_is_dbus = rux::sched::current()
+        let caller_is_dbus = rux::sched::hotpath::current()
             .map(|c| c.comm().starts_with(b"dbus-daemon".as_slice()))
             .unwrap_or(false);
         let path_interesting = pathname.contains("python3.10")
@@ -862,7 +862,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             && XT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
     };
     if xt_on {
-        let comm = rux::sched::current()
+        let comm = rux::sched::hotpath::current()
             .map(|c| {
                 let raw = c.comm();
                 let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
@@ -879,7 +879,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let full_path = if pathname.starts_with('/') {
         alloc::borrow::Cow::Borrowed(pathname)
     } else {
-        if let Some(current) = rux::sched::current() {
+        if let Some(current) = rux::sched::hotpath::current() {
             let cwd = current.get_cwd();
             if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
                 let mut path = String::with_capacity(cwd_str.len() + pathname.len() + 1);
@@ -1046,7 +1046,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     };
 
     // Get current process
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -errno::ESRCH as u64,
     };
@@ -1372,7 +1372,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         static UEEX_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-            if let Some(ft) = rux::sched::get_current_fdtable() {
+            if let Some(ft) = rux::sched::hotpath::get_current_fdtable() {
                 let mut hits: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
                 for fd in 0..16usize {
                     if let Some(f) = ft.get_file(fd) {
@@ -1411,7 +1411,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
             core::sync::atomic::AtomicUsize::new(0);
         let n = EXEC_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 120 {
-            let root = rux::sched::current()
+            let root = rux::sched::hotpath::current()
                 .and_then(|t| t.fs_arc())
                 .map(|fs| fs.get_root())
                 .unwrap_or_default();
@@ -1439,7 +1439,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         EXEC_FAIL2_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let n = EXEC_FAIL2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 48 {
-            let comm = rux::sched::current()
+            let comm = rux::sched::hotpath::current()
                 .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
@@ -1493,7 +1493,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
     // sequence (what it read/checked right before deciding to die) is
     // on the serial. Deep-root (app sandbox) processes only.
     {
-        let root = rux::sched::current()
+        let root = rux::sched::hotpath::current()
             .and_then(|t| t.fs_arc())
             .map(|fs| fs.get_root())
             .unwrap_or_default();
@@ -1675,7 +1675,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         let fp_t_wt = if crate::debug::forkprof::on() {
             crate::debug::forkprof::trace(
                 crate::debug::forkprof::T_WAIT_ENTRY,
-                rux::sched::get_current_pid(),
+                rux::sched::hotpath::get_current_pid(),
             );
             crate::debug::forkprof::now()
         } else {
@@ -1787,7 +1787,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         if id < 0 {
             return -(errno::EBADF as i64);
         }
-        let fdtable = match rux::sched::get_current_fdtable() {
+        let fdtable = match rux::sched::hotpath::get_current_fdtable() {
             Some(ft) => ft,
             None => return -(errno::EBADF as i64),
         };
@@ -1898,7 +1898,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
 /// process see the leader's pid). U1c: reported in the caller's pid
 /// namespace (ns-local pid).
 pub fn sys_getpid(_args: SyscallArgs) -> i64 {
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // group_leader_ptr() heals NULL. The LEADER's ns-local pid is
         // the process's pid in the caller's namespace (typed current;
         // the leader pointer stays raw).
@@ -1915,7 +1915,7 @@ pub fn sys_getpid(_args: SyscallArgs) -> i64 {
 /// U1c: reported in the caller's pid namespace.
 /// RISC-V syscall number: 178
 pub fn sys_gettid(_args: SyscallArgs) -> i64 {
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // SAFETY: current is guaranteed valid and non-null by sched::current().
         current.ns_pid_local() as i64
     } else {
@@ -1934,7 +1934,7 @@ pub fn sys_getppid(_args: SyscallArgs) -> i64 {
     // with NO pid-hash lookup. The old shape resolved ppid through
     // find_task_by_pid on every call (the perf-sample histogram showed
     // pid_hash_lookup in the null-syscall hot path).
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // SAFETY: current is valid; group_leader_ptr heals NULL and
         // parent_task_ptr applies the same plausibility screen ppid()
         // uses (a non-leader's parent field can be an unlinked snapshot).
@@ -1986,14 +1986,14 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // except self and PID 1. Permission is checked per target
         // (Linux check_kill_permission); EPERM is returned when no target
         // accepted the signal but at least one denied it.
-        let my_tgid = match rux::sched::current() {
+        let my_tgid = match rux::sched::hotpath::current() {
             // SAFETY: task pointer from sched::current() is valid when Some.
             Some(t) => t.tgid(),
             None => return -(errno::ESRCH as i64),
         };
         let group_filter: Option<u32> = if pid == 0 {
             // SAFETY: same current task as above.
-            rux::sched::current().map(|t| t.pgid())
+            rux::sched::hotpath::current().map(|t| t.pgid())
         } else if pid == -1 {
             None
         } else if pid == i32::MIN {
@@ -2020,7 +2020,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // ancestor-namespace tasks killed the LTP runner itself (pidns10
         // expected ESRCH from an empty namespace; pidns17's parent died
         // by the container's own SIGUSR1 broadcast).
-        let caller_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
+        let caller_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
         // pid_hash_for_each_task covers sleeping tasks too (unlike the
         // per-CPU for_each_task which only sees running/idle tasks) — and
         // every THREAD is its own hash entry, so each live member of a
@@ -2078,7 +2078,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
     // null before dereferencing and verify permissions before sending
     // signal (INV-PROC-BORROW-1 via borrow_task).
     {
-        let target = rux::sched::find_task_by_pid(global_pid);
+        let target = rux::sched::hotpath::find_task_by_pid(global_pid);
         if target.is_null() {
             return -(errno::ESRCH as i64);
         }
@@ -2115,7 +2115,7 @@ pub fn sys_set_tid_address(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // current is the running task's reference.
         current.set_clear_child_tid(tidptr);
         return current.pid() as i64;
@@ -2145,7 +2145,7 @@ pub fn sys_set_robust_list(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if let Some(current) = rux::sched::current() {
+    if let Some(current) = rux::sched::hotpath::current() {
         // current is the running task's reference.
         current.set_robust_list(head, len);
     }
@@ -2244,7 +2244,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
 
 /// sys_getuid - Get user ID
 pub fn sys_getuid(_args: SyscallArgs) -> i64 {
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         task.cred().uid as i64
     } else {
         0
@@ -2253,7 +2253,7 @@ pub fn sys_getuid(_args: SyscallArgs) -> i64 {
 
 /// sys_getgid - Get group ID
 pub fn sys_getgid(_args: SyscallArgs) -> i64 {
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         task.cred().gid as i64
     } else {
         0
@@ -2262,7 +2262,7 @@ pub fn sys_getgid(_args: SyscallArgs) -> i64 {
 
 /// sys_geteuid - Get effective user ID
 pub fn sys_geteuid(_args: SyscallArgs) -> i64 {
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         task.cred().euid as i64
     } else {
         0
@@ -2271,7 +2271,7 @@ pub fn sys_geteuid(_args: SyscallArgs) -> i64 {
 
 /// sys_getegid - Get effective group ID
 pub fn sys_getegid(_args: SyscallArgs) -> i64 {
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         task.cred().egid as i64
     } else {
         0
@@ -2284,7 +2284,7 @@ pub fn sys_getegid(_args: SyscallArgs) -> i64 {
 /// - args[0]: uid - user ID to set
 pub fn sys_setuid(args: SyscallArgs) -> i64 {
     let uid = args[0] as u32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
         {
@@ -2332,7 +2332,7 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
 /// - args[0]: gid - group ID to set
 pub fn sys_setgid(args: SyscallArgs) -> i64 {
     let gid = args[0] as u32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
         {
@@ -2367,7 +2367,7 @@ pub fn sys_setgid(args: SyscallArgs) -> i64 {
 pub fn sys_setreuid(args: SyscallArgs) -> i64 {
     let ruid = args[0] as i32;
     let euid = args[1] as i32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
         {
@@ -2440,7 +2440,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
 pub fn sys_setregid(args: SyscallArgs) -> i64 {
     let rgid = args[0] as i32;
     let egid = args[1] as i32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
         {
@@ -2495,7 +2495,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
     let ruid = args[0] as i32;
     let euid = args[1] as i32;
     let suid = args[2] as i32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
         {
@@ -2585,7 +2585,7 @@ pub fn sys_getresuid(args: SyscallArgs) -> i64 {
     let euid_ptr = args[1] as *mut u32;
     let suid_ptr = args[2] as *mut u32;
 
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
         let cred = ::process::r#unsafe::borrow_task(task).cred();
         // SAFETY: task is valid; user pointers are validated with access_ok before each write.
@@ -2626,7 +2626,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> i64 {
     let rgid = args[0] as i32;
     let egid = args[1] as i32;
     let sgid = args[2] as i32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
         {
@@ -2695,7 +2695,7 @@ pub fn sys_getresgid(args: SyscallArgs) -> i64 {
     let egid_ptr = args[1] as *mut u32;
     let sgid_ptr = args[2] as *mut u32;
 
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
         let cred = ::process::r#unsafe::borrow_task(task).cred();
         // SAFETY: task is valid; user pointers validated with access_ok before each write.
@@ -2738,7 +2738,7 @@ pub fn sys_getgroups(args: SyscallArgs) -> i64 {
     let size = args[0] as i32;
     let list_ptr = args[1] as *mut u32;
 
-    let task = match rux::sched::current() {
+    let task = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -2788,7 +2788,7 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
         // setgroups(0, NULL) CLEARS the supplementary group list (POSIX);
         // the old code returned success without touching the current set
         // (review P28).
-        if let Some(t) = rux::sched::current() {
+        if let Some(t) = rux::sched::hotpath::current() {
             // t is the running task's reference; groups lives on its Cred.
             t.cred_mut().groups.clear();
         }
@@ -2820,7 +2820,7 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     }
 
     // Store in task credentials
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         task.cred_mut().groups = groups;
     }
 
@@ -2836,7 +2836,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
     let target_pid = args[0] as i32;
     let pgid = args[1] as i32;
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -2867,7 +2867,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
     // LEADER (a live pid). Joining a nonexistent group is EPERM (LTP
     // setpgid02's pid_max case).
     if pgid != target_pid
-        && rux::sched::find_task_by_pid(pgid as u32).is_null()
+        && rux::sched::hotpath::find_task_by_pid(pgid as u32).is_null()
     {
         return -(errno::EPERM as i64);
     }
@@ -2881,7 +2881,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
             // setsid()'d child's group) — leader via borrow_task
             // (INV-PROC-BORROW-1, pid-hash liveness).
             if pgid as u32 != current_pid {
-                let leader = rux::sched::find_task_by_pid(pgid as u32);
+                let leader = rux::sched::hotpath::find_task_by_pid(pgid as u32);
                 if leader.is_null()
                     || ::process::r#unsafe::borrow_task(leader).sid() != current.sid()
                 {
@@ -2894,7 +2894,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
         // Setting child's pgid (find_task_by_pid returns a valid
         // pointer when non-null; target via borrow_task_mut — this
         // thread is the parent that can still move the child).
-        let target = rux::sched::find_task_by_pid(target_pid as u32);
+        let target = rux::sched::hotpath::find_task_by_pid(target_pid as u32);
         if target.is_null() {
             return -(errno::ESRCH as i64);
         }
@@ -2929,7 +2929,7 @@ pub fn sys_getpgid(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
 
     if pid == 0 {
-        if let Some(task) = rux::sched::current() {
+        if let Some(task) = rux::sched::hotpath::current() {
             // task is the running task's reference.
             return task.pgid() as i64;
         }
@@ -2937,7 +2937,7 @@ pub fn sys_getpgid(args: SyscallArgs) -> i64 {
     }
 
     // find_task_by_pid returns a valid pointer when non-null.
-    let target = rux::sched::find_task_by_pid(pid as u32);
+    let target = rux::sched::hotpath::find_task_by_pid(pid as u32);
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -2950,7 +2950,7 @@ pub fn sys_getpgid(args: SyscallArgs) -> i64 {
 /// # Returns
 /// New session ID on success, negative error on failure
 pub fn sys_setsid(_args: SyscallArgs) -> i64 {
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -2980,7 +2980,7 @@ pub fn sys_getsid(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
 
     if pid == 0 {
-        if let Some(task) = rux::sched::current() {
+        if let Some(task) = rux::sched::hotpath::current() {
             // task is the running task's reference.
             return task.sid() as i64;
         }
@@ -2988,7 +2988,7 @@ pub fn sys_getsid(args: SyscallArgs) -> i64 {
     }
 
     // find_task_by_pid returns a valid pointer when non-null.
-    let target = rux::sched::find_task_by_pid(pid as u32);
+    let target = rux::sched::hotpath::find_task_by_pid(pid as u32);
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -3029,7 +3029,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -3126,7 +3126,7 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
     let arg4 = args[3];
     let _arg5 = args[4];
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -3513,7 +3513,7 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
 
     // Validate target exists and caller has permission, even for sig==0.
     // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
-    let target = rux::sched::find_task_by_pid(tid);
+    let target = rux::sched::hotpath::find_task_by_pid(tid);
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -3570,7 +3570,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     // == tgid). Deliver to the leader (Linux picks any unblocked thread;
     // leader is the deterministic choice).
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
-    let target = rux::sched::find_task_by_pid(tgid);
+    let target = rux::sched::hotpath::find_task_by_pid(tgid);
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -3612,7 +3612,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
         sig,
         si_code,
         ::process::current_pid(),
-        rux::sched::current().map(|c| c.cred().uid).unwrap_or(0),
+        rux::sched::hotpath::current().map(|c| c.cred().uid).unwrap_or(0),
     );
     info.set_value_bytes(&payload);
 
@@ -3668,7 +3668,7 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
 
     // Resolve the exact thread.
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
-    let target = rux::sched::find_task_by_pid(tid);
+    let target = rux::sched::hotpath::find_task_by_pid(tid);
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -3695,7 +3695,7 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
         sig,
         si_code,
         ::process::current_pid(),
-        rux::sched::current().map(|c| c.cred().uid).unwrap_or(0),
+        rux::sched::hotpath::current().map(|c| c.cred().uid).unwrap_or(0),
     );
     info.set_value_bytes(&payload);
 
@@ -3781,7 +3781,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         None
     };
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
@@ -3836,7 +3836,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                     ::process::task::TaskState::RUNNING,
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
-                rux::sched::dequeue_task(current);
+                rux::sched::hotpath::dequeue_task(current);
                 continue;
             }
         }
@@ -3854,7 +3854,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                 let id = crate::timer::add_timer_wakeup_hres(
                     jiffies,
                     expires_time,
-                    rux::sched::get_current_pid(),
+                    rux::sched::hotpath::get_current_pid(),
                 );
                 crate::drivers::timer::rearm_for_hres();
                 id
@@ -3873,7 +3873,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                 ::process::task::TaskState::RUNNING,
             ));
         }
-        rux::sched::schedule();
+        rux::sched::hotpath::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
         }
@@ -3957,7 +3957,7 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
     // - otherwise: normal dirfd/AT_FDCWD-relative resolution ("" is
     //   ENOENT inside resolve_user_path, like getname()).
     let path = if flags & AT_EMPTY_PATH != 0 {
-        let file = rux::sched::get_current_fdtable()
+        let file = rux::sched::hotpath::get_current_fdtable()
             .and_then(|ft| ft.get_file(dirfd as usize));
         match file {
             Some(f) => {
@@ -4015,7 +4015,7 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
 /// - args[0]: fsuid - filesystem user ID
 pub fn sys_setfsuid(args: SyscallArgs) -> i64 {
     let fsuid = args[0] as u32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // task is the running task's reference; cred()/cred_mut()
         // return references to the task's credential structure.
         {
@@ -4065,7 +4065,7 @@ pub fn sys_setfsuid(args: SyscallArgs) -> i64 {
 /// - args[0]: fsgid - filesystem group ID
 pub fn sys_setfsgid(args: SyscallArgs) -> i64 {
     let fsgid = args[0] as u32;
-    if let Some(task) = rux::sched::current() {
+    if let Some(task) = rux::sched::hotpath::current() {
         // task is the running task's reference; cred()/cred_mut()
         // return references to the task's credential structure.
         {
@@ -4104,7 +4104,7 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
         // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (clock_t = i64)
         // Self ticks from the timer-IRQ CPU accounting; child ticks are
         // folded into this task at each child's exit (see do_exit).
-        let (utime, stime, cutime, cstime) = match rux::sched::current() {
+        let (utime, stime, cutime, cstime) = match rux::sched::hotpath::current() {
             Some(t) => {
                 use core::sync::atomic::Ordering::Relaxed;
                 (
@@ -4178,7 +4178,7 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         use core::sync::atomic::{AtomicU16, Ordering};
         static PROC_COUNT: AtomicU16 = AtomicU16::new(0);
         PROC_COUNT.store(0, Ordering::Relaxed);
-        rux::sched::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
+        rux::sched::hotpath::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
         let _ = ua::write_user::<u16>(base + 80, PROC_COUNT.load(Ordering::Relaxed));
         // totalhigh, freehigh, mem_unit
         let _ = ua::write_user::<u64>(base + 88, 0);
@@ -4310,7 +4310,7 @@ pub fn sys_kcmp(args: SyscallArgs) -> i64 {
     // PTRACE_MODE_ATTACH_REALCREDS parity: the caller must be able to
     // ptrace BOTH tasks. Rux has no capability sets per se; the root uid
     // is the capability stand-in (every LTP kcmp case runs as root).
-    if let Some(cur) = rux::sched::current() {
+    if let Some(cur) = rux::sched::hotpath::current() {
         let cur_euid = cur.cred().euid;
         if cur_euid != 0 && (cur_euid != t1.cred().euid || cur_euid != t2.cred().euid) {
             return -(errno::EPERM as i64);
@@ -4546,7 +4546,7 @@ fn process_vm_rw_locked(
 
     // SAFETY: current() returns the running task or None; target is
     // pinned by the caller.
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(c) => c as *mut ::process::task::Task,
         None => return -(errno::ESRCH as i64),
     };
@@ -4827,7 +4827,7 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
 /// Filter-attach privilege decision (seccomp(2)): the no_new_privs
 /// attribute OR CAP_SYS_ADMIN. Exposed pub(crate) for the unit rows.
 pub(crate) fn seccomp_attach_allowed() -> bool {
-    rux::sched::current()
+    rux::sched::hotpath::current()
         .map(|t| t.no_new_privs())
         .unwrap_or(false)
         || crate::security::capable(crate::security::CAP_SYS_ADMIN)
@@ -4841,7 +4841,7 @@ pub(crate) fn strict_allowed_for_test() -> &'static [u64; 5] {
 
 /// Enter STRICT mode. Cannot be entered once FILTER mode is active
 /// (Linux: EPERM — filters cannot be detached).
-fn seccomp_set_strict() -> Result<(), i32> {    let Some(task) = rux::sched::current() else {
+fn seccomp_set_strict() -> Result<(), i32> {    let Some(task) = rux::sched::hotpath::current() else {
         return Err(-(errno::ESRCH as i32));
     };
     if task.seccomp_mode() == crate::seccomp::SECCOMP_MODE_FILTER {
@@ -4856,7 +4856,7 @@ fn seccomp_set_strict() -> Result<(), i32> {    let Some(task) = rux::sched::cur
 /// word), BPF_LD|BPF_W|BPF_IMM (A = k), BPF_JMP|BPF_{JEQ,JGT,JGE,JSET}|BPF_K
 /// (compare), BPF_RET|BPF_K (return action). Anything else → EINVAL.
 fn seccomp_set_filter(filter: alloc::vec::Vec<::process::task::SockFilter>) -> Result<(), i32> {
-    let Some(task) = rux::sched::current() else {
+    let Some(task) = rux::sched::hotpath::current() else {
         return Err(-(errno::ESRCH as i32));
     };
 
@@ -5006,7 +5006,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
 
     // Determine the target task
     let target = if pid == 0 {
-        match rux::sched::current() {
+        match rux::sched::hotpath::current() {
             Some(t) => t,
             None => return -(errno::ESRCH as i64),
         }
@@ -5017,7 +5017,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
             return -(errno::EINVAL as i64);
         }
         // find_task_by_pid returns a valid pointer when non-null.
-        let ptr = rux::sched::find_task_by_pid(pid as u32);
+        let ptr = rux::sched::hotpath::find_task_by_pid(pid as u32);
         if ptr.is_null() {
             return -(errno::ESRCH as i64);
         }
@@ -5134,7 +5134,7 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
     // when the header pid names any other task (kernel/capability.c:
     // "if (pid && pid != task_pid_vnr(current)) return -EPERM"). LTP
     // capset04 forks a child and expects capset(child_pid, ...) = EPERM.
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -5199,7 +5199,7 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
 /// were retired upstream, so any value stores and reads back verbatim.
 pub fn sys_personality(args: SyscallArgs) -> i64 {
     let new = args[0] as u32;
-    match rux::sched::current() {
+    match rux::sched::hotpath::current() {
         Some(current) => {
             let old = current.personality;
             if new != 0xffffffff {
@@ -5264,7 +5264,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         if p.starts_with('/') {
             return alloc::string::String::from(p);
         }
-        let cwd = match rux::sched::current() {
+        let cwd = match rux::sched::hotpath::current() {
             Some(t) => t.get_cwd(),
             None => alloc::boxed::Box::from(&b"/"[..]),
         };
@@ -5342,7 +5342,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let Some(current) = rux::sched::current() else {
+    let Some(current) = rux::sched::hotpath::current() else {
         return -(errno::ESRCH as i64);
     };
 
@@ -5509,7 +5509,7 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let (cur, max) = match rux::sched::current() {
+    let (cur, max) = match rux::sched::hotpath::current() {
         Some(task) => task.rlimit(resource as usize),
         None => return -(errno::ESRCH as i64),
     };
@@ -5585,7 +5585,7 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -5641,7 +5641,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     //   32 ru_maxrss .. 40 ru_minflt 48 ru_majflt 56 ru_inblock 64 ru_oublock
     //   72 ru_nvcsw 80 ru_nivcsw (padded to 96) — struct is 96 bytes on musl;
     //   the old code zeroed 144 (glibc layout), keep zeroing the whole 144.
-    let (utime_ticks, stime_ticks) = match rux::sched::current() {
+    let (utime_ticks, stime_ticks) = match rux::sched::hotpath::current() {
         Some(t) => {
             use core::sync::atomic::Ordering::Relaxed;
             if who == RUSAGE_CHILDREN {
@@ -5672,14 +5672,14 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     // folded in do_exit; LTP getrusage03's inherit_fork2/grandchild
     // assertions read it).
     let maxrss_kb: u64 = if who == RUSAGE_CHILDREN {
-        rux::sched::current()
+        rux::sched::hotpath::current()
             .map(|t| {
                 (*t).ext.cmaxrss_kb
                     .load(core::sync::atomic::Ordering::Relaxed)
             })
             .unwrap_or(0)
     } else {
-        rux::sched::current()
+        rux::sched::hotpath::current()
             .and_then(|t| t.address_space())
             .map(|mm| mm.rss() * 4)
             .unwrap_or(0)
@@ -5877,7 +5877,7 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
     // group's descriptors. CLONE_FS stays a no-op (the fs struct is
     // per-fork here; nothing shares it).
     if flags & 0x00000400 != 0 {
-        if let Some(task) = rux::sched::current() {
+        if let Some(task) = rux::sched::hotpath::current() {
             // task is the running task's reference.
             if let Some(arc) = task.fdtable_arc() {
                 if alloc::sync::Arc::strong_count(&arc) > 2 {
@@ -6010,7 +6010,7 @@ pub fn sys_ioprio_set(args: SyscallArgs) -> i64 {
     // who == 0 (no pid/uid enumeration here) and report ESRCH for a
     // named foreign target — the reference sets/queries every matching
     // task, but nothing in LTP or the images selects a foreign pgrp/user.
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -6054,7 +6054,7 @@ pub fn sys_ioprio_get(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let current = match rux::sched::current() {
+    let current = match rux::sched::hotpath::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
@@ -6269,7 +6269,7 @@ pub fn sys_pidfd_send_signal(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -6313,7 +6313,7 @@ pub fn sys_pidfd_send_signal(args: SyscallArgs) -> i64 {
     // SI_TKILL (forged kernel-sourced signals are refused, the same rule
     // rt_sigqueueinfo enforces); si_pid/si_uid are rebuilt from the
     // SENDER (the kernel never trusts the user's values).
-    let (sender_pid, sender_uid) = match rux::sched::current() {
+    let (sender_pid, sender_uid) = match rux::sched::hotpath::current() {
         // current is the running task's reference.
         Some(t) => { (t.pid(), t.cred().uid) },
         None => (0, 0),
@@ -6442,7 +6442,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // "invalid pidfd"). Writing the actual fd stays future work — only
     // the fault probe is observable by current callers.
     if flags & 0x00001000 != 0 && !pidfd_ptr.is_null() {
-        let root = rux::sched::current()
+        let root = rux::sched::hotpath::current()
             .and_then(|t| t.address_space())
             .map(|a| a.root_ppn());
         // Writability probe: one read-only page-table walk of the
@@ -6488,7 +6488,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // is NOT shared (this one has its own — clone3 use by OH runtimes
     // is unlikely, the budget here is small and separate).
     {
-        let comm = rux::sched::current()
+        let comm = rux::sched::hotpath::current()
             .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -6511,7 +6511,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     match do_clone(clone_args) {
         Ok(pid) => {
             // Parent-namespace view, same as sys_clone's return.
-            let parent_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
+            let parent_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
             ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }
         Err(e) => e as i64,
@@ -6548,7 +6548,7 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
     // parent's descriptors open; without the copy the child closed the
     // shared table and the parent's very next fcntl died EBADF.
     if flags & CLOSE_RANGE_UNSHARE != 0 {
-        if let Some(task) = rux::sched::current() {
+        if let Some(task) = rux::sched::hotpath::current() {
             // task is the running task's reference.
             if let Some(arc) = task.fdtable_arc() {
                 // fdtable_arc() itself holds one reference: >2 means a
@@ -6561,7 +6561,7 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
         }
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -6608,7 +6608,7 @@ pub fn sys_pidfd_open(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -6660,7 +6660,7 @@ pub fn sys_pidfd_getfd(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let fdtable = match rux::sched::get_current_fdtable() {
+    let fdtable = match rux::sched::hotpath::get_current_fdtable() {
         Some(ft) => ft,
         None => return -(errno::EBADF as i64),
     };
@@ -6692,7 +6692,7 @@ pub fn sys_pidfd_getfd(args: SyscallArgs) -> i64 {
 
     // PTRACE_MODE_ATTACH_REALCREDS stand-in (same policy as kcmp): the
     // caller must be root or share the target's credentials.
-    if let Some(cur) = rux::sched::current() {
+    if let Some(cur) = rux::sched::hotpath::current() {
         // SAFETY: cur is the running task.
         let cur_euid = cur.cred().euid;
         if cur_euid != 0 && cur_euid != target.cred().euid {

@@ -249,7 +249,7 @@ fn note_carrier_evidence() {
     if cpu >= CARRIER_EVIDENCE.len() {
         return;
     }
-    let t = crate::sched::sched::cpu_state(cpu).current as usize;
+    let t = crate::sched::hotpath::cpu_state(cpu).current as usize;
     if t == 0 {
         return;
     }

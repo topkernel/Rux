@@ -55,8 +55,8 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
             // of 2 ms windows — the same starvation the inline windows
             // caused, just in schedulable context. Pending stays armed;
             // we remain RUNNING, so the scheduler re-picks us in turn.
-            if crate::sched::need_resched() {
-                crate::sched::schedule();
+            if crate::sched::hotpath::need_resched() {
+                crate::sched::hotpath::schedule();
             }
         }
 
@@ -66,7 +66,7 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
         // above and set_state found us RUNNING, so Task::wake_up was a no-op
         // and the wakeup would be lost — softirqs would then sit pending
         // until the next unrelated interrupt (Linux run_ksoftirqd pattern).
-        if let Some(current) = crate::sched::current() {
+        if let Some(current) = crate::sched::hotpath::current() {
             current.set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE,
             ));
@@ -74,7 +74,7 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
 
         if crate::interrupt::softirq::has_pending_softirqs() {
             // Race with wakeup — clear state and drain instead of sleeping
-            if let Some(current) = crate::sched::current() {
+            if let Some(current) = crate::sched::hotpath::current() {
                 current.set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
@@ -84,12 +84,12 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
                 // taking ourselves back off, a second CPU could pick and
                 // run this very kthread concurrently (double-drain, stack
                 // corruption). No-op when nothing enqueued us.
-                crate::sched::dequeue_task(&*current);
+                crate::sched::hotpath::dequeue_task(&*current);
             }
             continue;
         }
 
-        crate::sched::schedule();
+        crate::sched::hotpath::schedule();
 
         // Woken up — loop back to check pending softirqs
     }

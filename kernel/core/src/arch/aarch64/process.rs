@@ -51,7 +51,7 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 /// zero (a fault at ~(base + slot) reads as memory corruption).
 #[inline]
 pub fn flush_thread() {
-    if let Some(current) = crate::sched::current() {
+    if let Some(current) = crate::sched::hotpath::current() {
         // We are the current task; no concurrent mutation of our thread
         // state occurs.
         {

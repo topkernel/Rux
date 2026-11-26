@@ -5,9 +5,9 @@
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, AtomicI64, Ordering};
 use crate::process::task::Task;
-use crate::sched::class::{SchedClass, RunQueueRef};
-use crate::sched::entities::{SchedEntity, SchedRtEntity, SchedDlEntity, LoadWeight, NICE_0_LOAD};
-use crate::sched::entities::{DL_BW_UNIT, DL_DEFAULT_PERIOD_NS, DL_DEFAULT_RUNTIME_NS};
+use crate::sched::{hotpath::SchedClass, types::RunQueueRef};
+use crate::sched::{types::SchedEntity, types::SchedRtEntity, types::SchedDlEntity, types::LoadWeight, hotpath::NICE_0_LOAD};
+use crate::sched::hotpath::{DL_BW_UNIT, DL_DEFAULT_PERIOD_NS, DL_DEFAULT_RUNTIME_NS};
 
 
 
@@ -74,7 +74,7 @@ impl DlRunQueue {
             |v| v.checked_sub(1),
         ) {
             if old == 1 {
-                crate::sched::sched::class_nonempty_clear(
+                crate::sched::hotpath::class_nonempty_clear(
                     rux::api::sched::CLASS_DL_BIT,
                 );
             }
@@ -121,7 +121,7 @@ impl DlRunQueue {
             // the DL class bit (GRQ-held).
             let dl_old = self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
             if dl_old == 0 {
-                crate::sched::sched::class_nonempty_set(
+                crate::sched::hotpath::class_nonempty_set(
                     rux::api::sched::CLASS_DL_BIT,
                 );
             }
@@ -266,10 +266,10 @@ impl DlRunQueue {
 
             // b50 #GP guard — see the fair-class twin. A scribbled slot
             // pointer must never reach the deref below.
-            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+            if !crate::sched::hotpath::kernel_task_ptr_range_ok(task as *const u8) {
                 self.tasks.remove(&key);
                 self.dl_nr_dec();
-                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+                crate::sched::hotpath::report_poisoned_rq_entry(cpu_id, task as usize);
                 continue;
             }
 
