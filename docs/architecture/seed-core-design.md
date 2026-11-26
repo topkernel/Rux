@@ -683,20 +683,52 @@ User decision 2026-11-25: build the structure first with everything in
 `hotpath.rs`, then shrink. The two are not mixed — no lane decides
 whether a function is hot while it is moving files.
 
-**The shrink stage (after the structure is up).** For each
-`hotpath.rs`, function by function: is it on a path that a trap entry,
-the context switch, the page-fault handler, the timer interrupt, the
-block completion or a lock primitive calls by name? The answer comes
-from the call graph starting at those entries, not from a hand-written
-list of files, and it is checked against `syscost` samples under load.
-What remains is the subsystem's real hot-path line count, the number
-the core-size goal (§1a.4) is measured against.
+**The shrink stage (after the structure is up; method set by the user
+on 2026-11-26).** Hot is a property of a workload: how often the
+scheduler, or the allocator, runs depends on what is running. No static
+reading of the code decides it. A call graph built from the kernel
+binary shows only what a path can reach, and measured on 2026-11-25
+that is nearly everything: 2,224 functions have no direct caller at all
+and are reached through tables — every system call handler, every file
+operation of every file system, the scheduling classes, the interrupt
+and softirq handlers. So the stage does not start from the full core and
+argue each function cold. It starts from the empty one:
 
-A function that is not on any such path does not simply move to the
-crate (user decision 2026-11-25): moving it keeps the code alive under
-another name. The sweep covers the WHOLE core, not `hotpath.rs` alone
-(same day: the scheduler was one example; every subsystem is
-examined). Measured before pass 2 over the core without `tests/`:
+1. Before anything moves, the performance baseline is recorded with the
+   merge gate's instruments — the `syscost` census, the `pbench`
+   medians, the per-operation costs — on one machine configuration, and
+   a function-level sample report is taken under the workloads that
+   define hot for this kernel: `pbench`, lmbench, the Ubuntu desktop
+   boot, the OpenHarmony boot, the stress suite. The kernel already has
+   a `perf_event_open` software-clock sampler (tick-granular at
+   `KERNEL_HZ` = 100, with call chains); the report that turns its
+   samples into a count per function is the first piece of work of the
+   stage.
+2. One subsystem at a time: its safe code — everything of its
+   `hotpath.rs` — moves out to its crate. The core keeps the
+   subsystem's `unsafe.rs`, its `types.rs`, and the interface tables.
+3. The same measurements are taken again and compared with the baseline.
+   Where a number regressed, the samples say which functions the hot
+   path now reaches through the interface tables, and those functions
+   move back into the core, where the call is direct again.
+4. When the numbers are back at the baseline, the subsystem is merged
+   and the next one starts.
+
+Each line of the core at the end is there for one of two reasons: it is
+unsafe, or a measurement put it back. `hotpath.rs` then holds only what
+a measurement kept, and its line count per subsystem is the real
+hot-path size, the number the target (§1a.4) is measured against. The
+whole core moves out in one step only if the per-subsystem steps prove
+too slow: with everything out at once the regressions overlap and
+cannot be assigned to a subsystem.
+
+Code that leaves the core is of two kinds. A feature that is merely
+cold — code a `/proc` file reads, a mount option, a device's probe
+sequence — stays alive in its crate, as it should. A diagnostic
+instrument left behind by an investigation is not moved just to keep it
+alive (user decision 2026-11-25), and the sweep for such code covers
+the WHOLE core, not `hotpath.rs` alone (same day: the scheduler was one
+example; every subsystem is examined). Measured before pass 2 over the core without `tests/`:
 216,971 lines, of which 5,976 are hand-written number-to-text
 printers and 17,087 are functions whose name carries a diagnostic or
 forensic marker — 23,063 lines, 10.6%. `debug/` accounts for 5,938 of
