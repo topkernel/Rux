@@ -12887,7 +12887,7 @@ pub fn synchronize_rcu_bounded_sleepy(max_ms: u64, site: &'static str) -> bool {
     let gen = RCU_GEN.load(Ordering::Acquire);
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
-    wait_qs_sleepy(gen, max_ms, site)
+    wait_qs_sleepy(gen, max_ms, site) // the bounded-sleepy form
 }
 
 /// Snapshot-form grace wait with a bounded POLL phase before the sleepy
@@ -12921,7 +12921,7 @@ pub fn synchronize_rcu_bounded_pollfirst(max_ms: u64, site: &'static str) -> boo
         }
         core::hint::spin_loop();
     }
-    wait_qs_sleepy(gen, max_ms, site)
+    wait_qs_sleepy(gen, max_ms, site) // the bounded-pollfirst form
 }
 
 /// TRUE bounded grace period, for callers that free objects on its
@@ -13090,7 +13090,7 @@ pub fn synchronize_rcu_forced_sleepy(max_ms: u64, site: &'static str) -> bool {
     let gen = shared_grace_target();
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
-    wait_qs_sleepy(gen, max_ms, site)
+    wait_qs_sleepy(gen, max_ms, site) // the forced-sleepy form
 }
 
 /// Forced grace period with a bounded POLL phase before the sleepy
@@ -13116,7 +13116,7 @@ pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
         }
         core::hint::spin_loop();
     }
-    wait_qs_sleepy(gen, max_ms, site)
+    wait_qs_sleepy(gen, max_ms, site) // the forced-polled form
 }
 
 /// The sleeping poll loop shared by the sleepy wait forms: check first
