@@ -33,7 +33,7 @@ extern crate alloc;
 // The scheduling classes and the policy walks.
 // The policy files, flat at the crate root (seed-core-design 2c.2).
 pub mod sched_policy;
-pub mod cgroup_policy;
+pub mod cgroup;
 pub mod fair;
 pub mod rt;
 pub mod deadline;

@@ -16,7 +16,7 @@ ipc = { path = "../ipc", default-features = false }
 # and the wedge-dump rwfz_dump_tgid live in sync now.
 sync = { path = "../sync", default-features = false }
 # The sched policy crate (shrink-stage sibling dep): the mmap/munmap
-# cgroup memory-charge hooks moved to sched::cgroup_policy — direct
+# cgroup memory-charge hooks moved to sched::cgroup — direct
 # sibling-crate calls, no hook row.
 sched = { path = "../sched", default-features = false }
 fs = { path = "../fs", default-features = false }

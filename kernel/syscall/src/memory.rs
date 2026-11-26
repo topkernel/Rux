@@ -826,7 +826,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // with ENOMEM, like Linux's memcg charge failure here.
             // Simplification: virtual mapping length is the charge unit
             // (an RSS approximation); uncharge happens at munmap/exit.
-            if !::sched::cgroup_policy::cgroup_memory_charge(actual_length) {
+            if !::sched::cgroup::cgroup_memory_charge(actual_length) {
                 static NC: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
@@ -835,7 +835,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
-                    ::sched::cgroup_policy::debug_report_memory_refusal(comm, actual_length);
+                    ::sched::cgroup::debug_report_memory_refusal(comm, actual_length);
                 }
                 return mmap_error::ENOMEM;
             }
@@ -1450,7 +1450,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         Err(e) => {
                             // cgroup v2 (U1b): the pre-charge above must be
                             // returned when the mapping never happened.
-                            ::sched::cgroup_policy::cgroup_memory_uncharge(actual_length);
+                            ::sched::cgroup::cgroup_memory_uncharge(actual_length);
                             let err = match e {
                                 crate::mm::types::MapError::OutOfMemory => mmap_error::ENOMEM,
                                 crate::mm::types::MapError::Invalid => mmap_error::EINVAL,
@@ -1464,7 +1464,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 None => {
                     // cgroup v2 (U1b): no address space → no mapping; the
                     // pre-charge must go back.
-                    ::sched::cgroup_policy::cgroup_memory_uncharge(actual_length);
+                    ::sched::cgroup::cgroup_memory_uncharge(actual_length);
                     mmap_error::ENOMEM
                 }
             }
@@ -1542,7 +1542,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
                         Ok(()) => {
                             // cgroup v2 (U1b): give the unmapped length
                             // back to the cgroup memory charge.
-                            ::sched::cgroup_policy::cgroup_memory_uncharge(length);
+                            ::sched::cgroup::cgroup_memory_uncharge(length);
                             0
                         }
                         Err(e) => {

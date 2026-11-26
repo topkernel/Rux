@@ -838,7 +838,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
                 if !affinity_ok {
                     skip_reason = 3;
                 }
-                let throttled = crate::cgroup_policy::task_cgroup_throttled(task);
+                let throttled = crate::cgroup::task_cgroup_throttled(task);
                 if throttled {
                     skip_reason = 4;
                 }
@@ -1038,7 +1038,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
                             let nb = ((v >> (sh * 4)) & 0xF) as u8;
                             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                         }
-                        if crate::cgroup_policy::task_cgroup_throttled(task) {
+                        if crate::cgroup::task_cgroup_throttled(task) {
                             ps(b" THROTTLED");
                         }
                         putchar(b'\n');

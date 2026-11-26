@@ -2453,7 +2453,7 @@ pub fn runq_strand_census(now_j: u64) {
             Some(v) => v as u8,
             None => 2,
         };
-        let throttled = crate::cgroup_policy::task_cgroup_throttled(task as *const Task);
+        let throttled = crate::cgroup::task_cgroup_throttled(task as *const Task);
         let vr = tk.sched_entity().get_vruntime();
         // 63rd: the pick-path's decision-time history, now persistent on
         // the task (never refused = pick_visit_n 0; the old peek's None
