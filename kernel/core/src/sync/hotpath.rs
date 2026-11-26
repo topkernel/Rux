@@ -20,6 +20,7 @@
 //! of the subsystem's code under the hot-path name, not a verified set of
 //! hot-path functions (§2c.3, user decision 2026-11-25).
 
+#![forbid(unsafe_code)]
 use super::types::{
     Semaphore,
     Mutex,
@@ -1065,11 +1066,6 @@ fn ftx_opname(op: i32) -> &'static [u8] {
 #[cfg(not(feature = "debug-futex-trace"))]
 fn ftx_trace(_tag: &[u8], _uaddr: usize, _a: u64, _b: u64) {}
 
-// SAFETY: Waiter is only ever accessed while the per-slot Spinlock is held,
-// serialising all reads and writes.  The `task` raw pointer is only
-// dereferenced by the waker after validating it is non-null.
-unsafe impl Send for Waiter {}
-unsafe impl Sync for Waiter {}
 
 /// Waiter pool size - from config
 const WAITER_POOL_SIZE: usize = crate::config::FUTEX_WAITER_POOL_SIZE;
@@ -7243,11 +7239,6 @@ fn waiter_rank(idx: usize) -> (u8, u32) {
     }
 }
 
-// SAFETY: PiWaiter slots are only accessed while the per-slot spinlock
-// is held; the task raw pointer is only dereferenced by the waker after
-// a non-null check — the same contract as the plain Waiter.
-unsafe impl Send for PiWaiter {}
-unsafe impl Sync for PiWaiter {}
 
 const PI_WAITER_POOL_SIZE: usize = 128;
 const PI_STATE_POOL_SIZE: usize = 128;
@@ -8606,22 +8597,6 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
 // everything it protects is above the state spinlock. It must never
 // be taken while holding any spinlock.
 
-/// R77-style stall tripwire support: is the recorded owner still a live
-/// task? (pid-hash lookup; the stall tripwire only fires while the owner
-/// lives — a DEAD owner means the lock leaked with its holder unless
-/// release_if_owner ran.)
-fn locked_owner_alive_wait(owner: &u32) -> bool {
-    if *owner == 0 {
-        return false;
-    }
-    let t = crate::process::hotpath::pid_hash_lookup_pinned(*owner);
-    if t.is_null() {
-        return false;
-    }
-    let alive = unsafe { !(*t).state().is_dead() };
-    crate::process::types::Task::task_put(t);
-    alive
-}
 
 impl SleepMutex {
     /// R84 fairness: a waiter older than this may take a FREE lock at
@@ -8732,68 +8707,6 @@ impl SleepMutex {
         }
     }
 
-    /// Optimistic-spin probe (one state-lock section + owner on-CPU
-    /// check). Reference discipline: mutex_optimistic_spin only spins
-    /// while the OWNER IS RUNNING on a CPU (mutex_spin_on_owner reads
-    /// owner->on_cpu); the moment the holder is descheduled the
-    /// reference stops spinning and queues. Spinning against an
-    /// off-CPU holder is pure waste — and worse than waste under a
-    /// convoy: on a 2-CPU box with 5-6 contenders on VFS_MUTATION_LOCK
-    /// / EXT4_BIG_LOCK (ftest03 shape), spinners burning their whole
-    /// optimistic budget per round starve the very holder whose
-    /// critical section gates everyone (measured: 10 probe iterations
-    /// 14s -> ~95s, 7x, LTP ftest03 census FAIL via the 30s budget
-    /// TERM -> child TBROK unlink exits).
-    ///
-    /// Outcomes:
-    /// - `Acquired`: the fair try succeeded (free+unwaited, or
-    ///   recursion) — same gates as try_acquire_or_recurse_fair.
-    /// - `Spin`: lock held by ANOTHER task that is on-CPU right now —
-    ///   optimistic spinning is profitable, keep going.
-    /// - `Stop`: stop spinning and queue — holder off-CPU (or its task
-    ///   is gone), or the lock is free behind counted waiters (the R84
-    ///   handoff window: a fresh caller must not take it, so there is
-    ///   nothing to spin FOR).
-    fn optimistic_probe(&'static self, pid: u32) -> OptimisticProbe {
-        // One locked section: the fair-try gates + owner snapshot.
-        let owner_pid = {
-            let mut st = self.state.lock();
-            if !st.locked && st.waiters == 0 {
-                st.locked = true;
-                st.owner = pid;
-                st.depth = 1;
-                st.acquired_at = crate::timer::get_jiffies();
-                return OptimisticProbe::Acquired(SleepMutexGuard { lock: self });
-            } else if st.locked && st.owner == pid {
-                st.depth += 1;
-                return OptimisticProbe::Acquired(SleepMutexGuard { lock: self });
-            } else if !st.locked {
-                // Free behind counted waiters: the handoff window. The
-                // fair gate refuses us; the woken token holder is on its
-                // way. Spinning here only burns the CPU it needs.
-                return OptimisticProbe::Stop;
-            }
-            st.owner
-        };
-        // Holder task on-CPU? Pinned lookup keeps the Task alive across
-        // the read (a racing release+exit would otherwise free it).
-        let t = crate::process::hotpath::pid_hash_lookup_pinned(owner_pid);
-        if t.is_null() {
-            // Owner pid unresolvable (exiting / hash moment): cannot
-            // prove spinning is profitable — queue. The R77 stall
-            // tripwire separately watches a dead-owner leak.
-            return OptimisticProbe::Stop;
-        }
-        let on_cpu = unsafe {
-            (*t).ti_on_cpu.load(core::sync::atomic::Ordering::Acquire)
-        };
-        crate::process::types::Task::task_put(t);
-        if on_cpu {
-            OptimisticProbe::Spin
-        } else {
-            OptimisticProbe::Stop
-        }
-    }
 
     /// R84 fairness: spend the release() handoff token. The woken
     /// waiter takes a FREE lock unconditionally and leaves the waiter
@@ -9148,7 +9061,7 @@ impl SleepMutex {
                 let stranded_free = !locked && nwaiters > 0 && waited >= Self::STALL_WAITER_JIFFIES;
                 if (waited >= Self::STALL_WAITER_JIFFIES
                     || held >= crate::config::KERNEL_HZ as u64 * 10)
-                    && (stranded_free || locked_owner_alive_wait(&owner))
+                    && (stranded_free || crate::sync::r#unsafe::locked_owner_alive_wait(&owner))
                 {
                     static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
                         core::sync::atomic::AtomicU64::new(0);
@@ -9278,7 +9191,7 @@ impl SleepMutex {
             };
             if rtq > 0 {
                 if let Some(wtask) = self.wait.wake_up_one_hiprio() {
-                    let wpid = unsafe { (*(wtask as *mut crate::process::types::Task)).pid() as u32 };
+                    let wpid = crate::sync::r#unsafe::wake_task_pid(wtask);
                     self::rt_release_handoff(
                         self as *const _ as usize,
                         wpid,
@@ -9357,7 +9270,7 @@ impl SleepMutex {
                 };
                 if rtq > 0 {
                     if let Some(wtask) = self.wait.wake_up_one_hiprio() {
-                        let wpid = unsafe { (*(wtask as *mut crate::process::types::Task)).pid() as u32 };
+                        let wpid = crate::sync::r#unsafe::wake_task_pid(wtask);
                         self::rt_release_handoff(
                             self as *const _ as usize,
                             wpid,
@@ -9570,28 +9483,6 @@ pub fn acquire_evidence_fresh(cpu: usize, task: usize, now: u64) -> bool {
 
 // ==================== RawSpinlock (TTAS) ====================
 
-/// Capture this function's return address (the spinlock call site) for
-/// deadlock diagnostics.
-#[inline]
-fn caller_return_address() -> usize {
-    let ra: usize;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: frame pointers are forced on, so [rbp+8] is the return
-    // address of this inlined function's caller.
-    unsafe {
-        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
-    {
-        ra = 0;
-    }
-    ra
-}
 
 impl RawSpinlock {
     /// R11 (deadlock-layer unblinding): the raw lock word for the
@@ -9754,7 +9645,7 @@ impl RawSpinlock {
     #[inline(never)]
     pub fn lock(&self) {
         // Capture caller's return address before spinning
-        let caller_ra = caller_return_address();
+        let caller_ra = crate::sync::r#unsafe::caller_return_address();
         let mut spins: u32 = 0;
         // TTAS (test-and-test-and-set, C7): one CAS to acquire; while
         // contended, spin on a plain Relaxed load until the word reads
@@ -9824,363 +9715,8 @@ impl RawSpinlock {
         );
     }
 
-    /// Print deadlock warning via SBI (works even with interrupts disabled).
-    fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
-        // Raw UART output — printk might need locks we're spinning on.
-        // uart_putc_raw, NOT putchar_no_lock: the latter is compiled out
-        // of release builds, so this warn printed NOTHING on every
-        // production-config boot (the round-2 monopolist spun 32 s in
-        // kill() with zero DEADLOCK lines for exactly this reason).
-        // Once per (lock, site) per boot — see the call site.
-        {
-            static SEEN: [core::sync::atomic::AtomicUsize; 64] =
-                [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
-            let key = (lock_addr as usize >> 4) ^ (caller_ra << 8);
-            let slot = &SEEN[key % 64];
-            if slot.load(Ordering::Relaxed) == key {
-                return;
-            }
-            slot.store(key, Ordering::Relaxed);
-        }
-        let cpu = crate::arch::smp::cpu_id();
-        let msg = b"DEADLOCK: spinlock stuck cpu=";
-        for &b in msg {
-            crate::console::uart_putc_raw(b);
-        }
-        // Print CPU id as decimal digit
-        if cpu < 10 {
-            crate::console::uart_putc_raw(b'0' + cpu as u8);
-        }
-        // Print lock address in hex
-        let msg2 = b" lock=0x";
-        for &b in msg2 {
-            crate::console::uart_putc_raw(b);
-        }
-        let addr = lock_addr as usize;
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = (addr >> (shift as usize)) & 0xF;
-            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            crate::console::uart_putc_raw(c);
-        }
 
-        // Print caller return address (ra) for debugging
-        let msg3 = b" ra=0x";
-        for &b in msg3 {
-            crate::console::uart_putc_raw(b);
-        }
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = (caller_ra >> shift) & 0xF;
-            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            crate::console::uart_putc_raw(c);
-        }
 
-        // R11 (deadlock-layer unblinding, the seventh blind printer): the
-        // lock WORD value, always. The holder-identity block below is
-        // debug-lock-owner-gated, so on standard builds every stuck lock
-        // printed with NO holder datum at all — and the one value that
-        // discriminates "a real holder the tracker missed" (word == 1)
-        // from "the word itself was scribbled" (word ∉ {0,1}) was never
-        // printed. One relaxed load, cold path, raw uart.
-        let msg_lw = b" locked=0x";
-        for &b in msg_lw {
-            crate::console::uart_putc_raw(b);
-        }
-        let lw = unsafe { (&*lock_addr).locked_word() };
-        let mut shift_lw: i32 = 8;
-        while shift_lw > 0 {
-            shift_lw -= 4;
-            let nibble = ((lw >> shift_lw) & 0xF) as u8;
-            let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-            crate::console::uart_putc_raw(c);
-        }
-
-        // Holder identity: owner = hart+1 (0 = free / mid-handoff).
-        // oh-crash 91st extension (the meltdown holder hunt): the owner
-        // CPU's current task (pid/comm), the heap allocation CONTAINING
-        // the lock (small-object span + first words for offline
-        // symbolization of any ops/vtable pointers), and one REMOTE-BT
-        // of the holder per unique lock address per boot — the IPI
-        // handler on the holder captures its live interrupted stack.
-        // grq-lock-1st: the GRQ crime scene. A GRQ holder runs with IRQs
-        // OFF, so the REMOTE-BT capture below (an IPI) can never answer
-        // on a GRQ wedge — that is why every GRQ wedge so far ended with
-        // the holder UNNAMED. The GRQ site stamp is published BY the
-        // holder, so this dump reads it without any interrupt.
-        crate::sched::hotpath::grq_dump_holder("deadlock");
-
-        #[cfg(feature = "debug-lock-owner")]
-        {
-            let msg4 = b" holder=";
-            for &b in msg4 {
-                crate::console::uart_putc_raw(b);
-            }
-            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-            let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
-            let mut holder_cpu: Option<usize> = None;
-            if holder == 0 {
-                let msg5 = b"switching";
-                for &b in msg5 {
-                    crate::console::uart_putc_raw(b);
-                }
-            } else {
-                let h = holder - 1;
-                holder_cpu = Some(h);
-                if h < 10 {
-                    crate::console::uart_putc_raw(b'0' + h as u8);
-                }
-                // Holder CPU's current task: pid + comm (best-effort —
-                // an irqsave holder cannot migrate, so this is the task
-                // that acquired; plain lock() holders may have been
-                // preempted, in which case the remote-BT below shows
-                // what the CPU runs NOW and the pid names the victim).
-                // SAFETY: cpu_state(h).current is the scheduler's own
-                // published pointer; read-only access.
-                let cur = unsafe { crate::sched::hotpath::cpu_state(h).current };
-                if !cur.is_null() {
-                    // SAFETY: read-only access to a live Task.
-                    let pid = unsafe { (*cur).pid() };
-                    let msg_pid = b" task=";
-                    for &b in msg_pid {
-                        crate::console::uart_putc_raw(b);
-                    }
-                    Self::putdec(pid as u64);
-                    // SAFETY: comm is a fixed [u8;16], no allocation.
-                    let comm = unsafe { (*cur).comm() };
-                    crate::console::uart_putc_raw(b'(');
-                    let mut any = false;
-                    for &b in comm.iter() {
-                        if b == 0 {
-                            break;
-                        }
-                        if (0x20..0x7f).contains(&b) {
-                            crate::console::uart_putc_raw(b);
-                            any = true;
-                        }
-                    }
-                    if !any {
-                        crate::console::uart_putc_raw(b'?');
-                    }
-                    unsafe { crate::console::uart_putc_raw(b')'); }
-                }
-            }
-
-        crate::console::uart_putc_raw(b'\n');
-
-        // Leak forensics (debug-lock-owner): the LAST acquirer's pid,
-        // call site and acquire age — these persist past a cleared
-        // owner word, so a leaked lock names who took it and when
-        // even when the owner stamp is mid-handoff. Plus the raw
-        // locked word (1 = genuinely held; anything else is a torn
-        // or corrupted state worth seeing).
-        #[cfg(feature = "debug-lock-owner")]
-        {
-            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-            let l = unsafe { &*lock_addr };
-            let apid = l.acq_pid.load(Ordering::Relaxed);
-            let asite = l.acq_site.load(Ordering::Relaxed);
-            let ajif = l.acq_jiffies.load(Ordering::Relaxed);
-            let wv = l.locked.load(Ordering::Relaxed);
-            let now = crate::timer::get_jiffies();
-            let msg = b"LOCK-ACQ: word=";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::puthex(wv as u64);
-            let msg = b" pid=";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::putdec(apid as u64);
-            let msg = b" site=0x";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::puthex(asite as u64);
-            let msg = b" age=";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::putdec(now.wrapping_sub(ajif));
-            let msg = b"j\n";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-        }
-
-        // Containing heap object (works with or without a known holder):
-        // slab span + the first 6 words of the object. Any word landing
-        // in kernel text (0xffffffff8...) symbolizes offline against
-        // gen-ksyms output — that names the lock's OWNER STRUCT (ops
-        // table / vtable / function pointer members).
-        if let Some((base, sz)) = crate::mm::hotpath::object_span(lock_addr as usize) {
-            let msg = b"LOCK-OBJ: small kmalloc-";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::putdec(sz as u64);
-            let msg = b" base=0x";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::puthex(base as u64);
-            let msg = b" words=";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            for i in 0..6 {
-                // SAFETY: diagnostic read of the object's first words;
-                // the span was validated by object_span (inside a live
-                // slab page, in-bounds of the object's slot).
-                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
-                Self::puthex(w);
-                if i < 5 {
-                    crate::console::uart_putc_raw(b',');
-                }
-            }
-            crate::console::uart_putc_raw(b'\n');
-        } else if let Some((base, order, free)) =
-            crate::mm::hotpath::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
-        {
-            // oh-crash 98th: DIRECT BUDDY blocks (>1KB kmalloc — Task
-            // structs, large fs/ipc objects). Same offline-symbolization
-            // trick on the first words; `free!=0` (a lock inside a FREE
-            // block) is itself evidence of a freed-with-lock-reference
-            // object, printed as words=FREE.
-            let msg = b"LOCK-OBJ: buddy order-";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::putdec(order as u64);
-            let msg = b" base=0x";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::puthex(base as u64);
-            let msg = b" free=";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            Self::putdec(free as u64);
-            let msg = b" words=";
-            for &b in msg {
-                crate::console::uart_putc_raw(b);
-            }
-            for i in 0..6 {
-                // SAFETY: diagnostic read of the block's first words;
-                // buddy_block_span validated the address against the
-                // heap window and the block's base alignment.
-                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
-                Self::puthex(w);
-                if i < 5 {
-                    crate::console::uart_putc_raw(b',');
-                }
-            }
-            crate::console::uart_putc_raw(b'\n');
-        }
-
-        // One REMOTE-BT per unique lock address per boot: the IPI
-        // handler on the holder CPU captures the live interrupted
-        // stack. (x86_64 only — the riscv64/aarch64 twins have no
-        // IRQ_WORK remote capture yet.)
-        #[cfg(feature = "x86_64")]
-        {
-            static LAST_BT_LOCK: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let la = lock_addr as usize;
-            let prev = LAST_BT_LOCK.load(Ordering::Acquire);
-            if prev != la
-                && LAST_BT_LOCK
-                    .compare_exchange(prev, la, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                if let Some(h) = holder_cpu {
-                    let _ = crate::arch::ipi::remote_backtrace(h, "deadlock-holder");
-                }
-            }
-        }
-        }
-        #[cfg(not(feature = "debug-lock-owner"))]
-        {
-            crate::console::uart_putc_raw(b'\n');
-
-            // The heap-object span dump is cheap and holder-independent:
-            // keep it on default builds too (the meltdown hunts run
-            // stock feature sets as controls).
-            if let Some((base, sz)) = crate::mm::hotpath::object_span(lock_addr as usize) {
-                let msg = b"LOCK-OBJ: small kmalloc-";
-                for &b in msg {
-                    crate::console::uart_putc_raw(b);
-                }
-                Self::putdec(sz as u64);
-                let msg = b" base=0x";
-                for &b in msg {
-                    crate::console::uart_putc_raw(b);
-                }
-                Self::puthex(base as u64);
-                crate::console::uart_putc_raw(b'\n');
-            } else if let Some((base, order, free)) =
-                crate::mm::hotpath::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
-            {
-                let msg = b"LOCK-OBJ: buddy order-";
-                for &b in msg {
-                    crate::console::uart_putc_raw(b);
-                }
-                Self::putdec(order as u64);
-                let msg = b" base=0x";
-                for &b in msg {
-                    crate::console::uart_putc_raw(b);
-                }
-                Self::puthex(base as u64);
-                let msg = b" free=";
-                for &b in msg {
-                    crate::console::uart_putc_raw(b);
-                }
-                Self::putdec(free as u64);
-                crate::console::uart_putc_raw(b'\n');
-            }
-        }
-
-        // rux:watchdog (retired debug=watchdog) (debug-migrate: rux:taskdump kind=WATCHDOG):
-        // follow the warning with a full task-state snapshot
-        // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
-        if crate::trace::EVENT_TASKDUMP.armed() {
-            crate::trace::trace_taskdump(2, 0);
-            crate::debug::hotpath::dump_all_tasks("deadlock-watchdog");
-        }
-    }
-
-    /// Lockless hex print (deadlock diagnostics — putchar path only).
-    fn puthex(v: u64) {
-        let mut shift: i32 = 64;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = ((v >> shift) & 0xF) as u8;
-            let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-            unsafe { crate::console::putchar_no_lock(c); }
-        }
-    }
-
-    /// Lockless decimal print (deadlock diagnostics).
-    fn putdec(mut v: u64) {
-        let mut buf = [0u8; 20];
-        let mut i = 0;
-        loop {
-            buf[i] = b'0' + (v % 10) as u8;
-            i += 1;
-            v /= 10;
-            if v == 0 {
-                break;
-            }
-        }
-        while i > 0 {
-            i -= 1;
-            unsafe { crate::console::putchar_no_lock(buf[i]); }
-        }
-    }
 
     #[inline]
     pub fn try_lock(&self) -> bool {
@@ -10189,7 +9725,7 @@ impl RawSpinlock {
             .compare_exchange(0, Self::held_word(), Ordering::Acquire, Ordering::Acquire)
             .is_ok();
         if ok {
-            self.record_owner(caller_return_address());
+            self.record_owner(crate::sync::r#unsafe::caller_return_address());
             // RT-plan R1 completion: symmetric with lock()/unlock().
             crate::interrupt::preempt::preempt_count_add(
                 crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -10251,11 +9787,6 @@ impl RawSpinlock {
         self.locked.load(Ordering::Acquire) != 0
     }
 
-    #[inline]
-    pub unsafe fn reset(&mut self) {
-        self.clear_owner();
-        self.locked.store(0, Ordering::Release);
-    }
 }
 
 // ==================== Spinlock<T> ====================
@@ -10269,12 +9800,6 @@ impl Spinlock<i32> {
     }
 }
 
-// SAFETY: Spinlock<T> only allows &mut T access via the guard, which exists
-// only while the inner lock is held.  Send is required so the lock (and its
-// data) can be moved between threads; Sync is safe because the lock mediates
-// all access.
-unsafe impl<T: ?Sized + Send> Send for Spinlock<T> {}
-unsafe impl<T: ?Sized + Send> Sync for Spinlock<T> {}
 
 impl<T> Spinlock<T> {
     #[inline]
@@ -10380,45 +9905,19 @@ impl<T> Spinlock<T> {
     #[inline]
     pub fn is_locked(&self) -> bool { self.raw.is_locked() }
 
-    /// Get a shared reference to the inner data without locking.
-    ///
-    /// # Safety
-    /// Caller must ensure no concurrent mutable access (e.g., data is
-    /// write-once during boot and only read thereafter).
-    #[inline]
-    pub unsafe fn get_ref(&self) -> &T {
-        &*self.data.get()
-    }
 
-    /// Get a mutable reference to the inner data without locking.
-    ///
-    /// # Safety
-    /// Caller must ensure exclusive access (e.g., no concurrent readers or writers).
-    #[inline]
-    pub unsafe fn get_mut_unchecked(&self) -> &mut T {
-        &mut *self.data.get()
-    }
 
-    /// Consume the lock and return the inner data.
-    ///
-    /// # Safety
-    /// Caller must ensure no other thread holds a reference to the lock or data.
-    #[inline]
-    pub unsafe fn into_inner(self) -> T { self.data.into_inner() }
 }
 
 // ==================== SpinlockGuard (plain) ====================
 
-// SAFETY: SpinlockGuard exists only while the lock is held, so the guarded
-// data cannot be accessed concurrently from another thread.
-unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Guard holds the lock — no concurrent &mut access possible.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -10426,7 +9925,7 @@ impl<T: ?Sized> DerefMut for SpinlockGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Guard holds the lock exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -10457,16 +9956,13 @@ impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
 // slot site, which names THIS lock as the mutation governor).
 impl<T: ?Sized> crate::safety::slot::ExclusivityProof for SpinlockIrqGuard<'_, T> {}
 
-// SAFETY: SpinlockIrqGuard exists only while the lock is held, so the
-// guarded data cannot be accessed concurrently.
-unsafe impl<T: ?Sized + Send> Send for SpinlockIrqGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockIrqGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Guard holds the lock — no concurrent &mut access possible.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -10474,7 +9970,7 @@ impl<T: ?Sized> DerefMut for SpinlockIrqGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Guard holds the lock exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -10520,16 +10016,13 @@ impl<T: ?Sized> SpinlockIrqGuard<'_, T> {
 
 // ==================== SpinlockBhGuard (bottom-half) ====================
 
-// SAFETY: SpinlockBhGuard exists only while the lock is held, so the
-// guarded data cannot be accessed concurrently.
-unsafe impl<T: ?Sized + Send> Send for SpinlockBhGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockBhGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Guard holds the lock — no concurrent &mut access possible.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -10537,7 +10030,7 @@ impl<T: ?Sized> DerefMut for SpinlockBhGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Guard holds the lock exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -10804,12 +10297,6 @@ impl RawRwSpinlock {
 
 // ==================== Generic RwSpinlock<T> ====================
 
-// SAFETY: RwSpinlock<T> mediates all access to the inner data: shared (&T) via
-// read-locked guards, exclusive (&mut T) via write-locked guards.  Send allows
-// moving between threads; Sync allows shared references across threads because
-// the rwlock serialises access.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlock<T> {}
-unsafe impl<T: ?Sized + Send + Sync> Sync for RwSpinlock<T> {}
 
 impl<T: ?Sized + fmt::Debug> fmt::Debug for RwSpinlock<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -10932,28 +10419,17 @@ impl<T> RwSpinlock<T> {
         self.raw.is_locked()
     }
 
-    /// Consume the lock and return the inner data.
-    ///
-    /// # Safety
-    /// Caller must ensure no other thread holds a reference to the lock or data.
-    #[inline]
-    pub unsafe fn into_inner(self) -> T {
-        self.data.into_inner()
-    }
 }
 
 // ==================== Read Guard (plain — preempt) ====================
 
-// SAFETY: ReadGuard exists only while a read lock is held, preventing any
-// writer from obtaining exclusive access to the data.
-unsafe impl<T: ?Sized + Sync> Send for RwSpinlockReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Read lock is held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -10967,16 +10443,13 @@ impl<T: ?Sized> Drop for RwSpinlockReadGuard<'_, T> {
 
 // ==================== Write Guard (plain — preempt) ====================
 
-// SAFETY: WriteGuard exists only while the write lock is held exclusively,
-// so no other thread can access the data.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlockWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Write lock is held exclusively — no concurrent access.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -10984,7 +10457,7 @@ impl<T: ?Sized> DerefMut for RwSpinlockWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Write lock is held exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -10998,16 +10471,13 @@ impl<T: ?Sized> Drop for RwSpinlockWriteGuard<'_, T> {
 
 // ==================== IRQ Read Guard ====================
 
-// SAFETY: IrqReadGuard exists only while a read lock + IRQ disable is held,
-// preventing any writer from accessing the data.
-unsafe impl<T: ?Sized + Sync> Send for RwSpinlockIrqReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockIrqReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Read lock is held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -11022,16 +10492,13 @@ impl<T: ?Sized> Drop for RwSpinlockIrqReadGuard<'_, T> {
 
 // ==================== IRQ Write Guard ====================
 
-// SAFETY: IrqWriteGuard exists only while the write lock + IRQ disable is
-// held exclusively, so no other thread can access the data.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlockIrqWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockIrqWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Write lock is held exclusively — no concurrent access.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -11039,7 +10506,7 @@ impl<T: ?Sized> DerefMut for RwSpinlockIrqWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Write lock is held exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -11054,16 +10521,13 @@ impl<T: ?Sized> Drop for RwSpinlockIrqWriteGuard<'_, T> {
 
 // ==================== BH Read Guard ====================
 
-// SAFETY: BhReadGuard exists only while a read lock + BH disable is held,
-// preventing any writer from accessing the data.
-unsafe impl<T: ?Sized + Sync> Send for RwSpinlockBhReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockBhReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Read lock is held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -11077,16 +10541,13 @@ impl<T: ?Sized> Drop for RwSpinlockBhReadGuard<'_, T> {
 
 // ==================== BH Write Guard ====================
 
-// SAFETY: BhWriteGuard exists only while the write lock + BH disable is
-// held exclusively, so no other thread can access the data.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlockBhWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockBhWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Write lock is held exclusively — no concurrent access.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -11094,7 +10555,7 @@ impl<T: ?Sized> DerefMut for RwSpinlockBhWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Write lock is held exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -11322,13 +10783,6 @@ fn stall_report_ok() -> bool {
             .is_ok()
 }
 
-// SAFETY: same contract as WaitQueueHead/SleepMutex — the raw task
-// pointers inside the wait list are only ever passed to
-// sched::wake_up_process (whose own guards handle stale targets);
-// every list mutation is serialized by wait_lock; a queued waiter
-// cannot exit (UNINTERRUPTIBLE), so entries never dangle.
-unsafe impl Send for RwSemaphore {}
-unsafe impl Sync for RwSemaphore {}
 
 impl RwSemaphore {
     pub const fn new(name: &'static str) -> Self {
@@ -12244,10 +11698,6 @@ fn rwsem_preempt_disable() {
 
 // ==================== generic Rwsem<T> ====================
 
-// SAFETY: Rwsem<T> mediates all access to the inner data: shared (&T)
-// via read-locked guards, exclusive (&mut T) via write-locked guards.
-unsafe impl<T: ?Sized + Send> Send for Rwsem<T> {}
-unsafe impl<T: ?Sized + Send + Sync> Sync for Rwsem<T> {}
 
 impl<T: ?Sized + fmt::Debug> fmt::Debug for Rwsem<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -12327,16 +11777,13 @@ impl<T> Rwsem<T> {
     }
 }
 
-// SAFETY: guard exists only while the read lock is held, preventing
-// any writer from obtaining exclusive access to the data.
-unsafe impl<T: ?Sized + Sync> Send for RwsemReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwsemReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: read lock held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -12347,15 +11794,13 @@ impl<T: ?Sized> Drop for RwsemReadGuard<'_, T> {
     }
 }
 
-// SAFETY: guard exists only while the write lock is held exclusively.
-unsafe impl<T: ?Sized + Send> Send for RwsemWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwsemWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: write lock held exclusively.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
@@ -12363,7 +11808,7 @@ impl<T: ?Sized> DerefMut for RwsemWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: write lock held exclusively.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -12470,9 +11915,6 @@ impl RawSeqLock {
 // SeqLock<T>
 // ============================================================================
 
-// Safety: writers have exclusive access; readers get a Copy snapshot.
-unsafe impl<T: Copy + Send> Send for SeqLock<T> {}
-unsafe impl<T: Copy + Send> Sync for SeqLock<T> {}
 
 impl<T: Copy> SeqLock<T> {
     #[inline]
@@ -12532,14 +11974,6 @@ impl<T: Copy> SeqLock<T> {
         result
     }
 
-    /// Read without disabling preemption.
-    ///
-    /// # Safety
-    /// Caller must hold preemption disabled for the duration of this call.
-    #[inline]
-    pub unsafe fn read_preempt_disabled(&self) -> T {
-        self.read_inner()
-    }
 
     /// Check if a writer is currently active.
     #[inline]
@@ -12547,44 +11981,25 @@ impl<T: Copy> SeqLock<T> {
         self.raw.is_locked()
     }
 
-    /// Core read loop (no preemption management).
-    #[inline]
-    fn read_inner(&self) -> T {
-        loop {
-            let seq = self.raw.read_begin();
-            if seq & 1 != 0 {
-                core::hint::spin_loop();
-                continue;
-            }
-            // SAFETY: preemption is disabled and sequence is even (no writer).
-            let snapshot = unsafe { core::ptr::read_volatile(self.data.get()) };
-            if self.raw.read_retry(seq) {
-                core::hint::spin_loop();
-                continue;
-            }
-            return snapshot;
-        }
-    }
 }
 
 // ============================================================================
 // SeqLockWriteGuard
 // ============================================================================
 
-unsafe impl<T: Copy + Send> Send for SeqLockWriteGuard<'_, T> {}
 
 impl<T: Copy> Deref for SeqLockWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
+        crate::sync::r#unsafe::guard_shared(&self.lock.data)
     }
 }
 
 impl<T: Copy> DerefMut for SeqLockWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::r#unsafe::guard_exclusive(&self.lock.data)
     }
 }
 
@@ -12666,7 +12081,7 @@ impl RcuHead {
 // ============================================================================
 
 /// Per-CPU callback list head (static, zero-initialized, `init()` called at boot).
-static mut RCU_CBS: [ListHead; MAX_CPUS] = {
+pub(crate) static mut RCU_CBS: [ListHead; MAX_CPUS] = {
     const INIT: ListHead = ListHead::new();
     [INIT; MAX_CPUS]
 };
@@ -12684,7 +12099,7 @@ static RCU_GEN: AtomicU32 = AtomicU32::new(1);
 
 /// Per-CPU quiescent-state generation. Records the most recent `RCU_GEN`
 /// value this CPU reported via `rcu_note_context_switch()`.
-static RCU_QS_GEN: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub(crate) static RCU_QS_GEN: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 // ============================================================================
 // Public API: read-side
@@ -12739,9 +12154,7 @@ pub fn call_rcu(head: &mut RcuHead) {
     // (the RcuHead protocol) and the intrusive rewire is the list's own
     // audited operation (the reference's blist_add_tail counterpart) —
     // it mutates THIS node's links, hence &mut in the signature.
-    unsafe {
-        head.list.add_tail(&mut RCU_CBS[cpu]);
-    }
+    crate::sync::r#unsafe::rcu_link_tail(cpu, head);
     unlock_cb_list(cpu);
 
     // Raise softirq so callbacks get processed promptly.
@@ -12754,12 +12167,12 @@ pub fn call_rcu(head: &mut RcuHead) {
 /// overwhelmingly common state — the QS report fast-path below costs one
 /// relaxed load and stops there, keeping the per-syscall tax on the
 /// user-return path at that single load (perf gate: p1/p2 must not move).
-static RCU_WAITERS: AtomicU32 = AtomicU32::new(0);
+pub(crate) static RCU_WAITERS: AtomicU32 = AtomicU32::new(0);
 
 /// Consecutive failed grace rounds (reset by any passing round) and the
 /// one-shot latch for the frozen-CPU task dump — see wait_qs_sleepy.
-static GP_CONSEC_FAIL: AtomicU32 = AtomicU32::new(0);
-static GP_DUMPED: AtomicBool = AtomicBool::new(false);
+pub(crate) static GP_CONSEC_FAIL: AtomicU32 = AtomicU32::new(0);
+pub(crate) static GP_DUMPED: AtomicBool = AtomicBool::new(false);
 
 // ============================================================================
 // Public API: quiescent-state reporting
@@ -12887,7 +12300,7 @@ pub fn synchronize_rcu_bounded_sleepy(max_ms: u64, site: &'static str) -> bool {
     let gen = RCU_GEN.load(Ordering::Acquire);
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
-    wait_qs_sleepy(gen, max_ms, site) // the bounded-sleepy form
+    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the bounded-sleepy form
 }
 
 /// Snapshot-form grace wait with a bounded POLL phase before the sleepy
@@ -12921,7 +12334,7 @@ pub fn synchronize_rcu_bounded_pollfirst(max_ms: u64, site: &'static str) -> boo
         }
         core::hint::spin_loop();
     }
-    wait_qs_sleepy(gen, max_ms, site) // the bounded-pollfirst form
+    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the bounded-pollfirst form
 }
 
 /// TRUE bounded grace period, for callers that free objects on its
@@ -12981,7 +12394,7 @@ fn shared_grace_target() -> u32 {
 /// Complete the in-flight period (called by the waiter that observed
 /// all CPUs reported) so the next shared_grace_target opens a fresh
 /// one.
-fn shared_grace_done() {
+pub(crate) fn shared_grace_done() {
     GP_IN_FLIGHT.store(false, Ordering::Release);
 }
 
@@ -13090,7 +12503,7 @@ pub fn synchronize_rcu_forced_sleepy(max_ms: u64, site: &'static str) -> bool {
     let gen = shared_grace_target();
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
-    wait_qs_sleepy(gen, max_ms, site) // the forced-sleepy form
+    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the forced-sleepy form
 }
 
 /// Forced grace period with a bounded POLL phase before the sleepy
@@ -13116,290 +12529,9 @@ pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
         }
         core::hint::spin_loop();
     }
-    wait_qs_sleepy(gen, max_ms, site) // the forced-polled form
+    crate::sync::r#unsafe::wait_qs_sleepy(gen, max_ms, site) // the forced-polled form
 }
 
-/// The sleeping poll loop shared by the sleepy wait forms: check first
-/// (fresh reporters pass without ever sleeping), then one-jiffy
-/// INTERRUPTIBLE sleeps armed by a one-shot timer (the khungtaskd
-/// idiom), until every online CPU reports at/after `gen` or the budget
-/// expires. Returns whether the round completed.
-fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
-    use crate::process::types::TaskState;
-
-    let hz = crate::drivers::hotpath::timer::HZ as u64;
-    let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
-
-    loop {
-        if all_online_cpus_reported(gen) {
-            shared_grace_done();
-            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
-            GP_CONSEC_FAIL.store(0, Ordering::Relaxed);
-            return true;
-        }
-        if crate::timer::get_jiffies() >= deadline {
-            shared_grace_done();
-            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
-            static SGP_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let n = SGP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            // Print budget 4 (was 200): each report is a long IF=0
-            // polled-UART line; under the close storm the reports
-            // themselves pinned the console while the peer CPU's PID 1
-            // sat blocked in write(1) — manufacturing the very "stuck
-            // CPU" they were diagnosing (the bw_file_rd livelock
-            // anatomy, 2026-11-19). Four lines name the class; the
-            // rest stay silent.
-            if n < 4 {
-                // rwlock-livelock: the old print showed only qs[0..4] —
-                // on the SMP8 ub2404 rig the non-quiescent CPU was
-                // invisible (qs0-3 all == gen while the round failed),
-                // so the monopolist was unnameable. Show all MAX_CPUS
-                // (gen|on|idle triplets) and the first stuck CPU's
-                // slot-current task inline (same fields the
-                // frozen-CPU truth dump reads; no IPI here).
-                let mut qs_desc = alloc::string::String::new();
-                let mut stuck = usize::MAX;
-                for i in 0..MAX_CPUS {
-                    let on = crate::sched::hotpath::cpu_online(i);
-                    let idle = crate::sched::hotpath::cpu_running_idle(i);
-                    let q = RCU_QS_GEN[i].load(Ordering::Acquire);
-                    use core::fmt::Write as _;
-                    let _ = write!(
-                        qs_desc,
-                        "{}:{:x}/{}/{},",
-                        i, q, on as u8, idle as u8
-                    );
-                    if on && stuck == usize::MAX && !cpu_quiescent(i, gen) {
-                        stuck = i;
-                    }
-                }
-                let mut victim = alloc::string::String::new();
-                if stuck != usize::MAX {
-                    let cur = crate::sched::hotpath::grq_diag_cpu_currents();
-                    let t = cur[stuck].2 as *mut crate::process::types::Task;
-                    if !t.is_null() {
-                        // SAFETY: diagnostic read of stable fields on the
-                        // per-CPU current Task (idle/static or heap; both
-                        // stay valid while current on that CPU).
-                        let tk = unsafe { &*t };
-                        use core::fmt::Write as _;
-                        let cb = tk.comm();
-                        let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
-                        let name = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
-                        let _ = write!(
-                            victim,
-                            " stuck-cpu{}-cur pid={} tgid={} {} preempt={:#x}",
-                            stuck,
-                            tk.pid(),
-                            tk.tgid(),
-                            name,
-                            tk.preempt_count()
-                        );
-                        // rwlock-livelock: the victim's live kernel frames
-                        // sit BELOW the sp saved at its last switch-in
-                        // (same technique as the FROZEN-CPU IF=0 fallback,
-                        // but at STALL TIME — mid-episode; the one-shot
-                        // IPI dump kept arriving after rolling monopolies
-                        // had already drained). Names the leaking loop.
-                        let sp = tk.thread().sp;
-                        if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
-                            let base = sp as *const u64;
-                            let mut shown = 0usize;
-                            // SAFETY: diagnostic read within the current
-                            // task's own kernel stack pages (mapped while
-                            // the Task exists); races cost at worst a
-                            // torn-but-bounded word.
-                            for k in 0..96 {
-                                let v = unsafe {
-                                    core::ptr::read_volatile(base.wrapping_sub(k))
-                                };
-                                #[cfg(feature = "x86_64")]
-                                let (lo, hi) = (0xffff_ffff_8020_0000u64, 0xffff_ffff_8200_0000u64);
-                                #[cfg(not(feature = "x86_64"))]
-                                let (lo, hi) = (0xffff_ffff_8000_0000u64, 0xffff_ffff_8020_0000u64);
-                                if v >= lo && v < hi && (v & 1) == 0 {
-                                    let _ = write!(victim, " {v:#x}");
-                                    shown += 1;
-                                    if shown >= 10 {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                crate::pr_warn!(
-                    "RCU-GP-BOUND site={} waited>{}ms (sleepy): no full quiescent round gen={} per-cpu(cpu:gen/on/idle,...)={}:{}",
-                    site,
-                    max_ms,
-                    gen,
-                    qs_desc,
-                    victim,
-                );
-            }
-            // Comprehensive-fix residual hunt (2026-11-04, cgf1): a CPU
-            // frozen non-quiescent across MANY consecutive grace budgets
-            // is the wedge-family monopolist (IF=0/preempt-off holder —
-            // its own tick cannot fire, so every tick-side instrument is
-            // blind to it; the 13th/25th cross-CPU-dump prescription).
-            // This waiter runs on ANOTHER CPU in task (syscall) context,
-            // so it can walk the frozen CPU's tasks.
-            //
-            // 52nd session (oh-crash): the trigger bar moved 32 -> 4
-            // consecutive failed rounds. The ohc10-19 frozen face took
-            // 32 rounds to arm because grace rounds kept passing BETWEEN
-            // rolling monopolies; ohc20 proved the pandemic forms with
-            // NO terminal freeze at all — rolling preempt/softirq-leak
-            // carriers (PREEMPT-LEAK pc=0x10001/0x100, LEAK-ORIGIN
-            // slab.rs/unix.rs sites) starve the box while each monopoly
-            // lasts only seconds. Four failed rounds (~200ms of a stuck
-            // CPU at the 50ms fdreap budget) catches a carrier
-            // mid-monopoly; a healthy boot never fails even one sleepy
-            // round. One-shot per boot (GP_DUMPED), same latch as the
-            // full dump below.
-            let consec = GP_CONSEC_FAIL.fetch_add(1, Ordering::Relaxed) + 1;
-            // rwlock-livelock: consec==2 added — the ub2404 boot showed
-            // rolling monopolies where successes reset the counter
-            // before 4 accumulated, leaving the monopolist unnameable.
-            if (consec == 2 || consec == 4 || consec == 32)
-                && !GP_DUMPED.swap(true, Ordering::AcqRel)
-            {
-                // FIRST name the stuck CPU's live producer — per-CPU
-                // tick counts + last tick-entry RIP, then an IPI probe
-                // whose callback answers with the percpu canary (gs cpu
-                // id + magic vs LAPIC id) and the interrupted RIP + live
-                // stack of whatever runs there (or stays silent =
-                // IRQ-off monopolist) — BEFORE the full task dump
-                // floods the log.
-                let mut stuck = usize::MAX;
-                for i in 0..MAX_CPUS {
-                    if crate::sched::hotpath::cpu_online(i) && !cpu_quiescent(i, gen) {
-                        stuck = i;
-                        break;
-                    }
-                }
-                if stuck != usize::MAX {
-                    crate::debug::hotpath::dump_frozen_cpu_truth(stuck);
-                }
-                crate::debug::hotpath::dump_all_tasks("rcu-gp-frozen-cpu");
-            }
-            return false;
-        }
-
-        let current = match crate::sched::hotpath::current() {
-            Some(t) => t,
-            None => {
-                // Early-boot / no-task context: no sleep possible —
-                // plain yield rounds keep the wait alive.
-                crate::sched::hotpath::schedule();
-                continue;
-            }
-        };
-        // SAFETY: current is this task's own pointer.
-        let my_pid = unsafe { (*current).pid() };
-        // r16 (mechanism B — the GB lost-wake-mid-exit, re-landed): the
-        // one-shot wake below is keyed by PID, and a group member's
-        // do_exit used to free its pid BEFORE its opportunistic sweep, so
-        // this sleepy wait ran with a pid already returned to the
-        // allocator. The expiry then resolved the pid to nothing
-        // (WAKE-PID-MISS — silently dropped) or to a REUSED task — either
-        // way this waiter parked at the schedule() below and the deadline
-        // line under it never ran, because the bound is only re-checked
-        // on wake: the "bounded" wait became permanent (GB worker
-        // 312/313, both wedged mid-exit; the drain's rescue wake,
-        // addressed by task pointer, is what finally moved them). The
-        // exit path now frees the pid only AFTER the sweep, but keep the
-        // independent guard here: validate the pid->task mapping before
-        // arming, and when it is broken (any future pid-then-sleep
-        // order), fall back to a yield-poll that enforces its own
-        // deadline and never depends on a wake token. Rate-limited
-        // report: every firing names a producer of the order.
-        let pid_resolves = {
-            let t = crate::process::hotpath::pid_hash_lookup_pinned(my_pid);
-            if t.is_null() {
-                false
-            } else {
-                let ok = t as *const crate::process::types::Task
-                    == current as *const crate::process::types::Task;
-                // Release the lookup pin in both cases (unmatched or
-                // matched): the pinned refcount is the lookup's own.
-                crate::process::types::Task::task_put(t);
-                ok
-            }
-        };
-        if !pid_resolves {
-            static PIDFREE_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if PIDFREE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                crate::pr_warn!(
-                    "RCU-SLEEPY-PID-FREE pid={} site={} — yield-poll round (pid-keyed timer wake would be lost)",
-                    my_pid,
-                    site
-                );
-            }
-            // Cooperative yield round: state stays RUNNING (no park, no
-            // wake token), the schedule() itself reports this CPU's QS
-            // and lets peers run; the loop top re-checks completion and
-            // the deadline on every return.
-            crate::arch::cpu::restore_irq(true);
-            crate::sched::hotpath::schedule();
-            continue;
-        }
-        let target = crate::timer::get_jiffies() + 1;
-        let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
-        if timer_id != 0 {
-            // SAFETY: current is this task's own pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
-            // Re-check QS AFTER marking sleeping: the last missing
-            // reporter typically reports in the microseconds between
-            // the failed check at the loop top and here (the fd-close
-            // completion loop yields through schedule(), which is a
-            // report site). Aborting the sleep when it lands converts
-            // what was otherwise a full 1-jiffy stall — measured
-            // 2026-11-05: one close(2) per 10 ms tick stalled up to
-            // 10 ms in fdreapd's sleepy wait (probe: open+close median
-            // 1.07 us but mean 2.45 us, every stall ending at a jiffy
-            // boundary) — back into the microsecond poll window.
-            if all_online_cpus_reported(gen) {
-                // SAFETY: current is this task's own pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
-                    // NEW-C2: a racing wake may have enqueued us while
-                    // still executing — take ourselves back off.
-                    crate::sched::hotpath::dequeue_task(&*current);
-                }
-                crate::timer::del_timer(timer_id);
-                continue;
-            }
-            // Re-check the one-shot AFTER marking sleeping: it may have
-            // fired between arming and set_state (khungtaskd lesson).
-            if crate::timer::get_jiffies() >= target {
-                // SAFETY: current is this task's own pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
-                    // NEW-C2: a racing wake may have enqueued us while
-                    // still executing — take ourselves back off.
-                    crate::sched::hotpath::dequeue_task(&*current);
-                }
-                crate::timer::del_timer(timer_id);
-            } else {
-                crate::arch::cpu::restore_irq(true);
-                crate::sched::hotpath::schedule();
-                // Spurious wake before the deadline: drop the timer and
-                // loop (re-armed next iteration).
-                if crate::timer::timer_pending(timer_id) {
-                    crate::timer::del_timer(timer_id);
-                }
-            }
-        } else {
-            // Timer table full — stay runnable, yield one round.
-            crate::sched::hotpath::schedule();
-        }
-    }
-}
 
 /// Whether every online CPU has reported a quiescent state at or after
 /// generation `gen`.
@@ -13410,7 +12542,7 @@ pub fn all_online_cpus_reported_pub(gen: u32) -> bool {
     all_online_cpus_reported(gen)
 }
 
-fn all_online_cpus_reported(gen: u32) -> bool {
+pub(crate) fn all_online_cpus_reported(gen: u32) -> bool {
     for i in 0..MAX_CPUS {
         if !crate::sched::hotpath::cpu_online(i) {
             continue;
@@ -13433,7 +12565,7 @@ fn all_online_cpus_reported(gen: u32) -> bool {
 /// (r26: without it, every synchronous close-completion wait paid the
 /// sleepy poll's 1-jiffy granularity).
 #[inline]
-fn cpu_quiescent(i: usize, gen: u32) -> bool {
+pub(crate) fn cpu_quiescent(i: usize, gen: u32) -> bool {
     RCU_QS_GEN[i].load(Ordering::Acquire) >= gen
         || crate::sched::hotpath::cpu_running_idle(i)
 }
@@ -13503,16 +12635,7 @@ pub fn rcu_softirq_handler(_nr: usize) {
         lock_cb_list(cpu);
         // SAFETY: We hold cb_list lock for this CPU, so RCU_CBS[cpu] is only
         // accessed by us.  The list pointers were initialised in init().
-        unsafe {
-            if !RCU_CBS[cpu].is_empty() {
-                // Splice the list into `batch`.
-                batch.next = RCU_CBS[cpu].next;
-                batch.prev = RCU_CBS[cpu].prev;
-                (*batch.next).prev = &mut batch;
-                (*batch.prev).next = &mut batch;
-                RCU_CBS[cpu].init();
-            }
-        }
+        crate::sync::r#unsafe::rcu_splice_cbs(cpu, &mut batch);
         unlock_cb_list(cpu);
     }
 
@@ -13520,17 +12643,7 @@ pub fn rcu_softirq_handler(_nr: usize) {
     // SAFETY: We detached the entire callback list above and now own it
     // exclusively.  Each RcuHead was registered via call_rcu with a valid
     // func pointer and remains valid until the callback executes.
-    unsafe {
-        let sentinel = &mut batch as *mut ListHead;
-        let mut node = batch.next;
-        while node != sentinel {
-            let next = (*node).next;
-            let head = node as *mut RcuHead;
-            let func = (*head).func;
-            func(head as *mut core::ffi::c_void);
-            node = next;
-        }
-    }
+    crate::sync::r#unsafe::rcu_run_cbs(&mut batch);
 
     // Advance global generation so `synchronize_rcu()` callers can make progress.
     RCU_GEN.fetch_add(1, Ordering::AcqRel);
@@ -13545,7 +12658,7 @@ pub fn init() {
     for i in 0..MAX_CPUS {
         // SAFETY: Called once during boot before any CPU uses RCU — no
         // concurrent access to RCU_CBS[i].
-        unsafe { RCU_CBS[i].init(); }
+        crate::sync::r#unsafe::rcu_cbs_row_init(i);
         RCU_QS_GEN[i].store(0, Ordering::Relaxed);
     }
 
@@ -13618,7 +12731,7 @@ fn unlock_cb_list(cpu: usize) {
 /// while a guard is live). Zero on a healthy boot; every nonzero value
 /// names a call site that must be rewritten — the alias it attempted
 /// would have been the r8final class.
-static REENTRY_EVENTS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static REENTRY_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Number of re-entry refusals since boot (diagnostic hook for the
 /// census/debug lines).
@@ -13635,9 +12748,6 @@ impl<T: Copy> Clone for Row<T> {
 }
 impl<T: Copy> Copy for Row<T> {}
 
-// SAFETY: see the struct comment — rows are cpu-private by
-// construction of `with`.
-unsafe impl<T, const N: usize> Sync for CpuLocal<T, N> {}
 
 impl<T: Copy, const N: usize> CpuLocal<T, N> {
     /// Const constructor: every cpu's row starts as a copy of `val`.
@@ -13652,122 +12762,7 @@ impl<T: Copy, const N: usize> CpuLocal<T, N> {
 }
 
 impl<T, const N: usize> CpuLocal<T, N> {
-    /// Run `f` with this cpu's row, interrupts disabled for exactly
-    /// the duration of `f`. Returns `None` — with interrupts restored
-    /// — when the acting cpu id is out of range for this bank (the
-    /// r8final divergence family; callers keep their locked fallback)
-    /// or on a refused same-slot re-entry.
-    #[inline]
-    pub fn with<R>(&self, f: impl FnOnce(CpuLocalRef<'_, T>) -> R) -> Option<R> {
-        let flags = crate::arch::cpu::save_and_disable_irq();
-        let cpu = crate::arch::cpu_id() as usize;
-        if cpu >= N {
-            crate::arch::cpu::restore_irq(flags);
-            return None;
-        }
-        let rows = self.rows.get(); // *mut [Row<T>; N], interior-mutable
-        // SAFETY (pointer arithmetic and both field pointers): `cpu`
-        // is bounds-checked above; the row is private to this cpu for
-        // as long as interrupts stay disabled (they are — the guard
-        // restores at drop); the in_use flag read/set below refuses a
-        // second live guard, so the &mut handed out is exclusive. All
-        // access goes through raw pointers derived from the UnsafeCell
-        // — never through a `&`-path (the D-7 incident family).
-        let row = unsafe { rows.cast::<Row<T>>().add(cpu) }; // *mut Row<T>
-        let (val, in_use): (*mut T, *mut bool) = unsafe {
-            (
-                core::ptr::addr_of_mut!((*row).val),
-                core::ptr::addr_of_mut!((*row).in_use),
-            )
-        };
-        if unsafe { *in_use } {
-            // Same slot, same cpu, a guard is already live (the outer
-            // window still holds — flags were saved with IRQs already
-            // off and false restores nothing). Refuse the alias,
-            // count + taint: this is a call-site bug of the r8final
-            // class, and the taint names it instead of absorbing it.
-            REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
-            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
-            crate::arch::cpu::restore_irq(flags);
-            return None;
-        }
-        unsafe { *in_use = true };
-        let guard = CpuLocalRef {
-            val: unsafe { &mut *val },
-            cpu,
-            flags,
-            preempt_guard: false,
-            in_use,
-            _nosend: PhantomData,
-        };
-        Some(f(guard))
-    }
 
-    /// Run `f` with this cpu's row, PREEMPTION disabled but INTERRUPTS
-    /// LEFT ENABLED, for exactly the duration of `f` (106th, the
-    /// allocator irq-toggle restructure).
-    ///
-    /// The exclusivity this guard provides is strictly weaker than
-    /// [`CpuLocal::with`]: it excludes a context switch (so the cpu id
-    /// read inside cannot go stale — no migration between the read and
-    /// the row access) but it does NOT exclude interrupt context on the
-    /// same cpu. It is therefore only correct for banks whose IRQ-context
-    /// access is ROUTED AWAY from the rows by the caller — the small_alloc
-    /// magazines: interrupt-context allocs/frees take the class-lock path
-    /// directly and never touch a row, so a task-context row access can be
-    /// interrupted but never raced. `with_preempt` returns `None` (nothing
-    /// touched) whenever the caller is NOT in task context
-    /// (`in_interrupt()` — hardirq/softirq/NMI) or on the same
-    /// out-of-range/re-entry refusals as `with`; callers keep their locked
-    /// fallback for every `None`.
-    ///
-    /// Why this exists: `with` pays a cli/sti pair per access. On the
-    /// allocation fast paths that is ~46M IF=0 windows per boot, the
-    /// second-largest surviving interrupt-off shadow (the deferred-PMI
-    /// `enable_irq+0x1d` sample class). A preempt-disable window keeps
-    /// the tick and device IRQs flowing through the access.
-    pub fn with_preempt<R>(&self, f: impl FnOnce(CpuLocalRef<'_, T>) -> R) -> Option<R> {
-        if crate::interrupt::preempt::in_interrupt() {
-            return None;
-        }
-        crate::interrupt::preempt::preempt_count_add(crate::interrupt::preempt::PREEMPT_OFFSET);
-        let cpu = crate::arch::cpu_id() as usize;
-        if cpu >= N {
-            crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
-            return None;
-        }
-        let rows = self.rows.get(); // *mut [Row<T>; N], interior-mutable
-        // SAFETY: `cpu` is bounds-checked above; the row is private to
-        // this cpu for as long as preemption stays disabled (no context
-        // switch can migrate the task between the cpu_id read and the row
-        // access — the r8final divergence family); interrupt context is
-        // excluded by the caller-side routing documented on this method.
-        // The in_use flag read/set refuses a second live guard.
-        let row = unsafe { rows.cast::<Row<T>>().add(cpu) }; // *mut Row<T>
-        let (val, in_use): (*mut T, *mut bool) = unsafe {
-            (
-                core::ptr::addr_of_mut!((*row).val),
-                core::ptr::addr_of_mut!((*row).in_use),
-            )
-        };
-        if unsafe { *in_use } {
-            // Same refusal semantics as `with` (see there).
-            REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
-            crate::debug::hotpath::add_taint(crate::debug::types::TaintFlags::BAD_PAGE);
-            crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
-            return None;
-        }
-        unsafe { *in_use = true };
-        let guard = CpuLocalRef {
-            val: unsafe { &mut *val },
-            cpu,
-            flags: false,
-            preempt_guard: true,
-            in_use,
-            _nosend: PhantomData,
-        };
-        Some(f(guard))
-    }
 }
 
 impl<T> CpuLocalRef<'_, T> {
@@ -13799,7 +12794,7 @@ impl<T> Drop for CpuLocalRef<'_, T> {
     fn drop(&mut self) {
         // SAFETY: same-cpu exclusivity still holds until the restore
         // below; the raw store is the only writer.
-        unsafe { *self.in_use = false };
+        crate::sync::r#unsafe::cpu_local_row_release(self.in_use);
         if self.preempt_guard {
             crate::interrupt::preempt::preempt_count_sub(
                 crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -13901,9 +12896,6 @@ impl CanNestInside<FutexBucketKey> for WaiterSlotKey {}
 
 // ---- The keyed lock ----------------------------------------------
 
-// SAFETY: RawSpinlock's atomic protocol is the synchronization; the
-// key is zero-sized and carries no data.
-unsafe impl<K: NestKey> Sync for KeyedRawSpinlock<K> {}
 
 impl<K: NestKey> KeyedRawSpinlock<K> {
     pub const fn new() -> Self {
@@ -13991,9 +12983,6 @@ impl<Inner: NestKey> KeyedRawSpinlock<Inner> {
     }
 }
 
-// SAFETY: same rule as Spinlock itself — the atomic protocol
-// synchronizes; the key is zero-sized and carries no data.
-unsafe impl<K: NestKey, T: Send> Sync for KeyedSpinlock<K, T> {}
 
 impl<K: NestKey, T> KeyedSpinlock<K, T> {
     pub const fn new(data: T) -> Self {
@@ -14054,7 +13043,7 @@ impl<K: NestKey, T: ?Sized> core::ops::DerefMut for KeyedIrqGuard<'_, K, T> {
 impl<K: NestKey> Drop for KeyedGuard<'_, K> {
     #[inline]
     fn drop(&mut self) {
-        unsafe { (*self.lock).raw.unlock() };
+        crate::sync::r#unsafe::keyed_guard_unlock(self.lock);
     }
 }
 

@@ -127,7 +127,6 @@ kernel/core/src/security/lsm.rs	pre-collection state at baseline f8e6eb94d: 4 un
 kernel/core/src/security/mod.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/signal.rs	pre-collection state at baseline f8e6eb94d: 13 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/signal_unsafe.rs	pre-collection state at baseline f8e6eb94d: 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/sync/hotpath.rs	pre-collection state at baseline f8e6eb94d: 95 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/tests/fdtable.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 2 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/tests/framebuffer.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/tests/listhead.rs	pre-collection state at baseline f8e6eb94d (test/diagnostic probe compiled into the kernel): 7 unsafe keyword(s) to collect into the subsystem's unsafe.rs
