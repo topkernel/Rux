@@ -97,7 +97,6 @@ kernel/core/src/cov.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyw
 # pruned (file gone): kernel/core/src/drivers/timer/x86_64.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 # pruned (file gone): kernel/core/src/drivers/virtio/mod.rs	pre-collection state at baseline f8e6eb94d: 24 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 # pruned (file gone): kernel/core/src/drivers/virtio/queue.rs	pre-collection state at baseline f8e6eb94d: 12 unsafe keyword(s) to collect into the subsystem's unsafe.rs
-kernel/core/src/fs/hotpath.rs	pre-collection state at baseline f8e6eb94d: 258 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/init.rs	pre-collection state at baseline f8e6eb94d: 6 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/initrd.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
 kernel/core/src/interrupt/irqdesc.rs	pre-collection state at baseline f8e6eb94d: 1 unsafe keyword(s) to collect into the subsystem's unsafe.rs
