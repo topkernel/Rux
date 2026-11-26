@@ -280,12 +280,20 @@ def apply_spec(spec, dry):
                     section_order.append((d["section"], spec["moves"].index(d), fn_text))
                     fn_lines = fn_text.rstrip("\n").split("\n")
                 if inline:
-                    cut_line = lines[first_line]
-                    call = cut_line[:span[0] - ls] + d["call"] + cut_line[span[1] - ls:]
-                    rec["cut_lines"] = [cut_line]
+                    # a within-line replacement: the call goes where the
+                    # block stood, between the first line's prefix and the
+                    # last line's suffix — the block may span many lines
+                    # (`let x = unsafe {` ... `};`), so take the prefix and
+                    # suffix from their OWN lines and collapse the whole
+                    # span into the one call line
+                    prefix = lines[first_line][:span[0] - ls]
+                    ls_last = line_start(text, span[1] - 1)
+                    suffix = text[span[1]:line_end(text, span[1] - 1)]
+                    call = prefix + d["call"] + suffix
+                    rec["cut_lines"] = lines[first_line:last_line + 1]
                     rec["inserted_lines"] = [call]
                     rec["whole_line"] = False
-                    lines[first_line] = call
+                    lines[first_line:last_line + 1] = [call]
                 else:
                     cut = "\n".join(lines[first_line:last_line + 1])
                     call_lines = d["call"].split("\n")
@@ -477,11 +485,15 @@ def append_doc(item, note):
 def rewrite_vis(item, vis):
     hits = 0
     out = []
+    EXISTING_VIS = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)")
     for l in item.split("\n"):
         if not hits and FN_DECL.match(l):
             hits += 1
             indent = l[:len(l) - len(l.lstrip())]
-            l = indent + vis + " " + l.strip()
+            # strip an existing visibility before applying the override —
+            # the spec's `vis` is the FINAL visibility, not a prefix
+            # (an already-`pub` fn with vis "pub" would spell `pub pub`)
+            l = indent + vis + " " + EXISTING_VIS.sub("", l.strip())
         out.append(l)
     return "\n".join(out), hits
 
@@ -547,9 +559,13 @@ def verify(sub, base_rev, manifest_path):
     sub_dir = str(Path(files[0]).parent)
     dirpath = ROOT / sub_dir
 
-    rels = set()
-    for p in sorted(dirpath.rglob("*.rs")):
-        rels.add(str(p.relative_to(ROOT)))
+    # tracked source only: build.rs writes gitignored placeholders
+    # (ksyms_generated.rs) INSIDE subsystem dirs; they are build
+    # artifacts, not source, and must not enter the audited multiset
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", sub_dir],
+        capture_output=True, text=True).stdout.split()
+    rels = set(tracked)
     rels |= set(files)
     base, cur = collections.Counter(), collections.Counter()
     for rel in sorted(rels):
