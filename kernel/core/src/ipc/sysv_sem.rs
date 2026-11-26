@@ -32,53 +32,13 @@ const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 // UAPI Structures
 // ============================================================================
 
-/// struct seminfo — returned by IPC_INFO / SEM_INFO
-/// Must match Linux's include/uapi/linux/sem.h. Total: 40 bytes.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SemInfoUapi {
-    pub semmap: i32,  // +0
-    pub semmni: i32,  // +4
-    pub semmns: i32,  // +8
-    pub semmnu: i32,  // +12
-    pub semmsl: i32,  // +16
-    pub semopm: i32,  // +20
-    pub semume: i32,  // +24
-    pub semusz: i32,  // +28
-    pub semvmx: i32,  // +32
-    pub semaem: i32,  // +36
-}
+// SemInfoUapi — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SemInfoUapi};
 
-/// struct semid64_ds — returned by IPC_STAT, IPC_SET
-///
-/// riscv64/aarch64: asm-generic/sembuf.h — perm(48) + otime + ctime +
-/// nsems + 2 unused = 88 bytes, sem_nsems at offset 64.
-///
-/// x86_64: the x86 uapi (arch/x86/include/uapi/asm/sembuf.h) pads EACH
-/// time_t with a high word, so glibc/musl `struct semid_ds` on x86_64
-/// reads sem_nsems at offset 80 in a 104-byte struct (verified against
-/// the musl x86_64 bits/sem.h used by the LTP build:
-/// perm(48) + otime + pad + ctime + pad + nsems@80). Writing the
-/// asm-generic layout put nsems where x86_64 userspace sees
-/// __unused2 — LTP r21 semget01 read 0 where the kernel wrote 10
-/// (`sem_nsems (0) != PSEMS (10)` from IPC_STAT). The high words are
-/// pure padding on x86_64 (time_t is 64-bit), so they stay zero.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SemidDsUapi {
-    pub sem_perm: IpcPermUapi,
-    pub sem_otime: i64,
-    /// x86 uapi high words (32-bit compat heritage): always zero on
-    /// x86_64, absent from the asm-generic layout.
-    #[cfg(feature = "x86_64")]
-    pub __sem_otime_high: u64,
-    pub sem_ctime: i64,
-    #[cfg(feature = "x86_64")]
-    pub __sem_ctime_high: u64,
-    pub sem_nsems: u64,
-    pub __unused3: u64,
-    pub __unused4: u64,
-}
+// SemidDsUapi — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SemidDsUapi};
 
 impl SemidDsUapi {
     /// All-zero struct — the base the IPC_STAT / IPC_SET / SEM_STAT
@@ -110,49 +70,21 @@ const _: () = assert!(core::mem::size_of::<SemidDsUapi>() == 88);
 #[cfg(not(feature = "x86_64"))]
 const _: () = assert!(core::mem::offset_of!(SemidDsUapi, sem_nsems) == 64);
 
-/// struct sembuf — passed by userspace to semop/semtimedop
-/// Total: 6 bytes, no padding
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SemBuf {
-    pub sem_num: u16,
-    pub sem_op: i16,
-    pub sem_flg: u16,
-}
+// SemBuf — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SemBuf};
 
 // ============================================================================
 // Kernel Structures
 // ============================================================================
 
-/// Single semaphore within a set.
-struct SemEntry {
-    /// Current semaphore value.
-    value: AtomicI32,
-    /// Number of processes waiting for value to increase (sem_op < 0).
-    ncnt: AtomicUsize,
-    /// Number of processes waiting for value to become zero (sem_op == 0).
-    zcnt: AtomicUsize,
-    /// PID of the last process that operated on THIS semaphore (semop or
-    /// SETALL) — semctl(GETPID) returns it (LTP semctl07).
-    pid: AtomicU32,
-}
+// SemEntry — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{SemEntry};
 
-/// Semaphore set (the IPC object).
-pub struct SemArray {
-    pub perm: KernIpcPerm,
-    /// Per-semaphore values and wait queues.
-    sems: Spinlock<Option<alloc::vec::Vec<SemEntry>>>,
-    /// Time of last semop.
-    sem_otime: AtomicI64,
-    /// Time of last semctl that changed the set.
-    sem_ctime: AtomicI64,
-    /// PID of last semop.
-    sem_padid: AtomicU32,
-    /// Lock for the entire semaphore set (protects sems vector existence).
-    lock: Spinlock<()>,
-    /// Wait queue for processes blocked on semop.
-    wq: crate::process::wait::WaitQueueHead,
-}
+// SemArray — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SemArray};
 
 impl IpcObject for SemArray {
     fn get_perm(&self) -> &KernIpcPerm {

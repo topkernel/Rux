@@ -212,79 +212,34 @@ pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 /// dropped every SECCTX delivery (b45/b59 wedges).
 pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 2, 72);
 
-/// struct binder_transaction_data (LP64)
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct BinderTransactionData {
-    pub target_handle: u32,
-    pub _target_pad: u32,
-    pub cookie: u64,
-    pub code: u32,
-    pub flags: u32,
-    pub sender_pid: i32,
-    pub sender_euid: u32,
-    pub data_size: u64,
-    pub offsets_size: u64,
-    pub data_buffer: u64,
-    pub data_offsets: u64,
-}
+// BinderTransactionData — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderTransactionData};
+
 const _: () = assert!(core::mem::size_of::<BinderTransactionData>() == 64);
 
-/// struct binder_write_read (LP64). Copy: plain u64 UAPI record — the
-/// uaccess capsule round-trips it (copy_in_t/copy_out_t).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct BinderWriteRead {
-    pub write_size: u64,
-    pub write_consumed: u64,
-    pub write_buffer: u64,
-    pub read_size: u64,
-    pub read_consumed: u64,
-    pub read_buffer: u64,
-}
+// BinderWriteRead — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderWriteRead};
+
 const _: () = assert!(core::mem::size_of::<BinderWriteRead>() == 48);
 
-/// struct flat_binder_object (24 bytes on LP64)
-#[repr(C)]
-pub struct FlatBinderObject {
-    pub hdr_type: u32,
-    pub flags: u32,
-    pub handle: u32,
-    pub _handle_pad: u32,
-    pub cookie: u64,
-}
+// FlatBinderObject — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{FlatBinderObject};
+
 const _: () = assert!(core::mem::size_of::<FlatBinderObject>() == 24);
 
-/// struct binder_buffer_object (40 bytes on LP64): BINDER_TYPE_PTR —
-/// points at additional data outside the parcel that the driver copies
-/// into the target's sg (extra) area and rewrites to a target address.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BinderBufferObject {
-    hdr_type: u32,
-    flags: u32,
-    buffer: u64,
-    length: u64,
-    /// index into the offsets array of the parent BINDER_TYPE_PTR object
-    parent: u64,
-    /// offset in the parent buffer where this buffer's address is written
-    parent_offset: u64,
-}
+// BinderBufferObject — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{BinderBufferObject};
+
 const _: () = assert!(core::mem::size_of::<BinderBufferObject>() == 40);
 
-/// struct binder_fd_array_object (32 bytes on LP64): BINDER_TYPE_FDA —
-/// an array of u32 fds living inside the parent buffer object.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BinderFdArrayObject {
-    hdr_type: u32,
-    flags: u32,
-    num_fds: u64,
-    /// index into the offsets array of the parent BINDER_TYPE_PTR object
-    parent: u64,
-    /// offset of the fd array within the parent's buffer
-    parent_offset: u64,
-}
+// BinderFdArrayObject — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{BinderFdArrayObject};
+
 const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
 
 /// Security-context string copied into the transaction's sg area when the
@@ -333,16 +288,9 @@ pub const DEV_BINDER: DevNo = DevNo::new(MISC_MAJOR, BINDER_MINOR);
 pub const DEV_HWBINDER: DevNo = DevNo::new(MISC_MAJOR, HWBINDER_MINOR);
 pub const DEV_VNDBINDER: DevNo = DevNo::new(MISC_MAJOR, VNDBINDER_MINOR);
 
-/// Which device context an open belongs to. /dev/binder, /dev/hwbinder
-/// and /dev/vndbinder each carry their OWN context-manager node (Linux
-/// binder_device.context); handle-0 resolves within the opener's context
-/// only. Ref tables are per-open, so handles cannot leak across contexts.
-#[derive(Clone, Copy, PartialEq)]
-pub enum BinderCtx {
-    Binder = 0,
-    HwBinder = 1,
-    VndBinder = 2,
-}
+// BinderCtx — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderCtx};
 
 pub fn devno_ctx(dev: &DevNo) -> Option<BinderCtx> {
     if *dev == DEV_BINDER {
@@ -363,59 +311,9 @@ fn align8(v: usize) -> usize {
     (v + 7) & !7
 }
 
-/// INV-BINDER-BLOCKVIEW (unsafe-slim r3c): the ONE audited raw window over
-/// an in-flight transaction block, replacing the ~20 scattered volatile
-/// derefs the payload copy + flat-object walk used to carry. A TxnBlock is
-/// built after `BinderAlloc::new_buf` returns the block offset and lives
-/// for the duration of THIS transaction's fixup phase.
-///
-/// Layout contract (same arithmetic `BinderAlloc::block_need` reserved):
-/// the allocation is `alloc_len` bytes at `base` (page-aligned buddy
-/// block; `base` never escapes this type except through the audited
-/// `extra_copy_in`/`block_window` bodies that feed uaccess), and this
-/// txn's block is
-///   [data (data_size)][offsets (align8(offsets_size))][extra (align8(extra_size))]
-/// starting at `block_off` (8-aligned: new_buf carves sums of align8'd
-/// needs from 0). Every accessor checks BOTH the sub-layout bound AND the
-/// absolute allocation bound — a slip in either contract fails the
-/// transaction instead of writing out of the buffer (the sender controls
-/// the offsets array, so the bounds are hostile-input territory; see the
-/// wrap-proof checks the pre-conversion audit added).
-///
-/// Reads/writes stay volatile exactly as before the conversion (the
-/// buffer is concurrently observable through the target's user mapping).
-/// Misaligned object offsets were UB-shaped volatile reads before; now
-/// they are a clean None -> BR_FAILED_REPLY.
-pub struct TxnBlock {
-    /// Kernel-side base of the whole binder buffer allocation
-    /// (BinderAlloc::kvirt). Never handed out except by the audited
-    /// bodies below.
-    base: *mut u8,
-    /// Size of the whole allocation (npages * PAGE_SIZE).
-    alloc_len: usize,
-    /// This txn's block start within the allocation (8-aligned).
-    block_off: usize,
-    /// Parcel payload size (the [data] sub-area, unaligned tail is fine —
-    /// only align8() sizes are reserved).
-    data_size: usize,
-    /// Offsets-array size in bytes (8-aligned by the caller marshalling).
-    offsets_size: usize,
-    /// Extra/sg area payload size (sg buffers + optional secctx string).
-    extra_size: usize,
-    /// Target-user base of the whole allocation (BinderAlloc::user_base);
-    /// the user-side addresses the sender's PTR objects carry map back
-    /// against block_user_base() = user_base + block_off.
-    user_base: u64,
-    /// Precomputed layout end (block_off + align8 of the three sub-areas)
-    /// — span_ok runs on every accessor call, so the bound is computed
-    /// once at construction, not per access.
-    layout_end: usize,
-    /// Precomputed extra-area base (block-relative).
-    extra_base: usize,
-    /// Precomputed offsets-array base (block-relative) — the offsets
-    /// array sits right after the data sub-area.
-    offsets_base: usize,
-}
+// TxnBlock — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{TxnBlock};
 
 impl TxnBlock {
     fn new(
@@ -643,15 +541,9 @@ impl TxnBlock {
     }
 }
 
-/// Bound window over a resolved parent BINDER_TYPE_PTR sg copy (see
-/// TxnBlock::parent_window). Carries offsets, not pointers — every
-/// access re-checks against `len`.
-struct ParentWindow<'a> {
-    block: &'a TxnBlock,
-    /// Absolute offset of the parent buffer start within the allocation.
-    abs: usize,
-    len: usize,
-}
+// ParentWindow — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{ParentWindow};
 
 /// INV-BINDER-STAGE-POD (unsafe-slim r3c): bytewise view of a `Copy`
 /// repr(C) struct for staging into the read buffer (BinderTransactionData
@@ -705,46 +597,13 @@ impl ParentWindow<'_> {
 // Core state — everything behind UnsafeCell is mutated ONLY under WORLD.
 // ============================================================================
 
-pub struct NodeState {
-    internal_strong_refs: i32,
-    local_strong_refs: i32,
-    local_weak_refs: i32,
-    has_strong_ref: bool,
-    has_weak_ref: bool,
-    pending_strong_ref: bool,
-    pending_weak_ref: bool,
-    /// TF_ONE_WAY serialization: one async transaction in flight per node
-    /// (Linux node->has_async_transaction); extra oneways park on
-    /// node->async_todo until the in-flight buffer is freed.
-    pub has_async_transaction: bool,
-    /// Oneway transactions waiting for the node's async slot (Linux
-    /// node->async_todo). Their buffers are already allocated and fixed
-    /// up; delivery is just deferred.
-    pub async_todo: VecDeque<Arc<BinderTxn>>,
-}
+// NodeState — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{NodeState};
 
-pub struct BinderNode {
-    pub id: u64,
-    ptr: u64,
-    cookie: u64,
-    proc_id: u64,
-    /// sc157: tgid of the task that REGISTERED the node. When it differs
-    /// from the owner proc's pid, the node belongs to a forked child
-    /// sharing the parent's binder_proc — deliveries to such nodes must
-    /// be visible to the APPTXN tracer (the AMS→child ScheduleStartAbility
-    /// hop rides exactly this shape).
-    pub reg_tgid: u32,
-    /// flat_binder_object.flags at registration (accept_fds and
-    /// txn_security_ctx bits).
-    flags: u32,
-    /// sc161: the registering task group exited while the OWNER proc
-    /// lives on (forked appspawn children share the daemon's proc). Set
-    /// by binder_on_tgid_exit; makes node_is_dead true and fail-fasts
-    /// new transactions through stale refs (BR_DEAD_REPLY), mirroring
-    /// what proc teardown does for whole-process death.
-    dead: core::sync::atomic::AtomicBool,
-    st: core::cell::UnsafeCell<NodeState>,
-}
+// BinderNode — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderNode};
 
 impl BinderNode {
     const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64, reg_tgid: u32, flags: u32) -> Self {
@@ -789,82 +648,25 @@ impl NodeState {
     }
 }
 
-struct BinderRef {
-    desc: u32,
-    node: Arc<BinderNode>,
-    strong: i32,
-    weak: i32,
-    /// Death-notification request on this handle (Linux ref->death).
-    death: Option<RefDeath>,
-}
+// BinderRef — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{BinderRef};
 
-/// Death-notification request state (Linux struct binder_ref_death +
-/// its work-item states).
-struct RefDeath {
-    cookie: u64,
-    /// Armed: requested, node still alive. Queued: Work::DeadBinder sits
-    /// on the proc todo (node dead, BR not yet read). Delivered:
-    /// BR_DEAD_BINDER was read, awaiting BC_DEAD_BINDER_DONE.
-    phase: DeathPhase,
-    /// BC_CLEAR_DEATH_NOTIFICATION arrived while the notification was
-    /// queued or delivered: after BC_DEAD_BINDER_DONE, deliver
-    /// BR_CLEAR_DEATH_NOTIFICATION_DONE and drop the request (Linux
-    /// BINDER_WORK_DEAD_BINDER_AND_CLEAR).
-    clear_pending: bool,
-}
+// RefDeath — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{RefDeath};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum DeathPhase {
-    Armed,
-    Queued,
-    Delivered,
-}
+// DeathPhase — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DeathPhase};
 
-pub(crate) struct BufBlock {
-    pub(crate) off: usize,
-    pub(crate) len: usize,
-    pub(crate) free: bool,
-    pub(crate) async_block: bool,
-    pub(crate) allow_user_free: bool,
-    pub(crate) data_size: usize,
-    pub(crate) offsets_size: usize,
-    /// Per-allocation id (the reference's buffer->debug_id): assigned
-    /// by new_buf when a block is carved, 0 while free. Carried by the
-    /// binder_transaction_alloc_buf / buffer_release trace events.
-    pub(crate) buf_id: u64,
-    /// sg (extra) area size: BINDER_TYPE_PTR payload copies (layout:
-    /// [data][offsets][extra], each u64-aligned).
-    pub(crate) extra_size: usize,
-    /// Oneway (async) buffers keep their transaction alive so the node's
-    /// async slot is released when the receiver frees the buffer (Linux
-    /// buffer->transaction). Sync buffers rely on the reply path instead.
-    pub(crate) txn: Option<Arc<BinderTxn>>,
-    /// sc243 (leg-17): the sync txn this buffer carried has been
-    /// REPLIED — the request data is protocol-dead and only the
-    /// receiver's contractual BC_FREE_BUFFER remains. The OHOS
-    /// cc54-family services never issue that BC_FREE, so their allocs
-    /// filled with delivered-but-unfreed blocks (sc243 census: 329K
-    /// live BinderTxn arcs, every one pinned by such a block; at the
-    /// launcher floor this is ~210MB of the 831MB heap). On alloc
-    /// pressure these blocks are reclaimed (see alloc_new_buf).
-    pub(crate) reply_done: bool,
-}
+// BufBlock — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub(crate) use super::types::{BufBlock};
 
-pub(crate) struct BinderAlloc {
-    pub(crate) kvirt: *mut u8,
-    pub(crate) phys: usize,
-    pub(crate) npages: usize,
-    pub(crate) order: usize,
-    pub(crate) user_base: u64,
-    pub(crate) blocks: Vec<BufBlock>,
-    pub(crate) free_async_space: usize,
-    /// sc243 (leg-17): jiffies of the last stale-async sweep (see
-    /// sweep_stale_async) — rate-limits the O(blocks) scan to one per
-    /// second per allocator.
-    pub(crate) last_sweep_j: u32,
-    /// Monotone buffer-id source (see BufBlock::buf_id).
-    pub(crate) next_buf_id: u64,
-}
+// BinderAlloc — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub(crate) use super::types::{BinderAlloc};
 
 impl BinderAlloc {
     fn block_need(data_size: usize, offsets_size: usize, extra_size: usize) -> usize {
@@ -1038,22 +840,9 @@ impl BinderAlloc {
     }
 }
 
-pub enum Work {
-    TransactionComplete,
-    Transaction(Arc<BinderTxn>),
-    /// (cmd, param): BR_ERROR carries an s32 payload, the *_REPLY
-    /// variants carry none.
-    ReturnError(u32, i32),
-    /// BINDER_WORK_NODE: ref-state change; the read side derives
-    /// BR_INCREFS/ACQUIRE/RELEASE/DECREFS from the counters (like Linux).
-    Node(Arc<BinderNode>),
-    /// BINDER_WORK_DEAD_BINDER(_AND_CLEAR): (ref desc, cookie). The node
-    /// died; deliver BR_DEAD_BINDER.
-    DeadBinder { desc: u32, cookie: u64 },
-    /// BINDER_WORK_CLEAR_DEATH_NOTIFICATION: deliver
-    /// BR_CLEAR_DEATH_NOTIFICATION_DONE (cookie).
-    ClearDeathDone { cookie: u64 },
-}
+// Work — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{Work};
 
 
 /// sc243 (leg-17): reclaim DELIVERED-but-never-freed binder buffers of a
@@ -1896,74 +1685,9 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     }
 }
 
-pub struct BinderTxn {
-    pub id: u64,
-    pub from_proc: Option<Arc<BinderProc>>,
-    pub from_tid: Option<u32>,
-    pub to_proc: Arc<BinderProc>,
-    /// Set when the transaction is delivered (BR_TRANSACTION): the
-    /// receiving thread, which will later issue BC_REPLY. Atomic with
-    /// 0 = None (unsafe-slim r3: real binder tids are >= 1, so the
-    /// sentinel cannot collide; Relaxed is enough — the value is a
-    /// plain word, no pointer, no ordering contract).
-    to_tid: core::sync::atomic::AtomicU32,
-    pub target_node: Option<Arc<BinderNode>>,
-    /// Set while this txn holds the node's async slot (TF_ONE_WAY).
-    /// Interior-mutable: a parked oneway claims the slot only when the
-    /// in-flight buffer is freed and it graduates to the proc todo.
-    holds_async_slot: core::sync::atomic::AtomicBool,
-    pub code: u32,
-    pub flags: u32,
-    sender_pid: i32,
-    sender_euid: u32,
-    data_size: usize,
-    offsets_size: usize,
-    buffer_off: usize,
-    /// Target-user address of the NUL-terminated secctx string in the sg
-    /// area (0: the target node did not request a security context).
-    security_ctx: u64,
-    /// sc208 (launcher leg 13, C-line cross-finding: SAMgr SendRequest
-    /// ~30 s per call once the clock was fixed): lifecycle stamps for the
-    /// SLOW-TXN probe. enq_j = jiffies at BC_TRANSACTION queue time;
-    /// pick_j = jiffies at BR_TRANSACTION delivery (server pickup), 0
-    /// until then. The reply pop computes queue-vs-exec and prints the
-    /// split for any sync txn over 5 s — where the 30 s goes (server not
-    /// picking up vs handler running long) names the next chain link.
-    pub enq_j: u32,
-    /// (unsafe-slim r3) all five census cells below are Relaxed atomics:
-    /// every prior UnsafeCell variant trusted "single mutator under
-    /// WORLD"; the enqueue-wake latch (binder_transaction) writes two of
-    /// them AFTER the WORLD release, which was a bare single-writer
-    /// assumption. Atomics carry the same cost (one plain word store on
-    /// both targets) and drop the trust.
-    pick_j: core::sync::atomic::AtomicU32,
-    /// 23rd PICK-LATE evidence: eligible proc-work readers on the target
-    /// at proc-todo enqueue time (the wake_proc_one predicate count).
-    /// 0 = nobody to wake — every reader busy in its own handler (a
-    /// capacity signal, not a lost wake). Written under WORLD at
-    /// enqueue, read in the PICK-LATE probe under WORLD.
-    enq_elig: core::sync::atomic::AtomicU8,
-    /// 105th RTT census (rux:bindertrace (retired debug=bindertrace)), ns-domain twins of the
-    /// jiffies stamps: enq_ns = constructor time (request: enqueue;
-    /// reply: submit), pick_ns = server BR_TRANSACTION staging time, 0
-    /// until then. Jiffies (10 ms) cannot resolve the 4-5 ms fast-path
-    /// RTT class the 103rd measured vs the reference's ~1 ms. Written
-    /// once on the txn lifecycle path under WORLD, read at the census
-    /// accumulation points under WORLD.
-    enq_ns: u64,
-    pick_ns: core::sync::atomic::AtomicU64,
-    /// 105th wake-dispatch census: latched right after this txn's sync
-    /// wake — bits 0-3 = sched::WAKE_DISP code (1 idle-claim+IPI, 2 no-
-    /// idle sync, 3 no-idle async), bits 4-11 = idle mask at wake entry,
-    /// bits 12-19 = min(grq nr_running, 255). Read by the QPICK print.
-    /// Latched once at the enqueue-wake point (outside WORLD, single
-    /// enqueuing thread — atomic anyway), read at pickup under WORLD.
-    enq_disp: core::sync::atomic::AtomicU32,
-    /// 105th: the wake-issued stamp (0 until the enqueue's wake loops
-    /// ran) — q splits into sender-build (enq_ns->wake_ns) and
-    /// server-wait (wake_ns->pick_ns). Same contract as enq_disp.
-    wake_ns: core::sync::atomic::AtomicU64,
-}
+// BinderTxn — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderTxn};
 
 impl BinderTxn {
     /// INV-BINDER-HELD (unsafe-slim r3): the WORLD-held proof rides the
@@ -2038,22 +1762,13 @@ impl BinderTxn {
     }
 }
 
-/// Per-thread transition history (sc74 wedge forensics): the observed death
-/// loop ends in a state — server thread parked in the blocking read owing a
-/// reply, own todo empty, no nested txn anywhere in the world — that no
-/// single-threaded execution of this driver plus OH libipc can produce. The
-/// ring records the last BHIST state transitions under WORLD so the next
-/// stall dump names the exact step that never happened (or shows a
-/// transition sequence only corruption can produce).
-#[derive(Clone, Copy)]
-pub struct BinderEv {
-    pub j: u32,
-    pub ev: u8,
-    pub a: u32,
-    pub b: u32,
-}
+// BinderEv — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderEv};
 
-pub const BHIST: usize = 24;
+// BHIST — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BHIST};
 
 pub const EV_TXN_SENT: u8 = 1;
 pub const EV_TXN_TQUEUED: u8 = 2;
@@ -2098,130 +1813,13 @@ pub fn ev_name(ev: u8) -> &'static str {
     }
 }
 
-pub struct ThreadState {
-    pub looper: u32,
-    pub todo: VecDeque<Work>,
-    /// process_todo: a deferred TRANSACTION_COMPLETE on the todo does NOT
-    /// set this — the thread keeps sleeping until real work arrives.
-    process_todo: bool,
-    /// True while blocked in binder_thread_read waiting for proc work
-    /// (Linux waiting_threads list, drives BR_SPAWN_LOOPER).
-    pub waiting_for_proc_work: bool,
-    /// Reference looper_need_return: force the thread's next read to
-    /// return to userspace (binder_flush / fd close / deferred fd
-    /// completion all set it; the BWR read loop breaks on it).
-    looper_need_return: bool,
-    /// Park sequence stamp (65th session, reference-order parity):
-    /// value of NEXT_PARK_SEQ when this thread last joined the
-    /// waiting-for-proc-work set. The reference registers a parking
-    /// reader with `list_add` at the HEAD of proc->waiting_threads and
-    /// binder_select_thread_ilocked pops the head — i.e. the MOST
-    /// RECENTLY parked looper is selected for delivery (LIFO, sticky to
-    /// the thread that just finished and re-parked). We have no list;
-    /// a monotonic stamp under WORLD reproduces the exact order (max
-    /// stamp = head). 0 = not parked.
-    park_seq: u64,
-    pub txn_stack: Vec<Arc<BinderTxn>>,
-    /// 75th OH parity (CONFIG_BINDER_SENDER_INFO): thread->tokens.
-    /// sender_tokenid source — the SENDER's tgid of the transaction this
-    /// thread last staged to userspace (BR_TRANSACTION or BR_REPLY),
-    /// stamped for EVERY delivered txn exactly like the reference's
-    /// `thread->tokens.sender_tokenid = t->sender_tokenid`
-    /// (linux-6.6 binder.c:4829). The GET_SENDER_INFO ioctl resolves
-    /// the native access token through it. txn_stack cannot serve:
-    /// oneways are never stacked (no BC_REPLY will come).
-    sender_token_pid: u32,
-    /// 75th OH parity: thread->sender_pid_nr — task_tgid_nr of the
-    /// sender, but ONLY when t->from was set (sync txns; the reference
-    /// zeroes it for oneway/reply, binder.c:4737-4745).
-    sender_pid_nr: u32,
-    /// Single-slot error dedup (94th session, hp92w4 storm root cause).
-    /// Upstream binder.c 6.6 stages thread errors in TWO fixed single
-    /// work slots (thread->return_error for write-path failures,
-    /// thread->reply_error for async/death failures): a second error
-    /// staged while one is unconsumed is DROPPED ("Unexpected reply
-    /// error" — binder_send_failed_reply). Our todo-queue model had no
-    /// such guard: a proc death that failed the SAME pending sync txn
-    /// through two cleanup walks delivered TWO BR_DEAD_REPLY to one
-    /// thread (hp92w4 rings: three threads consumed ERR_RECV(29189)
-    /// twice at j4330); OH libipc's completion bookkeeping then desynced
-    /// into 2-command sync BWRs and the SYNCSEND-GUARD storm aborted
-    /// foundation. `err_staged` = a ReturnError work is queued and
-    /// unconsumed; `err_is_write` = it came from the write path (gates
-    /// the write loop, upstream's `thread->return_error.cmd == BR_OK`
-    /// loop condition).
-    err_staged: bool,
-    err_is_write: bool,
-    /// Transition ring (sc74 forensics); written under WORLD only.
-    pub hist: [BinderEv; BHIST],
-    pub hcur: usize,
-    /// Live BWR ioctl shadow (r41v6): (write_size, write_consumed,
-    /// read_size, first pending write cmd) of the binder_write_read this
-    /// thread is currently executing — recorded at ioctl entry, consumed
-    /// updated after the write leg, cleared on every exit. The
-    /// bwr_park_audit reads THIS, never user memory: the audit runs on
-    /// the timer heartbeat (interrupt context of an arbitrary task), so
-    /// dereferencing the audited thread's user bwr pointer through the
-    /// interrupted task's page tables produced the r41v4/r41v5 false-H2
-    /// rows (same-VA zero pages decoded as w=0/0 rsz=0 "write-only
-    /// parked"; unrelated mappings as garbage w= words).
-    pub live_bwr: Option<(u64, u64, u64, u32)>,
-}
+// ThreadState — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ThreadState};
 
-pub struct BinderThread {
-    pub tid: u32,
-    /// Owning task's TGID (sc161 child-tgid routing): several appspawn
-    /// children share ONE binder proc (the daemon's inherited fd), so the
-    /// proc's thread list mixes daemon-tgid and child-tgid threads. The
-    /// tgid decides which threads may consume a transaction aimed at a
-    /// child-registered node (reg_tgid) — without it the daemon's OS_IPC
-    /// reader threads steal the AMS→child deliveries.
-    tgid: u32,
-    /// Per-thread wait queue (Linux thread->wait): replies and tcomplete
-    /// wake the exact thread; proc work wakes one selected waiter.
-    pub wait: WaitQueueHead,
-    st: core::cell::UnsafeCell<ThreadState>,
-    /// Jiffies when this thread entered the blocking binder read wait (0
-    /// while not waiting) — read atomically by the khungtaskd binder-stall
-    /// scan without taking WORLD.
-    pub read_wait_since: core::sync::atomic::AtomicU64,
-    /// 105th QPICK census: nominal-clock stamp at the LAST return of the
-    /// blocking read wait (0 before the first park). Splits a slow
-    /// enqueue->pickup into wake->wait-return (scheduler) and
-    /// wait-return->staging (the read path itself — WORLD acquire and
-    /// drain). Relaxed atomic; diagnostic only.
-    read_wake_ns: core::sync::atomic::AtomicU64,
-    /// One stall report per wait episode (avoids per-scan spam).
-    pub stall_reported: core::sync::atomic::AtomicBool,
-    /// One REKICK hist record per wait episode (the re-kick itself still
-    /// runs every scan; only the ring entry is gated so the forensics
-    /// history is not flooded by heal noise).
-    pub rekicked: core::sync::atomic::AtomicBool,
-    /// Kicks issued in the current wait episode — >= 2 means the thread is
-    /// still parked in the SAME read wait one scan after a kick. That is
-    /// usually the benign idle-reader re-park (the kick ran it; no work was
-    /// readable, so the wait_event loop slept again — see wrl_last_exec_ns
-    /// for the discriminator), NOT by itself a wake→run leak; the scheduler
-    /// view is dumped then (WAKE-RUN-LEAK line) with the exec-delta shape.
-    pub rekick_count: core::sync::atomic::AtomicU32,
-    /// sc252/sc253 attribution (leg 19): outcome counters for this
-    /// thread's OWN wait-queue kicks, read by the WAKE-RUN-LEAK dump —
-    /// wok>=1 with the task still parked means the wake linked the task
-    /// and the PICK side never ran it; wno-only means every kick was
-    /// silently refused (the R82 DL-ENQ-DEFERRED / R80-phantom families).
-    pub kick_wake_ok: core::sync::atomic::AtomicU32,
-    pub kick_wake_refused: core::sync::atomic::AtomicU32,
-    /// wrl-class lane: exec_ns the WAKE-RUN-LEAK print last sampled for
-    /// this thread (per wait episode, reset with the kick counters). The
-    /// census row's exec delta between scans separates the dominant
-    /// benign shape — an idle reader whose kick RAN it (it re-checked
-    /// thread_has_work, found none, re-parked inside the same wait_event
-    /// epoch; exec advances a few µs per kick) — from the true leak
-    /// shape (kicks transition the queue entry, exec never advances: the
-    /// task never runs). On the lr-series boots ALL rows were re-parks;
-    /// without the delta each row reads as "kicked, never ran".
-    pub wrl_last_exec_ns: core::sync::atomic::AtomicU64,
-}
+// BinderThread — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderThread};
 
 impl BinderThread {
     fn new(tid: u32, tgid: u32) -> Self {
@@ -2272,29 +1870,13 @@ impl BinderThread {
     }
 }
 
-pub struct ProcInner {
-    alloc: Option<BinderAlloc>,
-    pub nodes: Vec<Arc<BinderNode>>,
-    refs: Vec<BinderRef>,
-    /// Next handle descriptor to hand out. Starts at 1: desc 0 is
-    /// reserved for the context manager in every process (Linux
-    /// binder_get_ref_for_node starts normal refs at 1).
-    next_desc: u32,
-    pub threads: Vec<Arc<BinderThread>>,
-    pub todo: VecDeque<Work>,
-    pub max_threads: i32,
-    pub requested_threads: i32,
-    pub requested_threads_started: i32,
-    is_dead: bool,
-}
+// ProcInner — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{ProcInner};
 
-pub struct BinderProc {
-    pub id: u64,
-    pub pid: u32,
-    ctx: BinderCtx,
-    wait: WaitQueueHead,
-    inner: core::cell::UnsafeCell<ProcInner>,
-}
+// BinderProc — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{BinderProc};
 
 impl BinderProc {
     fn new(id: u64, pid: u32, ctx: BinderCtx) -> Self {
@@ -2348,12 +1930,9 @@ impl Drop for BinderAlloc {
     }
 }
 
-pub struct World {
-    next_id: u64,
-    pub procs: Vec<Arc<BinderProc>>,
-    /// Context-manager node per device context (index by BinderCtx).
-    mgr_node: [Option<Arc<BinderNode>>; 3],
-}
+// World — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{World};
 
 static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
 static NEXT_PROC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -2463,21 +2042,9 @@ unsafe impl Sync for BinderTxn {}
 unsafe impl Send for BinderProc {}
 unsafe impl Sync for BinderProc {}
 
-/// RT-R4 (WORLD per-caller attribution): world_lock's sections all
-/// charge to ONE REST_SITES row (binder.rs:2092) — the 6–8 ms max could
-/// not be attributed to a caller. This wrapper records each section's
-/// span against the CALLER's Location (world_lock is #[track_caller]),
-/// and the syscost dump prints the top rows.
-pub struct WorldGuard<'a> {
-    inner: crate::sync::spinlock::SpinlockIrqGuard<'a, Option<World>>,
-    t0: u64,
-    loc: &'static core::panic::Location<'static>,
-    /// LAST FIELD ON PURPOSE: fields drop in declaration order, so this
-    /// drops AFTER `inner` has released WORLD — the deferred wakes run
-    /// with the lock GONE (the reference's wake_q discipline; see
-    /// DeferredWakes).
-    deferred: DeferredWakes,
-}
+// WorldGuard — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{WorldGuard};
 
 /// Direct-thread wakes requested while WORLD is held (the reference's
 /// wake_q shape). fh4 conviction (oh-launch round 4): do_exit's file
@@ -2494,9 +2061,9 @@ pub struct WorldGuard<'a> {
 /// guard's own field drop — no releaser can forget it.
 static DEFERRED_THREAD_WAKES: Spinlock<Vec<Arc<BinderThread>>> = Spinlock::new(Vec::new());
 
-/// Guard-carried drain list (see WorldGuard.deferred). Drop wakes every
-/// carried thread — runs strictly after WORLD is released.
-struct DeferredWakes(Vec<Arc<BinderThread>>);
+// DeferredWakes — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{DeferredWakes};
 
 impl Drop for DeferredWakes {
     fn drop(&mut self) {
@@ -2593,11 +2160,9 @@ impl Drop for WorldGuard<'_> {
 
 const WORLD_SEC_N: usize = 24;
 
-struct WorldSecRow {
-    loc: core::sync::atomic::AtomicU64,
-    n: core::sync::atomic::AtomicU64,
-    max: core::sync::atomic::AtomicU64,
-}
+// WorldSecRow — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{WorldSecRow};
 
 static WORLD_SEC: [WorldSecRow; WORLD_SEC_N] =
     [const { WorldSecRow { loc: core::sync::atomic::AtomicU64::new(0), n: core::sync::atomic::AtomicU64::new(0), max: core::sync::atomic::AtomicU64::new(0) } }; WORLD_SEC_N];
@@ -8935,16 +8500,10 @@ fn release_block(proc: &Arc<BinderProc>, off: usize) {
     }
 }
 
-/// binder_translate_fd: install a sender fd into the TARGET process's fd
-/// table (fget in the sender, get_unused_fd + fd_install on the target
-/// opener task). Runs in the sender's ioctl context and NEVER under WORLD
-/// INV-BINDER-PINTASK (unsafe-slim r3c): RAII twin of procfs's PinnedTask
-/// guard for the fd-translate paths — pid_hash_lookup_pinned takes a
-/// task_refcnt the guard releases on scope end (Drop), so no early-return
-/// path can leak the pin or use the task after release.
-struct PinnedTask {
-    ptr: *mut crate::process::task::Task,
-}
+// PinnedTask — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+use super::types::{PinnedTask};
+
 impl PinnedTask {
     fn lookup(pid: u32) -> Option<PinnedTask> {
         let p = crate::process::pid_hash::pid_hash_lookup_pinned(pid);

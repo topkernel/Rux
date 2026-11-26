@@ -41,6 +41,10 @@ pub mod binder;
 pub mod r#unsafe;
 pub mod sysv_sem;
 pub mod util;
+/// The subsystem's type definitions (seed-core-design §2c.3): every
+/// struct/enum that has no file of its own; impls stay in the
+/// topic files, which re-export their types from here.
+pub mod types;
 
 // Re-export IPC constants for use by dispatch and other modules
 pub use util::*;

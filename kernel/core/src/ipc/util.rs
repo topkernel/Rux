@@ -61,38 +61,17 @@ pub const O_EXCL_MQ: i32 = 0o200;
 pub const O_NONBLOCK_MQ: i32 = 0o4000; // Linux O_NONBLOCK (was 0o400 = O_NOCTTY — never matched the userspace flag)
 pub const O_CLOEXEC_MQ: i32 = 0o2000000;
 
-// Maximum number of IPC objects per type — reference IPCMNI (32768).
-// The id encoding is (index << 16) | seq, so index <= 32767 keeps every
-// id a positive i32; the slots arrays cost 8 bytes per entry (Option<Box>
-// niche) = 256 KiB per type, zeroed .bss. The old 256-entry table capped
-// msgmni below the reference default (32000): LTP msgstress01 creates
-// 1000 queues by default (its -n clamp never applies without the option)
-// and the parent's msgget hit ENOSPC at 257; the cleanup RMID cascade
-// then turned every child's msgsnd/msgrcv into EINVAL.
-pub const IPC_IDS_MAX: usize = 32768;
+// IPC_IDS_MAX — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{IPC_IDS_MAX};
 
 // ============================================================================
 // UAPI Structures (ABI-compatible, #[repr(C)])
 // ============================================================================
 
-/// struct ipc64_perm — userspace-visible IPC permission structure.
-/// Must match Linux's asm-generic/ipcbuf.h exactly for RV64.
-/// Total: 48 bytes. All-POD wire fields — Copy for the typed uaccess
-/// capsule.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct IpcPermUapi {
-    pub key: i32,
-    pub uid: u32,
-    pub gid: u32,
-    pub cuid: u32,
-    pub cgid: u32,
-    pub mode: u32,
-    pub seq: u16,
-    pub __pad2: u16,
-    pub __unused1: u64,
-    pub __unused2: u64,
-}
+// IpcPermUapi — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{IpcPermUapi};
 
 impl Default for IpcPermUapi {
     fn default() -> Self {
@@ -107,25 +86,9 @@ impl Default for IpcPermUapi {
 // Kernel IPC Permission Structure
 // ============================================================================
 
-/// kern_ipc_perm — kernel-internal permission structure embedded in all IPC objects.
-#[derive(Clone)]
-pub struct KernIpcPerm {
-    pub key: i32,
-    pub uid: u32,
-    pub gid: u32,
-    pub cuid: u32,
-    pub cgid: u32,
-    pub mode: u16,
-    pub seq: u32,
-    /// Owning IPC namespace identity (IpcNamespace::inum). The reference
-    /// kernel keeps one ipc_ids table PER ipc_namespace (ns->ids[...]);
-    /// Rux keeps a single global slot table, so the namespace must ride
-    /// on the object and every lookup filters by the caller's namespace
-    /// (LTP msg_comm: two CLONE_NEWIPC children msgget the SAME key and
-    /// each must get its OWN queue — a global key match made child1's
-    /// msgrcv see child2's message, "messages leak between namespaces").
-    pub ns_inum: u64,
-}
+// KernIpcPerm — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{KernIpcPerm};
 
 /// The caller's IPC namespace identity (inum). All SysV IPC lookups and
 /// enumerations are scoped to this (reference: the caller's ns->ids table).
@@ -208,21 +171,13 @@ pub fn ipc_id_seq(id: i32) -> u32 {
 // IpcIds — Central IPC Object Registry
 // ============================================================================
 
-/// Wrapper around each IPC object slot.
-pub struct IpcObjectEntry<T> {
-    pub inner: T,
-    pub deleted: bool,
-}
+// IpcObjectEntry — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{IpcObjectEntry};
 
-/// Generic IPC object registry. Manages allocation, lookup, and deletion
-/// of IPC objects by key or ID.
-pub struct IpcIds<T> {
-    pub slots: Spinlock<[Option<alloc::boxed::Box<IpcObjectEntry<T>>>; IPC_IDS_MAX]>,
-    next_seq: AtomicU32,
-    // pub (visibility tax of the ipc flip): sysv_shm's destroy
-    // paths decrement the live-object count under the slots lock.
-    pub count: AtomicUsize,
-}
+// IpcIds — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{IpcIds};
 
 impl<T> IpcIds<T> {
     pub const fn new() -> Self {
@@ -525,18 +480,9 @@ pub fn ipc_current_time() -> i64 {
     crate::drivers::rtc::wall_secs() as i64
 }
 
-/// Per-process semaphore undo entry.
-/// Records an adjustment made to a semaphore so it can be reversed on process exit.
-/// (Type substrate of Task's sem_undo field — lives with the framework.)
-#[derive(Clone, Copy)]
-pub struct SemUndoEntry {
-    /// Semaphore set ID.
-    pub semid: i32,
-    /// Semaphore number within the set.
-    pub sem_num: u16,
-    /// Adjustment value (the sem_op that was applied).
-    pub adjustment: i32,
-}
+// SemUndoEntry — the definition moved to ipc/types.rs; every impl and
+// function that uses it stays here. Re-exported so the paths are unchanged.
+pub use super::types::{SemUndoEntry};
 
 /// The registry bound the /proc/sys/kernel/shmmni clamp consults
 /// (IpcHooks row; the framework sysctl cannot name the service const).
