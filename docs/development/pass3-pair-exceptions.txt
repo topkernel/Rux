@@ -1,0 +1,41 @@
+# docs/development/pass3-pair-exceptions.txt — recorded pair-gate exceptions
+#
+# `scripts/refactor/pass2.py pair` verifies that the compiled kernel is
+# unchanged apart from symbol names. Pass 3 (seed-core-design.md §2c.5) is
+# a REWRITE, not a move: an inline unsafe block becomes a contract-carrying
+# function in the subsystem's unsafe.rs, and even though every wrapper is
+# #[inline(always)] (so no out-of-line copy is emitted and no call is
+# added), DEBUG-build instruction selection for the inlined body drifts by
+# a few instructions. Release builds (opt-level 3) inline identically —
+# those are pinned by the pbench gate, not this file.
+#
+# Each pattern below is passed to `pair --allow-unpaired REGEX` (repeatable).
+# The stage-b runner greps this file; a pattern with no matching unpaired
+# symbol is reported by pair as unused (harmless). Adding a pattern here is
+# a visible, reviewed edit — same policy as unsafe-verification-exemptions.tsv.
+#
+# --- the sync lane's recorded exception (merge-stage-b.sh, 2026-11) ---
+SeqLock[A-Za-z]*<mm\[[0-9a-f]*\]::hugepage::HugePageStats
+#   the SeqLock<HugePageStats> monomorphizations: zero references, the
+#   symbols exist only in rebuilds (rebuild-deterministic extras, base
+#   sizes [] on every arch).
+#
+# --- the pass-3 sched collection (p23-p3sched lane, 2026-11-26) ---
+^rux::sched::alloc_task_slot$
+^rux::sched::free_task_slot$
+^rux::sched::init$
+^rux::sched::scheduler_tick$
+#   the four sched functions whose inline unsafe block became an
+#   always-inlined unsafe.rs contract fn (task_slot_alloc / task_slot_init /
+#   task_drop_in_place / task_slot_poison_and_free / init_idle_cpu /
+#   tick_stack_canary). Same operation, verbatim body, wrapper inlined back
+#   at every call site; the residual is debug-build instruction-selection
+#   drift only. Measured (base -> current bytes, same rig, debug profile):
+#     rv:   alloc_task_slot 250->288, free_task_slot 2272->2248,
+#           init 364->378, scheduler_tick 18646->18484
+#     x86:  alloc_task_slot 265->310, free_task_slot 4495->4475,
+#           init 482->524, scheduler_tick 18722->18564
+#     a64:  alloc_task_slot 320->380, free_task_slot 2748->2712,
+#           init 668->704, scheduler_tick 15940->15780
+#   every other sched symbol pairs 1:1 at equal size on all three arches
+#   (after module-path, moved-nested-fn and closure normalization).

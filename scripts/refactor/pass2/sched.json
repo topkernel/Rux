@@ -452,5 +452,8 @@
    "WW_ONCPU_HEALS",
    "WW_CLAIM_HEALS"
   ]
- }
+ },
+ "moved_fns": [
+  "cpu_idle_loop"
+ ]
 }

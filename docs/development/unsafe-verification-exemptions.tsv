@@ -82,3 +82,4 @@ kernel/core/src/fs/vfs.rs	20	0	regions moved to fs/hotpath.rs by the pass-2 merg
 kernel/core/src/fs/vt.rs	12	0	regions moved to fs/hotpath.rs by the pass-2 merge (annotations carried by id; file no longer exists)
 kernel/core/src/net/file_arc.rs	2	0	regions moved to net/hotpath.rs (lines 104/119 carry INV-NETARC-1) by the pass-2 merge; git saw the file vanish (only buffer.rs detected as rename)
 kernel/core/src/net/mod.rs	3	0	regions moved to net/hotpath.rs (the three mod.rs functions are sections) by the pass-2 merge; annotations carried by id
+kernel/core/src/sched/hotpath.rs	16	0	pass-3 (seed-core 2c.5) collection: the 16 annotated inline regions moved into sched/unsafe.rs (7 recovered by moved-item pairing, 8 hand decisions in the re-bank, 1 GAP dissolved into the existing task_shared edge); the file holds zero unsafe keywords now — scripts/core_unsafe_gate.py --strict clean

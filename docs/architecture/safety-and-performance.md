@@ -1385,6 +1385,39 @@ with per-finding root cause + fix. Severity: low (fsck -a heals; no
 observed data loss in any verify=md5 battery), but the family is
 registered per the data-corruption doctrine.
 
+## 5.x addendum: the pass-3 unsafe collection, sched pilot (2026-11-26, p23-p3sched lane)
+
+Seed-core pass 3 (seed-core-design.md §2c.5) pilot: sched's scattered
+unsafe collected into `kernel/core/src/sched/unsafe.rs`. Before: 17
+inline unsafe regions in `sched/hotpath.rs` (13,971 lines), 91 in
+`unsafe.rs`. After: `sched/hotpath.rs` holds ZERO unsafe regions and
+zero `unsafe` keywords — audited by `scripts/core_unsafe_gate.py
+--strict --dir kernel/core/src/sched` (rc=0) — and `unsafe.rs` carries
+108 regions, 101 annotated (the 6 pre-existing GAP rows stay; the
+poison-window block stays GAP as it was). Every moved region carries
+its INV contract as a doc comment citing the registry (INV-SCE-1/2/3/4/
+10, INV-TL-1/2, INV-RD-CLAIM, INV-SENDSYNC-1).
+
+Mechanics and evidence, all in the lane worktree `run/`:
+- `pass3.py apply` moved 15 directives (275 cut lines relocated);
+  the manifest-closed verbatim audit (`pass3.py verify --base
+  f8e6eb94d`) shows the aggregate line multiset changed only by the
+  claimed mechanical lines (14 removed / 53 added: `unsafe {` braces,
+  wrapper signatures, call-site lines) — zero unclaimed edits;
+- compiled-kernel identity: pair vs the pass-2 baseline ELFs pairs
+  1:1 except 5 recorded SeqLock monomorphizations and 4 symbols whose
+  DEBUG-build instruction selection shifted when the inline block
+  became an (always-inlined) contract function (`alloc_task_slot`
+  250->288, `init` 364->378, `cpu_idle_loop` 1288->1284,
+  `free_task_slot` 2272->2248) — recorded in
+  docs/development/pass3-pair-exceptions.txt; release-codegen equality
+  is pinned by the pbench gate below;
+- warning count unchanged (2240 = baseline 2240, riscv64 debug build);
+- ledger re-bank with reference f8e6eb94d: annotations followed the
+  code (moved-item reference pairing plus 8 hand decision rows, each
+  citing the block's pre-move artifact row; final bank: sched/unsafe.rs
+  101 annotated / 7 GAP, all 7 pre-existing).
+
 ## 6. Process (how this grows)
 - Every merged round that lands a safety property, a perf number, or a
   bug-class elimination appends its evidence here (AGENTS.md rule,
