@@ -2448,3 +2448,50 @@ comment carries the full contract text.
 - INV-FOR-1 (stale adoption) — debug/forensics_edges.rs: task came from a diagnostic slot; read-only view of a possibly-freed task, pid stable for the struct's lifetime.
 - INV-FOR-2 (raw word) — debug/forensics_edges.rs: addr names memory the producer believes mapped; single volatile read of mapped-or-guarded memory.
 - INV-FOR-3 (location key) — debug/forensics_edges.rs: key was stored from a real event; the value is a rodata-backed Location.
+
+## 5.x addendum: the reboot(POWER_OFF) half-alive-machine bug class eliminated (2026-11-27, p23-rebootfix lane)
+
+Bug class: on x86_64 the shutdown cascade's POWER_OFF arm had no machine
+edge at all — machine_park() parked only the CALLING CPU with wfi. Any
+reboot(POWER_OFF) from a non-init task context left the machine
+half-alive: the calling task parked mid-syscall forever (never reaches a
+reapable exit, so the parent's wait4 parks with nch=1 nz=0 — the
+WAIT4-PARK anomaly shape), the other CPUs kept scheduling, and the VM
+never exited. The sampler flow (perfsample init forks pbench; the
+battery ends with reboot(POWER_OFF), the recorder ends with its own)
+hit it on every sampling boot: cascades printed "syncing filesystems /
+Power down" while the machine lived on until the host driver killed
+QEMU.
+
+Closure: the POWER_OFF arm now drives a real ACPI S5 edge
+(boot_edges::x86_acpi_power_off — PM1a_CNT SLP_EN|SLP_TYP=0 write to the
+q35/ICH9 0x604 and legacy piix4 0xB004 decoders). The caller still ends
+parked mid-syscall — exactly the reference kernel's shape (Linux
+kernel_power_off never returns to sys_reboot either); the parked caller
+is now unobservable because the machine is gone. The writes go through
+the INV-XE-PIO-1-safe port primitives, so the closure added NO new
+unsafe region; the edge sits in the INV-SYSC-4 device-effect family
+(owned by the cascade behind sys_reboot's CAP_SYS_BOOT gate). HALT
+keeps power-on semantics (parked CPUs, machine alive), matching
+kernel_halt.
+
+Same-rig A/B (q35 KVM, -m 2G -smp 2; repro: init ignores SIGTERM, forks
+a child calling reboot(POWER_OFF), parent waitpid):
+- pre-fix: "syncing filesystems / Power down" printed, WAIT4-PARK
+  pid=1 ch=[child] nch=1 nz=0 at age 10s, QEMU alive past the driver's
+  150s timeout (hang reproduced).
+- post-fix: identical cascade prints + "reboot: ACPI S5 power off",
+  QEMU process exits rc=0 at t=6s.
+
+Gates: in-kernel suite rv 912/912 and x86 914/914 PASS (wrapper rc=0,
+size gate green); pbench rc=0 (DONE at t=48s, serial ends on the S5
+edge, QEMU self-exit); perfsample full 40s window: PERFSAMPLE WINDOW
+records=28809 lost=0, PERFSAMPLE DONE rc=0, the battery's reboot and
+the recorder's poweroff interleave per the single-driver rule, QEMU
+self-exits via S5, dump extracted and report produced; plain builds
+rc=0 on x86_64, riscv64, aarch64.
+
+Honest gap (stays open in §5): no ACPI table parser yet — the edge
+hardcodes the QEMU PM1a_CNT decoder bases; real hardware takes
+PM1a_CNT_BLK from the FADT and would fall back to machine_park until a
+FADT parser lands.
