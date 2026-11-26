@@ -9635,7 +9635,7 @@ impl RawSpinlock {
     /// Clear the holder (debug-lock-owner feature only).
     #[inline]
     #[cfg(feature = "debug-lock-owner")]
-    fn clear_owner(&self) {
+    pub(crate) fn clear_owner(&self) {
         self.owner.store(0, Ordering::Relaxed);
     }
 
@@ -9698,7 +9698,7 @@ impl RawSpinlock {
 
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
-    fn clear_owner(&self) {}
+    pub(crate) fn clear_owner(&self) {}
 
     /// Spinlock deadlock threshold (iterations before warning).
     /// On SMP with QEMU emulation, brief contention is normal — PLIC IRQ
