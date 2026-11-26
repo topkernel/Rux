@@ -281,11 +281,18 @@ class Rewriter:
             return list(root_binds[segs[0]]) + segs[1:]
         return self.via_path(segs)
 
+    def is_old(self, tail):
+        """the path's first segment after the subsystem's own is an old module.
+        None is "does not reach the subsystem"; [] is "stops at the subsystem
+        itself" (`arch::mm` in a comment, `pub use ::fs;` seen through another
+        crate): neither goes through an old module, and both must stay unindexed."""
+        return tail is not None and len(tail) > 0 and tail[0] in self.mods_top
+
     def through(self, tail):
         """written from the core's name, when the path goes through an old module;
         a path that stops at a root item of the subsystem keeps resolving through
         the crate's root and is left alone"""
-        if tail is None or tail[0] not in self.mods_top:
+        if not self.is_old(tail):
             return None
         new = self.map_tail(tail)
         return None if new is None else "rux::" + self.sub + "::" + "::".join(new)
@@ -849,7 +856,7 @@ class Rewriter:
         else:
             # a service crate named outright (`use ::process::task::x;`)
             tail = self.crate_name_path(o, outright) if not is_core and not prefix else None
-            if tail is not None and tail[0] in self.mods_top:
+            if self.is_old(tail):
                 return ["crate"], ["crate", self.sub] + tail, True
             return None, None, False
         if not is_core:
@@ -858,7 +865,7 @@ class Rewriter:
                 return list(prefix), full, False
             if len(full) >= 2 and full[0] == "crate":
                 tail = self.root_tail(full[1:], root_binds)
-                if tail is not None and tail[0] in self.mods_top:
+                if self.is_old(tail):
                     return ["crate"], ["crate", self.sub] + tail, True
             return None, None, False         # the crate's own path: nothing of the subsystem in it
         return base, full, False
@@ -1410,6 +1417,13 @@ def cmd_verbatim(args):
             t = rx.sub(v, t)
         return by_path((t, item[1]))
 
+    def by_visibility(item):
+        """a private item widened to pub(super) so the subsystem's sibling
+        files reach it after the move into types.rs; the strip runs on both
+        sides, so the tier also pairs a narrowing — a widened line is the
+        expected direction, the count is the check"""
+        return by_path((re.sub(r"pub\(super\) ", "", item[0]), item[1]))
+
     def pair(key):
         """move every base line that has a current line of the same key out of both sets"""
         groups = collections.defaultdict(list)
@@ -1432,6 +1446,8 @@ def cmd_verbatim(args):
     stats["path only"] = n
     rest_base, rest_cur, n = pair(by_rename)
     stats["recorded rename"] = n
+    rest_base, rest_cur, n = pair(by_visibility)
+    stats["visibility widened"] = n
 
     def kind(item, other, fewer):
         line, in_use = item
@@ -1607,6 +1623,20 @@ def cmd_selftest(args):
         if want is not None and got != want:
             bad += 1
             print("FAIL\n   in  : %r\n   got : %r\n   want: %r" % (text, got, want))
+    # found by the mm lane (2026-11-26): a comment `arch::mm's is u64` — `arch` is a
+    # crate, its root aliases the subsystem, and nothing follows the alias
+    ac = Rewriter("mm", ["vma", "page"], {"Page"})
+    ac.roots = {"arch": CrateRoot.__new__(CrateRoot)}
+    ac.roots["arch"].__dict__.update(name="arch", expl={"mm": ("core", []), "config": ("core", [])}, from_sub=True, glob_sub=False, final_sub=False)
+    ac.crate = None
+    for text in ["const PS: usize = crate::mm::types::PAGE_SIZE; // usize (arch::mm's is u64)\nlet x = arch::mm::vma::V::new();\n",
+                 "let c = arch::config::HZ;\n"]:
+        got, st = ac.rewrite_text(text, ["crate", "sys", "memory"], False)
+        want = ("const PS: usize = crate::mm::types::PAGE_SIZE; // usize (arch::mm's is u64)\nlet x = rux::mm::hotpath::V::new();\n"
+                if "vma" in text else "let c = arch::config::HZ;\n")
+        if got != want:
+            bad += 1
+            print("FAIL outright alias\n   in  : %r\n   got : %r\n   want: %r" % (text, got, want))
     # a directory that stays one inline module: per-architecture modules chosen by #[cfg]
     dr = Rewriter("drivers", ["virtio", "virtio::blk", "rtc"], {"Dev"}, inline={"timer", "intc"})
     for text, want in [
