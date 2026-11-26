@@ -22,14 +22,7 @@ kernel/core/src/debug/switches.rs
 kernel/core/src/debug/syscost.rs
 kernel/core/src/debug/taint.rs
 kernel/core/src/debug/unixrd.rs
-kernel/core/src/drivers/blkdev/iostat.rs
-kernel/core/src/drivers/gpu/virtio_cmd.rs
-kernel/core/src/drivers/input/event.rs
-kernel/core/src/drivers/input/ps2.rs
-kernel/core/src/drivers/intc/plic.rs
-kernel/core/src/drivers/pci/mod.rs
-kernel/core/src/drivers/virtio/offset.rs
-kernel/core/src/drivers/virtio/virtio_pci.rs
+kernel/core/src/drivers/types.rs
 kernel/core/src/errno.rs
 kernel/core/src/fs/dev_t.rs
 kernel/core/src/fs/fdreap.rs
