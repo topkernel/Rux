@@ -331,7 +331,7 @@ pub fn file_dentry(file: &File) -> Option<&alloc::sync::Arc<crate::fs::dentry::D
 /// time; the leader lives as long as ANY thread of the group exists
 /// (the thread-group keeps a reference), so a borrow sourced from a
 /// pinned/live task is valid for that borrow's scope.
-pub fn task_group_leader(t: &crate::process::task::Task) -> &crate::process::task::Task {
+pub fn task_group_leader(t: &crate::process::types::Task) -> &crate::process::types::Task {
     // SAFETY: INV-PROC-TGL-1 above (the source task's liveness covers
     // the leader's).
     unsafe { &*t.group_leader_ptr() }
@@ -363,7 +363,7 @@ pub fn diag_read_u64(p: *const u64) -> u64 {
 /// grq_diag_cpu_currents rows): the GRQ keeps the referenced task page
 /// alive for the whole diagnostic walk (its queue/slot references pin
 /// it), so the borrow is valid for the caller's scope.
-pub fn diag_task_ref(p: *mut crate::process::task::Task) -> &'static crate::process::task::Task {
+pub fn diag_task_ref(p: *mut crate::process::types::Task) -> &'static crate::process::types::Task {
     // SAFETY: the diag snapshot's task pages are pinned by their queue
     // slots for the walk's duration (read-only diagnostics).
     unsafe { &*p }

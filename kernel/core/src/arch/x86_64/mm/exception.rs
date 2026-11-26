@@ -447,7 +447,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         ptag(b"=pid:");
                         // SAFETY: header reads only.
                         unsafe {
-                            phex((*(cur as *mut crate::process::Task)).pid() as u64);
+                            phex((*(cur as *mut crate::process::types::Task)).pid() as u64);
                         }
                     }
                 }
@@ -455,7 +455,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 // DEBUG: adjudicate the freed-stack execution engine — is
                 // the faulting rsp inside a recently FREED stack?
                 if let Some((top, fpid, age)) =
-                    crate::process::task::freed_stack_containing(regs.rsp as usize)
+                    crate::process::hotpath::freed_stack_containing(regs.rsp as usize)
                 {
                     ptag(b"KSO-FREED-STACK rsp in freed kstack top=");
                     phex(top as u64);
@@ -505,7 +505,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 }
                 // Read-only header walk via the pid hash (typed &Task
                 // callback — the wrapper's unsafe was stale).
-                crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                crate::process::hotpath::pid_hash_for_each_task_try(|task| {
                     {
                         let bottom = task.kernel_stack_bottom() as u64;
                         let top = task.kernel_stack_top() as u64;

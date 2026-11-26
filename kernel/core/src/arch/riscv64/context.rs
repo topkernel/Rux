@@ -33,8 +33,8 @@
 //!   (`prev_sp`) is stale; the only valid way to retrieve the current task
 //!   is via the `tp` (thread pointer) register, as set by `__switch_to`.
 
-use crate::process::task::Task;
-use crate::process::Task as ProcessTask;
+use crate::process::types::Task;
+use crate::process::types::Task as ProcessTask;
 use core::arch::asm;
 use super::mm::PageTable;
 use super::mm::PageTableEntry;
@@ -359,9 +359,9 @@ __switch_to:
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
     task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
-    task_pick_state = const crate::process::task::task_offsets::TI_PICK_STATE,
-    task_pid = const crate::process::task::task_offsets::TASK_PID,
-    task_kstack_bottom = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
+    task_pick_state = const crate::process::hotpath::task_offsets::TI_PICK_STATE,
+    task_pid = const crate::process::hotpath::task_offsets::TASK_PID,
+    task_kstack_bottom = const crate::process::hotpath::task_offsets::TASK_KERNEL_STACK_BOTTOM,
     kernel_stack_size = const crate::config::KERNEL_STACK_SIZE,
     thread_ra = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, ra),
     thread_sp = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp),
@@ -406,7 +406,7 @@ pub extern "C" fn rux_switchin_bad_ra(bad_ra: usize, task: *mut Task) -> ! {
         comm_str,
         bad_ra
     );
-    crate::process::exit::do_exit(9)
+    crate::process::hotpath::do_exit(9)
 }
 
 // ============================================================================
@@ -549,7 +549,7 @@ fn context_switch_body(prev: &mut Task, next: &mut Task) {
     // pick-marked (state stays PICKED, unused): skip.
     if (*next).pid() != 0 {
         let st = next.pick_state();
-        if st != crate::process::task::PICK_PICKED {
+        if st != crate::process::hotpath::PICK_PICKED {
             // SAFETY: the early-abort repair edge (nothing switched yet).
             unsafe { riscv_switch_abort(prev, next) };
             return;

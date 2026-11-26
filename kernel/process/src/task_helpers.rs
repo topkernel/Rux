@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::task::Task;
+use rux::process::types::Task;
 
 /// user-side copies live in its pt_regs).
 pub fn thread_clear_callee_saved(thread: &mut crate::arch::thread::ThreadStruct) {

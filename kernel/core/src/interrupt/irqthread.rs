@@ -20,7 +20,7 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::process::task::{SchedPolicy, Task, TaskState};
+use crate::process::types::{SchedPolicy, Task, TaskState};
 
 /// Thread spawning needs the scheduler (kthread enqueue touches the
 /// GRQ), but IRQ registrations start long before sched::init (the

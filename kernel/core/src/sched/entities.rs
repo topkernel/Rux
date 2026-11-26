@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU64, AtomicBool, AtomicU32, AtomicI64, AtomicUsiz
 use alloc::collections::BTreeMap;
 use super::r#unsafe::{VruntimeKey, RbNode, RbTimeline, node_key, node_of_task, task_of_node};
 use crate::list::ListHead;
-use crate::process::task::{Task, SchedPolicy};
+use crate::process::types::{Task, SchedPolicy};
 use crate::config::{MAX_CPUS, MAX_TASKS, KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
 use crate::trace;
 
@@ -29,7 +29,7 @@ pub struct CfsRunQueue {
     pub timeline: RbTimeline,
 
     /// Currently running scheduling entity
-    pub curr: *mut crate::process::Task,
+    pub curr: *mut crate::process::types::Task,
 
     /// Minimum vruntime in queue
     ///
@@ -1508,7 +1508,7 @@ impl CfsRunQueue {
     /// node (the reference's rb_leftmost; no invalidation-walk corner:
     /// the cache is maintained exactly at insert/erase). GRQ-HELD.
     #[inline]
-    fn leftmost_entry(&mut self) -> Option<(VruntimeKey, *mut crate::process::Task)> {
+    fn leftmost_entry(&mut self) -> Option<(VruntimeKey, *mut crate::process::types::Task)> {
         let nil = self.timeline.nil();
         let node = self.timeline.leftmost;
         if node == nil || node.is_null() || !RbTimeline::node_ok(node) {
@@ -1568,7 +1568,7 @@ impl CfsRunQueue {
     /// average); our picked tasks are already unlinked, so the sleep
     /// transition in __schedule calls this instead (linked sleepers get
     /// theirs inside dequeue()). GRQ-HELD.
-    pub fn capture_sleep_vlag(&mut self, task: *mut crate::process::Task) {
+    pub fn capture_sleep_vlag(&mut self, task: *mut crate::process::types::Task) {
         if task.is_null() {
             return;
         }
@@ -1609,7 +1609,7 @@ impl CfsRunQueue {
     /// cctx FAIR_TL probe (zero cost when cctx is off). Returns false
     /// when the poison discipline refused the link.
     #[inline]
-    pub fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) -> bool {
+    pub fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::types::Task) -> bool {
         let t0 = crate::debug::cctx::now();
         // nanosleep-loss conviction: inserting a node that is STILL
         // PHYSICALLY LINKED (a prior removal failed silently — pick_next
@@ -1680,7 +1680,7 @@ impl CfsRunQueue {
     /// still holds). Returns false when the poison discipline refused
     /// the unlink (node stays linked; counters stay paired).
     #[inline]
-    pub fn timeline_remove(&mut self, key: &VruntimeKey, task: *mut crate::process::Task) -> bool {
+    pub fn timeline_remove(&mut self, key: &VruntimeKey, task: *mut crate::process::types::Task) -> bool {
         let t0 = crate::debug::cctx::now();
         // SAFETY: callers pass the task whose node is linked (or, on the
         // poison path, a null task — handled below).
@@ -1949,7 +1949,7 @@ impl CfsRunQueue {
     ///
     /// # Returns
     /// Returns true on success, false if task is already in queue
-    pub fn enqueue(&mut self, task: *mut crate::process::Task) -> bool {
+    pub fn enqueue(&mut self, task: *mut crate::process::types::Task) -> bool {
         self.enqueue_inner(task, false)
     }
 
@@ -1957,11 +1957,11 @@ impl CfsRunQueue {
     ///
     /// The task's vruntime is aligned to min_vruntime if it falls behind
     /// preserving vruntime, but is never reset forward.
-    pub fn enqueue_migrate(&mut self, task: *mut crate::process::Task) -> bool {
+    pub fn enqueue_migrate(&mut self, task: *mut crate::process::types::Task) -> bool {
         self.enqueue_inner(task, true)
     }
 
-    fn enqueue_inner(&mut self, task: *mut crate::process::Task, migrate: bool) -> bool {
+    fn enqueue_inner(&mut self, task: *mut crate::process::types::Task, migrate: bool) -> bool {
         if task.is_null() {
             return false;
         }
@@ -2010,7 +2010,7 @@ impl CfsRunQueue {
                 se.vlag.set(0);
                 se.set_vruntime(self.avg_vruntime());
             } else if task_ref.state().bits()
-                != crate::process::task::TaskState::RUNNING as u32
+                != crate::process::types::TaskState::RUNNING as u32
             {
                 let v = self.avg_vruntime() as i128;
                 let w = se.load.weight as i128;
@@ -2081,7 +2081,7 @@ impl CfsRunQueue {
     ///
     /// # Returns
     /// Returns true on success
-    pub fn dequeue(&mut self, task: *mut crate::process::Task) -> bool {
+    pub fn dequeue(&mut self, task: *mut crate::process::types::Task) -> bool {
         if task.is_null() {
             return false;
         }
@@ -2159,7 +2159,7 @@ impl CfsRunQueue {
     /// removal has run since" — visible as the stored ORDER key being
     /// Some (set/cleared in lockstep with the node link). Same
     /// authority as the old key+map-value identity check, in one load.
-    pub fn is_linked(&self, task: *mut crate::process::Task) -> bool {
+    pub fn is_linked(&self, task: *mut crate::process::types::Task) -> bool {
         if task.is_null() {
             return false;
         }
@@ -2250,7 +2250,7 @@ impl CfsRunQueue {
     /// STOPPED-ish low bits), other] when non-NULL.
     pub fn strand_wall_probe(
         &mut self,
-        victim: *mut crate::process::Task,
+        victim: *mut crate::process::types::Task,
         rows: &mut [StrandWallRow],
         state_hist: &mut [usize; 3],
     ) -> (usize, usize, usize) {
@@ -2433,7 +2433,7 @@ impl CfsRunQueue {
     /// (R34: GRQ-held callers, direct console writes only).
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
-    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
+    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::types::Task) {
         crate::sched::sched::ww_claim_heal_inc();
         if crate::sched::sched::sched_hist_armed() && !task.is_null() {
             crate::sched::sched::sched_hist_ring(
@@ -2516,7 +2516,7 @@ impl CfsRunQueue {
     /// release (slot=0 swout=0) from a lying-slot double-run fight
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
-    fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
+    fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::types::Task, claim: i32, pk: u32) {
         crate::sched::sched::ww_oncpu_heal_inc();
         // 63rd: the heal event goes on the task's ring BEFORE the print
         // budget can swallow the line (a budgeted-out heal must still
@@ -2825,7 +2825,7 @@ impl CfsRunQueue {
     ///
     /// # Returns
     /// Next task pointer to run, or None if queue is empty
-    pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
+    pub fn pick_next(&mut self) -> Option<*mut crate::process::types::Task> {
         // Get task with smallest vruntime (O(1) via the cached leftmost
         // node — the reference's rb_leftmost)
         if let Some((key, task)) = self.leftmost_entry() {
@@ -2871,7 +2871,7 @@ impl CfsRunQueue {
     /// Peek next task to run (without removing)
     ///
     /// Used to check next task without changing queue state
-    pub fn peek_next(&self) -> Option<*mut crate::process::Task> {
+    pub fn peek_next(&self) -> Option<*mut crate::process::types::Task> {
         let nil = self.timeline.nil();
         let node = self.timeline.leftmost;
         if node != nil && !node.is_null() && RbTimeline::node_ok(node) {
@@ -3002,13 +3002,13 @@ impl CfsRunQueue {
     }
 
     /// Set currently running task
-    pub fn set_curr(&mut self, task: *mut crate::process::Task) {
+    pub fn set_curr(&mut self, task: *mut crate::process::types::Task) {
         self.curr = task;
     }
 
     /// Get currently running task
     #[inline]
-    pub fn get_curr(&self) -> *mut crate::process::Task {
+    pub fn get_curr(&self) -> *mut crate::process::types::Task {
         self.curr
     }
 

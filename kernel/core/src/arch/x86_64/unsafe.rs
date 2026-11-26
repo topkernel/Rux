@@ -92,10 +92,10 @@ impl<'a> core::ops::DerefMut for SavedFrame<'a> {
 /// or a cpu_state named one event ago (the same adoption proof as the
 /// switch path). Returns the foreign-entry report's header fields:
 /// (task address, pid, kernel-stack bottom, kernel-stack top).
-pub fn diag_task_fields(tp: *mut crate::process::task::Task) -> (u64, u32, usize, usize) {
+pub fn diag_task_fields(tp: *mut crate::process::types::Task) -> (u64, u32, usize, usize) {
     // SAFETY: broken-machine report read of the task the per-CPU slot
     // named; short ops, read-only, the CPU parks after the report.
-    match unsafe { crate::process::task_ref::TaskBorrow::from_raw(tp) } {
+    match unsafe { crate::process::types::TaskBorrow::from_raw(tp) } {
         Some(t) => (
             t.as_ptr() as u64,
             t.pid(),
@@ -109,7 +109,7 @@ pub fn diag_task_fields(tp: *mut crate::process::task::Task) -> (u64, u32, usize
 /// INV-ARCHDIAG-2 (adoption): `tp` is a CPU's current-task pointer read
 /// from its pub cpu_state slot. Returns (pid, comm) for the remote-BT
 /// requester's one-line attribution.
-pub fn diag_task_pid_comm(tp: *const crate::process::task::Task) -> (u32, [u8; 16]) {
+pub fn diag_task_pid_comm(tp: *const crate::process::types::Task) -> (u32, [u8; 16]) {
     if tp.is_null() {
         return (0, [0; 16]);
     }

@@ -151,7 +151,7 @@ pub struct SemArray {
     /// Lock for the entire semaphore set (protects sems vector existence).
     lock: Spinlock<()>,
     /// Wait queue for processes blocked on semop.
-    wq: crate::process::wait::WaitQueueHead,
+    wq: crate::process::types::WaitQueueHead,
 }
 
 impl IpcObject for SemArray {
@@ -181,7 +181,7 @@ impl SemArray {
             sem_ctime: AtomicI64::new(ipc_current_time()),
             sem_padid: AtomicU32::new(0),
             lock: Spinlock::new(()),
-            wq: crate::process::wait::WaitQueueHead::new(),
+            wq: crate::process::types::WaitQueueHead::new(),
         }
     }
 
@@ -1106,8 +1106,8 @@ fn semop_blocking_loop(
                                     // nobody will wake us (we skip sleeping),
                                     // so restore RUNNING explicitly.
                                     (*current).set_state(
-                                        crate::process::task::TaskState::new(
-                                            crate::process::task::TaskState::RUNNING,
+                                        crate::process::types::TaskState::new(
+                                            crate::process::types::TaskState::RUNNING,
                                         ),
                                     );
                                     crate::sched::dequeue_task(&*current);
@@ -1137,7 +1137,7 @@ fn semop_blocking_loop(
                                         entry.inner.wq.remove(current as *mut _);
                                     }
                                 }
-                                (*current).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+                                (*current).set_state(crate::process::types::TaskState::new(crate::process::types::TaskState::RUNNING));
                                 crate::sched::dequeue_task(&*current);
                                 return -(errno::EINTR as i64);
                             }
@@ -1170,8 +1170,8 @@ fn semop_blocking_loop(
                                     }
                                 }
                                 (*current).set_state(
-                                    crate::process::task::TaskState::new(
-                                        crate::process::task::TaskState::RUNNING,
+                                    crate::process::types::TaskState::new(
+                                        crate::process::types::TaskState::RUNNING,
                                     ),
                                 );
                                 crate::sched::dequeue_task(&*current);
@@ -1490,7 +1490,7 @@ fn find_blocking_op(idx: usize, sops: &[SemBuf]) -> Option<usize> {
 /// Called from do_exit() during process cleanup (through the IpcHooks
 /// exit row). The reference form replaces the historical raw task
 /// pointer — do_exit holds the task alive across the cleanup calls.
-pub fn sem_undo_exit(task: &crate::process::Task) {
+pub fn sem_undo_exit(task: &crate::process::types::Task) {
     // Take the undo table (replaces with empty Vec)
     let entries: alloc::vec::Vec<super::util::SemUndoEntry>;
     {

@@ -252,7 +252,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
             // handler writes its own console record right after, and
             // the staged sink bytes — the oops report — ride inside it).
             crate::debug::pstore::oops_capture(n);
-            crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
         }
     }
 }

@@ -645,7 +645,7 @@ pub fn notify(&self) {
     ///   stay valid until this returns
     pub fn wait_for_used_interruptible(
         used_ring: *const UsedRing,
-        wait_queue: &crate::process::wait::WaitQueueHead,
+        wait_queue: &crate::process::types::WaitQueueHead,
         prev_used: u16,
         resp_status: *const u8,
         blk_slot: usize,
@@ -1047,7 +1047,7 @@ break 'wait_done prev_used;
     /// - `wait_queue` must be the correct wait queue for this device's interrupt
     pub fn wait_for_desc_completion(
         used_ring: *const UsedRing,
-        wait_queue: &crate::process::wait::WaitQueueHead,
+        wait_queue: &crate::process::types::WaitQueueHead,
         start_idx: u16,
         expected_desc_id: u32,
         queue_size: u16,

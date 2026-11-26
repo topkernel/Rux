@@ -15,7 +15,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 
 /// Condition Variable
 ///

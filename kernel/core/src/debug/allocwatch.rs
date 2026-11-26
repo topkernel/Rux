@@ -331,7 +331,7 @@ pub fn tick_check() {
         let mut comm_out = [0u8; 16];
         let mut comm_len = 0usize;
         {
-            crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+            crate::process::hotpath::pid_hash_for_each_task_try(|t| {
                 if !found && t.pid() == pid {
                     state_bits = t.state().bits();
                     preempt = t.preempt_count();

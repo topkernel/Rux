@@ -8,7 +8,7 @@
 //! following the Linux kernel design. POSIX MQs are file descriptor-based.
 
 use crate::arch::uaccess::access_ok;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
@@ -684,8 +684,8 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                 mq.wq_send.remove(current as *mut _);
             }
             if let Some(cur) = crate::sched::current() {
-                (*cur).set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::RUNNING,
+                (*cur).set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::RUNNING,
                 ));
                 crate::sched::dequeue_task(&*cur);
             }
@@ -701,8 +701,8 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
                 let _messages = mq.messages.lock();
                 mq.wq_send.remove(current as *mut _);
             }
-            (*current).set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::RUNNING,
+            (*current).set_state(crate::process::types::TaskState::new(
+                crate::process::types::TaskState::RUNNING,
             ));
             crate::sched::dequeue_task(&*current);
             return -(errno::ENOMEM as i64);
@@ -839,8 +839,8 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
                 mq.wq_recv.remove(current as *mut _);
             }
             if let Some(cur) = crate::sched::current() {
-                (*cur).set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::RUNNING,
+                (*cur).set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::RUNNING,
                 ));
                 crate::sched::dequeue_task(&*cur);
             }
@@ -856,8 +856,8 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
                 let _messages = mq.messages.lock();
                 mq.wq_recv.remove(current as *mut _);
             }
-            (*current).set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::RUNNING,
+            (*current).set_state(crate::process::types::TaskState::new(
+                crate::process::types::TaskState::RUNNING,
             ));
             crate::sched::dequeue_task(&*current);
             return -(errno::ENOMEM as i64);
@@ -1162,7 +1162,7 @@ fn allocate_and_store_mq_fd(mq: alloc::sync::Arc<PosixMq>) -> Option<i32> {
     // fds on Linux; LTP mq_open01 lowers the soft limit to 0 and expects
     // EMFILE).
     let nofile = crate::sched::current()
-        .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
+        .map(|t| t.rlimit(crate::process::hotpath::rlimit_res::NOFILE).0)
         .unwrap_or(u64::MAX);
     let mut table = MQ_FD_TABLE.lock();
     for i in 0..MQ_FDS_MAX {
@@ -1207,7 +1207,7 @@ fn get_mq_fd(fd: usize) -> Option<alloc::sync::Arc<PosixMq>> {
 /// through the IpcHooks exit row). The reference form replaces the
 /// historical raw task pointer — do_exit holds the task alive across
 /// the cleanup calls.
-pub fn mq_fds_cleanup(task: &crate::process::Task) {
+pub fn mq_fds_cleanup(task: &crate::process::types::Task) {
     let pid = task.pid() as u32;
 
     // Phase 1: Collect matching entries and clear them from the fd table.

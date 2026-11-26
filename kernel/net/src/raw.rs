@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::buffer::{alloc_skb, kfree_skb, SkBuff};
 use crate::socket::{SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // ============================================================================

@@ -36,7 +36,7 @@ pub struct SyscallHooks {
     /// taskdump: the timerfd wheel census.
     pub timerfd_wheel_audit: fn(),
     /// taskdump: pid1's epoll interest (the launcher-watch face).
-    pub pid1_epoll_interest_dump: fn(crate::process::task::Pid),
+    pub pid1_epoll_interest_dump: fn(crate::process::types::Pid),
     /// /proc/sys/kernel/random + uuid sources.
     pub kernel_random_bytes: fn(&mut [u8]),
     /// futex's eventfd readiness probe (oh67 hunt).
@@ -56,7 +56,7 @@ pub struct SyscallHooks {
     pub epoll_dump_for_file: fn(u64),
     /// The classic-BPF seccomp filter interpreter (syscall crate):
     /// only reached when the current task has a filter installed.
-    pub seccomp_run: fn(&[crate::process::task::SockFilter], u64, &crate::arch::pt_regs::PtRegs) -> u32,
+    pub seccomp_run: fn(&[crate::process::types::SockFilter], u64, &crate::arch::pt_regs::PtRegs) -> u32,
     /// The strace1 loader-hunt line formatter (syscall crate):
     /// only reached behind the EVENT_STRACE1 arm gate + pid 1.
     pub strace1_line: fn(u32, &[u64; 6], i64),
@@ -99,7 +99,7 @@ pub fn epoll_interest_snapshot() { (hooks().epoll_interest_snapshot)() }
 #[inline]
 pub fn timerfd_wheel_audit() { (hooks().timerfd_wheel_audit)() }
 #[inline]
-pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) { (hooks().pid1_epoll_interest_dump)(pid) }
+pub fn pid1_epoll_interest_dump(pid: crate::process::types::Pid) { (hooks().pid1_epoll_interest_dump)(pid) }
 #[inline]
 pub fn kernel_random_bytes(out: &mut [u8]) { (hooks().kernel_random_bytes)(out) }
 #[inline]
@@ -120,7 +120,7 @@ pub fn syscall_eio_line(nr: u64, args: &[u64; 6]) { (hooks().syscall_eio_line)(n
 pub fn epoll_dump_for_file(fid: u64) { (hooks().epoll_dump_for_file)(fid) }
 #[inline]
 pub fn seccomp_run(
-    prog: &[crate::process::task::SockFilter],
+    prog: &[crate::process::types::SockFilter],
     nr: u64,
     regs: &crate::arch::pt_regs::PtRegs,
 ) -> u32 {

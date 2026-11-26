@@ -1016,13 +1016,13 @@ pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> ! {
     // delivers a fatal SIGSEGV whose default action terminates the
     // whole process; a thread-only exit left the process alive with
     // the dead thread's userspace locks orphaned.
-    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+    crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     unreachable!("do_exit returned from bad-frame exit");
 }
 
 /// Is `frame` inside `task`'s kernel stack [bottom, top)?  False for null
 /// tasks and unowned early-boot entries (caller checks null separately).
-fn frame_in_task_stack(task: *mut crate::process::task::Task, frame: usize) -> bool {
+fn frame_in_task_stack(task: *mut crate::process::types::Task, frame: usize) -> bool {
     // SAFETY: header reads of a task the per-CPU slot names as current.
     unsafe {
         let top = (*task).get_kernel_stack().map_or(0, |p| p as usize);
@@ -1044,7 +1044,7 @@ fn scribble_foreign_entry(
     cpu: usize,
     vector: u64,
     regs: *mut PtRegs,
-    tp: *mut crate::process::task::Task,
+    tp: *mut crate::process::types::Task,
     frame: usize,
 ) {
     (crate::api::arch::arch_diag().scribble_foreign_entry)(cpu, vector, regs, tp, frame)
@@ -1130,7 +1130,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         if user_entry {
             let tp = super::smp::PER_CPU[cpu_id]
                 .current_task
-                .load(core::sync::atomic::Ordering::Relaxed) as *mut crate::process::task::Task;
+                .load(core::sync::atomic::Ordering::Relaxed) as *mut crate::process::types::Task;
             let frame = regs as usize;
             if !tp.is_null() && !frame_in_task_stack(tp, frame) {
                 scribble_foreign_entry(cpu_id, vector, regs, tp, frame);
@@ -1559,7 +1559,7 @@ fn ww_irqwin_budget_ok() -> bool {
 /// - After schedule() returns, the frame unwinds normally through
 ///   trap_handler's tail and trap_exit's kernel restore.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
-    use crate::process::task::task_flags::TaskFlags;
+    use crate::process::types::TaskFlags;
     // LANDING STATE after the sc69-sc73 A/B ladder:
     // - The preempt_count leak is PRE-EXISTING (sc69: hook compiled out,
     //   leak present; disassembly-verified) — a plain SpinlockGuard whose
@@ -2136,7 +2136,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     // directly here killed hdcd before its handler could log the fault,
     // on every respawn. Same handler-first shape as the #GP path below.
     if regs.user_mode() {
-        let pid = crate::process::current_pid();
+        let pid = crate::process::hotpath::current_pid();
         // Forensics before anything can unwind: rip + the first 16
         // instruction bytes (ud2 = 0f 0b is the compiler CFI/trap
         // fingerprint; anything else is a wild jump into data).
@@ -2207,7 +2207,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
         // huks-wedge lane (hw5): fault-path default deaths are GROUP
         // deaths (Linux: fatal default action → do_group_exit).
-        crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGILL as i32));
+        crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGILL as i32));
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
         // A kernel-mode #UD is always a kernel bug; skipping it would
@@ -2244,7 +2244,7 @@ fn handle_general_protection(regs: &mut PtRegs) {
     if GP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
         crate::pr_info!("trap: #GP at rip={:#x}, mode={}, pid {}",
             regs.rip, if regs.user_mode() { "user" } else { "kernel" },
-            crate::process::current_pid());
+            crate::process::hotpath::current_pid());
     }
 
     if regs.user_mode() {
@@ -2268,7 +2268,7 @@ fn handle_general_protection(regs: &mut PtRegs) {
         // alone would re-enter the handler and loop forever.
         // si_code/si_addr parity (arena-mmap lane): #GP from user mode is
         // force_sig(SIGSEGV) — SI_KERNEL with si_addr 0 on the reference.
-        let pid = crate::process::current_pid();
+        let pid = crate::process::hotpath::current_pid();
         let gp_info = crate::signal::SigInfo::fault(
             crate::signal::Signal::SIGSEGV as i32,
             crate::signal::si_code::SI_KERNEL,
@@ -2286,7 +2286,7 @@ fn handle_general_protection(regs: &mut PtRegs) {
         gp_mmhistory_dump(regs);
         let _ = crate::signal::send_signal_with_info_directed(pid, gp_info);
         // huks-wedge lane (hw5): group death (Linux do_group_exit).
-        crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+        crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
         #[cfg(feature = "x86_64")]
         crate::debug::scribble::crash_report(b"#GP", regs);
@@ -2303,11 +2303,11 @@ fn handle_arith_exception(regs: &mut PtRegs, vector: u64) {
     if regs.user_mode() {
         // Linux delivers SIGFPE (catchable — fenv/overflow tests install
         // handlers); only the default disposition kills the task.
-        let pid = crate::process::current_pid();
+        let pid = crate::process::hotpath::current_pid();
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGFPE as i32);
         if !sigfpe_has_handler() {
             // huks-wedge lane (hw5): group death (Linux do_group_exit).
-            crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGFPE as i32));
+            crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGFPE as i32));
         }
     } else {
         panic!("trap: arith exception {:#x} in kernel mode at rip={:#x}", vector, regs.rip);
@@ -2317,11 +2317,11 @@ fn handle_arith_exception(regs: &mut PtRegs, vector: u64) {
 /// #AC (alignment check) → SIGBUS in user mode.
 fn handle_alignment_check(regs: &mut PtRegs) {
     if regs.user_mode() {
-        let pid = crate::process::current_pid();
+        let pid = crate::process::hotpath::current_pid();
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
         if !sigbus_has_handler() {
             // huks-wedge lane (hw5): group death (Linux do_group_exit).
-            crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
+            crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
         }
     } else {
         panic!("trap: #AC in kernel mode at rip={:#x}", regs.rip);
@@ -2400,7 +2400,7 @@ fn handle_debug(regs: &mut PtRegs) {
             if (*task).tracer_pid() != 0 {
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
-                    crate::process::ptrace_core::ptrace_stop(
+                    crate::process::hotpath::ptrace_stop(
                         task,
                         crate::signal::Signal::SIGTRAP as i32,
                         crate::signal::SigInfo::new(
@@ -2422,10 +2422,10 @@ fn handle_debug(regs: &mut PtRegs) {
         // Handler-first routing like the #UD/#GP arms; a blocked
         // SIGTRAP (trap inside its own handler) is forced to the
         // default action, mirroring the SIGSEGV discipline.
-        let pid = crate::process::current_pid();
+        let pid = crate::process::hotpath::current_pid();
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGTRAP as i32);
         if !sigtrap_has_handler() || sigtrap_blocked_current() {
-            crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+            crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         } else {
             crate::signal::force_unblock_current(crate::signal::Signal::SIGTRAP as i32);
         }
@@ -2465,11 +2465,11 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             let step_addr = (*task).single_step_addr();
             if (*task).single_step_active() && regs.rip == step_addr.wrapping_add(1) {
                 let saved = (*task).single_step_saved_insn();
-                let restored = crate::process::ptrace_core::write_target_word(task, step_addr, saved);
+                let restored = crate::process::hotpath::write_target_word(task, step_addr, saved);
                 (*task).clear_single_step();
                 if !restored {
                     // Tracee's text is gone racing the step — kill it.
-                    crate::process::exit::do_exit(
+                    crate::process::hotpath::do_exit(
                         -(crate::signal::Signal::SIGSEGV as i32),
                     );
                 }
@@ -2479,7 +2479,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 if (*task).tracer_pid() != 0 {
                     // SAFETY: task is the current task in its trap path.
                     unsafe {
-                        crate::process::ptrace_core::ptrace_stop(
+                        crate::process::hotpath::ptrace_stop(
                             task,
                             crate::signal::Signal::SIGTRAP as i32,
                             crate::signal::SigInfo::new(
@@ -2501,7 +2501,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             if (*task).tracer_pid() != 0 {
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
-                    crate::process::ptrace_core::ptrace_stop(
+                    crate::process::hotpath::ptrace_stop(
                         task,
                         crate::signal::Signal::SIGTRAP as i32,
                         crate::signal::SigInfo::new(
@@ -2515,7 +2515,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 return;
             }
         }
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+        crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
         // Kernel-mode int3 is a kernel bug (kgdb-style breakpoints are
@@ -2846,7 +2846,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // demand-maps the faulting page (FFRT arenas, GC guards)
                 // installs the WRONG page and the instruction re-faults
                 // forever (the 0x7ff1 OH fault-loop family).
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 let info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
                     crate::signal::si_code::SEGV_MAPERR,
@@ -2873,7 +2873,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // SIGSEGV (grpexit=false), the process survived, FOUR
                 // musl __lock words froze, every client parked forever
                 // (softbus/accountmgr/foundation/distributeddata/mmi).
-                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+                crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
                 crate::debug::scribble::crash_report(b"#PF-segv", regs);
@@ -2907,7 +2907,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // SEGV_ACCERR (permission denied, the PROT_NONE class)
                 // with si_addr = cr2 — FFRT's arena handler maps exactly
                 // this page (arena-mmap lane 2026-11-14).
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 let info = crate::signal::SigInfo::fault(
                     crate::signal::Signal::SIGSEGV as i32,
                     crate::signal::si_code::SEGV_ACCERR,
@@ -2923,7 +2923,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 // huks-wedge lane (hw5): group death (Linux do_group_exit)
                 // — see the SEGV_MAPERR arm above for the full rationale.
-                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
+                crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
                 crate::debug::scribble::crash_report(b"#PF-perm", regs);
@@ -2954,7 +2954,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // the same livelock the SIGSEGV arm guards against.
                 // si_code/si_addr parity (arena-mmap lane): BUS_ADRERR +
                 // fault_addr, Linux force_sig_bus shape.
-                let pid = crate::process::current_pid();
+                let pid = crate::process::hotpath::current_pid();
                 let _ = crate::signal::send_signal_with_info_directed(
                     pid,
                     crate::signal::SigInfo::fault(
@@ -2965,7 +2965,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 );
                 if !sigbus_has_handler() {
                     // huks-wedge lane (hw5): group death (Linux do_group_exit).
-                    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
+                    crate::process::hotpath::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
@@ -2998,9 +2998,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // hog before this task dies. Retry on true, die on false
                 // (struck out or nothing killable).
                 if !crate::api::mm::fault_oom_kill_or_retry(
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                 ) {
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                    crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGKILL as i32));
                 }
                 // true: fall through — returning to userspace re-executes
                 // the faulting instruction; the victim's freed pages serve
@@ -3211,9 +3211,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // ring-linked producer offline: a member whose children.next
             // is NULL/0 is a page that was zeroed after init — the face.
             {
-                use crate::process::task::task_offsets;
+                use crate::process::hotpath::task_offsets;
                 let cur_task: *mut u8 = match crate::sched::current() {
-                    Some(c) => (c as *mut crate::process::task::Task) as *mut u8,
+                    Some(c) => (c as *mut crate::process::types::Task) as *mut u8,
                     None => core::ptr::null_mut(),
                 };
                 fn kp_read64(p: *const u8) -> u64 {
@@ -3357,7 +3357,7 @@ fn handle_unknown_exception(regs: &mut PtRegs, vector: u64) {
     );
 
     if regs.user_mode() {
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+        crate::process::hotpath::do_exit(-(crate::signal::Signal::SIGKILL as i32));
     } else {
         // Kernel-mode unknown exceptions indicate a kernel bug; skipping
         // the instruction corrupts state. The Oops path prints the
@@ -3409,7 +3409,7 @@ pub extern "C" fn ret_from_fork_kernel_helper(
     _regs: *mut PtRegs,
 ) {
     let ret = fn_ptr(fn_arg);
-    crate::process::exit::do_exit(ret);
+    crate::process::hotpath::do_exit(ret);
 }
 
 // ============================================================================

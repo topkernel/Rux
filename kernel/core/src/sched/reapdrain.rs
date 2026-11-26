@@ -59,7 +59,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 /// Entries drained per tick (the budget that bounds the drainer's own
 /// cost in the timer IRQ context: 8 stack/PtRegs frees is well under a
@@ -569,6 +569,6 @@ fn reap_storage_free(task: *mut Task) -> (u32, u32) {
     t.set_fdtable(None);
     t.signal = None;
     t.set_fs(None);
-    crate::process::task::Task::task_put(task);
+    crate::process::types::Task::task_put(task);
     (parent_pid, child_pid)
 }

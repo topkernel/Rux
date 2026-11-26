@@ -119,14 +119,14 @@ pub use sched::{
 
 // Re-export of process::exit::{do_exit, do_wait, do_wait_nonblock} REMOVED
 // (process rung): zero callers at the flip; do_exit/do_exit_group stay
-// reachable at crate::process::exit::, the wait family moved to the
+// reachable at crate::process::hotpath::exit::, the wait family moved to the
 // process crate.
 
 // Re-export send_signal from signal module for backward compatibility
 pub use crate::signal::send_signal;
 
 // Re-export get_current_fdtable from process::task for backward compatibility
-pub use crate::process::task::get_current_fdtable;
+pub use crate::process::hotpath::get_current_fdtable;
 
 // Export CFS-related types (now in fair module)
 pub use entities::{

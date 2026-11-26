@@ -144,7 +144,7 @@ static TABLE: [LoSlot; SLOTS] = {
 };
 
 #[inline]
-fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
+fn slot_of(task: *mut crate::process::types::Task) -> &'static LoSlot {
     let a = task as usize;
     // preempt-hunt: XOR-of-shifts mixes alias — for every shift set there
     // are address strides (observed live: 0x1000000, then 0x2080000)
@@ -158,7 +158,7 @@ fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
 /// `preempt_count_add` when the probe is armed.
 #[inline]
 pub fn note_acquire(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     loc: &'static Location,
     cnt_after: i32,
 ) {
@@ -191,7 +191,7 @@ pub fn note_acquire(
             let slot_task = unsafe {
                 core::ptr::read_volatile(
                     &crate::sched::sched::cpu_state(cpu as usize).current
-                        as *const *mut crate::process::Task
+                        as *const *mut crate::process::types::Task
                 ) as usize
             };
             if slot_task != task as usize {
@@ -324,7 +324,7 @@ pub fn note_acquire(
 
 #[allow(unsafe_code)]
 fn report_acquire_divergent(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     loc: &'static Location,
     cpu: u32,
     slot_task: usize,
@@ -350,7 +350,7 @@ fn report_acquire_divergent(
         let pid = (*task).pid();
         let pc = (*task).preempt_count();
         let slot_pid = if slot_task >= 0x80000000 {
-            (*(slot_task as *mut crate::process::Task)).pid()
+            (*(slot_task as *mut crate::process::types::Task)).pid()
         } else {
             0
         };
@@ -450,7 +450,7 @@ fn report_acquire_divergent(
 /// carries both pointers so collisions are identifiable) or a genuine
 /// cross-task booking split. Budgeted; the flag is evidence, not proof.
 #[inline]
-pub fn note_release(task: *mut crate::process::Task) {
+pub fn note_release(task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
@@ -552,7 +552,7 @@ pub fn note_release(task: *mut crate::process::Task) {
     // note_acquire's sched-slot read.
     if ot >= 0x80000000 {
         unsafe {
-            let rt = ot as *mut crate::process::Task;
+            let rt = ot as *mut crate::process::types::Task;
             for &c in b" rpid=" {
                 putchar(c);
             }
@@ -627,7 +627,7 @@ pub fn note_release(task: *mut crate::process::Task) {
 /// shadow so a 0x10001 leak names BOTH producers independently.
 #[inline]
 pub fn note_hardirq_acquire(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     loc: &'static Location,
     cnt_after: i32,
 ) {
@@ -649,7 +649,7 @@ pub fn note_hardirq_acquire(
 /// task tp names at ITS time, splitting the pair).
 #[inline]
 pub fn note_softirq_acquire(
-    task: *mut crate::process::Task,
+    task: *mut crate::process::types::Task,
     loc: &'static Location,
     cnt_after: i32,
 ) {
@@ -665,7 +665,7 @@ pub fn note_softirq_acquire(
         let slot_task = unsafe {
             core::ptr::read_volatile(
                 &crate::sched::sched::cpu_state(cpu as usize).current
-                    as *const *mut crate::process::Task
+                    as *const *mut crate::process::types::Task
             ) as usize
         };
         if slot_task != task as usize { 1 } else { 0 }
@@ -677,7 +677,7 @@ pub fn note_softirq_acquire(
 
 /// Softirq field drained to zero: the acquire paired — drop the shadow.
 #[inline]
-pub fn note_softirq_release(task: *mut crate::process::Task) {
+pub fn note_softirq_release(task: *mut crate::process::types::Task) {
     let slot = slot_of(task);
     slot.ssite.store(0, Ordering::Release);
 }
@@ -685,7 +685,7 @@ pub fn note_softirq_release(task: *mut crate::process::Task) {
 /// Hardirq orphan twin (phantom-bits): print the recorded hsite for a
 /// task observed carrying a hardirq bit at tick ENTRY (stranded from an
 /// earlier bracket — the tick's own booking is not in that snapshot).
-pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
+pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
@@ -756,7 +756,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
 /// names the site that booked a still-set 0x100. Called from the
 /// tick-side orphan scan (preempt.rs) and the heal reports. Budgeted
 /// separately so orphan lines cannot be starved.
-pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
+pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
@@ -887,7 +887,7 @@ pub fn check_user_return() {
 /// ARCH tp slots: `tpcpu=N` (plus the arch-slot count) means the victim
 /// is actually running on N and the parkwalk's parked classification is
 /// the artifact; no tpcpu = genuinely parked, and the +1 is real.
-pub fn report_parked_site(task: *mut crate::process::Task) {
+pub fn report_parked_site(task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
@@ -914,7 +914,7 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
     let mut tpcpu: i32 = -1;
     let mut tppc: i32 = 0;
     for c in 0..crate::config::MAX_CPUS {
-        let tp = crate::arch::cpu::get_thread_id_of(c) as *mut crate::process::Task;
+        let tp = crate::arch::cpu::get_thread_id_of(c) as *mut crate::process::types::Task;
         if tp == task {
             tpcpu = c as i32;
             // SAFETY: diagnostic field read.
@@ -939,7 +939,7 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
 
 /// Append the recorded site for the tick-side PREEMPT-LEAK incumbent
 /// (called from the scheduler_tick tripwire's print block).
-pub fn report_incumbent_site(task: *mut crate::process::Task) {
+pub fn report_incumbent_site(task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
@@ -953,7 +953,7 @@ pub fn report_incumbent_site(task: *mut crate::process::Task) {
 /// adjudicated. Budgeted separately from BUDGET (the origin line is the
 /// hunt's primary output; it must not be starved by parked-adjacent
 /// noise).
-pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
+pub fn report_outermost(tag: &[u8], task: *mut crate::process::types::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
@@ -1050,7 +1050,7 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
 
 /// One report line: tag, pid, pc, site=<file>:<line> cnt_after=<n>
 /// age=<jiffies> for the recorded acquire.
-fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
+fn emit(tag: &[u8], task: *mut crate::process::types::Task, pc: i32) {
     use crate::console::uart_putc_raw as putchar;
     let b = BUDGET.load(Ordering::Acquire);
     if b == 0 {

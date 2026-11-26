@@ -38,7 +38,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::fs::file::FileOps;
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 /// EPOLLIN — the only bit a pidfd ever reports (exit readiness).
 const EPOLLIN_U16: u16 = 0x001;
@@ -46,8 +46,8 @@ const EPOLLIN_U16: u16 = 0x001;
 /// Global pidfd poller queue: every poll() over a pidfd registers here
 /// and `exit_notify_all_waiters` (called from do_exit) wakes them all.
 /// Spurious wakes re-check their own target's state and re-sleep.
-static PIDFD_EXIT_WAITQ: crate::process::wait::WaitQueueHead =
-    crate::process::wait::WaitQueueHead::new();
+static PIDFD_EXIT_WAITQ: crate::process::types::WaitQueueHead =
+    crate::process::types::WaitQueueHead::new();
 
 /// Wake every pidfd poller. Called from do_exit after the ZOMBIE state
 /// store (the reference's wake_up_poll on the pid's waiters).
@@ -68,7 +68,7 @@ pub struct PidFdData {
 /// when the pid is absent.
 fn pin_leader(pid: u32) -> Option<*mut Task> {
     // SAFETY: pid_hash_lookup_pinned returns a pinned, valid Task.
-    let t = unsafe { crate::process::pid_hash::pid_hash_lookup_pinned(pid) };
+    let t = unsafe { crate::process::hotpath::pid_hash_lookup_pinned(pid) };
     if t.is_null() {
         return None;
     }
@@ -154,7 +154,7 @@ pub fn fdinfo_pid_of(file: &crate::fs::File) -> Option<u32> {
 pub fn resolve_alive(data: &PidFdData) -> Option<&'static Task> {
     // SAFETY: lookup runs under RCU; equality with the pinned pointer
     // proves identity without dereferencing the result.
-    let now = unsafe { crate::process::pid_hash::pid_hash_lookup(data.pid) };
+    let now = unsafe { crate::process::hotpath::pid_hash_lookup(data.pid) };
     if now.is_null() || (now as *const Task) != (data.task as *const Task) {
         return None;
     }
@@ -168,11 +168,11 @@ pub fn resolve_alive(data: &PidFdData) -> Option<&'static Task> {
 pub fn target_exited(data: &PidFdData) -> bool {
     // SAFETY: the pinned leader's Task page is valid; state() is atomic.
     let st = unsafe { (*data.task).state() };
-    if st.is_dead() || st.contains(crate::process::task::TaskState::ZOMBIE) {
+    if st.is_dead() || st.contains(crate::process::types::TaskState::ZOMBIE) {
         return true;
     }
     // Reaped and hash-removed: exited by definition.
-    unsafe { crate::process::pid_hash::pid_hash_lookup(data.pid).is_null() }
+    unsafe { crate::process::hotpath::pid_hash_lookup(data.pid).is_null() }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ pub fn pidfd_poll_wait(
     _file: &crate::fs::File,
     task: *mut Task,
 ) -> bool {
-    PIDFD_EXIT_WAITQ.add(crate::process::wait::WaitQueueEntry::new(task, false));
+    PIDFD_EXIT_WAITQ.add(crate::process::types::WaitQueueEntry::new(task, false));
     true
 }
 

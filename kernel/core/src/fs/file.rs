@@ -1197,7 +1197,7 @@ impl FdTable {
     /// the min). Tasks without a Task context (early boot) are unlimited.
     fn nofile_ceiling() -> usize {
         let rlim = crate::sched::current()
-            .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
+            .map(|t| t.rlimit(crate::process::hotpath::rlimit_res::NOFILE).0)
             .unwrap_or(u64::MAX);
         MAX_FDS.min(rlim as usize)
     }
@@ -1939,7 +1939,7 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // (only regular-file write paths check).
         let mut buf = buf;
         if let Some(task) = crate::sched::current() {
-            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+            let (fsz_cur, _) = task.rlimit(crate::process::hotpath::rlimit_res::FSIZE);
             if fsz_cur != u64::MAX {
                 let start = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
                     inode.get_size()

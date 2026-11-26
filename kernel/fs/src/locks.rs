@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use rux::fs::file::File;
 use rux::fs::inode::Inode;
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // The framework half's shared vocabulary + count mirrors (the merged
@@ -431,7 +431,7 @@ fn ranges_overlap(s1: u64, e1: u64, s2: u64, e2: u64) -> bool {
 /// Only Pid-owned locks can go stale; OFD locks die with their File.
 fn owner_is_dead(owner: LockOwner) -> bool {
     match owner {
-        LockOwner::Pid(pid) => pid != 0 && crate::process::find_task_by_pid(pid).is_none(),
+        LockOwner::Pid(pid) => pid != 0 && crate::process::hotpath::find_task_by_pid(pid).is_none(),
         LockOwner::Ofd(_) => false,
     }
 }

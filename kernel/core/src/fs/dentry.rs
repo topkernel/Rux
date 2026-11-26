@@ -1091,7 +1091,7 @@ impl Dentry {
                             "DUPMNT-REPLACE parent='{}' name='{}' (pid {})",
                             pname,
                             name,
-                            crate::process::current_pid()
+                            crate::process::hotpath::current_pid()
                         );
                     }
                 }

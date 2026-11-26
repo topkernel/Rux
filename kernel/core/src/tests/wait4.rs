@@ -74,7 +74,7 @@ fn test_wait4_wnohang_no_child() -> i64 {
 
 fn test_wait4_wnohang_after_fork() -> i64 {
     use crate::syscall;
-    let child_pid = match crate::process::do_fork() {
+    let child_pid = match crate::process::hotpath::do_fork() {
         Some(pid) => pid,
         None => return -1,
     };

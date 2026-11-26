@@ -108,7 +108,7 @@ pub fn gp_mmhistory_dump(regs: &PtRegs) {
         return;
     }
     let Some(tk) = crate::sched::current() else { return };
-    let dump = |tag: &str, t: &crate::process::task::Task| {
+    let dump = |tag: &str, t: &crate::process::types::Task| {
         const N: usize = 16;
         let cur = t.ext.mm_ops_cur.load(Relaxed);
         let pid = t.pid();
@@ -148,10 +148,10 @@ pub fn gp_mmhistory_dump(regs: &PtRegs) {
     };
     dump("self", tk);
     let tgid = tk.tgid();
-    let self_ptr = tk as *const crate::process::task::Task;
+    let self_ptr = tk as *const crate::process::types::Task;
     let mut sibs = 0usize;
     let _skipped = crate::sched::for_each_task_try(|t| {
-        if t.tgid() == tgid && (t as *const crate::process::task::Task) != self_ptr {
+        if t.tgid() == tgid && (t as *const crate::process::types::Task) != self_ptr {
             sibs += 1;
             if sibs <= 6 {
                 dump("sib", t);
@@ -435,7 +435,7 @@ pub fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     {
         // HOTPATH-PRINT (whole fn): fatal-path forensics — one bounded dump
 // per user SIGSEGV death (capped event counts inline).
-fn dump_mm_ops(tag: &str, t: &crate::process::task::Task) {
+fn dump_mm_ops(tag: &str, t: &crate::process::types::Task) {
             use core::sync::atomic::Ordering::Relaxed;
             const N: usize = 16;
             let cur = t.ext.mm_ops_cur.load(Relaxed);
@@ -478,10 +478,10 @@ fn dump_mm_ops(tag: &str, t: &crate::process::task::Task) {
         if let Some(tk) = crate::sched::current() {
             dump_mm_ops("self", tk);
             let tgid = tk.tgid();
-            let self_ptr = tk as *const crate::process::task::Task;
+            let self_ptr = tk as *const crate::process::types::Task;
             let mut sibs = 0usize;
             let skipped = crate::sched::for_each_task_try(|t| {
-                if t.tgid() == tgid && (t as *const crate::process::task::Task) != self_ptr {
+                if t.tgid() == tgid && (t as *const crate::process::types::Task) != self_ptr {
                     sibs += 1;
                     if sibs <= 6 {
                         dump_mm_ops("sib", t);
@@ -938,7 +938,7 @@ pub fn scribble_foreign_entry(
     cpu: usize,
     vector: u64,
     regs: *mut PtRegs,
-    tp: *mut crate::process::task::Task,
+    tp: *mut crate::process::types::Task,
     frame: usize,
 ) {
     scribble_put_str(b"\n=== FOREIGN-ENTRY cpu=");

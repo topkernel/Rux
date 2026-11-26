@@ -26,7 +26,7 @@ use crate::mm::page_desc::Page;
 use crate::mm::pagemap::{MapError, Perm};
 use crate::mm::vma::{VmaFlags, VmaType};
 use crate::mm::zone::Zone;
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 // ==================== The seam vocabulary ====================
 // FaultFlags and MmFaultResult moved here with the M1a carve (from the

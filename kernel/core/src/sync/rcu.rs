@@ -520,7 +520,7 @@ pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
 /// idiom), until every online CPU reports at/after `gen` or the budget
 /// expires. Returns whether the round completed.
 fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
-    use crate::process::task::TaskState;
+    use crate::process::types::TaskState;
 
     let hz = crate::drivers::timer::HZ as u64;
     let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
@@ -572,7 +572,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                 let mut victim = alloc::string::String::new();
                 if stuck != usize::MAX {
                     let cur = crate::sched::sched::grq_diag_cpu_currents();
-                    let t = cur[stuck].2 as *mut crate::process::task::Task;
+                    let t = cur[stuck].2 as *mut crate::process::types::Task;
                     if !t.is_null() {
                         // SAFETY: diagnostic read of stable fields on the
                         // per-CPU current Task (idle/static or heap; both
@@ -711,15 +711,15 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
         // deadline and never depends on a wake token. Rate-limited
         // report: every firing names a producer of the order.
         let pid_resolves = {
-            let t = crate::process::pid_hash::pid_hash_lookup_pinned(my_pid);
+            let t = crate::process::hotpath::pid_hash_lookup_pinned(my_pid);
             if t.is_null() {
                 false
             } else {
-                let ok = t as *const crate::process::task::Task
-                    == current as *const crate::process::task::Task;
+                let ok = t as *const crate::process::types::Task
+                    == current as *const crate::process::types::Task;
                 // Release the lookup pin in both cases (unmatched or
                 // matched): the pinned refcount is the lookup's own.
-                crate::process::task::Task::task_put(t);
+                crate::process::types::Task::task_put(t);
                 ok
             }
         };

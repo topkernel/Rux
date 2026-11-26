@@ -573,7 +573,7 @@ pub fn epoll_wake_unregister(file_id: u64, ep: *mut u8) {
 /// Wrapper so the raw-pointer registry is `Send` (access under the lock).
 pub struct SignalfdWakeRegistry {
     pub bindings: alloc::vec::Vec<
-        (*mut crate::process::task::Task, *const crate::process::wait::WaitQueueHead),
+        (*mut crate::process::types::Task, *const crate::process::types::WaitQueueHead),
     >,
 }
 
@@ -586,7 +586,7 @@ static SIGNALFD_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<SignalfdWakeRegis
 /// Called from `signal::send_signal_locked_info` after the signal is added
 /// to the target's pending set, so a blocked `read(sfd)` returns promptly
 /// instead of waiting out the poll interval.
-pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
+pub fn signalfd_notify_task(task: *mut crate::process::types::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
@@ -608,14 +608,14 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
             // wq points into a boxed SignalFd alive until its close op
             // unregisters it (close runs only on the last Arc ref) —
             // INV-SYSC-2 reachability arm.
-            boxed_ref(*wq as *mut crate::process::wait::WaitQueueHead).wake_up_all();
+            boxed_ref(*wq as *mut crate::process::types::WaitQueueHead).wake_up_all();
         }
     }
 }
 
 pub fn signalfd_register(
-    task: *mut crate::process::task::Task,
-    wq: *const crate::process::wait::WaitQueueHead,
+    task: *mut crate::process::types::Task,
+    wq: *const crate::process::types::WaitQueueHead,
 ) {
     let mut registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     if !registry.bindings.iter().any(|(t, q)| *t == task && *q == wq) {
@@ -623,7 +623,7 @@ pub fn signalfd_register(
     }
 }
 
-pub fn signalfd_unregister(wq: *const crate::process::wait::WaitQueueHead) {
+pub fn signalfd_unregister(wq: *const crate::process::types::WaitQueueHead) {
     let mut registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     registry.bindings.retain(|(_, q)| *q != wq);
 }

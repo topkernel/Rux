@@ -251,7 +251,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
         && crate::arch::cpu::get_interrupts_state()
         && match crate::sched::current() {
             Some(task) => {
-                use crate::process::task::TIF_MEMDIE;
+                use crate::process::hotpath::TIF_MEMDIE;
                 if task.test_ti_flag(TIF_MEMDIE) {
                     false
                 } else {
@@ -263,7 +263,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
         };
     if kill_self {
         taskdump_raw_line(b"ALLOCTHROW -> SIGKILL current task (task-context ENOMEM)\n");
-        crate::process::exit::do_exit(-9);
+        crate::process::hotpath::do_exit(-9);
     }
     panic!("Allocation error: {:?}", layout);
 }
@@ -956,7 +956,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize process scheduler
         {
-            crate::process::pid_hash::init();
+            crate::process::hotpath::init();
             sched::init();
             print_status("sched", "CFS scheduler v1", true);
             print_status("sched", "runqueue per-CPU", true);

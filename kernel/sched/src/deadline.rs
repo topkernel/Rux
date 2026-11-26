@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, AtomicI64, Ordering};
-use crate::process::task::Task;
+use rux::process::types::Task;
 use crate::sched::class::{SchedClass, RunQueueRef};
 use crate::sched::entities::{SchedEntity, SchedRtEntity, SchedDlEntity, LoadWeight, NICE_0_LOAD};
 use crate::sched::entities::{DL_BW_UNIT, DL_DEFAULT_PERIOD_NS, DL_DEFAULT_RUNTIME_NS};

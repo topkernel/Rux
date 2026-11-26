@@ -31,7 +31,7 @@ pub fn mark_fb_user_mapped() {
 /// Rux apps call FBIO_FLUSH themselves; stock Xorg (xf86-video-fbdev) never
 /// does — without a periodic flush its output would stay invisible forever.
 extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::TaskState;
+    use rux::process::types::TaskState;
 
     // 3 jiffies = 30 ms @ KERNEL_HZ=100 (≈33 fps presentation).
     let interval_jiffies: u64 = 3;

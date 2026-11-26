@@ -83,7 +83,7 @@ pub fn cpu_id() -> usize {
         // tp points to task_struct, get hart_id from ti_cpu field
         // SAFETY: tp was set by trap.S to a live Task (the switch
         // protocol); the TI_CPU offset read is a relaxed atomic load.
-        let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
+        let ti_cpu_offset = crate::process::hotpath::task_offsets::TI_CPU;
         let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
         let raw = unsafe { (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) };
             // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
@@ -221,7 +221,7 @@ pub fn start_secondaries() {
     // Post-bring-up affinity refresh: every task created before this point
     // (boot init + early kthreads) gets its default mask widened to the
     // online set (see Task::refresh_default_affinity_to_online).
-    crate::process::task::Task::refresh_default_affinity_to_online();
+    crate::process::types::Task::refresh_default_affinity_to_online();
     if failed_harts == 0 {
         crate::print_status(
             "smp",

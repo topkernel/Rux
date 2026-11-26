@@ -34,7 +34,7 @@ pub fn test_preemptive_scheduler() {
     // Test 3: Time slice management
     match crate::sched::current() {
         Some(task) => {
-            let task_ref = unsafe { &mut *(task as *mut crate::process::Task) };
+            let task_ref = unsafe { &mut *(task as *mut crate::process::types::Task) };
             let initial_slice = task_ref.get_time_slice();
             task_ref.reset_time_slice();
             let reset_slice = task_ref.get_time_slice();

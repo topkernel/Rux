@@ -326,7 +326,7 @@ pub fn loop_is_bound(idx: usize) -> bool {
 /// reclaimer does. N_LOOPS is small and the check is only paid on the
 /// reclaim slow path.
 pub fn loop_io_claim_held_by_current() -> bool {
-    let me = crate::process::current_pid() as u32;
+    let me = crate::process::hotpath::current_pid() as u32;
     if me == 0 {
         return false;
     }
@@ -367,7 +367,7 @@ fn loop_request_fn(req: &mut Request) {
     // Error 35 (-EDEADLK): the caller's write is failed, its pages stay
     // dirty, and the flush retries outside the loop-write context.
     {
-        let me = crate::process::current_pid() as u32;
+        let me = crate::process::hotpath::current_pid() as u32;
         match dev.io_owner_pid.compare_exchange(
             0,
             me,
@@ -404,7 +404,7 @@ fn loop_request_fn(req: &mut Request) {
     // must not clear a claim it never took.
     loop_request_fn_claimed(req, dev, idx);
     let _ = dev.io_owner_pid.compare_exchange(
-        crate::process::current_pid() as u32,
+        crate::process::hotpath::current_pid() as u32,
         0,
         Ordering::AcqRel,
         Ordering::Acquire,

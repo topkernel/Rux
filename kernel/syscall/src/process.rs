@@ -280,7 +280,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                 if let Some(t) = rux::sched::current() {
                                     {
                                         const RL: usize =
-                                            ::process::task::INIT_CALLS_LEN;
+                                            rux::process::types::INIT_CALLS_LEN;
                                         let cur = t.ext.init_calls_cur.load(Relaxed);
                                         let mut s2 = alloc::string::String::new();
                                         let _ = write!(
@@ -342,7 +342,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                         {
                                             use core::fmt::Write;
                                             const RL: usize =
-                                                ::process::task::LAST_CALLS_LEN;
+                                                rux::process::types::LAST_CALLS_LEN;
                                             let cur = t
                                                 .ext.last_calls_cur
                                                 .load(core::sync::atomic::Ordering::Relaxed);
@@ -410,7 +410,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                             {
                                                 use core::sync::atomic::Ordering::Relaxed;
                                                 const RL: usize =
-                                                    ::process::task::INIT_CALLS_LEN;
+                                                    rux::process::types::INIT_CALLS_LEN;
                                                 let icur = t
                                                     .ext.init_calls_cur
                                                     .load(Relaxed);
@@ -455,7 +455,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                         }
                         // Parent-namespace view, same as the main return.
                         let parent_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
-                        ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+                        rux::process::hotpath::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
                     }
                     Err(e) => {
                         crate::pr_warn!(
@@ -478,7 +478,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     match do_clone(clone_args) {
         Ok(pid) => {
             let parent_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
-            ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+            rux::process::hotpath::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }
         Err(e) => {
             // sc116 probe (see the reserve-gate comment): any other
@@ -1058,7 +1058,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     // half-valid setuid binary must never elevate the *old* image
     // (review C-02).
     let mut secure_exec = false;
-    let mut cred_saved: Option<::process::task::Cred> = None;
+    let mut cred_saved: Option<rux::process::types::Cred> = None;
     {
         use crate::security::capability::Cap;
 
@@ -1625,7 +1625,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     // U1c pid-namespace semantics: the wait target pid is interpreted in
     // the CALLER's pid namespace, and the reaped child is REPORTED in it.
     let wait_pid: i32 = if pid > 0 {
-        match ::process::ns::resolve_vpid(pid as u32) {
+        match rux::process::hotpath::resolve_vpid(pid as u32) {
             Some(g) => g as i32,
             None => return -(errno::ECHILD as i64),
         }
@@ -1721,7 +1721,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
 /// Falls back to the global pid when the task is already gone from the
 /// hash (reaped) or lives in another namespace.
 fn report_wait_pid(global_pid: u32) -> i64 {
-    ::process::ns::wait_vpid(global_pid) as i64
+    rux::process::hotpath::wait_vpid(global_pid) as i64
 }
 
 /// 125th waitid leg: the reaper forensics print for a SUCCESSFUL waitid
@@ -1858,7 +1858,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
     // is interpreted in the CALLER's pid namespace (identity in init ns).
     // do_waitid compares against global child pids.
     let wait_id: i32 = if idtype == 1 {
-        match ::process::ns::resolve_vpid(id as u32) {
+        match rux::process::hotpath::resolve_vpid(id as u32) {
             Some(g) => g as i32,
             None => return -(errno::ECHILD as i64),
         }
@@ -1950,8 +1950,8 @@ pub fn sys_getppid(_args: SyscallArgs) -> i64 {
             // alive (ppid()'s discipline — INV-PROC-BORROW-1). Read-only
             // use.
             let parent =
-                ::process::r#unsafe::borrow_task(parent as *mut ::process::task::Task);
-            if ::process::ns::task_same_pid_ns(leader, parent) {
+                ::process::r#unsafe::borrow_task(parent as *mut rux::process::types::Task);
+            if rux::process::hotpath::task_same_pid_ns(leader, parent) {
                 // Same pid namespace: the ns-local pid is a plain field
                 // read (task_tgid_vnr fast case).
                 parent.ns_pid_local() as i64
@@ -2025,7 +2025,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // per-CPU for_each_task which only sees running/idle tasks) — and
         // every THREAD is its own hash entry, so each live member of a
         // multithreaded group receives its own copy.
-        ::process::pid_hash::pid_hash_for_each_task(|task| {
+        rux::process::hotpath::pid_hash_for_each_task(|task| {
             if let Some(ref ns) = caller_ns {
                 let same_ns = task
                     .ns_pid
@@ -2070,7 +2070,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
     // pid > 0: process-directed send — spread over the target's thread group.
     // U1c pid-namespace translation: the target pid is interpreted in the
     // CALLER's pid namespace (init ns: identity).
-    let global_pid = match ::process::ns::resolve_vpid(pid as u32) {
+    let global_pid = match rux::process::hotpath::resolve_vpid(pid as u32) {
         Some(g) => g,
         None => return -(errno::ESRCH as i64),
     };
@@ -2191,7 +2191,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
         nodename: {
             // U1c: nodename comes from the caller's UTS namespace.
             let mut a = [0u8; 65];
-            let hn = ::process::ns::current_uts_ns().get_hostname();
+            let hn = rux::process::hotpath::current_uts_ns().get_hostname();
             let n = hn.len().min(64);
             a[..n].copy_from_slice(&hn[..n]);
             a
@@ -2225,7 +2225,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
         domainname: {
             // U1c: domainname comes from the caller's UTS namespace.
             let mut a = [0u8; 65];
-            let dn = ::process::ns::current_uts_ns().get_domainname();
+            let dn = rux::process::hotpath::current_uts_ns().get_domainname();
             let n = dn.len().min(64);
             a[..n].copy_from_slice(&dn[..n]);
             a
@@ -3009,7 +3009,7 @@ pub fn sys_getsid(args: SyscallArgs) -> i64 {
 /// RLIMIT_STACK stores also reprogram the mm stack-limit (GROWSDOWN
 /// fault bound), keeping try_expand_stack in sync with the rlimit.
 pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
-    use ::process::task::{rlimit_res, RLIM_NLIMITS};
+    use ::rux::process::{hotpath::rlimit_res, types::RLIM_NLIMITS};
 
     let pid = args[0] as i32;
     let resource = args[1] as i32;
@@ -3101,7 +3101,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
 
 /// Reprogram the address space's stack growth bound from an
 /// RLIMIT_STACK soft limit (used by setrlimit/prlimit64 and exec).
-fn sync_stack_limit(task: &::process::task::Task, rlim_cur: u64) {
+fn sync_stack_limit(task: &rux::process::types::Task, rlim_cur: u64) {
     use crate::arch::mm::user_addr::STACK_MAX_SIZE;
 
     if let Some(aspace) = task.address_space() {
@@ -3391,7 +3391,7 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                     }
                 }
                 cred.securebits = new_bits;
-                cred.keepcaps = new_bits & ::process::task::SECBIT_KEEP_CAPS != 0;
+                cred.keepcaps = new_bits & rux::process::hotpath::SECBIT_KEEP_CAPS != 0;
             }
             0
         }
@@ -3827,13 +3827,13 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
             if current.pending.get_all() & !current.sigmask != 0 {
                 return -(errno::EINTR as i64);
             }
-            current.set_state(::process::task::TaskState::new(
-                ::process::task::TaskState::INTERRUPTIBLE,
+            current.set_state(rux::process::types::TaskState::new(
+                rux::process::types::TaskState::INTERRUPTIBLE,
             ));
             // Re-check after marking sleeping (lost-wakeup guard).
             if current.pending.get_all() & sigset != 0 {
-                current.set_state(::process::task::TaskState::new(
-                    ::process::task::TaskState::RUNNING,
+                current.set_state(rux::process::types::TaskState::new(
+                    rux::process::types::TaskState::RUNNING,
                 ));
                 // R8-5 (NEW-C2): undo a concurrent wake enqueue.
                 rux::sched::dequeue_task(current);
@@ -3869,8 +3869,8 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         // the loop re-checks pending and the deadline every pass.
         if deadline.is_some() && timer_id == 0 {
             // current is the running task's reference.
-            current.set_state(::process::task::TaskState::new(
-                ::process::task::TaskState::RUNNING,
+            current.set_state(rux::process::types::TaskState::new(
+                rux::process::types::TaskState::RUNNING,
             ));
         }
         rux::sched::schedule();
@@ -4293,14 +4293,14 @@ pub fn sys_kcmp(args: SyscallArgs) -> i64 {
         ::process::find_task_by_pid(pid2),
     ) {
         (Some(a), Some(b)) => (
-            a as *const ::process::task::Task,
-            b as *const ::process::task::Task,
+            a as *const rux::process::types::Task,
+            b as *const rux::process::types::Task,
         ),
         _ => return -(errno::ESRCH as i64),
     };
     let (t1, t2) = (
-        ::process::r#unsafe::borrow_task(t1 as *mut ::process::task::Task),
-        ::process::r#unsafe::borrow_task(t2 as *mut ::process::task::Task),
+        ::process::r#unsafe::borrow_task(t1 as *mut rux::process::types::Task),
+        ::process::r#unsafe::borrow_task(t2 as *mut rux::process::types::Task),
     );
 
     if ktype < 0 || ktype >= KCMP_TYPES {
@@ -4526,19 +4526,19 @@ fn process_vm_rw(args: SyscallArgs, to_remote: bool) -> i64 {
 
     // Target lookup. pid 0 / unused pid -> ESRCH.
     // SAFETY: the pin keeps the Task alive until task_put below.
-    let target = ::process::pid_hash::pid_hash_lookup_pinned(pid);
+    let target = rux::process::hotpath::pid_hash_lookup_pinned(pid);
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
     let ret = process_vm_rw_locked(target, &liovs, &riovs, to_remote);
     // SAFETY: release the pin taken above.
-    ::process::task::Task::task_put(target);
+    rux::process::types::Task::task_put(target);
     ret
 }
 
 /// Body with the target pinned: permission gate, then the segment walk.
 fn process_vm_rw_locked(
-    target: *mut ::process::task::Task,
+    target: *mut rux::process::types::Task,
     liovs: &[PvmIovec],
     riovs: &[PvmIovec],
     to_remote: bool,
@@ -4547,7 +4547,7 @@ fn process_vm_rw_locked(
     // SAFETY: current() returns the running task or None; target is
     // pinned by the caller.
     let current = match rux::sched::current() {
-        Some(c) => c as *mut ::process::task::Task,
+        Some(c) => c as *mut rux::process::types::Task,
         None => return -(errno::ESRCH as i64),
     };
     if target != current {
@@ -4689,7 +4689,7 @@ struct SockFprogUser {
     len: u16,
     _pad: u16,
     _pad2: u32,
-    filter: *const ::process::task::SockFilter,
+    filter: *const rux::process::types::SockFilter,
 }
 
 /// sys_seccomp - Operate on seccomp state (NR 277, U1c)
@@ -4755,7 +4755,7 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
             // Copy the filter program.
             let count = prog.len as usize;
             let mut filter =
-                alloc::vec::Vec::<::process::task::SockFilter>::with_capacity(count);
+                alloc::vec::Vec::<rux::process::types::SockFilter>::with_capacity(count);
             let mut raw = alloc::vec![0u8; count * 8];
             // prog.filter is a user pointer validated non-null and
             // the length is bounded by BPF_MAXINSNS; copy_in uses
@@ -4764,7 +4764,7 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             for chunk in raw.chunks_exact(8) {
-                filter.push(::process::task::SockFilter {
+                filter.push(rux::process::types::SockFilter {
                     code: u16::from_ne_bytes([chunk[0], chunk[1]]),
                     jt: chunk[2],
                     jf: chunk[3],
@@ -4855,7 +4855,7 @@ fn seccomp_set_strict() -> Result<(), i32> {    let Some(task) = rux::sched::cur
 /// Supported instruction subset: BPF_LD|BPF_W|BPF_ABS (load seccomp_data
 /// word), BPF_LD|BPF_W|BPF_IMM (A = k), BPF_JMP|BPF_{JEQ,JGT,JGE,JSET}|BPF_K
 /// (compare), BPF_RET|BPF_K (return action). Anything else → EINVAL.
-fn seccomp_set_filter(filter: alloc::vec::Vec<::process::task::SockFilter>) -> Result<(), i32> {
+fn seccomp_set_filter(filter: alloc::vec::Vec<rux::process::types::SockFilter>) -> Result<(), i32> {
     let Some(task) = rux::sched::current() else {
         return Err(-(errno::ESRCH as i32));
     };
@@ -5328,7 +5328,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     }
 
     // new_root must be a mountpoint of the current mount namespace.
-    if !::process::ns::ns_is_mountpoint(&new_root) {
+    if !rux::process::hotpath::ns_is_mountpoint(&new_root) {
         // RETIRED (probe-retire): unbounded error trace; budgeted (first 8).
         static PIVOT_NMP_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -5400,8 +5400,8 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // (b) + (c) mount-namespace bookkeeping: the old root becomes a row at
     // put_old (new-root-relative), other rows are rebased onto new_root.
     {
-        use ::process::ns::MountEntry;
-        let ns = ::process::ns::current_mnt_ns();
+        use ::rux::process::types::MountEntry;
+        let ns = rux::process::hotpath::current_mnt_ns();
         let mut table = ns.mounts.lock();
         // Old root row ("/" or the previous root device) moves to put_old.
         let old_root_entry = table
@@ -5409,7 +5409,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             .find(|e| e.mount_point == "/")
             .cloned()
             .unwrap_or(MountEntry {
-                mount_id: ::process::ns::alloc_mount_id(),
+                mount_id: rux::process::hotpath::alloc_mount_id(),
                 device: alloc::string::String::from("rootfs"),
                 mount_point: alloc::string::String::from("/"),
                 fs_type: alloc::string::String::from("rootfs"),
@@ -5480,7 +5480,7 @@ pub fn sys_setns(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let nstype = args[1];
 
-    match ::process::ns::setns(fd, nstype) {
+    match rux::process::hotpath::setns(fd, nstype) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }
@@ -5494,7 +5494,7 @@ pub fn sys_setns(args: SyscallArgs) -> i64 {
 ///
 /// Reads the real per-task values from task.rlimits.
 pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
-    use ::process::task::RLIM_NLIMITS;
+    use ::rux::process::types::RLIM_NLIMITS;
 
     let resource = args[0] as i32;
     let rlim_ptr = args[1] as *mut u64;
@@ -5540,7 +5540,7 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
 /// Stores into task.rlimits with the same validation as prlimit64
 /// (see there); RLIMIT_STACK also reprograms the mm stack bound.
 pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
-    use ::process::task::{rlimit_res, RLIM_NLIMITS};
+    use ::rux::process::{hotpath::rlimit_res, types::RLIM_NLIMITS};
 
     let resource = args[0] as i32;
     let rlim_ptr = args[1] as *const u64;
@@ -5736,7 +5736,7 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     // Only the current UTS namespace is affected (isolation contract).
-    ::process::ns::current_uts_ns().set_hostname(&buf[..len]);
+    rux::process::hotpath::current_uts_ns().set_hostname(&buf[..len]);
     0
 }
 
@@ -5772,7 +5772,7 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
     if crate::arch::uaccess_safe::copy_in(&mut buf[..len], name_ptr as usize) != 0 {
         return -(errno::EFAULT as i64);
     }
-    ::process::ns::current_uts_ns().set_domainname(&buf[..len]);
+    rux::process::hotpath::current_uts_ns().set_domainname(&buf[..len]);
     0
 }
 
@@ -5858,7 +5858,7 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
 
     // Only CLONE_* bits are meaningful; unknown bits (outside the CSIGNAL
     // byte) are EINVAL like clone.
-    const UNSHARE_KNOWN: u64 = ::process::ns::CLONE_NEWMASK
+    const UNSHARE_KNOWN: u64 = rux::process::hotpath::CLONE_NEWMASK
         | 0x00000200 /* CLONE_FS */
         | 0x00000400 /* CLONE_FILES */
         | 0x00010000 /* CLONE_THREAD (refused below, Linux EINVAL) */
@@ -5888,7 +5888,7 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
         }
     }
 
-    match ::process::ns::unshare_namespaces(flags) {
+    match rux::process::hotpath::unshare_namespaces(flags) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }
@@ -6512,7 +6512,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         Ok(pid) => {
             // Parent-namespace view, same as sys_clone's return.
             let parent_ns = rux::sched::current().and_then(|t| t.ns_pid.clone());
-            ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+            rux::process::hotpath::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }
         Err(e) => e as i64,
     }

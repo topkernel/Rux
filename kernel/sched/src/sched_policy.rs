@@ -38,7 +38,7 @@ use rux::api::sched::{
     WW_EV_AFFIRM
 };
 use crate::errno;
-use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
+use rux::process::{types::Task, types::TaskState, types::SchedPolicy, types::Pid, hotpath::PICK_LIVE, hotpath::PICK_PICKED};
 use crate::arch;
 use crate::println;
 use crate::config::MAX_CPUS;
@@ -1345,7 +1345,7 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
         psledger_note_publish(
             task_ptr,
             crate::arch::cpu_id() as usize,
-            if live { crate::process::task::PICK_LIVE } else { crate::process::task::PICK_PICKED },
+            if live { rux::process::hotpath::PICK_LIVE } else { rux::process::hotpath::PICK_PICKED },
         );
         pick_trace(task_ptr, 2);
     }
@@ -2361,7 +2361,7 @@ pub fn runq_strand_census(now_j: u64) {
         if !task.sched_entity().is_on_rq() {
             return;
         }
-        if task.state().bits() != crate::process::task::TaskState::RUNNING {
+        if task.state().bits() != rux::process::types::TaskState::RUNNING {
             return;
         }
         if task.on_cpu() {
@@ -2445,7 +2445,7 @@ pub fn runq_strand_census(now_j: u64) {
         printed += 1;
         // SAFETY: task was validated by phase A this burst.
         let tk = crate::sched::r#unsafe::task_shared(task as *mut Task);
-        let linked = match grq_diag_cfs_linked(task as *mut crate::process::task::Task) {
+        let linked = match grq_diag_cfs_linked(task as *mut rux::process::types::Task) {
             Some(v) => v as u8,
             None => 2,
         };
@@ -3032,8 +3032,8 @@ pub(crate) fn check_dl_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) 
 /// the GRQ lock. Without the migration a task could sit on two class queues
 /// at once (or on none), letting two CPUs pick it simultaneously or
 /// stranding it off-queue forever.
-pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32) {
-    use crate::process::task::SchedPolicy;
+pub fn change_task_policy(task: *mut Task, new_policy: rux::process::types::SchedPolicy, rt_prio: u32) {
+    use rux::process::types::SchedPolicy;
 
     let is_current = match current() {
         Some(c) => c as *const Task == task as *const Task,
@@ -3122,8 +3122,8 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     // — no poke from the migration dispatch), then the incumbent's
     // set_fifo LOWER runs here with linked=false and nothing pokes.
     if is_current && !linked {
-        fn class_rank(p: crate::process::task::SchedPolicy) -> u32 {
-            use crate::process::task::SchedPolicy;
+        fn class_rank(p: rux::process::types::SchedPolicy) -> u32 {
+            use rux::process::types::SchedPolicy;
             match p {
                 SchedPolicy::Deadline => 3,
                 SchedPolicy::Fifo | SchedPolicy::Rr => 2,

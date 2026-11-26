@@ -839,7 +839,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     if SHMTRAC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
         crate::pr_info!(
             "SHMTRAC: pid={} shmid={} shmaddr={:#x} shmflg={:#o} size={:#x}",
-            crate::process::current_pid(),
+            crate::process::hotpath::current_pid(),
             shmid,
             shmaddr,
             shmflg,
@@ -1127,7 +1127,7 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         let mut slots = SHM_IDS.slots.lock();
         if let Some(ref mut entry) = slots[idx] {
             let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
-            entry.inner.lpid.store(crate::process::current_pid(), Ordering::Relaxed);
+            entry.inner.lpid.store(crate::process::hotpath::current_pid(), Ordering::Relaxed);
             entry.inner.shm_dtime.store(ipc_current_time(), Ordering::Relaxed);
 
             // Free segment if marked for destruction and no more attaches.

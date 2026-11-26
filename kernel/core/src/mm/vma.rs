@@ -596,7 +596,7 @@ impl VmaManager {
                     "VMA-ADD-DUP start={:#x} end={:#x} pid={} — add will be REJECTED with Overlap (incumbent kept)",
                     start.as_usize(),
                     end.as_usize(),
-                    crate::process::current_pid()
+                    crate::process::hotpath::current_pid()
                 );
             }
         }

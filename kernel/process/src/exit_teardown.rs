@@ -9,7 +9,7 @@
 
 #![forbid(unsafe_code)]
 use crate::errno;
-use crate::task::{Pid, Task, TaskState};
+use rux::process::types::{Pid, Task, TaskState};
 
 // ============================================================================
 // Robust list / clear_child_tid exit processing (must run while the mm lives)
@@ -258,8 +258,8 @@ pub fn kill_other_threads(current: &Task) {
                         .load(core::sync::atomic::Ordering::Relaxed);
                     let nowt = crate::timer::read_time();
                     let linked = match m.policy() {
-                        crate::task::SchedPolicy::Fifo
-                        | crate::task::SchedPolicy::Rr => false,
+                        rux::process::types::SchedPolicy::Fifo
+                        | rux::process::types::SchedPolicy::Rr => false,
                         _ => m.sched_entity().timeline_key().is_some(),
                     };
                     #[cfg(feature = "x86_64")]
@@ -451,12 +451,12 @@ pub fn wait_for_thread_group_death(current: &Task, killable: bool) -> bool {
         if killable && crate::signal::fatal_signal_pending() {
             return false;
         }
-        current.set_state(crate::task::TaskState::new(
-            crate::task::TaskState::INTERRUPTIBLE,
+        current.set_state(rux::process::types::TaskState::new(
+            rux::process::types::TaskState::INTERRUPTIBLE,
         ));
         crate::sched::schedule();
-        current.set_state(crate::task::TaskState::new(
-            crate::task::TaskState::RUNNING,
+        current.set_state(rux::process::types::TaskState::new(
+            rux::process::types::TaskState::RUNNING,
         ));
     }
     true
@@ -662,7 +662,7 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
     m.signal = None;
     m.set_fs(None);
 
-    crate::task::Task::task_put(member);
+    rux::process::types::Task::task_put(member);
     // The burn: the obligation is consumed (the free above ran; the
     // claim dies with it — no re-park path holds it).
     core::mem::forget(claim);
@@ -1000,7 +1000,7 @@ pub fn release_task(task: *mut Task) {
     }
 
     // Remove from PID hash table before freeing resources
-    crate::pid_hash::pid_hash_remove(t.pid());
+    rux::process::hotpath::pid_hash_remove(t.pid());
 
     // Detach from parent's children list (must happen before freeing task memory)
     // E8-REPAR: screen the parent pointer first — do_wait claimed the
@@ -1053,8 +1053,8 @@ pub fn release_task(task: *mut Task) {
                     // still linked.
                     let c = crate::r#unsafe::borrow_task(child);
                     if c.state()
-                        == crate::task::TaskState::new(
-                            crate::task::TaskState::ZOMBIE,
+                        == rux::process::types::TaskState::new(
+                            rux::process::types::TaskState::ZOMBIE,
                         )
                     {
                         let mut info = crate::signal::SigInfo::child_exit(
@@ -1281,7 +1281,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
 
     // Free Task struct back to kernel heap — via task_put (R12-5): any
     // outstanding lookup pins delay the actual free to their own put.
-    crate::task::Task::task_put(task);
+    rux::process::types::Task::task_put(task);
     // The burn: the obligation is consumed (this is the synchronous
     // path's exactly-once free; the claim dies with it).
     core::mem::forget(claim);
@@ -1300,7 +1300,7 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
 ///   members and wait for the group to drain, then the classic ZOMBIE flow
 ///   (parent wait4 reaps via release_task).
 pub fn reparent_children_to_init(dying: &Task) {
-    use crate::task::TaskState;
+    use rux::process::types::TaskState;
 
     // init task (PID 1); falls back to no-op when absent (early boot).
     // SAFETY: pid 1's Task lives until system shutdown.
@@ -1326,7 +1326,7 @@ pub fn reparent_children_to_init(dying: &Task) {
     // in this process can still reap them. Only when no sibling
     // survives do we fall through to the subreaper/init walk.
     {
-        let _lock = crate::task::PROCESS_TREE_LOCK.lock();
+        let _lock = rux::process::hotpath::PROCESS_TREE_LOCK.lock();
         let mut member = dying.next_thread_ptr();
         let mut guard = 0u32;
         while (member as *const Task) != (dying_p as *const Task)
@@ -1348,11 +1348,11 @@ pub fn reparent_children_to_init(dying: &Task) {
             let m_ref = crate::r#unsafe::borrow_task(member);
             let st = m_ref.state();
             let member_exiting = m_ref.ti_flags()
-                & crate::task::task_flags::TaskFlags::PF_EXITING.bits()
+                & rux::process::types::TaskFlags::PF_EXITING.bits()
                 != 0;
             if !member_exiting
                 && !st.is_dead()
-                && !st.contains(crate::task::TaskState::ZOMBIE)
+                && !st.contains(rux::process::types::TaskState::ZOMBIE)
             {
                 // Pin INSIDE the lock hold: the member cannot leave the
                 // ring (thread_group_leave takes this lock) and a pinned
@@ -1390,7 +1390,7 @@ pub fn reparent_children_to_init(dying: &Task) {
         // The whole walk under the tree lock: every release_task of a
         // chain member has to pass remove_child under this lock first,
         // so no hop can be freed mid-walk.
-        let _lock = crate::task::PROCESS_TREE_LOCK.lock();
+        let _lock = rux::process::hotpath::PROCESS_TREE_LOCK.lock();
         while let Some(pp) = p {
             let pp = pp as *mut Task;
             // E8-REPAR: validate EVERY hop before dereferencing it
@@ -1430,7 +1430,7 @@ pub fn reparent_children_to_init(dying: &Task) {
                 .unwrap_or(false);
             let pp_exiting = crate::r#unsafe::borrow_task(pp)
                 .ti_flags()
-                & crate::task::task_flags::TaskFlags::PF_EXITING.bits()
+                & rux::process::types::TaskFlags::PF_EXITING.bits()
                 != 0;
             if is_reaper && !pp_exiting {
                 dest = pp;
@@ -1532,7 +1532,7 @@ pub fn reparent_children_to_init(dying: &Task) {
             // re-checks its children and the orphaned zombie leaks.
             // Group-wide: any member of dest's group may hold the
             // blocking wait (Linux wait_chldexit is group-shared).
-            if let Some(dest_handle) = crate::task_ref::TaskRef::lookup(dest_pid) {
+            if let Some(dest_handle) = rux::process::types::TaskRef::lookup(dest_pid) {
                 // The handle owns the pin for the wake.
                 crate::exit::wake_group_chldexit(&dest_handle);
             }

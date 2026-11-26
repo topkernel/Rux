@@ -18,7 +18,7 @@ const SECCOMP_DATA_SIZE: u32 = 4 + 4 + 8 + 6 * 8;
 /// Returns the RET value (default KILL on malformed access — Linux kills
 /// the task for out-of-bounds loads).
 pub fn seccomp_run(
-    prog: &[::process::task::SockFilter],
+    prog: &[rux::process::types::SockFilter],
     nr: u64,
     regs: &crate::arch::pt_regs::PtRegs,
 ) -> u32 {

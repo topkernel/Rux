@@ -59,7 +59,7 @@ fn who() -> (u32, &'static str) {
                 .unwrap_or("?")
         })
         .unwrap_or("?");
-    (crate::process::current_pid(), comm)
+    (crate::process::hotpath::current_pid(), comm)
 }
 
 /// TX: `sendmsg` attached `n` fds.

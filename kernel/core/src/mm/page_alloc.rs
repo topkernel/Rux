@@ -176,7 +176,7 @@ fn gate_holder_is_me() -> bool {
     if holder == 0 {
         return false;
     }
-    let pid = crate::process::current_pid();
+    let pid = crate::process::hotpath::current_pid();
     let me = if pid == 0 { usize::MAX } else { pid as usize };
     holder == me
 }
@@ -450,7 +450,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     // "free", so a pre-sched context claims usize::MAX) —
                     // do_exit clears a gate its dying task still holds.
                     let holder = {
-                        let pid = crate::process::current_pid();
+                        let pid = crate::process::hotpath::current_pid();
                         if pid == 0 { usize::MAX } else { pid as usize }
                     };
                     // PF_MEMALLOC parity (reference): an allocation made
@@ -1197,7 +1197,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     addr,
                     order,
                     pd_ref.map(|p| p.mapcount()).unwrap_or(0),
-                    crate::process::current_pid()
+                    crate::process::hotpath::current_pid()
                 );
                 crate::debug::backtrace::dump_stack();
             }
@@ -1238,7 +1238,7 @@ pub fn free_pages(addr: usize, order: usize) {
                         "free_pages: REFUSED frame {:#x} still CACHE-OWNED (type PageCache, mapping key live, refcount {}) pid {} — phantom-put free face",
                         addr,
                         p.refcount(),
-                        crate::process::current_pid()
+                        crate::process::hotpath::current_pid()
                     );
                     crate::debug::backtrace::dump_stack();
                 }
@@ -1347,7 +1347,7 @@ pub fn free_pages(addr: usize, order: usize) {
             }
         };
         if let Some((owner_pid, owner_va)) = stamped {
-            let dying = crate::process::current_pid();
+            let dying = crate::process::hotpath::current_pid();
             if owner_pid == dying {
                 crate::mm::page_desc::text_stamp_remove(pfn);
                 // Silent by design: printing from free_pages contexts (any

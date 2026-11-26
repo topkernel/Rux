@@ -173,7 +173,7 @@ pub struct EvdevDevice {
     /// Poll/select waiters (P3: event-driven poll). Woken in push_event so
     /// a waiter blocked in poll() on this device sleeps until a real input
     /// event arrives instead of waking at tick rate to re-check.
-    pub poll_waitq: crate::process::wait::WaitQueueHead,
+    pub poll_waitq: crate::process::types::WaitQueueHead,
 }
 
 impl EvdevDevice {
@@ -200,7 +200,7 @@ impl EvdevDevice {
             grabbed: AtomicBool::new(false),
             led_state: AtomicU32::new(0),
             event_queue: Spinlock::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
-            poll_waitq: crate::process::wait::WaitQueueHead::new(),
+            poll_waitq: crate::process::types::WaitQueueHead::new(),
         }
     }
 
@@ -386,7 +386,7 @@ pub fn push_event(&self, event: InputEvent) {
                 // this boot means the screen has already self-healed
                 // leaked entries from dead parkers upstream of this push.
                 l.push(b" stE=");
-                l.u64(crate::process::wait::WQ_STALE_EVICTED.load(Ordering::Relaxed));
+                l.u64(crate::process::hotpath::WQ_STALE_EVICTED.load(Ordering::Relaxed));
                 l.push(b"\n");
                 l.flush();
             }
@@ -467,7 +467,7 @@ pub fn push_event(&self, event: InputEvent) {
                 l.push(b"INPOP[");
                 l.u64(n);
                 l.push(b"] ");
-                l.u64(crate::process::current_pid() as u64);
+                l.u64(crate::process::hotpath::current_pid() as u64);
                 l.push(b" ");
                 for &c in self.name.iter().take_while(|&&c| c != 0).take(10) {
                     l.push(&[c]);
@@ -611,7 +611,7 @@ fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
 /// Returns false if no task context / timer was available (caller should
 /// fall back to a yield-style retry).
 fn sleep_ms_interruptible(ms: u64) -> bool {
-    use crate::process::task::{Task, TaskState};
+    use crate::process::types::{Task, TaskState};
 
     let target =
         crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
@@ -756,7 +756,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                         crate::pr_warn!(
                             "IN-READ #{} pid={} name={} type={} code={} val={} remain={}",
                             rn,
-                            crate::process::current_pid(),
+                            crate::process::hotpath::current_pid(),
                             alloc::string::String::from_utf8_lossy(&nm),
                             event.type_,
                             event.code,
@@ -796,7 +796,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
     // The wake-drop hunt's opener latch (PPARK/PRET filter) — armed
     // with the same gate as the rest of the hunt echoes.
     if crate::trace::EVENT_EVDEV_OPEN.armed() {
-        latch_opener_pid(crate::process::current_pid() as u32);
+        latch_opener_pid(crate::process::hotpath::current_pid() as u32);
     }
     // The tracepoint path first (it's the policy instrument; the debug
     // prints below are the frozen legacy view of the same event).
@@ -829,7 +829,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
         .take_while(|&&c| c != 0)
         .copied()
         .collect();
-    let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
+    let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::hotpath::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
     // obs-hygiene: line-atomic funnel instead of per-byte raw writes.
     crate::debug::taskdump::taskdump_raw_line(s.as_bytes());
 }
@@ -924,7 +924,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
 // ============================================================================
 
 /// Register `task` on the device's poll wait queue; push_event wakes it.
-pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+pub fn evdev_poll_wait(file: &File, task: *mut crate::process::types::Task) -> bool {
     // SAFETY: dispatcher identity-checked the File against EVDEV_OPS;
     // private_data holds a DevNo installed at open and the EVDEV_* statics
     // outlive every file.
@@ -932,7 +932,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
         Some(device) => {
             device
                 .poll_waitq
-                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+                .add(crate::process::types::WaitQueueEntry::new(task, false));
             // input:evdev_wake hunt: echo the park registration (names
             // WHO parks on the input nodes — the OH rig reads it off
             // serial). Same armed() gate as the verdict echo.
@@ -968,7 +968,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
 }
 
 /// Remove a registration added by evdev_poll_wait.
-pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::types::Task) {
     // SAFETY: same contract as evdev_poll_wait.
     if let Some(device) = device_of_file(file) {
         let dropped = device.poll_waitq.remove_count(task);
@@ -1112,7 +1112,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
             crate::pr_warn!(
                 "IN-IOCTL #{} pid={} name={} cmd={:#x}",
                 n,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 alloc::string::String::from_utf8_lossy(&nm),
                 cmd
             );
@@ -1262,7 +1262,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
                             crate::pr_warn!(
                                 "IN-TYPEBITS #{} pid={} name={} types={:#04x}",
                                 tn,
-                                crate::process::current_pid(),
+                                crate::process::hotpath::current_pid(),
                                 alloc::string::String::from_utf8_lossy(&nm),
                                 types[0]
                             );

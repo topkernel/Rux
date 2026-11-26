@@ -344,7 +344,7 @@ pub fn irq_enter() {
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
         let cur = crate::sched::current()
-            .map(|t| t as *mut crate::process::task::Task as usize)
+            .map(|t| t as *mut crate::process::types::Task as usize)
             .unwrap_or(0);
         let depth = IRQ_BOOK_DEPTH_CNT[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         if depth < IRQ_BOOK_DEPTH {
@@ -437,7 +437,7 @@ pub fn irq_exit() {
             let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
             if booked != 0 {
                 if let Some(cur) = crate::sched::current() {
-                    let cur_ptr = cur as *mut crate::process::task::Task as usize;
+                    let cur_ptr = cur as *mut crate::process::types::Task as usize;
                     if cur_ptr != booked {
                         irq_pair_report(cpu, booked, cur_ptr);
                     }
@@ -466,7 +466,7 @@ pub fn irq_exit() {
     }
     if booked != 0 {
         let cur = crate::sched::current()
-            .map(|t| t as *mut crate::process::task::Task as usize)
+            .map(|t| t as *mut crate::process::types::Task as usize)
             .unwrap_or(0);
         if cur == booked {
             preempt_count_sub(HARDIRQ_OFFSET);
@@ -476,9 +476,9 @@ pub fn irq_exit() {
             // bracket (it ran on another CPU) — the safe accessor
             // keeps the write off a freed page; the count of a freed
             // task is meaningless anyway.
-            let bpid = crate::process::task::Task::task_pid_of(booked as *mut crate::process::task::Task);
-            let released = crate::process::task::Task::release_hardirq_base_on(
-                booked as *mut crate::process::task::Task,
+            let bpid = crate::process::types::Task::task_pid_of(booked as *mut crate::process::types::Task);
+            let released = crate::process::types::Task::release_hardirq_base_on(
+                booked as *mut crate::process::types::Task,
                 HARDIRQ_OFFSET,
                 core::panic::Location::caller(),
             );
@@ -734,7 +734,7 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     let slot_pid = if slot_task >= 0x8000_0000_0000_0000 {
         // Diagnostic scalar read of the sched slot's task (the forensics
         // stale-handle edge — it was this CPU's published pick).
-        crate::debug::r#unsafe::t_pid(slot_task as *const crate::process::Task)
+        crate::debug::r#unsafe::t_pid(slot_task as *const crate::process::types::Task)
     } else {
         0
     };

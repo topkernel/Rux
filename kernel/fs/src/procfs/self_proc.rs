@@ -18,7 +18,7 @@ use alloc::format;
 ///
 /// Returns the PID number of the current process.
 pub fn get_self_link() -> Vec<u8> {
-    use crate::process::current_pid;
+    use crate::process::hotpath::current_pid;
     let pid = current_pid();
     format!("{}", pid).into_bytes()
 }
@@ -40,6 +40,6 @@ pub fn get_thread_self_link() -> Vec<u8> {
             let tid = t.pid();
             format!("{}", tid).into_bytes()
         }
-        None => format!("{}", crate::process::current_pid()).into_bytes(),
+        None => format!("{}", crate::process::hotpath::current_pid()).into_bytes(),
     }
 }

@@ -38,7 +38,7 @@
 
 #![forbid(unsafe_code)]
 use crate::arch::pt_regs::PtRegs;
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 /// The arch cold diagnostic rows (all cold; see the module doc).
 #[derive(Clone, Copy)]

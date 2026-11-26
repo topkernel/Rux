@@ -67,16 +67,16 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
         // and the wakeup would be lost — softirqs would then sit pending
         // until the next unrelated interrupt (Linux run_ksoftirqd pattern).
         if let Some(current) = crate::sched::current() {
-            current.set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::INTERRUPTIBLE,
+            current.set_state(crate::process::types::TaskState::new(
+                crate::process::types::TaskState::INTERRUPTIBLE,
             ));
         }
 
         if crate::interrupt::softirq::has_pending_softirqs() {
             // Race with wakeup — clear state and drain instead of sleeping
             if let Some(current) = crate::sched::current() {
-                current.set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::RUNNING,
+                current.set_state(crate::process::types::TaskState::new(
+                    crate::process::types::TaskState::RUNNING,
                 ));
                 // R33 (NEW-C2 discipline): the racing wakeup_ksoftirqd saw
                 // us INTERRUPTIBLE and may have set RUNNING + enqueued us
@@ -118,7 +118,7 @@ pub fn wakeup_ksoftirqd() {
     }
 
     if let Some(&addr) = KSOFTIRQD_TASK[cpu].get() {
-        crate::process::task::Task::wake_up(addr as *mut crate::process::task::Task);
+        crate::process::types::Task::wake_up(addr as *mut crate::process::types::Task);
     }
 }
 

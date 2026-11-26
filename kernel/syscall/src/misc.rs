@@ -163,7 +163,7 @@ struct EpollFile {
     /// Waiters blocked in epoll_wait (P1: busy-yield elimination). Woken by
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
-    wait_queue: ::process::wait::WaitQueueHead,
+    wait_queue: rux::process::types::WaitQueueHead,
     /// rux:socksnap (retired debug=socksnap) (b16): creator pid, printed by the interest dump so an
     /// epoll line can be tied to its owning process.
     owner_pid: u32,
@@ -726,7 +726,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             // irqsave: current's rlimits lock is shared with IRQ context
             // (scheduler_tick -> Task::rlimit -> lock_irqsave); a plain
             // holder interrupted by the tick self-deadlocks the CPU.
-            .map(|t| t.rlimits.lock_irqsave()[::process::task::rlimit_res::NOFILE].0)
+            .map(|t| t.rlimits.lock_irqsave()[rux::process::hotpath::rlimit_res::NOFILE].0)
             .unwrap_or(1024);
         if nfds as u64 > nofile {
             return -(errno::EINVAL as i64);
@@ -1093,7 +1093,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
 /// remaining timeout and EPOLL_RECHECK_JIFFIES), timer-woken. Degrades to
 /// a single schedule() round when the timer pool is exhausted.
 fn poll_sleep_slice(deadline_ns: Option<u64>) {
-    use ::process::task::TaskState;
+    use ::rux::process::types::TaskState;
 
     let current = match rux::sched::current() {
         Some(t) => t,
@@ -1176,8 +1176,8 @@ fn poll_sleep_slice(deadline_ns: Option<u64>) {
 // ============================================================================
 
 /// Per-fd-type poll-wait registration pair, dispatched by FileOps identity.
-type PollWaitRegFn = fn(&crate::fs::File, *mut ::process::task::Task) -> bool;
-type PollWaitUnregFn = fn(&crate::fs::File, *mut ::process::task::Task);
+type PollWaitRegFn = fn(&crate::fs::File, *mut rux::process::types::Task) -> bool;
+type PollWaitUnregFn = fn(&crate::fs::File, *mut rux::process::types::Task);
 
 /// Resolve the poll-wait register/unregister pair for `file`, or None when
 /// the file type has no producer-woken readiness queue.
@@ -1309,15 +1309,15 @@ enum PollEventWait {
 /// registrations.
 fn poll_event_wait_round(
     files: &[alloc::sync::Arc<crate::fs::File>],
-    task: *mut ::process::task::Task,
+    task: *mut rux::process::types::Task,
     // ABSOLUTE monotonic-ns deadline (None = wait forever). Armed as a
     // HIGH-RESOLUTION wake (same discipline as nanosleep) so short
     // timeouts fire between grid ticks, not at the next 10 ms jiffy.
     deadline: Option<u64>,
     ready: &dyn Fn() -> bool,
 ) -> PollEventWait {
-    use ::process::task::TaskState;
-    use ::process::wait::WaitQueueEntry;
+    use ::rux::process::types::TaskState;
+    use ::rux::process::types::WaitQueueEntry;
 
     // 1. State transition BEFORE registering on the queues (the
     //    prepare_to_wait discipline: a producer wake must never find the
@@ -1362,7 +1362,7 @@ fn poll_event_wait_round(
         }
     }
 
-    let unwait_all = |task: *mut ::process::task::Task| {
+    let unwait_all = |task: *mut rux::process::types::Task| {
         for (i, r) in regs.iter().enumerate() {
             r(&files[i], task);
         }
@@ -2009,7 +2009,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
         entries: crate::sync::spinlock::Spinlock::new(EpollEntryList {
             head: crate::list::ListHead::new(),
         }),
-        wait_queue: ::process::wait::WaitQueueHead::new(),
+        wait_queue: rux::process::types::WaitQueueHead::new(),
         owner_pid: ::process::current_pid(),
         wait_count: 0,
         notify_pins: core::sync::atomic::AtomicUsize::new(0),
@@ -2757,11 +2757,11 @@ pub fn param_stall_dump() {
             if tgid == 0 {
                 continue;
             }
-            let mut leader: *mut ::process::task::Task = core::ptr::null_mut();
+            let mut leader: *mut rux::process::types::Task = core::ptr::null_mut();
             rux::sched::for_each_task_try(|task| {
                 if leader.is_null() && task.tgid() as u32 == tgid && task.pid() as u32 == tgid {
-                    leader = task as *const ::process::task::Task
-                        as *mut ::process::task::Task;
+                    leader = task as *const rux::process::types::Task
+                        as *mut rux::process::types::Task;
                 }
             });
             if leader.is_null() {
@@ -2873,7 +2873,7 @@ pub fn param_stall_dump() {
             // pinned by ww_watch_add and tasks on the watch list are
             // never freed past a note_task_freed barrier (sched.rs) —
             // INV-PROC-BORROW-1 watch-pin arm.
-            let watched = ::process::r#unsafe::borrow_task(t as *mut ::process::task::Task);
+            let watched = ::process::r#unsafe::borrow_task(t as *mut rux::process::types::Task);
             let (pid, comm) = (watched.pid(), watched.comm());
             let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
             let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
@@ -2902,9 +2902,9 @@ pub fn param_stall_dump() {
     // break is "which syscall is init's main thread parked in" — this
     // answers it directly at 300 s.
     {
-        ::process::pid_hash::pid_hash_for_each_task_try(|t| {
-            let t = t as *const ::process::task::Task
-                as *mut ::process::task::Task;
+        rux::process::hotpath::pid_hash_for_each_task_try(|t| {
+            let t = t as *const rux::process::types::Task
+                as *mut rux::process::types::Task;
             let tk = ::process::r#unsafe::borrow_task(t);
             if tk.tgid() != 1 {
                 return;
@@ -2951,7 +2951,7 @@ pub fn param_stall_dump() {
 /// entity, preempt count, parked-syscall latches) so an orphan-marked or
 /// wake-refused sender is visible on the line itself.
 pub fn param_sender_dump() {
-    use ::process::task::{SchedPolicy, Task, TaskState};
+    use ::rux::process::types::{SchedPolicy, Task, TaskState};
     // init's unix socket identities (Arc raw pointers), one fdtable pass.
     let init_task = rux::sched::find_task_by_pid(1);
     if init_task.is_null() {
@@ -2971,7 +2971,7 @@ pub fn param_sender_dump() {
         init_socks.len()
     );
     // Read-only diagnostic iteration (pid_hash try contract).
-    ::process::pid_hash::pid_hash_for_each_task_try(|t| {
+    rux::process::hotpath::pid_hash_for_each_task_try(|t| {
             if rows >= 40 {
                 return;
             }
@@ -3009,7 +3009,7 @@ pub fn param_sender_dump() {
             }
             rows += 1;
             let linked = match rux::sched::sched::grq_diag_cfs_linked(
-                t as *const ::process::task::Task as *mut ::process::task::Task,
+                t as *const rux::process::types::Task as *mut rux::process::types::Task,
             ) {
                 Some(true) => "1",
                 Some(false) => "0",
@@ -3044,7 +3044,7 @@ pub fn param_sender_dump() {
     crate::pr_warn!("PARAM-SENDERS end rows={}", rows);
 }
 
-pub fn pid1_epoll_interest_dump(pid: ::process::task::Pid) {
+pub fn pid1_epoll_interest_dump(pid: rux::process::types::Pid) {
     // SAFETY: diagnostic lookup of the target task (find_task_by_pid
     // contract); read-only walks of its fdtable below.
     let task = rux::sched::find_task_by_pid(pid);
@@ -4150,7 +4150,7 @@ struct EventFd {
     /// EFD_SEMAPHORE flag
     semaphore: bool,
     /// Waiters blocked for counter != 0 (readers) or counter decrease (writers)
-    wait_queue: ::process::wait::WaitQueueHead,
+    wait_queue: rux::process::types::WaitQueueHead,
 }
 
 impl EventFd {
@@ -4158,7 +4158,7 @@ impl EventFd {
         Self {
             counter: core::sync::atomic::AtomicU64::new(initval),
             semaphore: (flags & EFD_SEMAPHORE) != 0,
-            wait_queue: ::process::wait::WaitQueueHead::new(),
+            wait_queue: rux::process::types::WaitQueueHead::new(),
         }
     }
 
@@ -4385,7 +4385,7 @@ struct TimerFd {
     /// Number of timer expirations since last read()
     expiration_count: core::sync::atomic::AtomicU64,
     /// Readers blocked until the timer fires
-    wait_queue: ::process::wait::WaitQueueHead,
+    wait_queue: rux::process::types::WaitQueueHead,
     /// Owning File's generation id (0 until create finishes) — the
     /// expiry path notifies the epoll registry with it (the EPOLLET
     /// lost-edge fix; see timerfd_expire_notify).
@@ -4399,7 +4399,7 @@ impl TimerFd {
             kernel_timer_id: 0,
             interval_jiffies: 0,
             expiration_count: core::sync::atomic::AtomicU64::new(0),
-            wait_queue: ::process::wait::WaitQueueHead::new(),
+            wait_queue: rux::process::types::WaitQueueHead::new(),
             file_id: 0,
         }
     }
@@ -4584,7 +4584,7 @@ pub(crate) static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder(
 
 /// Register `task` on the timerfd's wait queue; timerfd_expire_notify
 /// wakes it when the timer fires.
-fn timerfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -> bool {
+fn timerfd_poll_wait(file: &crate::fs::File, task: *mut rux::process::types::Task) -> bool {
     // SAFETY: the dispatcher identity-checked the File against TIMERFD_OPS;
     // private_data was installed by sys_timerfd_create as Box::into_raw and
     // stays valid while the File exists.
@@ -4593,12 +4593,12 @@ fn timerfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
         None => return false,
     };
     tfd.wait_queue
-        .add(::process::wait::WaitQueueEntry::new(task, false));
+        .add(rux::process::types::WaitQueueEntry::new(task, false));
     true
 }
 
 /// Remove a registration added by timerfd_poll_wait.
-fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
+fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut rux::process::types::Task) {
     // SAFETY: same contract as timerfd_poll_wait.
     if let Some(tfd) = ::process::r#unsafe::file_private_data_ref::<TimerFd>(file) {
         tfd.wait_queue.remove(task);
@@ -4613,7 +4613,7 @@ fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task)
 /// from poll_wait_impls — every poll()/epoll_wait() over an eventfd fell
 /// back to the 10 ms re-check slice (latency plus a full fd-set rescan
 /// per slice per waiter, the same tax the 26th removed for binder).
-fn eventfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -> bool {
+fn eventfd_poll_wait(file: &crate::fs::File, task: *mut rux::process::types::Task) -> bool {
     // SAFETY: the dispatcher identity-checked the File against EVENTFD_OPS;
     // private_data was installed by sys_eventfd2 as Box::into_raw and stays
     // valid while the File exists.
@@ -4622,12 +4622,12 @@ fn eventfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -
         None => return false,
     };
     efd.wait_queue
-        .add(::process::wait::WaitQueueEntry::new(task, false));
+        .add(rux::process::types::WaitQueueEntry::new(task, false));
     true
 }
 
 /// Remove a registration added by eventfd_poll_wait.
-fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
+fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut rux::process::types::Task) {
     // SAFETY: same contract as eventfd_poll_wait.
     if let Some(efd) = ::process::r#unsafe::file_private_data_ref::<EventFd>(file) {
         efd.wait_queue.remove(task);
@@ -4636,7 +4636,7 @@ fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task)
 
 /// Register `task` on the signalfd's wait queue; signalfd_notify_task
 /// wakes it when a masked signal arrives.
-fn signalfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) -> bool {
+fn signalfd_poll_wait(file: &crate::fs::File, task: *mut rux::process::types::Task) -> bool {
     // SAFETY: the dispatcher identity-checked the File against SIGNALFD_OPS;
     // private_data was installed by sys_signalfd4_impl as Box::into_raw and
     // stays valid while the File exists.
@@ -4645,12 +4645,12 @@ fn signalfd_poll_wait(file: &crate::fs::File, task: *mut ::process::task::Task) 
         None => return false,
     };
     sfd.wait_queue
-        .add(::process::wait::WaitQueueEntry::new(task, false));
+        .add(rux::process::types::WaitQueueEntry::new(task, false));
     true
 }
 
 /// Remove a registration added by signalfd_poll_wait.
-fn signalfd_poll_unwait(file: &crate::fs::File, task: *mut ::process::task::Task) {
+fn signalfd_poll_unwait(file: &crate::fs::File, task: *mut rux::process::types::Task) {
     // SAFETY: same contract as signalfd_poll_wait.
     if let Some(sfd) = ::process::r#unsafe::file_private_data_ref::<SignalFd>(file) {
         sfd.wait_queue.remove(task);
@@ -4679,7 +4679,7 @@ struct SignalFd {
     /// Signals readable through this fd (bit i-1 = signal i).
     mask: crate::sync::spinlock::Spinlock<u64>,
     /// Readers blocked waiting for a masked signal to arrive.
-    wait_queue: ::process::wait::WaitQueueHead,
+    wait_queue: rux::process::types::WaitQueueHead,
 }
 
 
@@ -4900,7 +4900,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
     };
     let sfd = alloc::boxed::Box::new(SignalFd {
         mask: crate::sync::spinlock::Spinlock::new(mask),
-        wait_queue: ::process::wait::WaitQueueHead::new(),
+        wait_queue: rux::process::types::WaitQueueHead::new(),
     });
     let sfd_ptr = alloc::boxed::Box::into_raw(sfd) as *mut u8;
 

@@ -144,7 +144,7 @@ pub fn resched_cpu(cpu: usize) {
 }
 
 pub fn wake_up_process(task: *mut Task) -> bool {
-    use crate::process::Task;
+    use crate::process::types::Task;
     Task::wake_up(task)
 }
 
@@ -152,7 +152,7 @@ pub fn wake_up_process(task: *mut Task) -> bool {
 /// transition as wake_up_process; the dispatch stacks the wakee with the
 /// waker (see Task::wake_up_impl's sync leg).
 pub fn wake_up_process_sync(task: *mut Task) -> bool {
-    use crate::process::Task;
+    use crate::process::types::Task;
     Task::wake_up_sync(task)
 }
 
@@ -420,7 +420,7 @@ pub fn wake_up_enqueue_opt(
                 let claim = crate::sched::r#unsafe::task_shared(task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
                 let mid_sw = task_is_mid_switch_out(task);
                 if !linked
-                    && pk == crate::process::task::PICK_LIVE
+                    && pk == crate::process::hotpath::PICK_LIVE
                     && !curr_on
                     && !mid_sw
                     && claim == -1
@@ -428,7 +428,7 @@ pub fn wake_up_enqueue_opt(
                 {
                     crate::sched::r#unsafe::task_shared(task).release_pick_ownership();
                     crate::sched::r#unsafe::task_shared(task).ti_pick_state.store(
-                        crate::process::task::PICK_PICKED,
+                        crate::process::hotpath::PICK_PICKED,
                         core::sync::atomic::Ordering::Release,
                     );
                     // Rule 1 (grq-lock-1st): event ring, not the console.
@@ -844,7 +844,7 @@ pub fn wake_up_enqueue_opt(
                 // a starved-but-live picker aborts at its affirm CAS; only
                 // then may the orphaned mark be cleared.
                 let ps = crate::sched::r#unsafe::task_shared(task).pick_state();
-                if ps == crate::process::task::PICK_LIVE {
+                if ps == crate::process::hotpath::PICK_LIVE {
                     // R80 (LIVE-phantom heal, the v1-r1 Xorg capture): we
                     // are holding the GRQ with the task RUNNING ∧ unlinked ∧
                     // owned by no slot (the curr_on scan above — lying idle
@@ -893,7 +893,7 @@ pub fn wake_up_enqueue_opt(
                         0,
                     );
                     // Fall through to the release + insert below.
-                } else if ps == crate::process::task::PICK_PICKED
+                } else if ps == crate::process::hotpath::PICK_PICKED
                     && !crate::sched::r#unsafe::task_shared(task).revoke_pending_pick()
                 {
                     // The picker affirmed LIVE under us (it is resuming
@@ -1025,7 +1025,7 @@ pub fn wake_up_enqueue_opt(
             let pc = crate::sched::r#unsafe::task_shared(task).preempt_count();
             if pc != 0 {
                 let exiting = crate::sched::r#unsafe::task_shared(task).ti_flags()
-                    & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                    & crate::process::types::TaskFlags::PF_EXITING
                         .bits()
                     != 0;
                 let mut mid_switch = task_is_mid_switch_out(task);
@@ -1160,10 +1160,10 @@ pub fn wake_up_enqueue_opt(
                                 .ext.last_calls_cur
                                 .load(core::sync::atomic::Ordering::Relaxed);
                             for k in 0..12usize {
-                                let idx = (cur + crate::process::task::LAST_CALLS_LEN
+                                let idx = (cur + crate::process::types::LAST_CALLS_LEN
                                     - 1
                                     - k)
-                                    % crate::process::task::LAST_CALLS_LEN;
+                                    % crate::process::types::LAST_CALLS_LEN;
                                 let nr = crate::sched::r#unsafe::task_shared(task).ext.last_calls[idx]
                                     .load(core::sync::atomic::Ordering::Relaxed);
                                 if k > 0 {
@@ -1716,7 +1716,7 @@ pub(crate) fn pick_gen_supersede(cpu: usize, task: *mut Task) {
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
-pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32) { crate::api::sched::change_task_policy(task, new_policy, rt_prio) }
+pub fn change_task_policy(task: *mut Task, new_policy: crate::process::types::SchedPolicy, rt_prio: u32) { crate::api::sched::change_task_policy(task, new_policy, rt_prio) }
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -2061,7 +2061,7 @@ pub fn sched_ev_drain(budget: usize) -> usize { crate::api::sched::sched_ev_drai
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
-pub fn note_task_freed(task: *mut crate::process::Task) { crate::api::sched::note_task_freed(task) }
+pub fn note_task_freed(task: *mut crate::process::types::Task) { crate::api::sched::note_task_freed(task) }
 
 /// Hook-routed (S1b): the policy crate's compiled fn via SchedHooks.
 #[inline]
@@ -2069,7 +2069,7 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) { crate::api::sched::rep
 
 
 use crate::errno;
-use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
+use crate::process::{types::Task, types::TaskState, types::SchedPolicy, types::Pid, hotpath::PICK_LIVE, hotpath::PICK_PICKED};
 use crate::arch;
 use crate::println;
 use crate::config::MAX_CPUS;
@@ -3080,11 +3080,11 @@ pub fn kernel_task_ptr_range_ok(p: *const u8) -> bool {
         return false;
     }
     let init_lo = crate::init::init_task_storage_addr();
-    if a >= init_lo && a < init_lo + core::mem::size_of::<crate::process::task::Task>() {
+    if a >= init_lo && a < init_lo + core::mem::size_of::<crate::process::types::Task>() {
         return true;
     }
     let idle_lo = crate::sched::r#unsafe::idle_task_storage_base();
-    let idle_span = core::mem::size_of::<crate::process::task::Task>() * MAX_CPUS;
+    let idle_span = core::mem::size_of::<crate::process::types::Task>() * MAX_CPUS;
     a >= idle_lo && a < idle_lo + idle_span
 }
 
@@ -3582,7 +3582,7 @@ pub fn deferred_exit_notify_slots(out: &mut [i64]) {
 /// siginfo AND the child's clone exit_signal (do_notify_parent sends
 /// THAT signal, not always SIGCHLD — LTP clone301 exit_signal=SIGUSR2).
 fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
-    let child = crate::process::pid_hash::pid_hash_lookup_pinned(child_pid);
+    let child = crate::process::hotpath::pid_hash_lookup_pinned(child_pid);
     if child.is_null() {
         return None;
     }
@@ -3597,7 +3597,7 @@ fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
         );
         (i, child.get_exit_signal())
     };
-    crate::process::task::Task::task_put(child);
+    crate::process::types::Task::task_put(child);
     Some((info, exit_sig))
 }
 
@@ -3653,13 +3653,13 @@ fn process_deferred_exit_pid(packed: i64) {
             let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
         }
     }
-    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(parent_pid);
+    let parent = crate::process::hotpath::pid_hash_lookup_pinned(parent_pid);
     if !parent.is_null() {
         // Group-wide wake: Linux's wait_chldexit queue is shared by the
         // whole thread group — a sibling blocked in wait4/waitid (e.g.
         // glib's gmain worker) must also observe the child exit.
-        crate::process::exit::wake_group_chldexit(crate::process::r#unsafe::borrow_task(parent));
-        crate::process::task::Task::task_put(parent);
+        crate::process::hotpath::wake_group_chldexit(crate::process::r#unsafe::borrow_task(parent));
+        crate::process::types::Task::task_put(parent);
     }
     if fp {
         crate::debug::forkprof::add(crate::debug::forkprof::P_SCHED_NOTIFY, fp_t0);
@@ -3689,7 +3689,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
     DEFERRED_EXIT_NOTIFY[cpu].store(0, core::sync::atomic::Ordering::Relaxed);
 
     let (pid, _child) = unpack_notify(packed);
-    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
+    let parent = crate::process::hotpath::pid_hash_lookup_pinned(pid);
     if !parent.is_null() {
         // SAFETY: parent was obtained from pid_hash_lookup and is a valid Task
         // pointer (PID hash table entries are not freed until release_task).
@@ -3723,7 +3723,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
                 steer_task_cpu(parent, cpu as i32);
             }
         }
-        crate::process::task::Task::task_put(parent);
+        crate::process::types::Task::task_put(parent);
     }
 
     process_deferred_exit_pid(packed);
@@ -4001,7 +4001,7 @@ pub fn init() {
             let idle_ptr = crate::sched::r#unsafe::idle_task_ptr(cpu);
             Task::new_idle_at(idle_ptr);
 
-            crate::process::pid_hash::pid_hash_insert(idle_ptr);
+            crate::process::hotpath::pid_hash_insert(idle_ptr);
 
             if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
                 (*idle_ptr).thread_mut().sp = stack_top as u64;
@@ -4190,7 +4190,7 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
             free_task_slot(task_ptr);
             return None;
         }
-        crate::process::pid_hash::pid_hash_insert(task_ptr);
+        crate::process::hotpath::pid_hash_insert(task_ptr);
     }
 
     // R69: the ownership bitmap was never populated — task_page_mark had
@@ -4615,11 +4615,11 @@ pub fn free_task_slot(task_ptr: *mut Task) {
             // u32 writes (not one u64) so a future field inserted between
             // state and pid cannot silently miss pid again.
             core::ptr::write_volatile(
-                slot.add(crate::process::task::TASK_STATE) as *mut u32,
+                slot.add(crate::process::hotpath::TASK_STATE) as *mut u32,
                 TASK_POISON,
             );
             core::ptr::write_volatile(
-                slot.add(crate::process::task::TASK_PID) as *mut u32,
+                slot.add(crate::process::hotpath::TASK_PID) as *mut u32,
                 TASK_POISON,
             );
             // (2026-11-23: the R83 freed-header paint loop that lived here
@@ -4666,7 +4666,7 @@ pub fn schedule() {
                 "SCHEDULE-ATOMIC (reference __schedule_bug parity) caller={}:{} pid={} pc={:#x} in_softirq={} in_irq={}",
                 loc.file(),
                 loc.line(),
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 crate::interrupt::preempt::preempt_count(),
                 crate::interrupt::preempt::in_softirq(),
                 crate::interrupt::preempt::in_irq(),
@@ -4691,7 +4691,7 @@ pub fn schedule() {
                 "SCHED-IRQOFF caller={}:{} pid={} pc={:#x}",
                 loc.file(),
                 loc.line(),
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 crate::sched::current()
                     .map(|t| t.preempt_count())
                     .unwrap_or(0)
@@ -4722,7 +4722,7 @@ pub fn schedule() {
     // cleared on return from __schedule in the same frame (per-task, so
     // coroutine resume/migration pair it correctly, unlike a per-CPU
     // flag).
-    use crate::process::task::task_flags::TaskFlags;
+    use crate::process::types::TaskFlags;
     const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
     if let Some(cur) = current() {
         cur.set_ti_flag(IN_SCHED);
@@ -4868,7 +4868,7 @@ fn grq_raw_puthex(v: u64) {
 }
 
 pub fn schedule_dead_never_returns() {
-    use crate::process::task::task_flags::TaskFlags;
+    use crate::process::types::TaskFlags;
     const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
     // boot-63 residue: the pacing flag — positive knowledge that this
     // task still executes here. Cleared only at the real switch-out
@@ -5003,11 +5003,11 @@ pub fn schedule_dead_never_returns() {
                         let l = {
                             let cur_t = crate::sched::r#unsafe::task_shared(cur);
                             match cur_t.policy() {
-                                crate::process::task::SchedPolicy::Fifo
-                                | crate::process::task::SchedPolicy::Rr => {
+                                crate::process::types::SchedPolicy::Fifo
+                                | crate::process::types::SchedPolicy::Rr => {
                                     g.rt_rq.is_linked(cur)
                                 }
-                                crate::process::task::SchedPolicy::Deadline => {
+                                crate::process::types::SchedPolicy::Deadline => {
                                     g.dl_rq.is_linked(cur)
                                 }
                                 _ => g.cfs_rq.is_linked(cur),
@@ -5254,7 +5254,7 @@ fn __schedule() {
         // R74 tripwire: name the shape (it is the orphan producer)
         // rate-limited.
         if home == usize::MAX && (tp as usize) >= 0x8000_0000_0000_0000 {
-            use crate::process::task::task_flags::TaskFlags;
+            use crate::process::types::TaskFlags;
             let tpr = crate::sched::r#unsafe::task_shared(tp);
             let exiting =
                 tpr.ti_flags() & TaskFlags::PF_EXITING.bits() != 0;
@@ -6202,7 +6202,7 @@ fn __schedule() {
 /// try_lock semantics so a wedged holder can never wedge the diagnostic
 /// itself; a busy lock reports linkage as unknown (None) and the dump
 /// labels it, exactly like the skipped pid-hash buckets.
-pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool> {
+pub fn grq_diag_cfs_linked(task: *mut crate::process::types::Task) -> Option<bool> {
     if task.is_null() {
         return Some(false);
     }
@@ -6245,7 +6245,7 @@ pub fn grq_nr_running_now() -> usize {
 pub fn grq_diag_cpu_currents() -> [(
     u32,
     bool,
-    *mut crate::process::task::Task,
+    *mut crate::process::types::Task,
 ); crate::config::MAX_CPUS] {
     let mut out = [(0u32, false, core::ptr::null_mut()); crate::config::MAX_CPUS];
     for c in 0..crate::config::MAX_CPUS {
@@ -7121,7 +7121,7 @@ pub fn scheduler_tick() {
                 PARKWALK_CENSUS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             struct Visit {
-                task: *mut crate::process::Task,
+                task: *mut crate::process::types::Task,
                 pc: i32,
                 running: bool,
                 // stress-port r8: was ANY cpu's ARCH tp register naming
@@ -7143,7 +7143,7 @@ pub fn scheduler_tick() {
             // while touching SNAPS beyond atomics).
             let mut visited: [Option<Visit>; 128] = [const { None }; 128];
             let mut nvisited = 0usize;
-            crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+            crate::process::hotpath::pid_hash_for_each_task_try(|task| {
                 {
                     let pid = task.pid();
                     if pid == 0 || pid == TASK_POISON {
@@ -7154,7 +7154,7 @@ pub fn scheduler_tick() {
                     // count while the exit path unwinds.
                     if task.state().is_dead()
                         || (task.ti_flags()
-                            & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                            & crate::process::types::TaskFlags::PF_EXITING
                                 .bits()
                             != 0)
                     {
@@ -7165,13 +7165,13 @@ pub fn scheduler_tick() {
                     let mut tp_named = false;
                     // The side-table stores raw identity — recover the
                     // pointer from the walk reference (same value).
-                    let task = task as *const crate::process::Task
-                        as *mut crate::process::Task;
+                    let task = task as *const crate::process::types::Task
+                        as *mut crate::process::types::Task;
                     for c in 0..crate::config::MAX_CPUS {
                         if cpu_state(c).current == task {
                             running = true;
                         }
-                        if crate::arch::cpu::get_thread_id_of(c) as *mut crate::process::Task
+                        if crate::arch::cpu::get_thread_id_of(c) as *mut crate::process::types::Task
                             == task
                         {
                             tp_named = true;
@@ -7661,7 +7661,7 @@ pub fn scheduler_tick() {
         // task's own fields.
         let current_t = crate::sched::r#unsafe::task_shared(current);
         let (soft, hard) =
-            current_t.rlimit(crate::process::task::rlimit_res::CPU);
+            current_t.rlimit(crate::process::hotpath::rlimit_res::CPU);
         if soft != u64::MAX || hard != u64::MAX {
             let secs = current_t
                 .sched_entity()
@@ -7995,7 +7995,7 @@ pub fn for_each_task<F>(mut f: F)
 where
     F: FnMut(&Task),
 {
-    crate::process::pid_hash::pid_hash_for_each_task(|t| f(t));
+    crate::process::hotpath::pid_hash_for_each_task(|t| f(t));
 }
 
 /// Non-blocking variant of [`for_each_task`] for NON-PREEMPTIBLE contexts
@@ -8025,7 +8025,7 @@ pub fn for_each_task_try<F>(mut f: F) -> usize
 where
     F: FnMut(&Task),
 {
-    crate::process::pid_hash::pid_hash_for_each_task_try(|t| f(t))
+    crate::process::hotpath::pid_hash_for_each_task_try(|t| f(t))
 }
 
 
@@ -8050,7 +8050,7 @@ pub fn get_current_ppid() -> u32 {
 }
 
 pub fn find_task_by_pid(pid: Pid) -> *mut Task {
-    crate::process::pid_hash::pid_hash_lookup(pid)
+    crate::process::hotpath::pid_hash_lookup(pid)
 }
 
 
@@ -8222,7 +8222,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
 /// re-linked the mid-do_exit dconf worker → double-run → epc-on-own-stack
 /// illegal-instruction panic).
 pub fn task_is_dying(task: *mut Task) -> bool {
-    use crate::process::task::task_flags::TaskFlags;
+    use crate::process::types::TaskFlags;
     if task.is_null() {
         return true;
     }
@@ -8574,7 +8574,7 @@ fn harvest_orphan_tasks(_my_cpu: usize) {
         }
     }
     let now = crate::timer::get_jiffies();
-    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+    crate::process::hotpath::pid_hash_for_each_task_try(|t| {
         // Helper APIs (heals, watch, relink) still take *mut Task.
         let t = t as *const Task as *mut Task;
         let pid = crate::sched::r#unsafe::task_shared(t).pid();
@@ -8745,7 +8745,7 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
         // Pin the page before dropping the slot's implicit pin; if the
         // page is at its last refcount (exiting), still rewrite the
         // stale name but do not hand a dead page to the wake path.
-        if !crate::process::task::Task::try_pin(curr) {
+        if !crate::process::types::Task::try_pin(curr) {
             cpu_state_mut(cpu).current = idle_task;
             slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
             // r11: the provably-stale name's generation is superseded.
@@ -8830,11 +8830,11 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
 /// (which can only reach LINKED candidates) and needs no concurrent wake
 /// (unlike the R46/R49 heals inside wake_up_enqueue).
 pub fn relink_unlinked_running_phantoms() -> u32 {
-    use crate::process::task::task_flags::TaskFlags;
+    use crate::process::types::TaskFlags;
     const MAXCAND: usize = 16;
     let mut cand: [*mut Task; MAXCAND] = [core::ptr::null_mut(); MAXCAND];
     let mut n = 0usize;
-    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+    crate::process::hotpath::pid_hash_for_each_task_try(|t| {
         if n >= MAXCAND {
             return;
         }
@@ -8853,7 +8853,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
             // idle_heal_own_slot). The candidate table stores raw
             // identity — recover the pointer from the walk reference.
             let t = t as *const Task as *mut Task;
-            if !crate::process::task::Task::try_pin(t) {
+            if !crate::process::types::Task::try_pin(t) {
                 return;
             }
             cand[n] = t;
@@ -9058,7 +9058,7 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
     // Drop the pins outside the GRQ (task_put may free).
     for i in 0..n {
         if !cand[i].is_null() {
-            crate::process::task::Task::task_put(cand[i]);
+            crate::process::types::Task::task_put(cand[i]);
         }
     }
     // Nudge an idle CPU so the relinked task is picked promptly (same
@@ -9282,7 +9282,7 @@ pub fn cpu_idle_loop() -> ! {
                 // under its own lock and refuses a task that exited
                 // under the pin.
                 wake_up_enqueue(victim);
-                crate::process::task::Task::task_put(victim);
+                crate::process::types::Task::task_put(victim);
             }
         }
 

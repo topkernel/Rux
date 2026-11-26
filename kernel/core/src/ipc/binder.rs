@@ -71,7 +71,7 @@ use alloc::vec::Vec;
 
 use crate::errno::constants::{EBADF, EBUSY, EFAULT, EAGAIN, EINTR, EINVAL, ESRCH};
 use crate::fs::dev_t::{DevNo, MISC_MAJOR};
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // ============================================================================
@@ -1556,7 +1556,7 @@ pub fn is_inst(pid: u32) -> bool {
     }
     // SAFETY: diagnostic task lookup + comm read (same contract as the
     // TXN-HANG comm decode).
-    let t = crate::process::find_task_by_pid(pid);
+    let t = crate::process::hotpath::find_task_by_pid(pid);
     let Some(t) = t else {
         return false;
     };
@@ -1583,7 +1583,7 @@ pub fn is_acct(pid: u32) -> bool {
     }
     // SAFETY: diagnostic task lookup + comm read (same contract as the
     // TXN-HANG comm decode).
-    let t = crate::process::find_task_by_pid(pid);
+    let t = crate::process::hotpath::find_task_by_pid(pid);
     let Some(t) = t else {
         return false;
     };
@@ -2368,8 +2368,8 @@ static NEXT_PARK_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomic
 /// Waiters parked while the context manager for their device context is
 /// not yet installed (see wait_for_context_manager). set_context_mgr
 /// wakes everyone on success.
-static MANAGER_WAIT: crate::process::wait::WaitQueueHead =
-    crate::process::wait::WaitQueueHead::new();
+static MANAGER_WAIT: crate::process::types::WaitQueueHead =
+    crate::process::types::WaitQueueHead::new();
 
 /// Bounded block for handle-0 transactions issued before the context
 /// manager exists (OH boot bring-up).
@@ -2419,7 +2419,7 @@ fn wait_for_context_manager(ctx: BinderCtx) {
             Some(t) => t,
             None => return,
         };
-        let current = cur_ref as *mut crate::process::task::Task;
+        let current = cur_ref as *mut crate::process::types::Task;
         let my_pid = cur_ref.pid();
         let target = crate::timer::get_jiffies() + SLICE_JIFFIES.max(1);
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
@@ -2432,8 +2432,8 @@ fn wait_for_context_manager(ctx: BinderCtx) {
             // A racing wake may have enqueued us while we are still
             // executing — take ourselves back off (NEW-C2). cur_ref is
             // this task's own &mut (sched::current contract).
-            cur_ref.set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::RUNNING,
+            cur_ref.set_state(crate::process::types::TaskState::new(
+                crate::process::types::TaskState::RUNNING,
             ));
             crate::sched::dequeue_task(cur_ref);
         } else {
@@ -2742,9 +2742,9 @@ pub fn wake_thread(t: &BinderThread) {
 /// (binder_wakeup_proc_ilocked, sync=false).
 pub fn wake_thread_hint(t: &BinderThread, sync: bool) {
     let hint = if sync {
-        crate::process::wait::WakeUpHint::Sync
+        crate::process::types::WakeUpHint::Sync
     } else {
-        crate::process::wait::WakeUpHint::Normal
+        crate::process::types::WakeUpHint::Normal
     };
     let n = t.wait.wake_up(hint, 0);
     // sc252/sc253 attribution: wake_up counts entries it transitioned (a
@@ -3163,7 +3163,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // ioctl, b5).
     let pid = crate::sched::current()
         .map(|t| { (*t).tgid() as u32 })
-        .unwrap_or_else(crate::process::current_pid);
+        .unwrap_or_else(crate::process::hotpath::current_pid);
     let id = NEXT_PROC_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let proc = Arc::new(BinderProc::new(id, pid, ctx));
     {
@@ -4420,7 +4420,7 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
 /// through the same queue the blocking BWR read wait uses, so a parked
 /// poll() on the binder fd wakes the moment thread work arrives — no
 /// 10 ms re-check slice.
-pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
+pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::types::Task) -> bool {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (proc_ref(file)) else {
         return false;
@@ -4452,7 +4452,7 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
         thread.st(world).looper |= LOOPER_POLL;
         thread
             .wait
-            .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            .add(crate::process::types::WaitQueueEntry::new(task, false));
     }
     true
 }
@@ -4460,7 +4460,7 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
 /// Remove a registration added by binder_poll_wait (poll round teardown;
 /// the reference has no analogue because its poll_table owns the entry —
 /// our registry is per wait round, so no pollfree hazard exists).
-pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
+pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::types::Task) {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (proc_ref(file)) else {
         return;
@@ -6446,13 +6446,13 @@ fn binder_transaction(
                             // process::find_task_by_pid reference (same
                             // unpinned validity contract as the sched
                             // lookup it replaces — diagnostic read only).
-                            let from_comm = crate::process::find_task_by_pid(
+                            let from_comm = crate::process::hotpath::find_task_by_pid(
                                 t.from_tid.unwrap_or(0),
                             );
-                            let to_comm = crate::process::find_task_by_pid(
+                            let to_comm = crate::process::hotpath::find_task_by_pid(
                                 t.to_tid(world).unwrap_or(t.to_proc.pid),
                             );
-                            fn comm_of(p: Option<&crate::process::task::Task>) -> &str {
+                            fn comm_of(p: Option<&crate::process::types::Task>) -> &str {
                                 match p {
                                     Some(t) => core::str::from_utf8(t.comm())
                                         .unwrap_or("?")
@@ -7681,7 +7681,7 @@ fn binder_transaction(
                         tr.code
                     },
                     proc.pid,
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     comm,
                     target.pid,
                     data_size,
@@ -7750,7 +7750,7 @@ fn binder_transaction(
                     if tr.flags & TF_ONE_WAY != 0 { " ONEWAY" } else { "" },
                     comm,
                     target.pid,
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     data_size,
                     parcel
                 );
@@ -7969,7 +7969,7 @@ fn binder_transaction(
             // (unsafe-slim r3c) safe pinned-bucket reference; the
             // validity contract is the same unpinned pid-hash lookup
             // the sched:: variant wrapped.
-            let Some(t) = crate::process::find_task_by_pid(tgid) else {
+            let Some(t) = crate::process::hotpath::find_task_by_pid(tgid) else {
                 return false;
             };
             let name = core::str::from_utf8(t.comm())
@@ -8943,18 +8943,18 @@ fn release_block(proc: &Arc<BinderProc>, off: usize) {
 /// task_refcnt the guard releases on scope end (Drop), so no early-return
 /// path can leak the pin or use the task after release.
 struct PinnedTask {
-    ptr: *mut crate::process::task::Task,
+    ptr: *mut crate::process::types::Task,
 }
 impl PinnedTask {
     fn lookup(pid: u32) -> Option<PinnedTask> {
-        let p = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
+        let p = crate::process::hotpath::pid_hash_lookup_pinned(pid);
         if p.is_null() {
             None
         } else {
             Some(PinnedTask { ptr: p })
         }
     }
-    fn get(&self) -> &crate::process::task::Task {
+    fn get(&self) -> &crate::process::types::Task {
         // SAFETY: pinned at construction (task_refcnt held until Drop).
         // Shared borrow only: the task may be mutated concurrently by its
         // own CPU, so callers touch only internally-locked members here
@@ -8964,7 +8964,7 @@ impl PinnedTask {
 }
 impl Drop for PinnedTask {
     fn drop(&mut self) {
-        crate::process::task::Task::task_put(self.ptr);
+        crate::process::types::Task::task_put(self.ptr);
     }
 }
 
@@ -9887,7 +9887,7 @@ fn binder_thread_read(
                             if let Some(cur) = crate::sched::current() {
                                 let tg = { (*cur).tgid() as u32 };
                                 if tg != 0 {
-                                    let lt = crate::process::find_task_by_pid(tg);
+                                    let lt = crate::process::hotpath::find_task_by_pid(tg);
                                     if let Some(lt) = lt.as_ref() {
                                         let lname = core::str::from_utf8(lt.comm())
                                             .unwrap_or("")
@@ -10051,7 +10051,7 @@ fn binder_thread_read(
                                                 .as_ref()
                                                 .map(|p| p.pid)
                                                 .unwrap_or(0);
-                                            let picker_comm = crate::process::find_task_by_pid(
+                                            let picker_comm = crate::process::hotpath::find_task_by_pid(
                                                 thread.tid,
                                             );
                                             let picker_comm = match picker_comm.as_ref() {

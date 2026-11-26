@@ -38,9 +38,9 @@ fn fmt_load(fixed: u64) -> alloc::string::String {
 ///
 /// Format: <load1> <load5> <load15> <running>/<total> <last_pid>
 pub fn generate() -> Vec<u8> {
-    use crate::process::pid_hash;
+    use crate::process::hotpath;
 
-    let pids = pid_hash::pid_hash_collect_all();
+    let pids = hotpath::pid_hash_collect_all();
 
     // Linux nr_threads semantics: idle tasks (pid 0) are NOT counted —
     // Linux never allocates a pid for them. Rux hash-inserts MAX_CPUS

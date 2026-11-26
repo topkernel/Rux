@@ -39,7 +39,7 @@ static MOUNT_TABLE: Spinlock<Vec<(String, String, String, String)>> = Spinlock::
 /// compares; one boot printed 637 >=100 ms inter-tick gaps). The ns.rs
 /// namespace tables already use plain .lock(); MOUNT_TABLE now matches.
 pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
-    if crate::process::ns::in_init_mnt_ns() {
+    if crate::process::hotpath::in_init_mnt_ns() {
         let mut table = MOUNT_TABLE.lock();
         table.retain(|(_, mp, _, _)| mp != mount_point);
         table.push((
@@ -49,7 +49,7 @@ pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &st
             String::from(flags),
         ));
     }
-    crate::process::ns::ns_register_mount(device, mount_point, fs_type, flags);
+    crate::process::hotpath::ns_register_mount(device, mount_point, fs_type, flags);
 }
 
 /// Is `target` already registered as a mount of filesystem type
@@ -82,7 +82,7 @@ pub fn get_global_mounts() -> Vec<(String, String, String, String)> {
 /// Get the mounts visible to the CALLER (U1c: the current mount namespace;
 /// the init namespace table is seeded from the boot registry).
 pub fn get_mounts() -> Vec<(String, String, String, String)> {
-    crate::process::ns::ns_get_mounts()
+    crate::process::hotpath::ns_get_mounts()
         .into_iter()
         .map(|e| (e.device, e.mount_point, e.fs_type, e.flags))
         .collect()
@@ -92,8 +92,8 @@ pub fn get_mounts() -> Vec<(String, String, String, String)> {
 /// /proc/self/mountinfo numbers rows by struct mount.mnt_id, never by
 /// output position (registry churn re-pairing positional ids with
 /// different mounts made systemd's monitor see phantom changes).
-pub fn get_mount_entries() -> Vec<crate::process::ns::MountEntry> {
-    crate::process::ns::ns_get_mounts()
+pub fn get_mount_entries() -> Vec<crate::process::types::MountEntry> {
+    crate::process::hotpath::ns_get_mounts()
 }
 
 #[repr(C)]

@@ -76,7 +76,7 @@ fn status_shape_check() {
 /// Live pin: the current task's status file carries exactly
 /// STATUS_FIELDS, in order, one row each.
 fn status_order_check() {
-    let pid = crate::process::current_pid() as u64;
+    let pid = crate::process::hotpath::current_pid() as u64;
     let bytes = crate::procfs::pid::generate_status(pid);
     let text = String::from_utf8(bytes)
         .unwrap_or_else(|_| panic!("/proc/[pid]/status must be UTF-8"));

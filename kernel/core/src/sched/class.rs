@@ -10,7 +10,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 
 /// Enqueue flags
 pub const ENQUEUE_WAKEUP: i32 = 0x0001;
@@ -214,7 +214,7 @@ impl SchedClassId {
 /// IMPORTANT: SCHED_IDLE policy tasks use fair_sched_class with very low weight (3).
 /// Only per-CPU idle tasks (pid=0) use idle_sched_class.
 pub fn task_sched_class(task: &Task) -> &'static dyn SchedClass {
-    use crate::process::task::SchedPolicy;
+    use crate::process::types::SchedPolicy;
 
     match task.policy() {
         SchedPolicy::Fifo | SchedPolicy::Rr => crate::api::sched::rt_sched_class(),

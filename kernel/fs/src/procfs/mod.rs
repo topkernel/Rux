@@ -1291,7 +1291,7 @@ pub fn mount_table_regen(path: &str) -> Option<fn() -> Vec<u8>> {
 
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
-    use crate::process::current_pid;
+    use crate::process::hotpath::current_pid;
     // 24.04 bring-up hunt probe (NOBLEDBG): "which /proc reads does pid 1
     // make?" — printed ~1.1k lines on a ub2404 boot (every cgroup/
     // self//mountinfo read systemd does), flooding the serial console.
@@ -1633,7 +1633,7 @@ fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     if pid::is_pid_dir(name) {
         if let Some(pid_val) = pid::parse_pid(name) {
             // PID directories are dynamic - check if process exists
-            use crate::process::{current_pid, find_task_by_pid};
+            use crate::process::{hotpath::current_pid, hotpath::find_task_by_pid};
             if current_pid() as u64 == pid_val || find_task_by_pid(pid_val as u32).is_some() {
                 return Ok(pid_val);  // Use PID as inode number
             }
@@ -1703,9 +1703,9 @@ fn procfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
             && rem >= NS_LINK_INO_OFF
             && rem < NS_LINK_INO_OFF + 6
         {
-            let kind = crate::process::ns::NsKind::from_index(rem - NS_LINK_INO_OFF);
+            let kind = crate::process::types::NsKind::from_index(rem - NS_LINK_INO_OFF);
             let size = match kind {
-                Some(k) => crate::process::ns::ns_link_target(pid_val as u32, k).len() as i64,
+                Some(k) => crate::process::hotpath::ns_link_target(pid_val as u32, k).len() as i64,
                 None => 0,
             };
             stat.st_ino = inode.ino;
@@ -1738,10 +1738,10 @@ fn procfs_getattr(inode: &Inode, stat: &mut rux::fs::Stat) -> i32 {
         )
         ) {
             if let Some(pid) = node.pid {
-                let target = if crate::process::current_pid() as u64 == pid {
-                    crate::process::current_task()
+                let target = if crate::process::hotpath::current_pid() as u64 == pid {
+                    crate::process::hotpath::current_task()
                 } else {
-                    crate::process::find_task_by_pid(pid as u32)
+                    crate::process::hotpath::find_task_by_pid(pid as u32)
                 };
                 if let Some(t) = target {
                     // find_task_by_pid returns a typed reference.
@@ -1872,8 +1872,8 @@ fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
         // Synthetic ns magic link (/proc/[pid]/ns/<kind>, U1c): readlink
         // yields "<kind>:[<inum>]".
         if pid::is_valid_pid(pid_val) && rem >= NS_LINK_INO_OFF && rem < NS_LINK_INO_OFF + 6 {
-            if let Some(kind) = crate::process::ns::NsKind::from_index(rem - NS_LINK_INO_OFF) {
-                let target = crate::process::ns::ns_link_target(pid_val as u32, kind);
+            if let Some(kind) = crate::process::types::NsKind::from_index(rem - NS_LINK_INO_OFF) {
+                let target = crate::process::hotpath::ns_link_target(pid_val as u32, kind);
                 let len = target.len().min(buf.len());
                 buf[..len].copy_from_slice(&target[..len]);
                 return len as isize;
@@ -2092,10 +2092,10 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
         // service child setuid()s to its final uid BEFORE writing its
         // exec label — a root-owned 0644 node answered EACCES and init
         // aborted the service (INIT_EEXEC_CONTENT).
-        let target = if crate::process::current_pid() as u64 == parent.ino / 10000 {
-            crate::process::current_task()
+        let target = if crate::process::hotpath::current_pid() as u64 == parent.ino / 10000 {
+            crate::process::hotpath::current_task()
         } else {
-            crate::process::find_task_by_pid((parent.ino / 10000) as u32)
+            crate::process::hotpath::find_task_by_pid((parent.ino / 10000) as u32)
         };
         if let Some(t) = target {
             // find_task_by_pid returns a typed reference.
@@ -2144,7 +2144,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
     // Check for PID directory
     if pid::is_pid_dir(name) {
         if let Some(pid_val) = pid::parse_pid(name) {
-            use crate::process::{current_pid, find_task_by_pid};
+            use crate::process::{hotpath::current_pid, hotpath::find_task_by_pid};
             if current_pid() as u64 == pid_val || find_task_by_pid(pid_val as u32).is_some() {
                 let mode = InodeMode::new(InodeMode::S_IFDIR | 0o555);
                 let mut inode = Inode::new(pid_val, mode);
@@ -2247,10 +2247,10 @@ fn procfs_file_write(file: &rux::fs::File, buf: &[u8]) -> isize {
         if !(-1000..=1000).contains(&adj) {
             return -22; // EINVAL (Linux: OOM_SCORE_ADJ_MIN/MAX)
         }
-        let task = if crate::process::current_pid() as u64 == pid {
-            crate::process::current_task()
+        let task = if crate::process::hotpath::current_pid() as u64 == pid {
+            crate::process::hotpath::current_task()
         } else {
-            crate::process::find_task_by_pid(pid as u32)
+            crate::process::hotpath::find_task_by_pid(pid as u32)
         };
         return match task {
             Some(t) => {
@@ -2615,7 +2615,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
         use rux::fs::inode::file_type;
         let pid_val = (inode.ino / 10000) as u32;
         let mut tids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
-        crate::process::pid_hash::pid_hash_for_each_task(|t| {
+        crate::process::hotpath::pid_hash_for_each_task(|t| {
             if t.tgid() == pid_val {
                 tids.push(t.pid() as u64);
             }
@@ -2693,8 +2693,8 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<rux::fs::inode::VfsDi
 
     // For procfs root (ino == 1), also list all active PID directories.
     if inode.ino == 1 {
-        use crate::process::pid_hash;
-        for pid in pid_hash::pid_hash_collect_all() {
+        use crate::process::hotpath;
+        for pid in hotpath::pid_hash_collect_all() {
             // Linux-exact /proc root listing: pid 0 (the per-CPU idle
             // tasks / swapper) NEVER appears — Linux keeps idle tasks out
             // of the PID allocator, so no dirent is generated for them.
@@ -2754,7 +2754,7 @@ fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
         Some(p) => p as usize as u64,
         None => return Err(errno::Errno::NotADirectory),
     };
-    match crate::process::ns::NsKind::from_name(name) {
+    match crate::process::types::NsKind::from_name(name) {
         Some(kind) => Ok(pid_val * 10000 + NS_LINK_INO_OFF + kind.index()),
         None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
@@ -2794,7 +2794,7 @@ fn procfs_ns_dir_readdir(
         name: alloc::vec![b'.', b'.'],
         file_type: file_type::DT_DIR,
     });
-    for kind in crate::process::ns::NsKind::ALL {
+    for kind in crate::process::types::NsKind::ALL {
         entries.push(rux::fs::inode::VfsDirEntry {
             ino: pid_val * 10000 + NS_LINK_INO_OFF + kind.index(),
             name: kind.name().as_bytes().to_vec(),
@@ -2845,9 +2845,9 @@ pub fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errn
         return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     // Closed (or out-of-range) fds are ENOENT, like Linux.
-    let open = crate::process::find_task_by_pid(pid_val as u32)
+    let open = crate::process::hotpath::find_task_by_pid(pid_val as u32)
         .or_else(|| {
-            use crate::process::{current_pid, current_task};
+            use crate::process::{hotpath::current_pid, hotpath::current_task};
             if current_pid() as u64 == pid_val { current_task() } else { None }
         })
         .and_then(|t| t.try_fdtable())

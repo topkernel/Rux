@@ -80,7 +80,7 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
             };
 
             // Find target process (syscall-context short read: TaskBorrow).
-            let Some(task) = ::process::task_ref::TaskBorrow::lookup(target_pid) else {
+            let Some(task) = rux::process::types::TaskBorrow::lookup(target_pid) else {
                 return -(errno::ESRCH as i64);  // Process does not exist
             };
 
@@ -105,7 +105,7 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
                 who
             };
             let mut best_nice: Option<i32> = None;
-            ::process::pid_hash::pid_hash_for_each_task(|t| {
+            rux::process::hotpath::pid_hash_for_each_task(|t| {
                 // The callback runs under the bucket lock (typed walk).
                 let matches =
                     if which == PRIO_PGRP { t.pgid() == key } else { t.cred().uid == key };
@@ -171,7 +171,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
             };
             // Collect under the bucket lock, apply after it drops (renice
             // takes the GRQ lock — never nest it inside a pid-hash bucket).
-            ::process::pid_hash::pid_hash_for_each_task(|t| {
+            rux::process::hotpath::pid_hash_for_each_task(|t| {
                 // Callback runs under the bucket lock (typed walk).
                 let matches =
                     if which == PRIO_PGRP { t.pgid() == key } else { t.cred().uid == key };
@@ -195,7 +195,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         // free it between lookup and use). TaskRef owns the pin: every
         // `continue` below releases it via Drop — the four manual
         // task_put sites collapsed into the handle.
-        let Some(mut task) = ::process::task_ref::TaskRef::lookup(target_pid) else {
+        let Some(mut task) = rux::process::types::TaskRef::lookup(target_pid) else {
             last_err = -(errno::ESRCH as i64);
             continue;
         };
@@ -350,18 +350,18 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     // Convert and apply with run-queue migration under the GRQ lock
     // (review PROC-P07).
     let new_policy = match policy {
-        SCHED_NORMAL => ::process::task::SchedPolicy::Normal,
-        SCHED_FIFO => ::process::task::SchedPolicy::Fifo,
-        SCHED_RR => ::process::task::SchedPolicy::Rr,
-        SCHED_BATCH => ::process::task::SchedPolicy::Batch,
-        SCHED_IDLE => ::process::task::SchedPolicy::Idle,
-        SCHED_DEADLINE => ::process::task::SchedPolicy::Deadline,
+        SCHED_NORMAL => rux::process::types::SchedPolicy::Normal,
+        SCHED_FIFO => rux::process::types::SchedPolicy::Fifo,
+        SCHED_RR => rux::process::types::SchedPolicy::Rr,
+        SCHED_BATCH => rux::process::types::SchedPolicy::Batch,
+        SCHED_IDLE => rux::process::types::SchedPolicy::Idle,
+        SCHED_DEADLINE => rux::process::types::SchedPolicy::Deadline,
         _ => return -(errno::EINVAL as i64),
     };
     // change_task_policy takes the GRQ lock internally (still raw-ptr
     // typed: it also serves pinned/raw callers).
     rux::sched::change_task_policy(
-        task as *mut ::process::task::Task,
+        task as *mut rux::process::types::Task,
         new_policy,
         param.sched_priority as u32,
     );
@@ -393,18 +393,18 @@ pub fn sys_sched_getscheduler(args: SyscallArgs) -> i64 {
         pid
     };
 
-    let Some(task) = ::process::task_ref::TaskBorrow::lookup(target_pid) else {
+    let Some(task) = rux::process::types::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
     };
 
     let policy = task.policy();
     match policy {
-        ::process::task::SchedPolicy::Normal => SCHED_NORMAL as i64,
-        ::process::task::SchedPolicy::Fifo => SCHED_FIFO as i64,
-        ::process::task::SchedPolicy::Rr => SCHED_RR as i64,
-        ::process::task::SchedPolicy::Batch => SCHED_BATCH as i64,
-        ::process::task::SchedPolicy::Idle => SCHED_IDLE as i64,
-        ::process::task::SchedPolicy::Deadline => SCHED_DEADLINE as i64,
+        rux::process::types::SchedPolicy::Normal => SCHED_NORMAL as i64,
+        rux::process::types::SchedPolicy::Fifo => SCHED_FIFO as i64,
+        rux::process::types::SchedPolicy::Rr => SCHED_RR as i64,
+        rux::process::types::SchedPolicy::Batch => SCHED_BATCH as i64,
+        rux::process::types::SchedPolicy::Idle => SCHED_IDLE as i64,
+        rux::process::types::SchedPolicy::Deadline => SCHED_DEADLINE as i64,
     }
 }
 
@@ -462,7 +462,7 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     // (dequeue + field update + re-enqueue under the GRQ lock) and mirror
     // the setscheduler validation.
     let policy = task.policy();
-    if matches!(policy, ::process::task::SchedPolicy::Fifo | ::process::task::SchedPolicy::Rr) {
+    if matches!(policy, rux::process::types::SchedPolicy::Fifo | rux::process::types::SchedPolicy::Rr) {
         // RT parameter changes require CAP_SYS_NICE, mirroring the RT
         // policy-switch check in sys_sched_setscheduler.
         if !crate::security::capable(crate::security::CAP_SYS_NICE) {
@@ -516,7 +516,7 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
         pid
     };
 
-    let Some(task) = ::process::task_ref::TaskBorrow::lookup(target_pid) else {
+    let Some(task) = rux::process::types::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
     };
 
@@ -578,7 +578,7 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
         pid
     };
 
-    let Some(task) = ::process::task_ref::TaskBorrow::lookup(target_pid) else {
+    let Some(task) = rux::process::types::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
     };
 
@@ -589,12 +589,12 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
         let attr = SchedAttr {
             size: core::cmp::min(size, core::mem::size_of::<SchedAttr>() as u32),
             sched_policy: match policy {
-                ::process::task::SchedPolicy::Normal => SCHED_NORMAL as u32,
-                ::process::task::SchedPolicy::Fifo => SCHED_FIFO as u32,
-                ::process::task::SchedPolicy::Rr => SCHED_RR as u32,
-                ::process::task::SchedPolicy::Batch => SCHED_BATCH as u32,
-                ::process::task::SchedPolicy::Idle => SCHED_IDLE as u32,
-                ::process::task::SchedPolicy::Deadline => SCHED_DEADLINE as u32,
+                rux::process::types::SchedPolicy::Normal => SCHED_NORMAL as u32,
+                rux::process::types::SchedPolicy::Fifo => SCHED_FIFO as u32,
+                rux::process::types::SchedPolicy::Rr => SCHED_RR as u32,
+                rux::process::types::SchedPolicy::Batch => SCHED_BATCH as u32,
+                rux::process::types::SchedPolicy::Idle => SCHED_IDLE as u32,
+                rux::process::types::SchedPolicy::Deadline => SCHED_DEADLINE as u32,
             },
             sched_flags: 0,
             sched_nice: task_ref.nice(),
@@ -767,12 +767,12 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     }
 
     let new_policy = match policy {
-        SCHED_NORMAL => ::process::task::SchedPolicy::Normal,
-        SCHED_FIFO => ::process::task::SchedPolicy::Fifo,
-        SCHED_RR => ::process::task::SchedPolicy::Rr,
-        SCHED_BATCH => ::process::task::SchedPolicy::Batch,
-        SCHED_IDLE => ::process::task::SchedPolicy::Idle,
-        SCHED_DEADLINE => ::process::task::SchedPolicy::Deadline,
+        SCHED_NORMAL => rux::process::types::SchedPolicy::Normal,
+        SCHED_FIFO => rux::process::types::SchedPolicy::Fifo,
+        SCHED_RR => rux::process::types::SchedPolicy::Rr,
+        SCHED_BATCH => rux::process::types::SchedPolicy::Batch,
+        SCHED_IDLE => rux::process::types::SchedPolicy::Idle,
+        SCHED_DEADLINE => rux::process::types::SchedPolicy::Deadline,
         _ => return -(errno::EINVAL as i64),
     };
 
@@ -780,7 +780,7 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     // BEFORE the policy switch so change_task_policy's re-enqueue
     // (update_deadline + replenish_runtime) already sees them; they are
     // inert while the task is not on the Deadline policy.
-    if new_policy == ::process::task::SchedPolicy::Deadline {
+    if new_policy == rux::process::types::SchedPolicy::Deadline {
         let dl = task.dl_entity_mut();
         dl.dl_runtime.store(attr.sched_runtime, core::sync::atomic::Ordering::Release);
         dl.dl_period.store(dl_period, core::sync::atomic::Ordering::Release);
@@ -793,14 +793,14 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     // Apply the policy switch with run-queue migration under the GRQ lock
     // (review PROC-P07). change_task_policy takes the GRQ lock internally.
     rux::sched::change_task_policy(
-        task as *mut ::process::task::Task,
+        task as *mut rux::process::types::Task,
         new_policy,
         attr.sched_priority,
     );
 
     // Set nice for normal tasks: route through the locked renice helper
     // (R31-3c: bare set_nice raced the CFS accounting).
-    if matches!(new_policy, ::process::task::SchedPolicy::Normal | ::process::task::SchedPolicy::Batch) {
+    if matches!(new_policy, rux::process::types::SchedPolicy::Normal | rux::process::types::SchedPolicy::Batch) {
         rux::sched::sched::sched_renice_locked(
             task,
             attr.sched_nice.clamp(MIN_NICE, MAX_NICE),
@@ -850,7 +850,7 @@ struct TimeSpec {
         pid
     };
 
-    let Some(task) = ::process::task_ref::TaskBorrow::lookup(target_pid) else {
+    let Some(task) = rux::process::types::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
     };
 
@@ -858,7 +858,7 @@ struct TimeSpec {
     // other policy gets {0, 0} (LTP sched_rr_get_interval02 runs with
     // SCHED_FIFO and requires an all-zero timespec).
     let policy = task.policy();
-    let ts = if policy == ::process::task::SchedPolicy::Rr {
+    let ts = if policy == rux::process::types::SchedPolicy::Rr {
         TimeSpec { tv_sec: 0, tv_nsec: 100_000_000 }
     } else {
         TimeSpec { tv_sec: 0, tv_nsec: 0 }
@@ -901,13 +901,13 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
-    let task: &mut ::process::task::Task = if pid == 0 || pid as u32 == ::process::current_pid() {
+    let task: &mut rux::process::types::Task = if pid == 0 || pid as u32 == ::process::current_pid() {
         current
     } else {
         let Some(target) = ::process::find_task_by_pid(pid) else {
             return -(errno::ESRCH as i64);
         };
-        let same = core::ptr::eq(target, current as &::process::task::Task);
+        let same = core::ptr::eq(target, current as &rux::process::types::Task);
         if !same && !crate::security::capable(crate::security::CAP_SYS_NICE) {
             return -(errno::EPERM as i64);
         }

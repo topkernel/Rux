@@ -17,7 +17,7 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::process::task::{Task, TaskState, TIF_MEMDIE};
+use rux::process::{types::Task, types::TaskState, hotpath::TIF_MEMDIE};
 use rux::mm::mm_struct::MmFlags;
 use crate::sync::spinlock::Spinlock;
 
@@ -154,7 +154,7 @@ fn oom_badness_mm(task: &Task, mm: &rux::mm::mm_struct::MmStruct, totalpages: u6
 /// pairs under the bucket locks (the Arc is MOVED into the vector, never
 /// dropped there); phase 2 scores each candidate with no locks held.
 fn select_bad_process(oc: &mut OomControl) {
-    use crate::process::pid_hash::{pid_hash_for_each_task, pid_hash_lookup_pinned};
+    use rux::process::hotpath::{pid_hash_for_each_task, pid_hash_lookup_pinned};
 
     // Phase 1: bucket-locked collection with the cheap per-task filters.
     let mut candidates: alloc::vec::Vec<(u32, alloc::sync::Arc<rux::mm::mm_struct::MmStruct>)> =
@@ -201,7 +201,7 @@ fn select_bad_process(oc: &mut OomControl) {
     // task-side fields (oom_score_adj, state) are read through the pin.
     for (pid, mm_arc) in candidates {
         // Pinned handle (TaskRef owns the pin; Drop releases it).
-        let Some(tp) = crate::process::task_ref::TaskRef::lookup(pid) else {
+        let Some(tp) = rux::process::types::TaskRef::lookup(pid) else {
             continue;
         };
         let points = {
@@ -226,7 +226,7 @@ fn select_bad_process(oc: &mut OomControl) {
                 oc.chosen = Some(winner);
                 oc.chosen_pid = pid;
                 oc.chosen_points = points;
-                crate::process::task::Task::task_put(winner);
+                rux::process::types::Task::task_put(winner);
             }
         }
     }
@@ -255,16 +255,16 @@ fn oom_kill_process(oc: &mut OomControl) {
     // rejects PID reuse: if the pinned lookup returns a different Task,
     // the original victim is gone and killing the PID's new owner would
     // be wrong.
-    let victim = crate::process::pid_hash::pid_hash_lookup_pinned(oc.chosen_pid);
+    let victim = rux::process::hotpath::pid_hash_lookup_pinned(oc.chosen_pid);
     if victim.is_null() || victim != chosen {
         if !victim.is_null() {
-            crate::process::task::Task::task_put(victim);
+            rux::process::types::Task::task_put(victim);
         }
         return;
     }
     // TaskRef adopts the verified pin (Drop's task_put replaces the
     // manual put at every exit below).
-    let Some(victim) = crate::process::task_ref::TaskRef::from_pinned(victim) else {
+    let Some(victim) = rux::process::types::TaskRef::from_pinned(victim) else {
         return;
     };
 
@@ -325,7 +325,7 @@ fn oom_kill_process(oc: &mut OomControl) {
         let victim_mm_ptr = victim.address_space_arc()
             .map(|mm| mm.as_ref() as *const _ as usize);
         if let Some(mm_ptr) = victim_mm_ptr {
-            crate::process::pid_hash::pid_hash_for_each_task(|task_ptr| {
+            rux::process::hotpath::pid_hash_for_each_task(|task_ptr| {
                 let t = &*task_ptr;
                 if t.pid() == victim_pid {
                     return; // Skip the victim itself

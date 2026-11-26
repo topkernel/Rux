@@ -371,7 +371,7 @@ fn test_sys_rt_sigprocmask() {
 
 fn test_sys_kill() {
     // Test tkill: invalid signal (>64) should return -EINVAL
-    let current_pid = process::current_pid();
+    let current_pid = process::hotpath::current_pid();
     let einval = -(errno::EINVAL as i64);
     let ret = sys_tkill([current_pid as u64, 65, 0, 0, 0, 0]);
     test_assert_eq!(ret, einval, "sys_tkill invalid signal 65");

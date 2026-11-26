@@ -202,7 +202,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     // rt-r4: RT-class pick deltas (avg + µs max) — see RT_PICK_N.
     if matches!(
         crate::process::r#unsafe::borrow_task(task).policy(),
-        crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr
+        rux::process::types::SchedPolicy::Fifo | rux::process::types::SchedPolicy::Rr
     ) {
         RT_PICK_N.fetch_add(1, Ordering::Relaxed);
         RT_PICK_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
@@ -634,7 +634,7 @@ pub fn stallwatch_tick() {
     // hazard but left the acquisition itself blocking. The _try walk
     // skips held buckets — a skipped round just misses tasks for one
     // ~5s scan, harmless for a stall detector that re-scans forever.
-    let _skipped = crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+    let _skipped = rux::process::hotpath::pid_hash_for_each_task_try(|t| {
         // for_each_task pins the task (per-bucket lock); reads are of
         // stable fields. The side-table helpers take raw identity.
         // The try-walk pins the task (per-bucket lock); the side-table
@@ -686,7 +686,7 @@ pub fn stallwatch_tick() {
             tk.pid(),
             comm
         );
-        const RL: usize = crate::process::task::LAST_CALLS_LEN;
+        const RL: usize = rux::process::types::LAST_CALLS_LEN;
         let cur = tk.ext.last_calls_cur.load(Ordering::Relaxed);
         for k in 0..RL {
             let i = (cur + RL - k) % RL;

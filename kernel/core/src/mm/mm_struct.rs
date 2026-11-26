@@ -1441,13 +1441,13 @@ impl Drop for MmStruct {
             {
                 let owner = self.owner_pid();
                 let cur = crate::sched::get_current_pid() as i32;
-                let owner_live = crate::process::find_task_by_pid(owner as u32)
+                let owner_live = crate::process::hotpath::find_task_by_pid(owner as u32)
                     .map(|t| {
                         let st = t.state();
                         !st.is_dead()
-                            && !st.contains(crate::process::task::TaskState::ZOMBIE)
+                            && !st.contains(crate::process::types::TaskState::ZOMBIE)
                             && t.ti_flags()
-                                & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                                & crate::process::types::TaskFlags::PF_EXITING
                                     .bits()
                                 == 0
                             && t.mm_ptr_peek()

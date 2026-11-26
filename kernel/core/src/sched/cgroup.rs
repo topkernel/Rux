@@ -56,7 +56,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::process::task::Task;
+use crate::process::types::Task;
 use crate::sync::spinlock::Spinlock;
 
 // ============================================================================
@@ -579,7 +579,7 @@ pub fn cgroup_on_fork(parent: *mut Task, child: *mut Task) -> Result<(), i32> {
 /// subtracted from the old chain and added to the new chain so
 /// memory.current stays consistent across migration.
 pub fn cgroup_attach_pid(node: &Arc<CgroupNode>, pid: u32) -> Result<(), i32> {
-    let task = crate::process::find_task_by_pid(pid)
+    let task = crate::process::hotpath::find_task_by_pid(pid)
         .ok_or(crate::errno::Errno::NoSuchProcess.as_neg_i32())? as *mut Task;
 
     // Ledger BEFORE moving (migration transfers the task's charge; the

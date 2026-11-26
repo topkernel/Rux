@@ -20,7 +20,7 @@
 #![forbid(unsafe_code)]
 use crate::fs::dev_t::DevNo;
 use crate::fs::file::FileOps;
-use crate::process::Task;
+use crate::process::types::Task;
 use alloc::vec::Vec;
 
 /// The keys quota static the service owns, indexed for the sysctl rows.

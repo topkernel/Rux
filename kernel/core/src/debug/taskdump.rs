@@ -251,14 +251,14 @@ pub fn dump_syscall_ring_for(pid: u32) {    use crate::syscall::dispatch::{SYSCA
 
 /// DEBUG: read one user u32 through a task's page tables (diagnostic).
 #[cfg(feature = "debug-futex-trace")]
-fn debug_task_read_u32(t: &crate::process::Task, va: u64) -> Option<u32> {
+fn debug_task_read_u32(t: &crate::process::types::Task, va: u64) -> Option<u32> {
     let as_arc = t.address_space_arc()?;
     crate::debug::walk_read::<u32>(as_arc.root_ppn(), va)
 }
 
 /// DEBUG: one-line periodic snapshot of a tracked user word.
 #[cfg(feature = "debug-futex-trace")]
-fn debug_track_word(t: &crate::process::Task, va: u64) {
+fn debug_track_word(t: &crate::process::types::Task, va: u64) {
     match debug_task_read_u32(t, va) {
         Some(v) => {
             taskdump_raw_line(b"FTX-TRACK u=");
@@ -274,7 +274,7 @@ fn debug_track_word(t: &crate::process::Task, va: u64) {
 /// DEBUG: dump a parked task's user stack words that look like code pointers,
 /// read through the task's own page tables (its mm is not active here).
 #[cfg(feature = "debug-futex-trace")]
-fn debug_dump_user_stack(t: &crate::process::Task, usp: u64) {
+fn debug_dump_user_stack(t: &crate::process::types::Task, usp: u64) {
     use crate::arch::mm::mm_ops::PageTableWalker;
     use crate::arch::mm::memory_layout::phys_to_virt;
     taskdump_raw_line(b"FTX-USTACK sp=");
@@ -423,7 +423,7 @@ pub fn dump_all_tasks(reason: &str) {
         static OFFS_PRINTED: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
         if !OFFS_PRINTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-            use crate::process::task::task_offsets as to;
+            use crate::process::hotpath::task_offsets as to;
             puts("taskoff:");
             let offs: [(&str, usize); 11] = [
                 (" ti_flags", to::TI_FLAGS),
@@ -458,7 +458,7 @@ pub fn dump_all_tasks(reason: &str) {
             } else {
                 // SAFETY (one adopt edge): the per-CPU current Task stays
                 // allocated; pid is a stable field read.
-                put_dec(unsafe { crate::process::task_ref::TaskBorrow::from_raw(cur) }
+                put_dec(unsafe { crate::process::types::TaskBorrow::from_raw(cur) }
                     .map(|t| t.pid() as u64)
                     .unwrap_or(999999));
             }
@@ -498,14 +498,14 @@ pub fn dump_all_tasks(reason: &str) {
         // bt below.
         #[cfg(feature = "debug-taskdump-bt")]
         for c in 0..crate::config::MAX_CPUS {
-            let t = cur[c].2 as *mut crate::process::task::Task;
+            let t = cur[c].2 as *mut crate::process::types::Task;
             if t.is_null() {
                 continue;
             }
             // SAFETY (one adopt edge): the per-CPU current snapshot's Task
             // stays allocated (idle tasks and hash-invisible exiting tasks
             // are still valid Task objects); stable-field diagnostic read.
-            let tk = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(t) } {
+            let tk = match unsafe { crate::process::types::TaskBorrow::from_raw(t) } {
                 Some(tk) => tk,
                 None => continue,
             };
@@ -599,8 +599,8 @@ pub fn dump_all_tasks(reason: &str) {
     // snapshot) but can never be half-printed: the slot is freed only after
     // pid_hash_remove, which the iterator's bucket locks serialize against.
     let skipped =
-        crate::process::pid_hash::pid_hash_for_each_task_try(|task_ptr| {
-            let t: &crate::process::task::Task = task_ptr;
+        crate::process::hotpath::pid_hash_for_each_task_try(|task_ptr| {
+            let t: &crate::process::types::Task = task_ptr;
             count += 1;
             puts("task @0x");
             put_hex(task_ptr as *const _ as u64);
@@ -661,7 +661,7 @@ pub fn dump_all_tasks(reason: &str) {
             // below) — never a lockless tree walk, which races structural
             // mutation on other CPUs and corrupts the iterator.
             let linked = crate::sched::sched::grq_diag_cfs_linked(
-                task_ptr as *const crate::process::task::Task as *mut crate::process::task::Task);
+                task_ptr as *const crate::process::types::Task as *mut crate::process::types::Task);
             match linked {
                 Some(b) => {
                     puts(" linked=");
@@ -856,7 +856,7 @@ pub fn dump_all_tasks(reason: &str) {
 }
 
 fn state_name(bits: u32) -> &'static str {
-    use crate::process::task::TaskState as S;
+    use crate::process::types::TaskState as S;
     match bits {
         S::RUNNING => "RUNNING",
         // R52: a task between new_task_at and its first enqueue. Legit
@@ -890,8 +890,8 @@ fn state_name(bits: u32) -> &'static str {
     }
 }
 
-fn policy_name(t: &crate::process::task::Task) -> &'static str {
-    use crate::process::task::SchedPolicy;
+fn policy_name(t: &crate::process::types::Task) -> &'static str {
+    use crate::process::types::SchedPolicy;
     match t.policy() {
         SchedPolicy::Normal => "CFS",
         SchedPolicy::Batch => "BATCH",
@@ -1075,11 +1075,11 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             // above it, the lock's owner path. Read-side only, from this
             // CPU; races cost at worst a torn-but-bounded word.
             let cur = crate::sched::sched::grq_diag_cpu_currents();
-            let t = cur[stuck].2 as *mut crate::process::task::Task;
+            let t = cur[stuck].2 as *mut crate::process::types::Task;
             if !t.is_null() {
                 // SAFETY (one adopt edge): as the per-CPU walk — the
                 // current Task stays allocated; stable-field reads.
-                let tk = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(t) } {
+                let tk = match unsafe { crate::process::types::TaskBorrow::from_raw(t) } {
                     Some(tk) => tk,
                     None => return,
                 };
@@ -1171,9 +1171,9 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
 /// read_volatile's words inside the sleeping task's own kernel-stack
 /// pages, which the Task pins. A task that wakes mid-walk costs a torn
 /// word at worst.
-pub fn parked_kstack_syms(t: &crate::process::task::Task) -> alloc::string::String {
+pub fn parked_kstack_syms(t: &crate::process::types::Task) -> alloc::string::String {
     use core::fmt::Write as _;
-    use crate::process::task::Task;
+    use crate::process::types::Task;
 
     // Kernel text window (same bounds discipline as the R76 HUNG-STK
     // scan; the two arch linker scripts spell the bounds differently).
@@ -1448,7 +1448,7 @@ pub fn ensure_defer_thread() {
 }
 
 extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::{Task, TaskState};
+    use crate::process::types::{Task, TaskState};
     loop {
         if crate::api::process::kthread_should_stop() {
             break;
@@ -1697,7 +1697,7 @@ pub fn pid1spin_audit() {
     // Short diagnostic read of init (pid 1) — TaskBorrow's lookup
     // contract; reads only task fields + its mapped kernel stack
     // (sleep_snapshot contract, sc261).
-    let tk = match crate::process::task_ref::TaskBorrow::lookup(1) {
+    let tk = match crate::process::types::TaskBorrow::lookup(1) {
         Some(t) => t,
         None => return,
     };

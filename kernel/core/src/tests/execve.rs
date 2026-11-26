@@ -36,7 +36,7 @@ pub fn test_execve() {
     test_assert_eq!(errno::Errno::OutOfMemory.as_i32(), 12, "ENOMEM == 12");
 
     // Test 6: Verify current PID is valid (test context)
-    let pid = process::current_pid();
+    let pid = process::hotpath::current_pid();
     test_assert!(pid >= 0, "current PID valid in execve test context");
 
     // Test 7: execve replaces process image

@@ -70,7 +70,7 @@ pub mod exec_policy;
 // crate::exec::X keeps resolving for both halves' users.
 pub mod exec {
     pub use crate::exec_policy::*;
-    pub use rux::process::exec_ring::*;
+    pub use rux::process::{hotpath::{STACKZERO_RING, STACKZERO_CURSOR}, types::ZeroEntry};
 }
 
 // exit: the wait4/waitid family + the TEARDOWN family (this crate)
@@ -83,7 +83,7 @@ pub mod exit_teardown;
 pub mod exit {
     pub use crate::exit_wait::*;
     pub use crate::exit_teardown::*;
-    pub use rux::process::exit::*;
+    pub use rux::process::{hotpath::{do_exit, do_exit_group, ERESTARTSYS, wake_group_chldexit}};
 }
 
 // The old framework mod.rs's re-exports at their historical paths
@@ -97,11 +97,10 @@ pub use crate::pid::{
 
 // The framework-staying modules at the historical paths.
 pub use rux::process::{
-    task, task_ref, r#unsafe, pid_hash, wait, ns, exec_ring, ptrace_core,
-};
+    types, hotpath, r#unsafe};
 pub use rux::process::{
-    Task, current_pid, current_ppid, current_pgid, current_task,
-    find_task_by_pid, thread_set_entry,
+    types::Task, hotpath::current_pid, hotpath::current_ppid, hotpath::current_pgid, hotpath::current_task,
+    hotpath::find_task_by_pid, hotpath::thread_set_entry,
 };
 
 // The framework's test counters at the crate root, where the moved

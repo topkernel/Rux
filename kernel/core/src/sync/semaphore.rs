@@ -14,7 +14,7 @@
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicI32, Ordering};
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 
 /// R77 (semaphore CAS discipline): try to take one unit from `count` —
 /// succeeds only by atomically swapping a POSITIVE value to value-1. A

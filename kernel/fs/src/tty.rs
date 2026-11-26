@@ -22,7 +22,7 @@
 // layouts with fixed kernel-side sizes; no pointers cross.)
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::signal::Signal;
 use crate::sync::spinlock::Spinlock;
 
@@ -634,7 +634,7 @@ impl TtyDevice {
     fn send_isig(&self, signo: i32) {
         let mut pgid = self.fg_pgrp.load(Ordering::Acquire);
         if pgid == 0 {
-            pgid = crate::process::current_pgid();
+            pgid = crate::process::hotpath::current_pgid();
         }
         if pgid != 0 {
             crate::signal::send_signal_to_pgid(pgid, signo);

@@ -50,7 +50,7 @@ pub fn capable(cap: u32) -> bool {
 /// Used when checking permissions on behalf of another context
 /// (e.g., checking file opener's credentials).
 #[inline]
-pub fn has_capability(cred: &crate::process::task::Cred, cap: u32) -> bool {
+pub fn has_capability(cred: &crate::process::types::Cred, cap: u32) -> bool {
     security_capable(cred, cap) == 0
 }
 
@@ -60,7 +60,7 @@ pub fn has_capability(cred: &crate::process::task::Cred, cap: u32) -> bool {
 /// CAP_KILL is held.  Matches Linux `kill_ok_by_cred()` in
 /// `kernel/signal.c`.
 #[inline]
-pub fn can_send_signal(target_cred: &crate::process::task::Cred) -> bool {
+pub fn can_send_signal(target_cred: &crate::process::types::Cred) -> bool {
     match crate::sched::current() {
         Some(task) => {
             let cred = task.cred();

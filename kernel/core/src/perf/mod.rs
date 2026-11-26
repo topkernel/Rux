@@ -81,7 +81,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
-use crate::process::wait::WaitQueueHead;
+use crate::process::types::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
 // ==================== ABI constants (uapi/linux/perf_event.h) ====================
@@ -667,7 +667,7 @@ pub fn ring_frame_check(phys: usize, order: usize) {
                 "PERF-RING-RESOLD: frame {:#x} (pfn {}) re-handed by allocator while a live perf ring still lists it — premature free, sampler would write into the new owner pid {}",
                 (hit_pfn as usize) << 12,
                 hit_pfn,
-                crate::process::current_pid()
+                crate::process::hotpath::current_pid()
             );
         }
     }
@@ -1253,7 +1253,7 @@ fn read_value(ev: &PerfEvent) -> u64 {
                 CTXSW[ev.target_cpu as usize % crate::config::MAX_CPUS].load(Ordering::Relaxed)
             } else {
                 // task-scoped: nvcsw+nivcsw of the target task
-                match crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid) {
+                match crate::process::hotpath::pid_hash_lookup_pinned(ev.target_tid) {
                     t if !t.is_null() => {
                         // SAFETY: the pinned lookup took a reference —
                         // liveness proven for this block; put drops it.
@@ -1261,7 +1261,7 @@ fn read_value(ev: &PerfEvent) -> u64 {
                             ((*t).nvcsw.load(Ordering::Relaxed)
                                 + (*t).nivcsw.load(Ordering::Relaxed)) as u64
                         };
-                        crate::process::task::Task::task_put(t);
+                        crate::process::types::Task::task_put(t);
                         v
                     }
                     _ => 0,
@@ -1274,14 +1274,14 @@ fn read_value(ev: &PerfEvent) -> u64 {
             } else {
                 // task-scoped: per-task major+minor faults (ru_minflt+
                 // ru_majflt equivalent; the Task counters).
-                match crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid) {
+                match crate::process::hotpath::pid_hash_lookup_pinned(ev.target_tid) {
                     t if !t.is_null() => {
                         // SAFETY: as the ctxsw arm (pinned reference).
                         let v = unsafe {
                             ((*t).min_flt.load(Ordering::Relaxed)
                                 + (*t).maj_flt.load(Ordering::Relaxed)) as u64
                         };
-                        crate::process::task::Task::task_put(t);
+                        crate::process::types::Task::task_put(t);
                         v
                     }
                     _ => 0,
@@ -1406,7 +1406,7 @@ fn perf_close(file: &crate::fs::File) -> i32 {
                                 crate::pr_err!(
                                     "PERF-CLOSE-UNDERFLOW: ring frame {:#x} refcount already 0 at owner drop — an extra put happened (leaking, not freeing) pid {}",
                                     p,
-                                    crate::process::current_pid()
+                                    crate::process::hotpath::current_pid()
                                 );
                             }
                         }
@@ -1433,17 +1433,17 @@ pub static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 /// Poll-wait registration (event-driven poll, misc dispatcher).
 pub fn perf_poll_wait(
     file: &crate::fs::File,
-    task: *mut crate::process::task::Task,
+    task: *mut crate::process::types::Task,
 ) -> bool {
     let Some(ev) = event_of(file) else { return false };
     ev.wait_queue
-        .add(crate::process::wait::WaitQueueEntry::new(task, false));
+        .add(crate::process::types::WaitQueueEntry::new(task, false));
     true
 }
 
 pub fn perf_poll_unwait(
     file: &crate::fs::File,
-    task: *mut crate::process::task::Task,
+    task: *mut crate::process::types::Task,
 ) {
     if let Some(ev) = event_of(file) {
         ev.wait_queue.remove(task);
@@ -1523,7 +1523,7 @@ pub fn perf_mmap_handler(
                     crate::pr_err!(
                         "PERF-ALLOC-DIRTY: alloc_pages returned frame {:#x} with refcount {} mapcount {} — allocator handed out a LIVE page; zeroing it would corrupt its owner pid {}",
                         p, rc, mc,
-                        crate::process::current_pid()
+                        crate::process::hotpath::current_pid()
                     );
                 }
             }
@@ -1702,7 +1702,7 @@ pub fn perf_mmap_handler(
             crate::pr_info!(
                 "PERF-RING-MAP: event {} ring at {:#x} len {:#x} ({} pages) pid {}",
                 ev.id, vaddr, length, total_pages,
-                crate::process::current_pid()
+                crate::process::hotpath::current_pid()
             );
         }
     }
@@ -1984,7 +1984,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         // reference's perf permission rule simplified to uid).
         // The pinned lookup keeps the Task alive across the check.
         {
-            let target = crate::process::pid_hash::pid_hash_lookup_pinned(tid);
+            let target = crate::process::hotpath::pid_hash_lookup_pinned(tid);
             if target.is_null() {
                 return -(crate::errno::constants::ESRCH as i64);
             }
@@ -1996,7 +1996,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             } else {
                 false
             };
-            crate::process::task::Task::task_put(target);
+            crate::process::types::Task::task_put(target);
             if !ok {
                 return -(crate::errno::constants::EACCES as i64);
             }

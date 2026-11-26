@@ -9,7 +9,7 @@
 
 //! Process sleep and wakeup mechanism test
 use crate::println;
-use crate::process::task::{Task, TaskState};
+use crate::process::types::{Task, TaskState};
 use super::{test_pass, test_fail, test_group_start, test_skip};
 
 /// Phase gate for the wake probe kthread (Test 3):
@@ -64,7 +64,7 @@ pub fn test_sleep_and_wakeup() {
     }
 
     // Test 2: Verify state setting and getting
-    let mut task = Task::new(999, crate::process::task::SchedPolicy::Normal);
+    let mut task = Task::new(999, crate::process::types::SchedPolicy::Normal);
     if !task.state().is_running() {
         test_fail("initial state", "should be Running");
         return;

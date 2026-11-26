@@ -31,7 +31,7 @@ pub fn ensure_dump_thread() {
     if DUMP_THREAD_ON.swap(true, Ordering::AcqRel) {
         return;
     }
-    crate::process::kthread_run(
+    crate::process::hotpath::kthread_run(
         mmprof_dump_fn,
         core::ptr::null_mut(),
         "mmprofd",
@@ -39,9 +39,9 @@ pub fn ensure_dump_thread() {
 }
 
 extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    use crate::process::task::TaskState;
+    use crate::process::types::TaskState;
     loop {
-        if crate::process::kthread_should_stop() {
+        if crate::process::hotpath::kthread_should_stop() {
             break;
         }
         // Sleep MMPROF_DUMP_SECS of jiffies (nanosleep discipline:

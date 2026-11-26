@@ -3641,7 +3641,7 @@ pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
         if let Some(socket) = tcp_socket_table_ref().get(fd as usize) {
             crate::pr_info!(
                 "tcp-listen: pid {} port {}",
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 socket.local_port
             );
         }

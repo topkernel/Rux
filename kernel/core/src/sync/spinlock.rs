@@ -265,7 +265,7 @@ impl RawSpinlock {
         // owner slot's usize.
         self.owner.store((crate::arch::smp::cpu_id() + 1) as usize, Ordering::Relaxed);
         // Leak forensics (see field docs): last acquirer's pid + site.
-        self.acq_pid.store(crate::process::current_pid(), Ordering::Relaxed);
+        self.acq_pid.store(crate::process::hotpath::current_pid(), Ordering::Relaxed);
         self.acq_site.store(ra, Ordering::Relaxed);
         self.acq_jiffies
             .store(crate::timer::get_jiffies(), Ordering::Relaxed);
@@ -385,7 +385,7 @@ impl RawSpinlock {
             && crate::arch::cpu::get_interrupts_state()
             && crate::sched::current()
                 .map(|t| {
-                    t.state().bits() == crate::process::task::TaskState::RUNNING
+                    t.state().bits() == crate::process::types::TaskState::RUNNING
                 })
                 .unwrap_or(false)
     }

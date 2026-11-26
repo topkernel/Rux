@@ -155,7 +155,7 @@ def escape_hatch_check(failures):
     inv_re = _re.compile(r"\b(INV-[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\b")
     owners = [
         ROOT / "kernel" / "core" / "src" / "safety",
-        ROOT / "kernel" / "core" / "src" / "process" / "task_ref.rs",
+        ROOT / "kernel" / "core" / "src" / "process" / "hotpath.rs",
         ROOT / "kernel" / "core" / "src" / "fs" / "unsafe.rs",
     ]
     files = []

@@ -505,7 +505,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // costs 3 stores.
     if crate::trace::EVENT_SYSFORENSIC.armed() {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
-            .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
+            .record(crate::process::hotpath::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
         if let Some(cur) = crate::sched::current() {
             use core::sync::atomic::Ordering::Relaxed;
             cur.ext.last_syscall_nr.store(syscall_no as u32, Relaxed);
@@ -577,7 +577,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 crate::println!(
                     "syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x}) pid={} comm={}",
                     syscall_no, args[0], args[1], args[2],
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     comm
                 );
             }
@@ -600,7 +600,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         if EFT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
             crate::pr_info!(
                 "EFAULTTRAC: pid={} nr={} a0={:#x} a1={:#x}",
-                crate::process::current_pid(), syscall_no, args[0], args[1]
+                crate::process::hotpath::current_pid(), syscall_no, args[0], args[1]
             );
         }
     }
@@ -626,7 +626,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         if ENOSYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
             crate::pr_info!(
                 "ENOSYS-TRACE: pid={} nr={} a0={:#x} a1={:#x}",
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 syscall_no,
                 args[0],
                 args[1]
@@ -640,7 +640,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // turns that into "which step failed" (search-open, fstat, mmap,
     // header read).
     if crate::trace::EVENT_STRACE1.armed()
-        && crate::process::current_pid() == 1
+        && crate::process::hotpath::current_pid() == 1
     {
         crate::syscall::support::strace1_line(syscall_no as u32, &args, result);
     }
@@ -653,7 +653,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // switch catalog note in debug/switches.rs.
     if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
-            crate::process::current_pid(), syscall_no, result,
+            crate::process::hotpath::current_pid(), syscall_no, result,
             if result < 0 { "error" } else { "ok" });
     }
 
@@ -729,7 +729,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // Same rux:sysring (retired debug=sysring) gate as the entry-side record — see above.
     if crate::trace::EVENT_SYSRING.armed() {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
-            .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
+            .record(crate::process::hotpath::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
     }
 
     // sc128 (Session P): per-task nr-only ring of the last syscalls
@@ -740,7 +740,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     if let Some(cur) = crate::sched::current() {
         use core::sync::atomic::Ordering::Relaxed;
         let idx = cur.ext.last_calls_cur.fetch_add(1, Relaxed)
-            % crate::process::task::LAST_CALLS_LEN;
+            % crate::process::types::LAST_CALLS_LEN;
         cur.ext.last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
     }
 
@@ -773,13 +773,13 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             if let Some(cur) = crate::sched::current() {
                 use core::sync::atomic::Ordering::Relaxed;
                 let n = cur.ext.init_calls_cur.fetch_add(1, Relaxed);
-                let idx = n % crate::process::task::INIT_CALLS_LEN;
+                let idx = n % crate::process::types::INIT_CALLS_LEN;
                 cur.ext.init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
                 cur.ext.init_a0[idx].store(args[0], Relaxed);
                 // sc143: latch the birth window once (first 64 filtered
                 // calls of this task's life) — the deep ring's tail gets
                 // churned by retry loops, the birth window cannot.
-                if n < crate::process::task::BIRTH_CALLS_LEN as usize {
+                if n < crate::process::types::BIRTH_CALLS_LEN as usize {
                     cur.ext.birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
                     cur.ext.birth_a0[n].store(args[0], Relaxed);
                 }
@@ -830,7 +830,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             if IO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
                 crate::pr_warn!(
                     "appioctl: pid={} comm='{}' fd={} cmd={:#x} ret={}",
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     comm,
                     args[0],
                     args[1],
@@ -945,7 +945,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                             if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2400 {
                                 crate::pr_warn!(
                                     "applog pid={} comm='{}' ret={} |{}",
-                                    crate::process::current_pid(),
+                                    crate::process::hotpath::current_pid(),
                                     comm,
                                     result,
                                     joined
@@ -983,7 +983,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         if is_app {
             static APPSPAWN_MAIN_PID: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            let my_pid = crate::process::current_pid() as u32;
+            let my_pid = crate::process::hotpath::current_pid() as u32;
             let parent_pid = APPSPAWN_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
             let skip = if comm == "appspawn" {
                 if parent_pid == 0 {
@@ -1080,7 +1080,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             if PRCTL_EI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
                 crate::pr_warn!(
                     "prctl-einval: pid {} comm='{}' option={} a1={:#x} a2={:#x} a3={:#x} a4={:#x}",
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     comm,
                     args[0],
                     args[1],
@@ -1105,7 +1105,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // by shimming the nr-79 arm — zero hits while the hook printed).
     if (result == -20 || (result == -2
             && [53u64, 79, 90].contains(&(syscall_no as u64))))
-        && crate::process::current_pid() >= 300
+        && crate::process::hotpath::current_pid() >= 300
     {
         static ENOTDIR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -1124,7 +1124,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 args[0],
                 path,
                 args[2],
-                crate::process::current_pid()
+                crate::process::hotpath::current_pid()
             );
         }
     }
@@ -1176,7 +1176,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                     "openmiss: path='{}' root='{}' pid={}",
                     path,
                     root_str,
-                    crate::process::current_pid()
+                    crate::process::hotpath::current_pid()
                 );
             }
         }
@@ -1640,7 +1640,7 @@ pub mod fixbl {
     pub fn note(idx: usize) {
         let n = HITS[idx].fetch_add(1, Ordering::Relaxed);
         if n == 0 && !SEEN[idx].swap(true, Ordering::AcqRel) {
-            let pid = crate::process::current_pid();
+            let pid = crate::process::hotpath::current_pid();
             let comm = match crate::sched::current() {
                 Some(t) => t.comm_str(),
                 None => alloc::borrow::Cow::Borrowed("?"),

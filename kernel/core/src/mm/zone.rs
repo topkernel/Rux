@@ -746,7 +746,7 @@ impl Zone {
                 crate::pr_err!(
                     "RAW-FREE-OF-LIVE-TABLE pfn={:#x} order={} by pid={} — stack:",
                     pfn, order,
-                    crate::process::current_pid()
+                    crate::process::hotpath::current_pid()
                 );
                 let mut frames: [u64; 10] = [0; 10];
                 // Reads the frame-pointer chain of the current stack

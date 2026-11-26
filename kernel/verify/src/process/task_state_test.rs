@@ -3,7 +3,8 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for TaskState bitmap operations.
-//! Copied from: kernel/core/src/process/task.rs
+//! Copied from: kernel/core/src/process/types.rs (the struct)
+//! and kernel/core/src/process/hotpath.rs (its impl)
 
 use proptest::prelude::*;
 

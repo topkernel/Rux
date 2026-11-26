@@ -7,10 +7,10 @@
 //! Definitions only. Every `struct`, `enum` and type alias of the
 //! subsystem lives here, together with the constants those definitions
 //! name (array lengths, and the constants those derive from); every
-//! `impl` block stays with the functions that use it — an impl is code,
-//! a definition is data layout. The exceptions are definitions local to
-//! code: a type declared inside a function or inside a private inline
-//! module.
+//! `impl` block lives in `hotpath.rs` beside the functions that use it —
+//! an impl is code, a definition is data layout. The exceptions are
+//! definitions local to code: a type declared inside a function or
+//! inside a private inline module of `hotpath.rs`.
 //!
 //! `TaskFlags` is the one definition that brings impl blocks with it:
 //! the `bitflags!` invocation generates the struct and its operations
@@ -19,8 +19,8 @@
 //!
 //! This file holds no `unsafe`. A field that was private to its old
 //! topic file is `pub(super)` here because the code that touches it
-//! stayed in that file: the process directory is the smallest visibility
-//! boundary Rust offers for a definition that lives in a sibling module.
+//! lives in the sibling module `hotpath`: the process directory is the
+//! smallest visibility boundary Rust offers for that split.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -531,7 +531,7 @@ pub struct Task {
     pub pending: SigPending,
 
     /// PID namespace (None == initial namespace).
-    pub ns_pid: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+    pub ns_pid: Option<alloc::sync::Arc<crate::process::types::PidNamespace>>,
 
     /// PID hash table chain link (singly-linked for RCU-safe traversal).
     pub pid_hash_next: *mut Task,
@@ -687,7 +687,7 @@ pub struct Task {
     ///
     /// Parent processes wait on this queue when calling wait4/waitpid
     /// Child process exit wakes up parent via this queue
-    pub wait_chldexit: crate::process::wait::WaitQueueHead,
+    pub wait_chldexit: crate::process::types::WaitQueueHead,
 
     /// vfork parent task pointer
     ///
@@ -809,23 +809,23 @@ pub struct Task {
     pub(super) cpu_time_last_sigxcpu: AtomicU64,
 
     /// Mount namespace (None == initial namespace).
-    pub ns_mount: Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+    pub ns_mount: Option<alloc::sync::Arc<crate::process::types::MountNamespace>>,
 
     /// UTS namespace (None == initial namespace).
-    pub ns_uts: Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+    pub ns_uts: Option<alloc::sync::Arc<crate::process::types::UtsNamespace>>,
 
     /// IPC namespace (None == initial namespace; stub).
-    pub ns_ipc: Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+    pub ns_ipc: Option<alloc::sync::Arc<crate::process::types::IpcNamespace>>,
 
     /// PID namespace that future children are created in (unshare/setns
     /// CLONE_NEWPID target; None == same as ns_pid).
-    pub ns_pid_for_children: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+    pub ns_pid_for_children: Option<alloc::sync::Arc<crate::process::types::PidNamespace>>,
 
     /// Network namespace (None == initial namespace; stub).
-    pub ns_net: Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+    pub ns_net: Option<alloc::sync::Arc<crate::process::types::NetNamespace>>,
 
     /// User namespace (None == initial namespace; stub).
-    pub ns_user: Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+    pub ns_user: Option<alloc::sync::Arc<crate::process::types::UserNamespace>>,
 
     /// PID of this task inside its pid namespace (== pid for the initial
     /// namespace; 1 for a CLONE_NEWPID namespace init).
@@ -839,7 +839,7 @@ pub struct Task {
     /// number the intermediate ns assigned it. Built once in
     /// copy_namespaces; immutable afterwards.
     pub ns_upids: alloc::vec::Vec<(
-        alloc::sync::Arc<crate::process::ns::PidNamespace>,
+        alloc::sync::Arc<crate::process::types::PidNamespace>,
         u32,
     )>,
 

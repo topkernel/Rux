@@ -28,7 +28,7 @@
 //! stay plain framework fns, not accessors of this table).
 
 #![forbid(unsafe_code)]
-use crate::process::task::Task;
+use crate::process::types::Task;
 use crate::signal::{SigInfo, SignalStruct};
 
 // ==================== The seam vocabulary ====================

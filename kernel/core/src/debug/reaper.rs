@@ -222,13 +222,13 @@ pub fn zombie_scan(now: u64) {
     // holding a pid-hash bucket spinlock).
     let mut found: [(u32, i32, [u8; 16], u32, u32); 16] = [(0, 0, [0; 16], 0, 0); 16];
     let mut nfound = 0usize;
-    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+    crate::process::hotpath::pid_hash_for_each_task_try(|t| {
         if nfound >= found.len() {
             return;
         }
         let task = t;
-        if task.state() == crate::process::task::TaskState::new(
-            crate::process::task::TaskState::ZOMBIE,
+        if task.state() == crate::process::types::TaskState::new(
+            crate::process::types::TaskState::ZOMBIE,
         ) && task.pid() != 0
         {
             found[nfound] = (
@@ -296,7 +296,7 @@ pub fn zombie_scan(now: u64) {
         }
         let (kind, val) = decode_kernel_code(code);
         // Name the non-reaping parent and what it is blocked on instead.
-        let parent_desc = crate::process::find_task_by_pid(ppid)
+        let parent_desc = crate::process::hotpath::find_task_by_pid(ppid)
             .map(|p| {
                 alloc::format!(
                     "{}('{}' state={:#x} lastsys={} a0={:#x})",

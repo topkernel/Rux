@@ -37,7 +37,7 @@
 #![forbid(unsafe_code)]
 use crate::fs::elf::{Elf64Ehdr, Elf64Phdr};
 use crate::fs::file::FileFlags;
-use crate::task::{rlimit_res, Task};
+use rux::process::{hotpath::rlimit_res, types::Task};
 use alloc::vec::Vec;
 
 /// ELF core file type.
@@ -229,7 +229,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
     let comm: &[u8] = &c[..c.iter().position(|&b| b == 0).unwrap_or(c.len())];
     let cred = task.cred();
     let (uid, gid) = (cred.uid, cred.gid);
-    let hostname = crate::ns::current_uts_ns().get_hostname();
+    let hostname = rux::process::hotpath::current_uts_ns().get_hostname();
 
     let mut out = Vec::with_capacity(pattern.len() + 24);
     let mut i = 0;

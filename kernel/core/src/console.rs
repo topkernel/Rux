@@ -180,8 +180,8 @@ static CAD_SEQ_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::Atomic
 const CAD_MAGIC: &[u8; 6] = b"\x1b[3;7~";
 
 /// Wait queue for blocking reads — readers sleep here when buffer is empty.
-static UART_READ_WAITQ: crate::process::wait::WaitQueueHead =
-    crate::process::wait::WaitQueueHead::new();
+static UART_READ_WAITQ: crate::process::types::WaitQueueHead =
+    crate::process::types::WaitQueueHead::new();
 
 // ============================================================================
 // UART base address
@@ -823,7 +823,7 @@ fn tty_isig_deliver(signo: i32) {
     // Target the tty foreground process group; fall back to the caller's.
     let mut pgid = crate::fs::leaf_glue::tty::console_fg_pgid();
     if pgid == 0 {
-        pgid = crate::process::current_pgid();
+        pgid = crate::process::hotpath::current_pgid();
     }
     if pgid != 0 {
         crate::signal::send_signal_to_pgid(pgid, signo);
@@ -1072,7 +1072,7 @@ pub fn getchar() -> Option<u8> {
 }
 
 /// Wait queue accessor — for char_dev.rs blocking read
-pub fn read_waitq() -> &'static crate::process::wait::WaitQueueHead {
+pub fn read_waitq() -> &'static crate::process::types::WaitQueueHead {
     &UART_READ_WAITQ
 }
 

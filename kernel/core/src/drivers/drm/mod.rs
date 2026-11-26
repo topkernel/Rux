@@ -481,7 +481,7 @@ pub fn trace_foreign_prime_ioctl(request: u32, fd: i32, err: i32) {
             "drm: prime-import on non-drm fd={} (err {}) pid={} #{}",
             fd,
             err,
-            crate::process::current_pid(),
+            crate::process::hotpath::current_pid(),
             n
         );
     }
@@ -882,7 +882,7 @@ fn trace_seq(request: u32, ret: i64) {
     if !crate::debug::switches::oh_hunt_prints_on() {
         return;
     }
-    let pid = crate::process::current_pid();
+    let pid = crate::process::hotpath::current_pid();
     let n = SEQ_N.fetch_add(1, Ordering::Relaxed);
     if n < 128 {
         crate::pr_warn!("drm[{}] ioctl#{n} {:#x} -> {}", pid, request, ret);
@@ -938,7 +938,7 @@ fn trace_ioctl(request: u32, ret: i64) {
                 crate::pr_warn!(
                     "drm: VERSION probe #{} pid={} (ret {})",
                     v,
-                    crate::process::current_pid(),
+                    crate::process::hotpath::current_pid(),
                     ret
                 );
             }
@@ -1788,7 +1788,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
             crate::pr_warn!(
                 "drm: prime import fd={} DEAD (EBADF) pid={}",
                 prime_fd,
-                crate::process::current_pid()
+                crate::process::hotpath::current_pid()
             );
         }
         return -9; // EBADF
@@ -1800,7 +1800,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
             crate::pr_warn!(
                 "drm: prime import fd={} NOT a dma-buf (EINVAL) pid={}",
                 prime_fd,
-                crate::process::current_pid()
+                crate::process::hotpath::current_pid()
             );
         }
         return -22; // EINVAL: not a dma-buf
@@ -1852,7 +1852,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
             crate::pr_warn!(
                 "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
                 it,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 prime_fd,
                 gem.id,
                 nz,
@@ -2332,7 +2332,7 @@ fn vblank_seq_at(ns: u64) -> u64 {
 /// Sleep (interruptible) until `deadline_ns` (monotonic since boot).
 /// Returns false when a signal interrupted the wait.
 fn sleep_until_ns(deadline_ns: u64) -> bool {
-    use crate::process::task::TaskState;
+    use crate::process::types::TaskState;
 
     if crate::drivers::timer::monotonic_ns_since_boot() >= deadline_ns {
         return true;
@@ -2446,7 +2446,7 @@ pub fn gem_mmap_resolve(
             crate::pr_warn!(
                 "drm: prime mmap#{} pid={} gem={} off={:#x} len={} -> phys={:#x}",
                 mt,
-                crate::process::current_pid(),
+                crate::process::hotpath::current_pid(),
                 gem.id,
                 offset,
                 n,

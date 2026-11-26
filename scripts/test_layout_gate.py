@@ -37,7 +37,7 @@ ALLOWLIST = {
     ("kernel/core/src/drivers/timer/x86_64.rs", "test_advance_jiffies"),
     ("kernel/core/src/drivers/timer/aarch64.rs", "test_advance_jiffies"),
     ("kernel/core/src/timer/wheel.rs", "test_shared"),
-    ("kernel/core/src/process/task.rs", "test_ti_flag"),
+    ("kernel/core/src/process/hotpath.rs", "test_ti_flag"),
     # page_desc's atomic bit helpers: "test" as in test-and-set, not tests.
     ("kernel/core/src/mm/page_desc.rs", "test_and_set"),
     ("kernel/core/src/mm/page_desc.rs", "test_and_clear"),

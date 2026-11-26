@@ -14,7 +14,7 @@
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
 use crate::fs::FdTable;
 use crate::sched;
-use crate::process::task::{Task, SchedPolicy};
+use crate::process::types::{Task, SchedPolicy};
 use crate::println;
 use crate::cmdline;
 use alloc::vec::Vec;
@@ -249,7 +249,7 @@ fn create_and_start_init_process(
         // here re-opened the wakeable-half-built-task window.)
 
         // Register init process in PID hash table (required for find_task_by_pid)
-        crate::process::pid_hash::pid_hash_insert(task_ptr);
+        crate::process::hotpath::pid_hash_insert(task_ptr);
 
         // Add init process to run queue
         // R52: check the insert. INIT_TASK_STORAGE is a static (not heap)
@@ -453,7 +453,7 @@ fn load_and_setup_elf(
         #[cfg(feature = "aarch64")]
         let entry = ret_from_fork as u64;
         let thread = (*task_ptr).thread_mut();
-        crate::process::thread_set_entry(thread, entry, child_regs as u64);
+        crate::process::hotpath::thread_set_entry(thread, entry, child_regs as u64);
     }
 
     Ok(())

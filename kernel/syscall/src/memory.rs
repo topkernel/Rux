@@ -191,7 +191,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 // behavior — brk(2) returns the current break, not ENOMEM).
                 // RLIM_INFINITY (u64::MAX) disables the check.
                 let (data_cur, _) = current_task.rlimit(
-                    ::process::task::rlimit_res::DATA,
+                    rux::process::hotpath::rlimit_res::DATA,
                 );
                 if data_cur != u64::MAX
                     && new_brk.saturating_sub(brk_floor) > data_cur
@@ -780,7 +780,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // mutable address_space borrow below.
             {
                 let (as_cur, _) = current_task.rlimit(
-                    ::process::task::rlimit_res::AS,
+                    rux::process::hotpath::rlimit_res::AS,
                 );
                 if as_cur != u64::MAX {
                     let page = crate::mm::page::PAGE_SIZE as u64;
@@ -3548,7 +3548,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
     // holds no CAP_IPC_LOCK and the soft limit is 0.
     let has_ipc_lock = crate::security::capable(crate::security::CAP_IPC_LOCK);
     let (memlock_cur, _) = current_task
-        .rlimit(::process::task::rlimit_res::MEMLOCK);
+        .rlimit(rux::process::hotpath::rlimit_res::MEMLOCK);
     if !has_ipc_lock && memlock_cur == 0 {
         return -1_i64; // EPERM
     }
@@ -3835,7 +3835,7 @@ pub fn sys_mlockall(args: [u64; 6]) -> i64 {
     // check.
     let has_ipc_lock = crate::security::capable(crate::security::CAP_IPC_LOCK);
     let (memlock_cur, _) = current_task
-        .rlimit(::process::task::rlimit_res::MEMLOCK);
+        .rlimit(rux::process::hotpath::rlimit_res::MEMLOCK);
     if !has_ipc_lock && memlock_cur == 0 {
         return -1_i64; // EPERM
     }

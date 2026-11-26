@@ -69,7 +69,7 @@ pub fn stash_file(op: u32, path: &str) {
     }
     // current_pid() is the task (thread) id — the same id TXN-HANG
     // reports as the server tid.
-    let tid = crate::process::current_pid();
+    let tid = crate::process::hotpath::current_pid();
     if tid == 0 {
         return;
     }

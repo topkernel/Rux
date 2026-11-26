@@ -82,8 +82,8 @@ fn test_sys_getpid() {
     let pid2 = sys_getpid([0; 6]);
     test_assert_eq!(pid1, pid2, "sys_getpid returns consistent pid across calls");
 
-    // sys_getpid result should match process::current_pid()
-    let raw_pid = process::current_pid() as i64;
+    // sys_getpid result should match process::hotpath::current_pid()
+    let raw_pid = process::hotpath::current_pid() as i64;
     test_assert_eq!(pid, raw_pid, "sys_getpid matches process::current_pid()");
 
     // sys_getppid: returns the parent PID
@@ -96,8 +96,8 @@ fn test_sys_getpid() {
     let ppid2 = sys_getppid([0; 6]);
     test_assert_eq!(ppid1, ppid2, "sys_getppid returns consistent ppid across calls");
 
-    // getppid should match process::current_ppid()
-    let raw_ppid = process::current_ppid() as i64;
+    // getppid should match process::hotpath::current_ppid()
+    let raw_ppid = process::hotpath::current_ppid() as i64;
     test_assert_eq!(ppid, raw_ppid, "sys_getppid matches process::current_ppid()");
 }
 

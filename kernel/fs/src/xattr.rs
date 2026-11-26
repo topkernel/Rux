@@ -101,7 +101,7 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
             let cred = if let Some(task) = crate::sched::current() {
                 task.cred().clone()
             } else {
-                crate::process::task::Cred::new_init()
+                crate::process::types::Cred::new_init()
             };
             if crate::security::has_capability(&cred, crate::security::CAP_SYS_ADMIN) {
                 Ok(())
@@ -118,7 +118,7 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
             let cred = if let Some(task) = crate::sched::current() {
                 task.cred().clone()
             } else {
-                crate::process::task::Cred::new_init()
+                crate::process::types::Cred::new_init()
             };
             if crate::security::has_capability(&cred, cap) {
                 Ok(())
@@ -141,7 +141,7 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
             let cred = if let Some(task) = crate::sched::current() {
                 task.cred().clone()
             } else {
-                crate::process::task::Cred::new_init()
+                crate::process::types::Cred::new_init()
             };
             if cred.euid == 0
                 || crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
@@ -235,7 +235,7 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
         let cred = if let Some(task) = crate::sched::current() {
             task.cred().clone()
         } else {
-            crate::process::task::Cred::new_init()
+            crate::process::types::Cred::new_init()
         };
         if !crate::security::has_capability(&cred, crate::security::CAP_SYS_ADMIN) {
             return Err(errno::Errno::PermissionDenied);

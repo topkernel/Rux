@@ -357,10 +357,10 @@ fn check_not_readonly(pathname: &str) -> Result<(), i32> {
 /// without the global flag change (the sandbox is weaker, the system
 /// stays writable — the contained trade for the un-cloned ns model).
 fn ns_may_reflag(mnt: &Arc<VfsMountInternal>) -> bool {
-    if crate::process::ns::in_init_mnt_ns() {
+    if crate::process::hotpath::in_init_mnt_ns() {
         return true;
     }
-    let ns = crate::process::ns::current_mnt_ns();
+    let ns = crate::process::hotpath::current_mnt_ns();
     let tracked = ns.vfs_mounts.lock();
     tracked.iter().any(|m| Arc::ptr_eq(m, mnt))
 }
@@ -384,7 +384,7 @@ fn apply_mnt_flags(
     // and the PrivateTmp setup all died EROFS from exactly that leak.
     // The sandbox itself keeps its RO enforcement inside the namespace
     // through the per-mount mnt.flags guard (path_on_readonly_mount).
-    if !crate::process::ns::in_init_mnt_ns() {
+    if !crate::process::hotpath::in_init_mnt_ns() {
         return;
     }
     // Keep the underlying ext4's own ro latch in sync — its
@@ -660,7 +660,7 @@ pub fn vfs_mount(
             // get_vfs_root() → VFS_STATE.lock() — self-deadlock under the
             // guard held here (sc98 first-boot DEADLOCK).
             drop(state);
-            crate::process::ns::ns_track_vfsmount(mnt_desc);
+            crate::process::hotpath::ns_track_vfsmount(mnt_desc);
             return Some(mounted_root);
         } else {
             // Intermediate component — create if not exists
@@ -1618,7 +1618,7 @@ fn bind_clone_attach(
             drop(state);
             // sc98: MS_REC clones belong to the caller's namespace too —
             // a dying private ns must unmount them with the rest.
-            crate::process::ns::ns_track_vfsmount(mnt_desc);
+            crate::process::hotpath::ns_track_vfsmount(mnt_desc);
             return;
         }
         // Intermediate component — dcache hit or fs lookup; never fabricate
@@ -1755,7 +1755,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
                         "vswitch-root: walk miss at '{}' of '{}' (pid {})",
                         component,
                         from,
-                        crate::process::current_pid()
+                        crate::process::hotpath::current_pid()
                     );
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
@@ -1774,7 +1774,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
             crate::pr_warn!(
                 "vswitch-root: no mount object at '{}' (pid {})",
                 from,
-                crate::process::current_pid()
+                crate::process::hotpath::current_pid()
             );
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
@@ -1786,7 +1786,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
         crate::pr_warn!(
             "vswitch-root: no attached mount at '{}' (pid {})",
             from,
-            crate::process::current_pid()
+            crate::process::hotpath::current_pid()
         );
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -1800,7 +1800,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
 
     // Namespace anchor: setns(CLONE_NEWNS) re-anchoring and Drop
     // bookkeeping read ns.root; record the crafted root like a pivot.
-    let ns = crate::process::ns::current_mnt_ns();
+    let ns = crate::process::hotpath::current_mnt_ns();
     *ns.root.lock() = Some(mnt.root.clone());
     // Teardown tracking (mntput-on-nsput): the attach path usually
     // tracked this mount already — dedupe by identity so Drop unmounts
@@ -1814,7 +1814,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
     crate::pr_info!(
         "vswitch-root: task re-rooted at '{}' (pid {})",
         from,
-        crate::process::current_pid()
+        crate::process::hotpath::current_pid()
     );
     Ok(())
 }
@@ -2057,7 +2057,7 @@ pub fn vfs_attach_mount_at(
     // ns_track_vfsmount must run AFTER dropping VFS_STATE (lazy
     // ns init reaches get_vfs_root() — see the sc98 note in vfs_mount).
     drop(state);
-    crate::process::ns::ns_track_vfsmount(mnt.clone());
+    crate::process::hotpath::ns_track_vfsmount(mnt.clone());
     Ok(mountpoint)
 }
 
@@ -2274,8 +2274,8 @@ pub fn init() {
 fn get_cwd() -> String {
     if let Some(current) = crate::sched::current() {
         // Verify alignment of the underlying pointer (fixes H62).
-        let ptr = current as *const crate::process::task::Task;
-        if (ptr as usize) % core::mem::align_of::<crate::process::task::Task>() != 0 {
+        let ptr = current as *const crate::process::types::Task;
+        if (ptr as usize) % core::mem::align_of::<crate::process::types::Task>() != 0 {
             return String::from("/");
         }
         let cwd_bytes = current.get_cwd();
@@ -2625,7 +2625,7 @@ fn sbx_trace(kind: &str, key: &str, detail: &str) {
         total,
         *n,
         detail,
-        crate::process::current_pid()
+        crate::process::hotpath::current_pid()
     );
 }
 
@@ -3252,7 +3252,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     crate::pr_warn!(
                         "apptap negdentry hit '{}' (cached ENOENT, pid {})",
                         prefix,
-                        crate::process::current_pid()
+                        crate::process::hotpath::current_pid()
                     );
                 }
             }
@@ -3756,7 +3756,7 @@ fn check_parent_write_permission(parent_inode: &Inode) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
     if !crate::fs::permission::generic_permission(
         inode_mode, inode_uid, inode_gid,
@@ -3778,7 +3778,7 @@ fn check_parent_exec_permission(parent_inode: &Inode) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
     if !crate::fs::permission::generic_permission(
         inode_mode, inode_uid, inode_gid,
@@ -3806,7 +3806,7 @@ fn check_sticky(parent_inode: &Inode, target_inode: Option<&Inode>) -> Result<()
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
 
     if crate::security::has_capability(&cred, crate::security::CAP_FOWNER) {
@@ -4939,7 +4939,7 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
     if cred.euid != 0 && cred.euid != inode_uid {
@@ -5001,7 +5001,7 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
     let inode_gid = inode.gid.load(Ordering::Relaxed);
@@ -5106,7 +5106,7 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
     // truncate_setsize's callers; LTP truncate03 sets the limit in
     // setup and expects the 32MiB truncate to fail EFBIG).
     if let Some(task) = crate::sched::current() {
-        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        let (fsz_cur, _) = task.rlimit(crate::process::hotpath::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
             return Err(errno::Errno::FileTooLarge.as_neg_i32());
         }
@@ -5127,7 +5127,7 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
     if !crate::fs::permission::generic_permission(
         inode_mode, inode_uid, inode_gid,
@@ -5167,7 +5167,7 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
 
     // RLIMIT_FSIZE parity with vfs_truncate (Linux do_ftruncate path).
     if let Some(task) = crate::sched::current() {
-        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        let (fsz_cur, _) = task.rlimit(crate::process::hotpath::rlimit_res::FSIZE);
         if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
             return Err(errno::Errno::FileTooLarge.as_neg_i32());
         }
@@ -5409,7 +5409,7 @@ pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, 
     let seq = TMPFILE_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let unique = alloc::format!(
         ".rux-tmpfile-{}-{}",
-        crate::process::current_pid(),
+        crate::process::hotpath::current_pid(),
         seq
     );
     let full = if dirpath.ends_with('/') {
@@ -5549,9 +5549,9 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                         && rem < crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF + 6
                     {
                         if let Some(kind) =
-                            crate::process::ns::NsKind::from_index(rem - crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF)
+                            crate::process::types::NsKind::from_index(rem - crate::fs::leaf_glue::procfs::PROCFS_NS_LINK_INO_OFF)
                         {
-                            let file = crate::process::ns::build_ns_file(
+                            let file = crate::process::hotpath::build_ns_file(
                                 pid_val as u32,
                                 kind,
                                 flags,
@@ -6476,7 +6476,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     let caller_ns = crate::sched::current()
                         .and_then(|t| t.ns_pid.clone());
                     let resolved = if kind == 1 {
-                        crate::process::ns::resolve_local_pid_to_global(
+                        crate::process::hotpath::resolve_local_pid_to_global(
                             id as u32,
                             caller_ns.as_ref(),
                         )
@@ -6488,12 +6488,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                         if caller_ns.is_none() {
                             Some(id)
                         } else {
-                            crate::process::ns::resolve_local_pid_to_global(
+                            crate::process::hotpath::resolve_local_pid_to_global(
                                 id as u32,
                                 caller_ns.as_ref(),
                             )
                             .and_then(|leader| {
-                                crate::process::find_task_by_pid(leader)
+                                crate::process::hotpath::find_task_by_pid(leader)
                                     .map(|t| t.pgid() as i32)
                             })
                         }
@@ -6501,12 +6501,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     // Validate the target exists (Linux: ESRCH).
                     let exists = match resolved {
                         Some(gid) if kind == 1 => {
-                            crate::process::find_task_by_pid(gid as u32).is_some()
+                            crate::process::hotpath::find_task_by_pid(gid as u32).is_some()
                         }
                         Some(gid) => {
                             let pgid = gid as u32;
                             let found = core::cell::Cell::new(false);
-                            crate::process::pid_hash::pid_hash_for_each_task(|task| {
+                            crate::process::hotpath::pid_hash_for_each_task(|task| {
                                 if task.pgid() == pgid {
                                     found.set(true);
                                 }
@@ -6543,7 +6543,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     crate::sched::current()
                         .and_then(|t| t.ns_pid.clone())
                         .map(|ns| {
-                            crate::process::ns::translate_sender_pid_ns(
+                            crate::process::hotpath::translate_sender_pid_ns(
                                 o.id as u32,
                                 Some(&ns),
                             ) as i32
@@ -6615,16 +6615,16 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let resolved = if caller_ns.is_none() {
                     Some(opid)
                 } else if kind == 2 {
-                    crate::process::ns::resolve_local_pid_to_global(
+                    crate::process::hotpath::resolve_local_pid_to_global(
                         opid as u32,
                         caller_ns.as_ref(),
                     )
                     .and_then(|leader| {
-                        crate::process::find_task_by_pid(leader)
+                        crate::process::hotpath::find_task_by_pid(leader)
                             .map(|t| t.pgid() as i32)
                     })
                 } else {
-                    crate::process::ns::resolve_local_pid_to_global(
+                    crate::process::hotpath::resolve_local_pid_to_global(
                         opid as u32,
                         caller_ns.as_ref(),
                     )
@@ -6634,7 +6634,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let exists = match resolved {
                     Some(gid) if kind == 2 => {
                         let found = core::cell::Cell::new(false);
-                        crate::process::pid_hash::pid_hash_for_each_task(|task| {
+                        crate::process::hotpath::pid_hash_for_each_task(|task| {
                             if task.pgid() == gid as u32 {
                                 found.set(true);
                             }
@@ -6642,7 +6642,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                         found.get()
                     }
                     Some(gid) => {
-                        crate::process::find_task_by_pid(gid as u32).is_some()
+                        crate::process::hotpath::find_task_by_pid(gid as u32).is_some()
                     }
                     None => false,
                 };
@@ -7338,7 +7338,7 @@ pub fn vfs_utimensat_ex(
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new_init()
+        crate::process::types::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
     let owner_or_cap = cred.euid == inode_uid
