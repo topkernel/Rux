@@ -14,10 +14,15 @@
 //! local to code: a type declared inside a function or inside an inline
 //! module of `hotpath.rs`.
 //!
-//! This file holds no `unsafe`. A field that was private to its old
-//! topic file is `pub(super)` here because the code that touches it
-//! lives in the sibling module `hotpath`: the sched directory is the
-//! smallest visibility boundary Rust offers for that split.
+//! This file holds no `unsafe`; the attribute below keeps it so. A field
+//! that was private to its old topic file is `pub(super)` here because
+//! the code that touches it lives in the sibling module `hotpath`: the
+//! sched directory is the smallest visibility boundary Rust offers for
+//! that split.
+
+// Kernel layer policy (docs/architecture/kernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

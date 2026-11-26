@@ -98,7 +98,7 @@ kernel/process/src/pid.rs
 kernel/core/src/process/pid_hash.rs
 kernel/core/src/process/task.rs
 kernel/core/src/process/wait.rs
-kernel/core/src/sched/class.rs
+kernel/core/src/sched/types.rs
 kernel/sched/src/deadline.rs
 kernel/sched/src/idle.rs
 kernel/sched/src/sched_ev.rs
@@ -166,7 +166,6 @@ kernel/net/src/lib.rs
 kernel/drivers/src/lib.rs
 kernel/sched/src/fair.rs
 kernel/sched/src/rt.rs
-kernel/core/src/sched/cgroup.rs
 kernel/sched/src/sched_policy.rs
 kernel/process/src/lib.rs
 kernel/process/src/exit_teardown.rs
