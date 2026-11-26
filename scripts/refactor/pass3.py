@@ -157,7 +157,10 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and masked[j:j + 5] in ("impl ", "fn ", "trai", "exter"):
+        elif j < len(masked) and (masked[j:j + 5] == "impl "
+                                  or masked[j:j + 3] == "fn "
+                                  or masked[j:j + 6] == "trait "
+                                  or masked[j:j + 7] == "extern"):
             brace = find_body_brace(masked, j)
             if brace >= 0:
                 hits.append((m.start(), match_brace(masked, brace) + 1))
@@ -170,6 +173,17 @@ def region_char_span(text, masked, reg, kind):
 def fn_span_from(text, masked, inner_char):
     """Line span (first, last inclusive) of the innermost fn containing
     inner_char, doc comment and attributes included."""
+    # an `unsafe fn` region's span starts at the KEYWORD, one token
+    # before the `fn` FN_SPAN matches — advance to the fn's own body so
+    # the enclosing-fn scan (which requires brace < inner_char) sees the
+    # fn itself, not just its parent
+    if masked[inner_char:inner_char + 6] == "unsafe":
+        j = inner_char + 6
+        while j < len(masked) and masked[j] in " \t":
+            j += 1
+        brace = find_body_brace(masked, j)
+        if brace >= 0:
+            inner_char = brace + 1
     best = None
     for m in FN_SPAN.finditer(masked):
         brace = find_body_brace(masked, m.start())
