@@ -105,7 +105,7 @@ numbers this register cites).
   booted and every opt≥1 boot died at the first cache miss — caught by
   disassembly verification, fixed with `UnsafeCell` (root-cause record:
   perf-audit/run/pa68-d7-rootcause.txt).
-- **WalkClaim reader banks** (fs/dentry.rs, commit 3f377d13): the path
+- **WalkClaim reader banks** (fs/hotpath.rs, dentry section, commit 3f377d13): the path
   walk's per-component reads (child map, inode Arc) run lock-free
   behind a typed claim — a SeqCst increment of THIS CPU's reader-bank
   counter whose `&WalkClaim` is the only currency the lock-free read
@@ -183,7 +183,7 @@ numbers this register cites).
   boots with ZERO stale-negative deliveries, ghost entries, or
   verification failures. Source: stress-port/run/stress-runs/findings.md
   (round-4 negmemo validation).
-- **R84/R85 handoff SleepMutex** (sync/mutex.rs): waiters/tokens/
+- **R84/R85 handoff SleepMutex** (sync/types.rs, hotpath.rs mutex section): waiters/tokens/
   anti-starve state machine, now loom/Kani-verified (see S-1 in
   section A — the verification and the design are one story).
 - **D-2 Packed kernel-stack slab** (x86_64, cross-ref D-2): kernel
@@ -239,7 +239,7 @@ numbers this register cites).
     ops in the 100 s window, zero strike-only kills
     (stress-port/run/stress-runs/findings.md).
   - GUP-pinned user-page DIO (gup-dio lane, 2026-11-18): the reference's
-    pin_user_pages / bio_iov_iter_get_pages shape — mm/gup.rs walks the
+    pin_user_pages / bio_iov_iter_get_pages shape — mm/hotpath.rs (gup section) walks the
     current task's page tables under the mm PTE lock (INV-LOCK-7) after
     fault-in (FOLL_WRITE discipline for BOTH DMA directions), takes a
     page refcount per frame (reclaim's refcount==1 gate keeps pinned
@@ -298,7 +298,7 @@ numbers this register cites).
   (1,240/3,589 → 2,163/2,629 → 2,990/3,346), swap writes +75%; the
   swap-starvation family closed with verification boots. Source:
   stress-port/run/stress-runs/findings.md (round 7).
-- **bio write-plan closure bound** (fs/bio.rs, commit 619dc8cc,
+- **bio write-plan closure bound** (fs/hotpath.rs, bio section, commit 619dc8cc,
   merged via be56334a): `plan_add_constraints` rescanned every pending
   publication against the whole plan per round — a quadratic the
   reference kernel's block layer cannot grow because it never
@@ -449,7 +449,7 @@ numbers this register cites).
 ## G. Pending evidence slots (placeholders until measured)
 
 - **S-2 typed binder transaction FSM** (survey shortlist item,
-  scheduled with the OH lane): binder.rs transaction states modeled
+  scheduled with the OH lane): the binder transaction states modeled (ipc/hotpath.rs binder section)
   as an enum FSM so illegal state transitions are unrepresentable —
   PLACEHOLDER; no A/B numbers exist yet.
 - **S-3 anykernel-style in-host test slice for ext4/jbd2** —
@@ -712,7 +712,7 @@ foreign QEMUs):
   C-style callback: `fn(&Inode, pos: u64, buf: &mut [u8]) ->
   Result<(bytes_filled, next_pos), i32>` with the record format,
   every-byte-written (pad included), EOF/EINVAL and sleep rules
-  documented at the type (kernel/src/fs/inode.rs). The VFS branch is
+  documented at the type (fs/hotpath.rs, inode section). The VFS branch is
   8 lines; ext4 owns the walk.
 - **Byte-offset f_pos, d_off = resume point.** The file position
   becomes the ext4 directory byte offset and each record's d_off
@@ -739,7 +739,7 @@ foreign QEMUs):
 - **The unconditional-increment fd lookup forced every close(2) to
   wait out an RCU grace period; conditional acquisition moved the
   guarantee into the refcount transition itself.** The old protocol
-  (fs/fdreap.rs, pre-oc-rc): `get_file` cloned a slot's Arc with an
+  (fs/hotpath.rs, fdreap section, pre-oc-rc): `get_file` cloned a slot's Arc with an
   UNCONDITIONAL `increment_strong_count`, so a closer could only prove
   "no in-flight reader will bump the count after my observation" by
   parking the Arc and waiting a full grace period before the close
@@ -1052,7 +1052,7 @@ the open gap — the fire-late/hrtimer-re-arm attribution is queued (rt-r4).
 
 - **One batch, one claim per shared line — the per-cpu-pageset handout
   shape for the page-cache bulk path** (branch `bufw-parity`, commit
-  3aa437e96; mm/zone.rs, mm/pcp.rs, mm/page_alloc.rs): a 1 MiB buffered
+  3aa437e96; mm/hotpath.rs, zone/pcp/page_alloc sections): a 1 MiB buffered
   write asks the frame allocator for 256 pages in bursts of 64. The old
   batch loop called the single-page allocator per page under one zone
   lock — paying four locked RMWs on shared cachelines PER PAGE

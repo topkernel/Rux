@@ -818,8 +818,8 @@ Three shapes, not one. A directory is filed by what it is:
    are not split for the sake of the pattern; pass 3 gives each an
    `unsafe.rs` beside its file.
 
-The lock primitives (`sync/spinlock.rs`, `rwlock.rs`, `percpu.rs`,
-`seqlock.rs`) are unsafe throughout: their interiors are the
+The lock primitives (the spinlock/rwlock/percpu/seqlock sections of
+`sync/hotpath.rs`) are unsafe throughout: their interiors are the
 irreducible floor. Pass 3 files them under `sync/unsafe/` or leaves
 them and lists them in the gate's allowance with the reason; the lane
 that reads them decides and records it here.
@@ -1005,7 +1005,7 @@ rux-fs forbid-safe (DONE 2026-11-23, origin 50f0cc97a: pipe/fifo/
  between runs (noise), the I/O-coupled rows (write_fsync,
  append, stat) spread more between MAIN'S OWN two runs
  than between sides. Accounting counters moved
- FRAMEWORK-side (fs/perf_ctr.rs; trap/sched mutation paths
+ FRAMEWORK-side (fs/hotpath.rs perf_ctr section; trap/sched mutation paths
  stay direct). Suites: riscv64 879/879, x86_64 881/881
  (116/117 groups — fs_pins/rootfs split out); triple-arch
  rc=0; boot smoke 9/9; ledger re-banked artifact-preserving
@@ -1025,7 +1025,7 @@ rux-ipc forbid-safe (DONE 2026-11-23, ipc-flip lane; COLD-FOUR
  cluster, the latched-map walks, the BC decoder and
  register_app_child_pid, 4,062 lines total — sole-copied to
  src/ipc/binder_diag.rs; the trap-regs/page-table walkers became
- framework ipc/binder_edges.rs (INV-BINDER-ENTRYFRAME/PROBE/
+ framework ipc/unsafe.rs (INV-BINDER-ENTRYFRAME/PROBE/
  DIAG-COMM/DIAG-TASKREF); an 8-row BinderDiagHooks table carries the
  heartbeat/taskdump call sites; the diagnostics' read surface of the
  object model is published on binder.rs, 89 items, mechanism-only
@@ -1040,7 +1040,7 @@ rux-ipc forbid-safe (DONE 2026-11-23, ipc-flip lane; COLD-FOUR
  access_token, 5,406 lines — sole-copied under crate
  forbid; the unsafe blocks converted via the
  uaccess_safe typed twins (+copy_in_t_slice), live
- &Task exit signatures, and framework ipc/edges.rs
+ &Task exit signatures, and framework ipc/unsafe.rs
  (INV-IPC-PAGEOP-1); IpcHooks 24 rows, all COLD paths.
  SHELVED with numbers: binder.rs — 46 blocks + 10
  unsafe impls in 7 floor-shaped clusters (TxnBlock

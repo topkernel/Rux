@@ -57,7 +57,7 @@ one of them was **boot-time only** (`init_from_cmdline()` at
 
 Triggers available before Tranche 1: UART magic `DUMP!` and `LEDGER!`
 (`console.rs:558`, `console.rs:577`), the spinlock-deadlock watchdog
-(`sync/spinlock.rs:236`), and a 30 s periodic timer (`timer.rs:720`).
+(kernel/core/src/sync/hotpath.rs, spinlock section), and a 30 s periodic timer (kernel/core/src/timer.rs).
 
 ### 2.2 What is missing entirely
 
@@ -164,7 +164,7 @@ symbolized traces.
 Goal: every existing instrument becomes armable and observable from
 userspace, without a reboot, through the reference kernel's interfaces.
 
-1. **debugfs** (`kernel/src/fs/debugfs.rs`): a new filesystem mounted at
+1. **debugfs** (`kernel/fs/src/debugfs.rs`): a new filesystem mounted at
    `/sys/kernel/debug`, exactly like the reference kernel. The mount point is a real
    sysfs directory (`/sys/kernel/debug`), so sysfs owns the directory
    and debugfs is mounted over it — the reference kernel's arrangement.
@@ -212,7 +212,7 @@ pages), processor and policy next to the utime/stime the timer IRQ
 already charged.
 
 **Part 2 — implemented.** `/proc/vmstat` (the reference's key names, the page
-counters live in `kernel/src/mm/vmstat.rs`, the memory manager owning
+counters live in `kernel/core/src/mm/hotpath.rs` (vmstat section), the memory manager owning
 them like the reference kernel's mm/vmstat.c), `/proc/buddyinfo` (free pages per order
 per zone, from the zone allocator's per-order free lists),
 `/proc/softirqs` (per-CPU per-vector raise counts, using the vector set
@@ -234,7 +234,7 @@ sysrq `d` command prints the same rows, as the reference kernel's does.
 the reference kernel's layout (the reference host's line:
 `   7       0 loop0 14 0 34 2 0 0 0 0 0 1 2 0 0 0 0 0 0`): the block
 layer counts reads, writes, sectors and the time spent per device
-(`drivers/blkdev/iostat.rs`, the same place the reference keeps them —
+(drivers/hotpath.rs, blkdev::iostat section — the same place the reference keeps them —
 block/genhd.c). Rux merges no requests, has no discard path and no
 separate flush path, so those columns report zero.
 
@@ -668,14 +668,14 @@ Every tranche is verified in the guest, not by inspection:
 |---|---|
 | switch table | `kernel/src/debug/switches.rs` |
 | instrument modules | `kernel/src/debug/*.rs` |
-| debugfs | `kernel/src/fs/debugfs.rs` |
+| debugfs | `kernel/fs/src/debugfs.rs` |
 | procfs tree | `kernel/src/fs/procfs/mod.rs` |
 | procfs generators | `kernel/src/fs/procfs/{meminfo,interrupts,loadavg,uptime,pid,sysctl,sysrq}.rs` |
 | printk / kmsg | `kernel/src/printk.rs` |
 | panic handler | `kernel/src/main.rs` |
 | backtrace | `kernel/src/debug/backtrace.rs` |
-| page allocator | `kernel/src/mm/page_alloc.rs` |
-| scheduler | `kernel/src/sched/sched.rs` |
+| page allocator | `kernel/core/src/mm/hotpath.rs` (page_alloc section) |
+| scheduler | `kernel/core/src/sched/hotpath.rs` (sched section) |
 | timer | `kernel/src/timer.rs` |
 
 ## 8. procfile! adoption (format-drift class, added leg-34 2026-10-25)

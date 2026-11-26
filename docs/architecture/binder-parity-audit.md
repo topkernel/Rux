@@ -43,7 +43,7 @@ empty.
 | Row | Status |
 |---|---|
 | TF_UPDATE_TXN | LANDED: TF_UPDATE_TXN const + can_update_with (parity of binder.c:2734) + supersede-on-park in the oneway parked branch (binder.c:2832-2845 semantics: match = both ONE_WAY|UPDATE, same proc/code/flags/sender_pid/target node) |
-| file_operations.flush | LANDED: FileOps.flush slot (fs/file.rs) + binder_flush (deferred_flush parity: looper_need_return on all threads + wake WAITING) + BINDER_OPS.flush wired + looper_need_return field + read-loop break (reference binder_thread_read's pre-wait check) |
+| file_operations.flush | LANDED: FileOps.flush slot (fs/hotpath.rs, file section) + binder_flush (deferred_flush parity: looper_need_return on all threads + wake WAITING) + BINDER_OPS.flush wired + looper_need_return field + read-loop break (reference binder_thread_read's pre-wait check) |
 | FDA fd lifetime (target-context install) | OPEN PROJECT: reference defers target fd_install to apply_fd_fixups in TARGET context; failure/undelivered paths fput cleanly. Our install-at-send leaves ghost fds on undelivered txns. Requires the txn-fail/undelivered path rework WITH the fail_txn_after_fixups rig — standalone change, not a drive-by. |
 | defer_copy ordering | ASSESSED LOW: ordering-only difference (reference copies SG after all object validation; we copy per-object with equivalent rollback via fail_txn_after_fixups) — same bytes, same destinations, both roll back. Documented; no action unless a corruption class appears. |
 | vma_close | EQUIVALENT PRESENT: our binder_close performs the alloc teardown; munmap→close window covered by the alloc's block-table lifetime. Verified by construction; no change. |

@@ -316,9 +316,9 @@ address space happens to include it.
 |---|---|---|---|---|
 | F1 | TCB ledger script + baseline number | `scripts/`, roadmap entry | report exists | **now** (with x86 port) |
 | F2 | Newtype sweep: raw addresses in generic code → `PhysAddr`/`VirtAddr`/`Pfn` | `syscall/`, `fs/`, `drivers/` | LTP parity | post-Ubuntu-gate |
-| F3 | Guard migration: irqsave/preempt bools → RAII guards | hot paths first (`fs/bio.rs`, `drivers/virtio/`) | LTP + soak | post-Ubuntu-gate |
+| F3 | Guard migration: irqsave/preempt bools → RAII guards | hot paths first (`fs/hotpath.rs` bio section, `drivers/hotpath.rs` virtio sections) | LTP + soak | post-Ubuntu-gate |
 | F4 | `Result<T, KernelError>` for internal APIs | new code now; one subsystem at a time after | per-subsystem | ongoing |
-| F5 | Split oversized modules; curated `mod.rs` exports | `arch/*/mm/*`, `fs/vfs.rs` | builds + tests | with x86 mm work |
+| F5 | Split oversized modules; curated `mod.rs` exports | `arch/*/mm/*`, the `fs/hotpath.rs` vfs section | builds + tests | with x86 mm work |
 | F6 | Clippy lint set: deny `unwrap`/`expect` outside boot/tests | workspace | clean build | after F4 starts |
 | F7 | Dual-arch CI matrix (riscv64 + x86_64 both green) | CI | both targets | with x86 first boot |
 

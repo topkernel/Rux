@@ -140,9 +140,9 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 **Fix 2 — Save/restore CURRENT_PT_REGS across nested traps** (`arch/riscv64/trap.rs`): With interrupts enabled during syscalls, a timer interrupt can nest inside a fork/exec syscall. The inner `trap_handler()` was overwriting and then clearing `CURRENT_PT_REGS[cpu]`, causing the outer syscall's `current_pt_regs()` call to return NULL and silently fail (fork returns None, exec skips trap frame setup). Fixed by saving the previous value on entry and restoring it on return.
 
-**Fix 3 — Page cache eviction loop progress check** (`fs/page_cache.rs`): `insert()` could loop forever in `evict_one()` when all cached pages had `ref_count > 0`. Added a progress check: if `evict_one()` fails to reduce `total_pages`, break immediately.
+**Fix 3 — Page cache eviction loop progress check** (`fs/hotpath.rs`, page_cache section): `insert()` could loop forever in `evict_one()` when all cached pages had `ref_count > 0`. Added a progress check: if `evict_one()` fails to reduce `total_pages`, break immediately.
 
-**Fix 4 — VirtIO lost-wakeup race** (`drivers/virtio/queue.rs`): `wait_for_used_interruptible()` added a short spin-wait (256 iterations) between adding to the wait queue and calling `schedule()`, closing the race window where a device interrupt fires between the condition check and sleep.
+**Fix 4 — VirtIO lost-wakeup race** (`drivers/hotpath.rs`, virtio::queue section): `wait_for_used_interruptible()` added a short spin-wait (256 iterations) between adding to the wait queue and calling `schedule()`, closing the race window where a device interrupt fires between the condition check and sleep.
 
 **Fix 5 — ext4 directory entry parse safety** (`fs/ext4/dir.rs`): `from_bytes()` now returns an empty entry when the input slice is shorter than 8 bytes (minimum dir entry size), instead of panicking. The `Ext4DirIterator::next()` also handles `rec_len == 0` to stop iteration on truncated entries.
 ### 2026-04-14 — TCP Protocol Integrity Fixes (3 HIGH findings)
@@ -165,15 +165,15 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 **RootFS hard link sharing** (`fs/rootfs.rs`, H61): Changed `RootFSNode.data` from `Option<Vec<u8>>` to `Option<Arc<Vec<u8>>>`. Hard links now share the same data Arc; writes use `Arc::make_mut` for copy-on-write semantics, matching POSIX hard link behavior.
 
-**VFS get_cwd alignment** (`fs/vfs.rs`, H62): `get_cwd()` now verifies pointer alignment of the underlying task pointer before dereference, preventing UB on misaligned pointers.
+**VFS get_cwd alignment** (`fs/hotpath.rs`, vfs section — H62): `get_cwd()` now verifies pointer alignment of the underlying task pointer before dereference, preventing UB on misaligned pointers.
 
-**Block cache lock ordering** (`fs/bio.rs`, H63): Added `lru_lock_under_bucket()` helper that enforces the bucket-lock-before-LRU-lock ordering. All 6 LRU lock acquisition sites under bucket lock now use this helper. Lock hierarchy documented in struct-level comment.
+**Block cache lock ordering** (`fs/hotpath.rs`, bio section — H63): Added `lru_lock_under_bucket()` helper that enforces the bucket-lock-before-LRU-lock ordering. All 6 LRU lock acquisition sites under bucket lock now use this helper. Lock hierarchy documented in struct-level comment.
 
 ### 2026-04-14 — Medium Finding Fixes (8 items: M13, M16, M22, M23, M47, M50, M58, M65)
 
-**Task initialization fix** (`process/task.rs`, M13): Removed double-write of `thread` field in `new_idle_at` that was overwriting the `cpu_idle_loop` entry point. Added initialization of missing fields (`comm`, `pdeath_signal`, `dumpable`, `wait_chldexit`, `kernel_stack_bottom`, `exe_path`, `sem_undo`, `itimer_ids`, `posix_timers`) in both `new_idle_at` and `new_task_at`.
+**Task initialization fix** (`process/hotpath.rs`, task section — M13): Removed double-write of `thread` field in `new_idle_at` that was overwriting the `cpu_idle_loop` entry point. Added initialization of missing fields (`comm`, `pdeath_signal`, `dumpable`, `wait_chldexit`, `kernel_stack_bottom`, `exe_path`, `sem_undo`, `itimer_ids`, `posix_timers`) in both `new_idle_at` and `new_task_at`.
 
-**Timer cleanup on exit** (`process/exit.rs`, M16): `do_exit` now disarms active interval timers (swapping `itimer_ids` to 0 and calling `del_timer`) and drains POSIX timers (disarming each kernel timer before dropping).
+**Timer cleanup on exit** (`process/hotpath.rs`, exit section — M16): `do_exit` now disarms active interval timers (swapping `itimer_ids` to 0 and calling `del_timer`) and drains POSIX timers (disarming each kernel timer before dropping).
 
 **Sched syscall user access** (`syscall/sched.rs`, M22/M23): Added `access_ok` + `copy_from_user`/`copy_to_user` to 6 sched syscalls that were directly dereferencing user pointers: `sys_sched_setscheduler`, `sys_sched_setparam`, `sys_sched_getparam`, `sys_sched_setattr`, `sys_sched_getattr`, `sys_sched_rr_get_interval`.
 
@@ -199,17 +199,17 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 **ASID CAS loop** (`arch/riscv64/mm/asid.rs`, M32): Replaced recursive CAS retry with outer `loop` + inner `for` scan, eliminating stack overflow risk under contention.
 
-**Iteration limit cleanup** (`process/task.rs`, M14): Removed redundant iteration counters in `for_each_child` and `find_child_by_pid` — `ListHead::for_each` already has a built-in 1000-iteration guard.
+**Iteration limit cleanup** (`process/hotpath.rs`, task section — M14): Removed redundant iteration counters in `for_each_child` and `find_child_by_pid` — `ListHead::for_each` already has a built-in 1000-iteration guard.
 
-**Memblock alignment** (`mm/memblock.rs`, M40): `add()` now computes aligned base/end as a pair, ensuring correct size even for sub-page-aligned regions. Sub-page regions return `Err` instead of silently succeeding.
+**Memblock alignment** (`mm/hotpath.rs`, memblock section — M40): `add()` now computes aligned base/end as a pair, ensuring correct size even for sub-page-aligned regions. Sub-page regions return `Err` instead of silently succeeding.
 
-**Slab cache count** (`mm/slab.rs`, M42): `NUM_CACHES` derived from `OBJECT_SIZES.len()` instead of config constant, preventing mismatch if array size changes.
+**Slab cache count** (`mm/hotpath.rs`, slab section — M42): `NUM_CACHES` derived from `OBJECT_SIZES.len()` instead of config constant, preventing mismatch if array size changes.
 
-**Inode cache count fix** (`fs/inode.rs`, M74): `icache_add` only increments `count` when the target bucket was previously empty, preventing count inflation on hash collision overwrite.
+**Inode cache count fix** (`fs/hotpath.rs`, inode section — M74): `icache_add` only increments `count` when the target bucket was previously empty, preventing count inflation on hash collision overwrite.
 
-**Dentry cache parent verification** (`fs/dentry.rs`, M75): Added `parent_ino` field to `DentryHashBucket` for explicit verification, preventing same-name cross-directory confusion.
+**Dentry cache parent verification** (`fs/hotpath.rs`, dentry section — M75): Added `parent_ino` field to `DentryHashBucket` for explicit verification, preventing same-name cross-directory confusion.
 
-**File flags interior mutability** (`fs/file.rs` + `fs/vfs.rs`, M76): Changed `File.flags` from `FileFlags` to `UnsafeCell<FileFlags>`, added `flags()`, `set_flags()`, `add_flags()` accessors. Eliminated raw pointer cast UB in F_SETFL.
+**File flags interior mutability** (`fs/hotpath.rs`, file + vfs sections — M76): Changed `File.flags` from `FileFlags` to `UnsafeCell<FileFlags>`, added `flags()`, `set_flags()`, `add_flags()` accessors. Eliminated raw pointer cast UB in F_SETFL.
 
 **Rootfs read cleanup** (`fs/mod.rs`, M80): Replaced byte-by-byte `unsafe` `as_ptr().add(i)` loop with `data.as_ref().clone()`.
 
@@ -233,15 +233,15 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 **Timer use-after-free** (`timer.rs`): Moved expired timer processing and periodic re-arm inside TIMERS+ACTIONS lock scope. Prevents concurrent `timerfd_close` from freeing a TimerFd while the softirq handler still holds a reference to it.
 
-**IPC TOCTOU** (`ipc/util.rs`): Changed `alloc()` to hold a single lock for the entire key-lookup + slot-allocation sequence. Eliminates the window where another thread could delete the slot between `find_by_key_locked()` and reuse.
+**IPC TOCTOU** (`ipc/hotpath.rs`, util section): Changed `alloc()` to hold a single lock for the entire key-lookup + slot-allocation sequence. Eliminates the window where another thread could delete the slot between `find_by_key_locked()` and reuse.
 
 **RootFS aliasing** (`fs/rootfs.rs`): Replaced `Vec<u8>` name field with `UnsafeCell<Vec<u8>>` and added a `name()` accessor method. `set_name()` and `rename_child()` now write through UnsafeCell under the parent's children lock, eliminating the previous `&self → &mut` pointer cast UB.
 
-**File Send bound** (`fs/file.rs`): Added `unsafe impl Send for File {}`. File objects can be transferred across threads (e.g., during fork copy_files), matching the existing `Sync` impl and Linux's `struct file` semantics.
+**File Send bound** (`fs/hotpath.rs`, file section): Added `unsafe impl Send for File {}`. File objects can be transferred across threads (e.g., during fork copy_files), matching the existing `Sync` impl and Linux's `struct file` semantics.
 
-**VirtIO descriptor wrap** (`drivers/virtio/queue.rs`): Changed `alloc_desc()` to always return a valid descriptor index via modulo on `queue_size`. Previously returned `None` on ring overflow, causing callers to silently drop I/O requests.
+**VirtIO descriptor wrap** (`drivers/hotpath.rs`, virtio::queue section): Changed `alloc_desc()` to always return a valid descriptor index via modulo on `queue_size`. Previously returned `None` on ring overflow, causing callers to silently drop I/O requests.
 
-**RCU init guard** (`sync/rcu.rs`): Added `initialized` flag to `RcuHead`. `call_rcu()` now checks the flag and silently drops uninitialized heads, preventing list corruption from `add_tail()` on an uninitialized `ListHead`.
+**RCU init guard** (`sync/hotpath.rs`, rcu section): Added `initialized` flag to `RcuHead`. `call_rcu()` now checks the flag and silently drops uninitialized heads, preventing list corruption from `add_tail()` on an uninitialized `ListHead`.
 
 ### 2026-04-09 — Phase 51: Memory Compaction
 
@@ -252,13 +252,13 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 - Migration filter: only anonymous, mapped, refcount=1, clean pages migratable
 - `CompactResult` enum: Complete, Partial, Skipped
 
-**Buddy integration** (`mm/buddy_allocator.rs`):
+**Buddy integration** (`mm/hotpath.rs`, buddy_allocator section):
 - `alloc_pages` falls back to compaction when high-order allocation fails
 - Free block consolidation via buddy merge after migration
 
 ### 2026-04-09 — Phase 50: SeqLock
 
-**Sequence lock** (`sync/seqlock.rs`):
+**Sequence lock** (`sync/hotpath.rs`, seqlock section):
 - `RawSeqLock`: odd/even sequence counter for writer serialization
 - `SeqLock<T: Copy>`: generic wrapper with lock-free readers and retry-on-write
 - `SeqLockWriteGuard`: RAII write guard, increments sequence on drop
@@ -274,7 +274,7 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 ### 2026-04-09 — Phase 48: Tiny RCU
 
-**Non-preemptible RCU** (`sync/rcu.rs`):
+**Non-preemptible RCU** (`sync/hotpath.rs`, rcu section):
 - `rcu_read_lock` = `preempt_disable`, `rcu_read_unlock` = `preempt_enable`
 - Per-CPU callback lists for deferred reclamation
 - Softirq-driven callback processing (`RCU_SOFTIRQ`)
@@ -343,7 +343,7 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 ### 2026-04-09 — Phase 39-40: Rmap & OOM
 
-**Reverse mapping** (`mm/rmap.rs`):
+**Reverse mapping** (`mm/hotpath.rs`, rmap section):
 - AnonVma/AnonVmaChain for tracking page→process mapping
 - `try_to_unmap` for page reclamation
 
@@ -397,11 +397,11 @@ reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
 
 ### 2026-04-01 — Phase 3.6: Driver Migration to Softirq Bottom Half
 
-**VirtIO Block MMIO → Block softirq** (`drivers/virtio/mod.rs`):
+**VirtIO Block MMIO → Block softirq** (`drivers/hotpath.rs`, virtio section):
 - Extracted completion loop (used ring processing, buffer deallocation, I/O completion signaling) into `block_bh_handler()`
 - `interrupt_handler()` now only acks device interrupt and raises `Block` softirq
 
-**VirtIO Net → NetRx softirq** (`drivers/net/virtio_net.rs`):
+**VirtIO Net → NetRx softirq** (`drivers/hotpath.rs`, net::virtio_net section):
 - Added `net_rx_softirq_handler()` wrapping `ethernet_poll()`
 - `interrupt_handler()` now only acks device interrupt and raises `NetRx` softirq
 - Entire RX path (ethernet→IP→TCP/UDP) now runs in softirq context

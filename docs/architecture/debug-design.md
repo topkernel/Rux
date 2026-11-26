@@ -66,7 +66,7 @@ verified and must be before any work relies on them.
 | task dump | who is stuck where | `sysrq-t`, `/proc/<pid>/stack` | `taskdump` |
 | hung-task, soft-lockup detectors | a task or CPU making no progress | `khungtaskd` | `hung_task`, `softlockup` |
 | hard-lockup watchdog | a CPU with interrupts off | NMI watchdog | no |
-| RCU stall detection | a grace period that does not end | RCU stall warnings | `sync/rcu.rs` |
+| RCU stall detection | a grace period that does not end | RCU stall warnings | `sync/hotpath.rs` (rcu section) |
 | `WARN` / `BUG` with a stack, rate limited | a broken invariant, reported once | macros | no macros; 15 bare `dump_stack()` calls, 51 `debug_assert!` (no stack, absent in release) |
 | slab and object debugging | a corrupted or leaked object | `/proc/slabinfo`, SLUB debug, `DEBUG_OBJECTS` | `/proc/slabinfo`; SLUB debug flags and object debugging NOT CHECKED |
 | lockdep | a deadlock before it happens | `PROVE_LOCKING` | no |

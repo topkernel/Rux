@@ -574,7 +574,7 @@ an ignored failure is a build warning, not a silent drop.
 **Compatibility evidence.** Conversions so far: (1) the file-locks
 subsystem (`fs/locks.rs` — flock, POSIX/OFD record locks, leases):
 the four public functions return `Result<(), Errno>`; the six call
-sites (sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs,
+sites (sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in the fs/hotpath.rs vfs section,
 three break_lease propagation sites) each map once with
 `as_neg_i32()`; the enum gained the missing `Deadlock = 35` variant.
 (2) the xattr subsystem (`fs/xattr.rs` — check_name/may_set/set/get/
@@ -585,7 +585,7 @@ syscall/file.rs mapping once per arm; the enum gained
 (the file's two local errno-constant duplicates are deleted). Errno
 values byte-identical throughout; suite green; the LTP fcntl/flock
 and setxattr/getxattr/listxattr/removexattr families are the
-behavioral guards. (3) the VFS inode-operations table (`fs/inode.rs`
+behavioral guards. (3) the VFS inode-operations table (fs/hotpath.rs, inode section -
 - the lookup/create/symlink/mkdir/mknod/iget slots, their op_*
 wrappers, and the 26 implementer functions across tmpfs/ext4/procfs/
 devfs/rootfs/sysfs/selinuxfs/debugfs/cgroup): the whole create-class
@@ -743,9 +743,9 @@ ipcdisc battery's drain-shape discriminators.
 ## D-16: Deferred-free timer ring (wall-clock stand-in for deferred reclamation)
 
 **Design.** Freed `MmStruct`/`Task` blocks enter a global 16384-entry ring
-drained after a 1500 ms wall-clock deadline (`mm/deferred_free.rs`), sized
+drained after a 1500 ms wall-clock deadline (mm/hotpath.rs, deferred_free section), sized
 by a length-class match, instead of grace-period-based reclamation
-(call_rcu) for these objects. The QSBR RCU (`sync/rcu.rs`) exists and is
+(call_rcu) for these objects. The QSBR RCU (sync/hotpath.rs, rcu section) exists and is
 used where readers are enumerable; the mm/task blocks take the ring
 because their borrowers (procfs walkers) are unaccounted `&MmStruct`
 borrows that a quiescent-state discipline cannot see cheaply.
@@ -916,7 +916,7 @@ pair as the standing regression probe.
 
 ## D-21: Default-on bounded poll-before-sleep for synchronous I/O waits
 
-**Design.** `IoCompletion::wait` (kernel/src/fs/io_completion.rs:188-212,
+**Design.** `IoCompletion::wait` (kernel/core/src/fs/hotpath.rs, io_completion section;
 submit-2x lane, d4769538e) polls its `done` flag for a bounded budget —
 1536 PAUSE iterations ≈ 14 µs on the 3.7 GHz KVM rig — with IRQs and
 preemption armed, BEFORE arming the 10 s deadline timer and scheduling
@@ -1050,10 +1050,10 @@ new sync-write classes (perf-gate fs domain).
 
 ## D-24: Per-inode BTreeMap page cache with single-walk entry() install (xarray analogue)
 
-**Design.** The page cache (kernel/src/fs/page_cache.rs:477) keeps each
+**Design.** The page cache (kernel/core/src/fs/hotpath.rs, page_cache section) keeps each
 inode's pages in a per-inode `Spinlock<BTreeMap<u64, CachedPage>>` —
 safe-Rust std BTreeMap, no unsafe, no lock-free radix tricks — with the
-batched install (`insert_batch_ext`, :2748) doing ONE map descent per
+batched install (`insert_batch_ext`) doing ONE map descent per
 page (the old shape was contains_key + contains_key + insert = three
 descents). Dirty/writeback state lives in a side-table
 (DIRTY_DATA_BLOCKS, ext4/file.rs:2175) rather than in-tree tags. The
@@ -1086,8 +1086,8 @@ perf-gate rows; fio verify suites; PCACHE-RECLAIM census faces.
 
 ## D-25: Adaptive lock-free child memo over the authoritative dentry tree (dcache-lookup analogue)
 
-**Design.** Directory child lookup (kernel/src/fs/dentry.rs:380-389,
-529-534, stat-2x lane 78b17d528) keeps the authoritative
+**Design.** Directory child lookup (kernel/core/src/fs/hotpath.rs, dentry section;
+stat-2x lane 78b17d528) keeps the authoritative
 `children: Spinlock<BTreeMap<String, Arc<Dentry>>>` and adds
 lock-free read tiers in front: an inline 4-slot memo, then a lazily
 allocated `BigMemoTable` — a direct-mapped table of seqlock slots,
@@ -1132,8 +1132,8 @@ rt_mutexes (sleepable, PI-chained). Rux keeps every spinlock a
 spinlock — the measured critical sections are small (GRQ hold ~102
 ns, D-1) and nesting is a compile fact (D-11 typed lock keys) — and
 gives ONLY the sleepable locks an RT task can actually block on the
-rt_mutex semantics (R6, kernel/src/sync/mutex.rs `SleepMutex::new_rt`
-+ kernel/src/sync/futex_pi.rs kernel-keyed states): VFS-MUTATION,
+rt_mutex semantics (R6, `SleepMutex::new_rt` in kernel/core/src/sync/hotpath.rs,
+mutex section, with the futex_pi section's kernel-keyed states): VFS-MUTATION,
 EXT4-BIGLOCK, loop-io. Even there the PI chain arms ONLY for
 SCHED_FIFO/RR waiters (kernel rt_waiter_enter's policy gate): CFS
 contention keeps the R84 FIFO handoff byte-for-byte (the sync-checked
@@ -1174,7 +1174,7 @@ fs-domain pbench rows (p6_*) + sched domain p2_ctxsw band.
 pointers across lock drops and detects the world changing via the
 next_lock comparison, under the pi_lock/wait_lock lock-order dance
 (with trylock retry loops). Rux's `pi_chain_walk`
-(kernel/src/sync/futex_pi.rs) takes AT MOST ONE PI bucket lock at a
+(kernel/core/src/sync/hotpath.rs, futex_pi section) takes AT MOST ONE PI bucket lock at a
 time (never nested — opposite-direction walks cannot deadlock by
 construction) and re-derives every step from freshly read state
 (`pi_blocked_state_of` pool scan = the task->pi_blocked_on

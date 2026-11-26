@@ -221,7 +221,7 @@ is unchanged until a policy narrows them; the risk to watch is per-op cost
 on the dispatch hot path (perf gate Tier 1/2 must be reported). The
 vDSO-only-entry idea is NOT a divergence for us (the reference kernel has
 a vDSO); for Rux the relevant fact is the opposite direction — x86_64 Rux
-has NO vDSO (`kernel/src/process/exec.rs` keeps AT_SYSINFO_EHDR absent),
+has NO vDSO (`kernel/process/src/exec_policy.rs` keeps AT_SYSINFO_EHDR absent),
 so clock_gettime and friends pay full trap cost on our primary rig. That
 is parity work with a direct perf payoff, routed to the perf lane, not
 this register. Cost: rights table prototype ~2 sessions; vDSO parity
@@ -360,7 +360,7 @@ Recorded here so it is not mistaken for a divergence candidate: Zircon's
 vDSO-only entry (§2.2) is a design the reference kernel ALSO has (its own
 vDSO accelerates clock_gettime/gettimeofday and friends). For Rux the
 actionable item is parity, not divergence: x86_64 Rux ships no vDSO
-(`kernel/src/process/exec.rs` — "x86_64 has no vDSO mapping —
+(`kernel/process/src/exec_policy.rs` — "x86_64 has no vDSO mapping —
 AT_SYSINFO_EHDR stays absent"), so every vDSO-eligible call from glibc
 images pays a full trap. On the x86_64-first rig this is measurable in
 the syscost per-op averages (clock_gettime). Route: perf lane, sized 2–3
@@ -633,7 +633,7 @@ risks are gates 2–3 (behavior must stay identical) plus the perf gate.
 ### S-2. Binder transaction typed state machine (from §1.2 / lever §6)
 
 - **Goal.** Turn the hand-maintained transaction lifecycle of
-  `kernel/src/ipc/binder.rs` (Pending → InFlight → Completed → Reaped /
+  `kernel/core/src/ipc/hotpath.rs` (binder section; Pending → InFlight → Completed → Reaped /
   Aborted) into an enum state machine whose illegal transitions do not
   compile; derive the BHIST forensics from the transition log instead of
   maintaining both.
