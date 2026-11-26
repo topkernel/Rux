@@ -157,7 +157,7 @@ def region_char_span(text, masked, reg, kind):
         if kind == "block":
             if j < len(masked) and masked[j] == "{":
                 hits.append((m.start(), match_brace(masked, j) + 1))
-        elif j < len(masked) and (masked[j:j + 5] == "impl "
+        elif j < len(masked) and (masked[j:j + 5] in ("impl ", "impl<")
                                   or masked[j:j + 3] == "fn "
                                   or masked[j:j + 6] == "trait "
                                   or masked[j:j + 7] == "extern"):
