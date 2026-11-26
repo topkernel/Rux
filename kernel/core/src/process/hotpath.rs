@@ -22,6 +22,7 @@
 //! of the subsystem's code under the hot-path name, not a verified set of
 //! hot-path functions (§2c.3, user decision 2026-11-25).
 
+#![forbid(unsafe_code)]
 use super::types::{
     BIRTH_CALLS_LEN,
     Cred,
@@ -160,7 +161,7 @@ pub fn current_ppid() -> u32 {
 /// Get current process group ID
 pub fn current_pgid() -> u32 {
     // SAFETY: sched::current() returns a valid pointer to the currently running task.
-    crate::sched::hotpath::current().map_or(0, |t| unsafe { (*t).pgid() })
+    crate::sched::hotpath::current().map_or(0, |t| crate::process::r#unsafe::task_pgid_raw(t))
 }
 
 /// Get current task reference
@@ -181,7 +182,7 @@ pub fn find_task_by_pid(pid: u32) -> Option<&'static mut Task> {
     } else {
         // SAFETY: pid_hash_lookup returns a valid Task pointer from the PID hash table.
         // The pointer remains valid as long as the task is alive (not reaped).
-        Some(unsafe { &mut *ptr })
+        Some(crate::process::r#unsafe::task_from_pid_ptr(ptr))
     }
 }
 
@@ -5030,21 +5031,6 @@ impl TaskBorrow {
         self.0.as_ptr()
     }
 
-    /// Adopt an already-validated raw task handle (round 4): the ONE
-    /// audited edge for handles that predate this type (tree-ring
-    /// handles, walk-callback pointers). The caller proves the same
-    /// contract `lookup` documents: a short read/write in syscall
-    /// context on this CPU, no yield, no store.
-    /// (INV-TASKREF-1 hatch row: adopt-once under the caller's
-    /// liveness proof.)
-    ///
-    /// # Safety
-    /// `p` must point at a live task (the caller's borrow/pin/tree-lock
-    /// keeps the slot alive for the borrow's duration) and must not be
-    /// adopted twice into handles that outlive that proof.
-    pub unsafe fn from_raw(p: *mut Task) -> Option<Self> {
-        NonNull::new(p).map(TaskBorrow)
-    }
 }
 
 impl Deref for TaskBorrow {
@@ -5055,7 +5041,7 @@ impl Deref for TaskBorrow {
         // cannot run on this CPU while the borrower executes, so the
         // task page cannot be freed under this reference for the
         // duration of the short read.
-        unsafe { self.0.as_ref() }
+        crate::process::r#unsafe::task_borrow_deref(&self.0)
     }
 }
 
@@ -5065,7 +5051,7 @@ impl DerefMut for TaskBorrow {
         // on the caller's existing exclusion (this CPU owns the task,
         // or the caller holds the lock that serializes the write) —
         // the same argument the pre-conversion call sites made.
-        unsafe { self.0.as_mut() }
+        crate::process::r#unsafe::task_borrow_deref_mut(&mut self.0)
     }
 }
 
@@ -5103,7 +5089,7 @@ impl Deref for TaskRef {
         // SAFETY: the pin defers `free_task_slot` (task_put) until
         // after this handle is dropped, so the task page stays alive
         // and mapped for the whole lifetime of the handle.
-        unsafe { self.0.as_ref() }
+        crate::process::r#unsafe::task_ref_deref(&self.0)
     }
 }
 
@@ -5111,7 +5097,7 @@ impl DerefMut for TaskRef {
     fn deref_mut(&mut self) -> &mut Task {
         // SAFETY: same liveness as Deref; mutation exclusion is the
         // caller's (the pin serializes freeing, not writing).
-        unsafe { self.0.as_mut() }
+        crate::process::r#unsafe::task_ref_deref_mut(&mut self.0)
     }
 }
 

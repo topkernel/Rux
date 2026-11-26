@@ -1524,84 +1524,84 @@ db3852e9a4f1	kernel/core/src/perf/mod.rs	sys_perf_event_open	2103		INV:INV-PERF-
 002f97612eab	kernel/core/src/printk.rs	ring_rec	130		INV:INV-STATIC-CELL-1
 7c13650ad5de	kernel/core/src/printk.rs	ring_rec_mut	142		INV:INV-STATIC-CELL-1
 be3f8843528c	kernel/core/src/printk.rs	init_logger	2175		INV:INV-FS-GLOBALSB-1
-044820fcb017	kernel/core/src/process/hotpath.rs	current_pgid	163		INV:INV-PROC-BORROW-1
-d0c0b691cdb1	kernel/core/src/process/hotpath.rs	find_task_by_pid	184		INV:INV-PROC-BORROW-1
-0b0f18e6d190	kernel/core/src/process/hotpath.rs	<module>	5045		INV:INV-TASKREF-1
-837c6e191b9c	kernel/core/src/process/hotpath.rs	deref	5058		INV:INV-TASKREF-1
-63944b509bf3	kernel/core/src/process/hotpath.rs	deref_mut	5068		INV:INV-TASKREF-1
-f2d3d21d860a	kernel/core/src/process/hotpath.rs	deref	5106		INV:INV-TASKREF-1
-ec03ad8e53c4	kernel/core/src/process/hotpath.rs	deref_mut	5114		INV:INV-TASKREF-1
-67b192449e59	kernel/core/src/process/unsafe.rs	borrow_task	55		INV:INV-PROC-BORROW-1
-bd71ad6de7a5	kernel/core/src/process/unsafe.rs	borrow_task_mut	72		INV:INV-PROC-BORROW-1
-d5603ebc5b03	kernel/core/src/process/unsafe.rs	place_task	107		INV:INV-PROC-PLACE-2
-98b67ace5d00	kernel/core/src/process/unsafe.rs	dump_read_page	148		INV:INV-PROC-COREDUMP-1
-886d528d3282	kernel/core/src/process/unsafe.rs	dump_read_page	159	ptr-ops	INV:INV-PROC-COREDUMP-1
-7a12d86b34a8	kernel/core/src/process/unsafe.rs	file_private_data_ref	174		INV:INV-PROC-NSFILE-1
-e58b41fa75c1	kernel/core/src/process/unsafe.rs	file_private_data_ref	175	ptr-ops	INV:INV-PROC-NSFILE-1
-01eb6ee04b35	kernel/core/src/process/unsafe.rs	file_private_data_take_boxed	189		INV:INV-PROC-NSFILE-2
-a2dca8951246	kernel/core/src/process/unsafe.rs	file_private_data_take_boxed	190	ptr-ops	INV:INV-PROC-NSFILE-2
-c16b52d6c0d0	kernel/core/src/process/unsafe.rs	file_private_data_mut	205		INV:INV-PROC-NSFILE-1
-788e70111c5b	kernel/core/src/process/unsafe.rs	file_private_data_mut	206	ptr-ops	INV:INV-PROC-NSFILE-1
-2c0ff4d96c27	kernel/core/src/process/unsafe.rs	read_volatile_u64	220	volatile	INV:INV-PROC-DIAG-1
-b852026b8f76	kernel/core/src/process/unsafe.rs	journal_handle	261		INV:INV-PROC-JOURNAL-1
-c8d205051f55	kernel/core/src/process/unsafe.rs	free_fork_pt_regs	294	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
-08a6d396020d	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	308		INV:INV-PROC-ROOTSWITCH-1
-6db2c60dcc19	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	313		INV:INV-PROC-ROOTSWITCH-1
-261d36511c92	kernel/core/src/process/unsafe.rs	apppark_rets	327		INV:INV-PROC-APPPARK-1
-12fb2eacd76a	kernel/core/src/process/unsafe.rs	freelist_next	343	ptr-ops	INV:INV-PROC-KSTACK-1
-66173bca9837	kernel/core/src/process/unsafe.rs	freelist_link	353	ptr-ops	INV:INV-PROC-KSTACK-1
-a1a98cb4767b	kernel/core/src/process/unsafe.rs	heap_alloc	366		INV:INV-PROC-KSTACK-2
-a43f848d2da4	kernel/core/src/process/unsafe.rs	heap_dealloc	376		INV:INV-PROC-KSTACK-2
-3d6dc1f3dff6	kernel/core/src/process/unsafe.rs	slot_ptr	386		INV:INV-PROC-KSTACK-3
-fe2df6a3c95f	kernel/core/src/process/unsafe.rs	zero_bytes	397	ptr-ops	INV:INV-PROC-KSTACK-3
-6175e81baf23	kernel/core/src/process/unsafe.rs	write_volatile_u64	407	volatile	INV:INV-PROC-DIAG-1
-bafa10ec53e1	kernel/core/src/process/unsafe.rs	<module>	415		INV:INV-PROC-DIAG-1
-772502082581	kernel/core/src/process/unsafe.rs	<module>	419		INV:INV-PROC-DIAG-1
-5995cb9bca11	kernel/core/src/process/unsafe.rs	read_volatile_u32	428	volatile	INV:INV-PROC-DIAG-1
-57585b69f447	kernel/core/src/process/unsafe.rs	borrow_active_mm	443		INV:INV-PROC-ACTIVEMM-1
-7d4ddbb8f9db	kernel/core/src/process/unsafe.rs	list_add_tail	462		INV:INV-PROC-LIST-1
-dc1c99a6282f	kernel/core/src/process/unsafe.rs	list_del	472		INV:INV-PROC-LIST-1
-651b0269dabb	kernel/core/src/process/unsafe.rs	list_for_each	486		INV:INV-PROC-LIST-1
-702136a9cbf4	kernel/core/src/process/unsafe.rs	store_pick_qword	506	ptr-ops	INV:INV-PROC-PICKQWORD-1
-ce96a76b6888	kernel/core/src/process/unsafe.rs	paint_bytes	519	ptr-ops	INV:INV-PROC-KSTACK-3
-d224c887ec1e	kernel/core/src/process/unsafe.rs	frame_mut	539		INV:INV-PROC-FRAME-1
-c904ee5472b1	kernel/core/src/process/unsafe.rs	frame_ref	551		INV:INV-PROC-FRAME-1
-280b0eff250f	kernel/core/src/process/unsafe.rs	exec_copy_user_image	577		INV:INV-PROC-EXEC-COPY-1
-7b93271d03b0	kernel/core/src/process/unsafe.rs	exec_copy_user_image	588	ptr-ops	INV:INV-PROC-EXEC-COPY-1
-dfe061b528c1	kernel/core/src/process/unsafe.rs	exec_phdr_at	609		INV:INV-PROC-EXEC-ELF-1
-44afe162206b	kernel/core/src/process/unsafe.rs	exec_ehdr_from	619		INV:INV-PROC-EXEC-ELF-1
-f5e6af510611	kernel/core/src/process/unsafe.rs	exec_map_user_range	631		INV:INV-PROC-EXEC-MAP-1
-3d70a9ef0432	kernel/core/src/process/unsafe.rs	exec_map_user_region_static	650		INV:INV-PROC-EXEC-VDSO-1
-71bca7da2c26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	661		INV:INV-PROC-EXEC-PROBE-1
-7a9b10befe26	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	666	volatile,ptr-ops	INV:INV-PROC-EXEC-PROBE-1
-0932c8233145	kernel/core/src/process/unsafe.rs	exec_free_user_page_trees	680		INV:INV-PROC-EXEC-FREETREE-1
-7101dbc4f9e1	kernel/core/src/process/unsafe.rs	exec_write_sigtramp	698	volatile,ptr-ops	INV:INV-PROC-EXEC-TRAMP-1
-f583bf0747d8	kernel/core/src/process/unsafe.rs	exec_mm_new_user	712		INV:INV-PROC-EXEC-MMNEW-1
-bdcaddddd803	kernel/core/src/process/unsafe.rs	exec_switch_address_space	725		INV:INV-PROC-EXEC-SWITCH-1
-a64d8daa9c81	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	760		INV:INV-LOCK-7
-ef936ecf5fdb	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	807		INV:INV-LOCK-7
-41eb9bd53d45	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	866		INV:INV-LOCK-7
-84c1d0de38ef	kernel/core/src/process/unsafe.rs	fork_save_parent_fpu	886		INV:INV-PROC-FORK-FPU-1
-9c4972a1db8d	kernel/core/src/process/unsafe.rs	fork_save_parent_vstate	897		INV:INV-PROC-FORK-FPU-1
-96d969eaedc4	kernel/core/src/process/unsafe.rs	fork_save_parent_fpu	908		INV:INV-PROC-FORK-FPU-1
-8b3965e31bd6	kernel/core/src/process/unsafe.rs	fork_fpu_save_for_switch	917		INV:INV-PROC-FORK-FPU-1
-310bdebc72d6	kernel/core/src/process/unsafe.rs	fork_pt_walk	928		INV:INV-PROC-FORK-WALK-1
-d0861acb3385	kernel/core/src/process/unsafe.rs	fork_handle_cow_fault	941		INV:INV-PROC-FORK-COW-1
-1215985369c6	kernel/core/src/process/unsafe.rs	fork_write_child_tid	961	volatile,ptr-ops	INV:INV-PROC-FORK-TIDWRITE-1
-66defd8834bc	kernel/core/src/process/unsafe.rs	read_user_tp_register	974	asm	INV:INV-PROC-DIAG-1
-c4f1c64aa0a3	kernel/core/src/process/unsafe.rs	page_refcount	994		INV:INV-PROC-DIAG-1
-ffa567502be7	kernel/core/src/process/unsafe.rs	<module>	1004		INV:INV-PROC-DIAG-1
-343efcc82885	kernel/core/src/process/unsafe.rs	<module>	1006		INV:INV-PROC-DIAG-1
-1dab6431ea79	kernel/core/src/process/unsafe.rs	pid_hash_unlink_store	1025		INV:INV-PROC-PIDHASH-1
-ac909a56256b	kernel/core/src/process/unsafe.rs	ptrace_translate	1045		INV:INV-PROC-PTRACE-WALK-1
-bf496ea05d15	kernel/core/src/process/unsafe.rs	ptrace_read_word	1056	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
-5fab594e7758	kernel/core/src/process/unsafe.rs	ptrace_write_word	1067	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
-19a5515fe351	kernel/core/src/process/unsafe.rs	ptrace_copy_chunk	1080	ptr-ops	INV:INV-PROC-PTRACE-MEM-1
-3ab6182dc4f6	kernel/core/src/process/unsafe.rs	ptrace_flush_icache	1098	asm	INV:INV-PROC-PTRACE-ICOH-1
-0f1920fa471f	kernel/core/src/process/unsafe.rs	ptrace_flush_icache	1114	asm	INV:INV-PROC-PTRACE-ICOH-1
-7a2ffd2e5118	kernel/core/src/process/unsafe.rs	ptrace_read_gregset	1139	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
-25047740f485	kernel/core/src/process/unsafe.rs	ptrace_write_gregset	1157	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
-cad0967e9cd2	kernel/core/src/process/unsafe.rs	zeroed_siginfo	1172		INV:INV-PROC-DIAG-1
+a247b3404319	kernel/core/src/process/unsafe.rs	borrow_task	57		INV:INV-PROC-BORROW-1
+643b20351cfb	kernel/core/src/process/unsafe.rs	borrow_task_mut	74		INV:INV-PROC-BORROW-1
+7ed073d80a83	kernel/core/src/process/unsafe.rs	place_task	109		INV:INV-PROC-PLACE-2
+120ccfb259dd	kernel/core/src/process/unsafe.rs	dump_read_page	150		INV:INV-PROC-COREDUMP-1
+9c5f6dfc8390	kernel/core/src/process/unsafe.rs	dump_read_page	161	ptr-ops	INV:INV-PROC-COREDUMP-1
+e5cb24af273a	kernel/core/src/process/unsafe.rs	file_private_data_ref	176		INV:INV-PROC-NSFILE-1
+8eca6be0e2c1	kernel/core/src/process/unsafe.rs	file_private_data_ref	177	ptr-ops	INV:INV-PROC-NSFILE-1
+b5e9e6aedaef	kernel/core/src/process/unsafe.rs	file_private_data_take_boxed	191		INV:INV-PROC-NSFILE-2
+482841980682	kernel/core/src/process/unsafe.rs	file_private_data_take_boxed	192	ptr-ops	INV:INV-PROC-NSFILE-2
+859f9db80cdc	kernel/core/src/process/unsafe.rs	file_private_data_mut	207		INV:INV-PROC-NSFILE-1
+c68c840cde03	kernel/core/src/process/unsafe.rs	file_private_data_mut	208	ptr-ops	INV:INV-PROC-NSFILE-1
+1a156f013f59	kernel/core/src/process/unsafe.rs	read_volatile_u64	222	volatile	INV:INV-PROC-DIAG-1
+5700c28e8eaf	kernel/core/src/process/unsafe.rs	journal_handle	263		INV:INV-PROC-JOURNAL-1
+8c1d3b2e981c	kernel/core/src/process/unsafe.rs	free_fork_pt_regs	296	ptr-ops	INV:INV-PROC-PTREGS-FREE-1
+6bca9c24500c	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	310		INV:INV-PROC-ROOTSWITCH-1
+3c9a91356216	kernel/core/src/process/unsafe.rs	switch_to_kernel_root_on_exit	315		INV:INV-PROC-ROOTSWITCH-1
+61a41fe012c7	kernel/core/src/process/unsafe.rs	apppark_rets	329		INV:INV-PROC-APPPARK-1
+d2707beb2b06	kernel/core/src/process/unsafe.rs	freelist_next	345	ptr-ops	INV:INV-PROC-KSTACK-1
+9c017465968f	kernel/core/src/process/unsafe.rs	freelist_link	355	ptr-ops	INV:INV-PROC-KSTACK-1
+726200509812	kernel/core/src/process/unsafe.rs	heap_alloc	368		INV:INV-PROC-KSTACK-2
+941c205853ed	kernel/core/src/process/unsafe.rs	heap_dealloc	378		INV:INV-PROC-KSTACK-2
+8d1556711065	kernel/core/src/process/unsafe.rs	slot_ptr	388		INV:INV-PROC-KSTACK-3
+da69afde0882	kernel/core/src/process/unsafe.rs	zero_bytes	399	ptr-ops	INV:INV-PROC-KSTACK-3
+7ae605ac4029	kernel/core/src/process/unsafe.rs	write_volatile_u64	409	volatile	INV:INV-PROC-DIAG-1
+232623fa8a63	kernel/core/src/process/unsafe.rs	<module>	417		INV:INV-PROC-DIAG-1
+69df92e22e41	kernel/core/src/process/unsafe.rs	<module>	421		INV:INV-PROC-DIAG-1
+6354ac047caf	kernel/core/src/process/unsafe.rs	read_volatile_u32	430	volatile	INV:INV-PROC-DIAG-1
+e14f1eae214c	kernel/core/src/process/unsafe.rs	borrow_active_mm	445		INV:INV-PROC-ACTIVEMM-1
+66d9b757a47e	kernel/core/src/process/unsafe.rs	list_add_tail	464		INV:INV-PROC-LIST-1
+f177bc0daeda	kernel/core/src/process/unsafe.rs	list_del	474		INV:INV-PROC-LIST-1
+35c7aa6f6e0a	kernel/core/src/process/unsafe.rs	list_for_each	488		INV:INV-PROC-LIST-1
+a3dcb272c044	kernel/core/src/process/unsafe.rs	store_pick_qword	508	ptr-ops	INV:INV-PROC-PICKQWORD-1
+d47cf42a5f73	kernel/core/src/process/unsafe.rs	paint_bytes	521	ptr-ops	INV:INV-PROC-KSTACK-3
+532fc49966bd	kernel/core/src/process/unsafe.rs	frame_mut	541		INV:INV-PROC-FRAME-1
+76cd7129dea8	kernel/core/src/process/unsafe.rs	frame_ref	553		INV:INV-PROC-FRAME-1
+7173cc6ae469	kernel/core/src/process/unsafe.rs	exec_copy_user_image	579		INV:INV-PROC-EXEC-COPY-1
+c3865cb207c4	kernel/core/src/process/unsafe.rs	exec_copy_user_image	590	ptr-ops	INV:INV-PROC-EXEC-COPY-1
+25d3f992ca20	kernel/core/src/process/unsafe.rs	exec_phdr_at	611		INV:INV-PROC-EXEC-ELF-1
+da5467057b15	kernel/core/src/process/unsafe.rs	exec_ehdr_from	621		INV:INV-PROC-EXEC-ELF-1
+70756eeb5eaf	kernel/core/src/process/unsafe.rs	exec_map_user_range	633		INV:INV-PROC-EXEC-MAP-1
+17383b1ec944	kernel/core/src/process/unsafe.rs	exec_map_user_region_static	652		INV:INV-PROC-EXEC-VDSO-1
+ae25beaa643a	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	663		INV:INV-PROC-EXEC-PROBE-1
+310ad79a167b	kernel/core/src/process/unsafe.rs	exec_probe_read_u64	668	volatile,ptr-ops	INV:INV-PROC-EXEC-PROBE-1
+a50f2972d545	kernel/core/src/process/unsafe.rs	exec_free_user_page_trees	682		INV:INV-PROC-EXEC-FREETREE-1
+fd2f805f6fb3	kernel/core/src/process/unsafe.rs	exec_write_sigtramp	700	volatile,ptr-ops	INV:INV-PROC-EXEC-TRAMP-1
+6bf23e1712e5	kernel/core/src/process/unsafe.rs	exec_mm_new_user	714		INV:INV-PROC-EXEC-MMNEW-1
+2dc9356327ed	kernel/core/src/process/unsafe.rs	exec_switch_address_space	727		INV:INV-PROC-EXEC-SWITCH-1
+40a82e6a03f2	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	762		INV:INV-LOCK-7
+9a4391349adc	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	809		INV:INV-LOCK-7
+1c49a068c1cb	kernel/core/src/process/unsafe.rs	exec_set_leaf_flags_range	868		INV:INV-LOCK-7
+e370fe066605	kernel/core/src/process/unsafe.rs	fork_save_parent_fpu	888		INV:INV-PROC-FORK-FPU-1
+6a892bde7ffe	kernel/core/src/process/unsafe.rs	fork_save_parent_vstate	899		INV:INV-PROC-FORK-FPU-1
+584cbf7ffe67	kernel/core/src/process/unsafe.rs	fork_save_parent_fpu	910		INV:INV-PROC-FORK-FPU-1
+e03d215c2f32	kernel/core/src/process/unsafe.rs	fork_fpu_save_for_switch	919		INV:INV-PROC-FORK-FPU-1
+e1bd99344a24	kernel/core/src/process/unsafe.rs	fork_pt_walk	930		INV:INV-PROC-FORK-WALK-1
+04620a0803bd	kernel/core/src/process/unsafe.rs	fork_handle_cow_fault	943		INV:INV-PROC-FORK-COW-1
+dea84e693e99	kernel/core/src/process/unsafe.rs	fork_write_child_tid	963	volatile,ptr-ops	INV:INV-PROC-FORK-TIDWRITE-1
+41eb702f384f	kernel/core/src/process/unsafe.rs	read_user_tp_register	976	asm	INV:INV-PROC-DIAG-1
+6cca4e5afb36	kernel/core/src/process/unsafe.rs	page_refcount	996		INV:INV-PROC-DIAG-1
+d430ef8e5933	kernel/core/src/process/unsafe.rs	<module>	1006		INV:INV-PROC-DIAG-1
+190bcfb143de	kernel/core/src/process/unsafe.rs	<module>	1008		INV:INV-PROC-DIAG-1
+073c4004d3d9	kernel/core/src/process/unsafe.rs	pid_hash_unlink_store	1027		INV:INV-PROC-PIDHASH-1
+b3d8eca74e47	kernel/core/src/process/unsafe.rs	ptrace_translate	1047		INV:INV-PROC-PTRACE-WALK-1
+5e1aa3c1bcc3	kernel/core/src/process/unsafe.rs	ptrace_read_word	1058	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+87dca49e8aac	kernel/core/src/process/unsafe.rs	ptrace_write_word	1069	volatile,ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+50a2d07cc487	kernel/core/src/process/unsafe.rs	ptrace_copy_chunk	1082	ptr-ops	INV:INV-PROC-PTRACE-MEM-1
+2109bc750e8f	kernel/core/src/process/unsafe.rs	ptrace_flush_icache	1100	asm	INV:INV-PROC-PTRACE-ICOH-1
+785f8bdb4513	kernel/core/src/process/unsafe.rs	ptrace_flush_icache	1116	asm	INV:INV-PROC-PTRACE-ICOH-1
+da3db7a1349e	kernel/core/src/process/unsafe.rs	ptrace_read_gregset	1141	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
+952c929d078f	kernel/core/src/process/unsafe.rs	ptrace_write_gregset	1159	ptr-ops	INV:INV-PROC-PTRACE-GREG-1
+843152f7668a	kernel/core/src/process/unsafe.rs	zeroed_siginfo	1174		INV:INV-PROC-DIAG-1
+6d07bae9fd14	kernel/core/src/process/unsafe.rs	<module>	1198		INV:INV-TASKREF-1
+44e88b08fd92	kernel/core/src/process/unsafe.rs	task_borrow_deref	1212		INV:INV-TASKREF-1
+128ac9ad30b8	kernel/core/src/process/unsafe.rs	task_borrow_deref_mut	1224		INV:INV-TASKREF-1
+8fabc1d32c95	kernel/core/src/process/unsafe.rs	task_ref_deref	1235		INV:INV-TASKREF-1
+ecbe91080f47	kernel/core/src/process/unsafe.rs	task_ref_deref_mut	1246		INV:INV-TASKREF-1
+3509fb4abcb5	kernel/core/src/process/unsafe.rs	task_pgid_raw	1261		INV:INV-PROC-BORROW-1
+5dcba9d857fe	kernel/core/src/process/unsafe.rs	task_from_pid_ptr	1276		INV:INV-PROC-BORROW-1
 d0a027a52e5d	kernel/core/src/safety/bytes.rs	bytes_of	43	raw-construct,ptr-ops	INV:INV-CBYTES-1
 5e23ee24100c	kernel/core/src/safety/bytes.rs	bytes_of_mut	52	ptr-ops	INV:INV-CBYTES-1
 721b9284dd79	kernel/core/src/safety/bytes.rs	from_bytes	65	ptr-ops	INV:INV-CBYTES-2
