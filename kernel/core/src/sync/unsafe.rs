@@ -26,6 +26,72 @@
 //!   bucket that serializes kernel-side accessors of the word.
 
 use crate::process::types::Task;
+use super::hotpath::NestKey;
+use super::types::KeyedRawSpinlock;
+use core::cell::UnsafeCell;
+
+// ---------------------------------------------------------------------------
+// INV-SY-4: guard-held data dereference (the lock-guard Deref/DerefMut edge)
+//
+// The call sites are the guard Deref/DerefMut impls of hotpath.rs: each
+// holds a live guard proving the lock's own discipline, so the data cell
+// behind the guard may be reached with exactly the guard's own exclusivity.
+// These fns exist so the deref SITES carry no inline `unsafe` — the edge is
+// named once, here, with the contract below.
+// ---------------------------------------------------------------------------
+
+/// Shared (read) dereference of a lock's data cell (pass-3 collection).
+///
+/// # Contract (INV-SY-4)
+///
+/// `cell` is the `data` field of a lock whose SHARED guard the caller
+/// currently holds (SpinlockGuard / RwSpinlock read-family / Rwsem read /
+/// SeqLock write guard serialized by the write phase) — a live shared
+/// guard excludes writers for the returned reference's lifetime, which
+/// the borrow of `cell` (reached through the guard) ties down.
+#[inline(always)]
+pub(crate) fn guard_shared<'a, T: ?Sized>(cell: &'a UnsafeCell<T>) -> &'a T {
+    // SAFETY: INV-SY-4 — the caller's live shared guard excludes writes
+    // for 'a; UnsafeCell::get is the documented interior-mutability edge.
+    unsafe { &*cell.get() }
+}
+
+/// Exclusive (mutable) dereference of a lock's data cell (pass-3
+/// collection).
+///
+/// # Contract (INV-SY-4)
+///
+/// `cell` is the `data` field of a lock whose EXCLUSIVE guard the caller
+/// currently holds (SpinlockGuard / SpinlockIrqGuard / SpinlockBhGuard /
+/// RwSpinlock write-family / Rwsem write / SeqLock write guard — each
+/// proof at its call site): no other reference to the data can exist
+/// while the guard is live, so the `&mut` is exclusive for 'a.
+#[inline(always)]
+pub(crate) fn guard_exclusive<'a, T: ?Sized>(cell: &'a UnsafeCell<T>) -> &'a mut T {
+    // SAFETY: INV-SY-4 — the caller's live exclusive guard excludes every
+    // other access for 'a (proof named per call site).
+    unsafe { &mut *cell.get() }
+}
+
+// ---------------------------------------------------------------------------
+// INV-SY-5: the keyed-guard release edge (KeyedGuard::drop)
+// ---------------------------------------------------------------------------
+
+/// Release the raw lock a live [`KeyedRawSpinlock`] guard owns (pass-3
+/// collection of KeyedGuard::drop's raw-pointer deref).
+///
+/// # Contract (INV-SY-5)
+///
+/// `lock` is the pointer a live KeyedGuard was minted with (KeyedGuard
+/// holds it exclusively for its lifetime — the guard is `!Send` and
+/// cannot be duplicated); the deref is in-bounds for the guard's whole
+/// life and the release is RawSpinlock::unlock's audited owner-in-word
+/// protocol.
+#[inline(always)]
+pub(crate) fn keyed_guard_unlock<K: NestKey>(lock: *mut KeyedRawSpinlock<K>) {
+    // SAFETY: INV-SY-5 — the live guard owns `lock` exclusively.
+    unsafe { (*lock).raw.unlock() }
+}
 
 // ---------------------------------------------------------------------------
 // INV-SY-1: cross-task user-memory diagnostic reads
