@@ -58,16 +58,16 @@ def foreign_qemus():
 
 
 def build_probe(out, src, extra=None):
-    if not os.path.exists(src):
-        # probe sources are delivered through the tracked archive (the
-        # 2026-11-02 test-case rule: test/ carries no loose sources);
-        # restore on demand, same as make test does.
-        r = subprocess.run([os.path.join(WT, "scripts", "extract-probes.sh")],
-                           capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.exists(src):
-            print("[build] probe source missing: %s (extract failed rc=%d)"
-                  % (src, r.returncode))
-            return False
+    # probe sources are delivered through the tracked archive (the
+    # 2026-11-02 test-case rule: test/ carries no loose sources);
+    # re-extract on EVERY run: a stale extracted copy once shadowed the
+    # archive's arch-guarded probe with a pre-guard x86-only one.
+    r = subprocess.run([os.path.join(WT, "scripts", "extract-probes.sh")],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(src):
+        print("[build] probe source missing: %s (extract failed rc=%d)"
+              % (src, r.returncode))
+        return False
     if not os.path.exists(os.path.join(MUSL, "lib", "libc.a")):
         print("[build] riscv64 musl missing: run toolchain/build-musl.sh "
               "(or symlink a worktree's toolchain/riscv64-rux-linux-musl)")
