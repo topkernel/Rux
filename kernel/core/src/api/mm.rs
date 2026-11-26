@@ -19,7 +19,7 @@
 
 #![forbid(unsafe_code)]
 use crate::arch::mm::VirtAddr as ArchVirtAddr;
-use crate::drivers::blkdev::GenDisk;
+use crate::drivers::types::GenDisk;
 use crate::mm::types::MmStruct;
 use crate::mm::types::VirtAddr as PageVirtAddr;
 use crate::mm::types::Page;

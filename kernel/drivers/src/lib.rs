@@ -72,12 +72,10 @@ pub mod of_fdt;
 // The framework's remaining driver tree (registries, transports,
 // mechanism drivers) — re-exported so the service files reach them as
 // names of this root (`hooks`, `pci`, `initcalls`, ...).
-// (rux::drivers::timer is NOT among them: the crate root's `timer` is
+// (rux::drivers::hotpath::timer is NOT among them: the crate root's `timer` is
 // the framework's timekeeping module, which the service files use; the
 // driver one is named by its full path.)
-pub use rux::drivers::{blkdev, drm, initcalls, input,
-    intc, loop_dev, pci, rtc};
-pub use rux::drivers::ashmem;
+pub use rux::drivers::{types, hotpath, hotpath::intc};
 
 // The service files (sole copy), flat at the crate root
 // (seed-core-design 2c.2).
@@ -89,7 +87,11 @@ pub mod access_tokenid;
 // transport + the offset consts); the probe orchestrator joins
 // here (sole copy: src/virtio/probe.rs).
 pub mod virtio {
-    pub use rux::drivers::virtio::*;
+    // virtio/{mod.rs,queue.rs,offset.rs,virtio_pci.rs} are flattened into
+    // hotpath: the old module paths (queue::, offset::, virtio_pci::) are
+    // hotpath item names now; the device types come from types.
+    pub use rux::drivers::hotpath::*;
+    pub use rux::drivers::types::*;
     pub mod probe;
 }
 
@@ -97,7 +99,30 @@ pub mod virtio {
 // netdev registry + the virtio protocol driver); loopback joins
 // here. This module owns the crate root's `net` name.
 pub mod net {
-    pub use rux::drivers::net::*;
+    // net/space and net/virtio_net are flattened into hotpath: their items
+    // and the module names' old paths live as hotpath items now.
+    pub use rux::drivers::{
+        hotpath::{
+            dev_flags,
+            register_netdevice,
+            unregister_netdevice,
+            get_netdevice_by_index,
+            get_netdevice_by_name,
+            get_netdevice_count,
+            virtio_net_init,
+            get_virtio_net_device,
+            get_virtio_net_device_net,
+            virtio_net_get_device,
+            virtio_net_enable_device_interrupt,
+            init_pci,
+        },
+        types::{
+            NetDevice,
+            NetDeviceOps,
+            DeviceStats,
+            ArpHrdType,
+        },
+    };
     pub mod loopback;
 }
 
@@ -105,7 +130,22 @@ pub mod net {
 // substrate), virtio_gpu, virtio_cmd, the device registry}; the
 // simple-framebuffer probe and the fbdev chardev join here.
 pub mod gpu {
-    pub use rux::drivers::gpu::*;
+    // gpu/{framebuffer,virtio_cmd,virtio_gpu} are flattened into hotpath.
+    pub use rux::drivers::{
+        hotpath::{
+            probe_virtio_gpu,
+            set_framebuffer_info,
+            get_framebuffer_info,
+            set_gpu_device,
+            flush_framebuffer,
+            with_gpu_device,
+        },
+        types::{
+            FrameBuffer,
+            FrameBufferInfo,
+            VirtioGpuDevice,
+        },
+    };
     pub mod fb_simple;
     pub mod fbdev;
 }

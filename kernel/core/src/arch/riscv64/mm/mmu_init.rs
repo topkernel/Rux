@@ -2143,7 +2143,7 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
         (CLINT_BASE, 0x1_0000),                                // CLINT
         (PLIC_BASE, 0x21_0000),                                // PLIC prio/pending/enable/contexts
         (VIRTIO_MMIO_BASE & !0xFFF, 0x9_000),                  // UART + virtio-mmio slots
-        (crate::drivers::rtc::GOLDFISH_RTC_BASE, crate::drivers::rtc::GOLDFISH_RTC_SIZE),
+        (crate::drivers::hotpath::GOLDFISH_RTC_BASE, crate::drivers::hotpath::GOLDFISH_RTC_SIZE),
         (PCIE_ECAM_BASE, 0x800_000),                           // PCIe ECAM buses 0-7
         (PCI_MMIO_BASE, 0x1000_0000),                          // PCI MMIO BAR window
     ];
@@ -2192,9 +2192,9 @@ pub fn setup_device_mappings() {
         // Goldfish RTC: 0x101000, 1 page (QEMU virt's default RTC device,
         // read once at boot for the wall-clock epoch offset — drivers/rtc.rs)
         map_kernel_region(
-            crate::drivers::rtc::GOLDFISH_RTC_BASE,
-            crate::drivers::rtc::GOLDFISH_RTC_BASE,
-            crate::drivers::rtc::GOLDFISH_RTC_SIZE,
+            crate::drivers::hotpath::GOLDFISH_RTC_BASE,
+            crate::drivers::hotpath::GOLDFISH_RTC_BASE,
+            crate::drivers::hotpath::GOLDFISH_RTC_SIZE,
             device_flags,
         );
 

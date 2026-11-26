@@ -32,7 +32,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering, AtomicUsize, AtomicU8, AtomicU32};
 use crate::sync::types::Spinlock;
-use crate::drivers::timer;
+use crate::drivers::hotpath::timer;
 
 pub mod nohz;
 pub mod oneshot;
@@ -1043,7 +1043,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // VW forensic instrumentation: per-jiffy virtio completion-lag
     // watchdog (prints walker/ring state when PENDING_LAST lags the used
     // ring with no scheduled consumer — the ftest01 wedge family).
-    crate::drivers::virtio::vw_lag_watchdog(current);
+    crate::drivers::hotpath::vw_lag_watchdog(current);
 
     // rux:claiminject (retired debug=claiminject) (GNOME-wedge adjudication): every 50 jiffies, leak
     // a foreign claim onto the linked pickable set. Unpatched kernels
@@ -1401,7 +1401,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                             // term); armdl≈late_us says it was armed AT
                             // the late instant (kernel coarse-arm term).
                             #[cfg(feature = "x86_64")]
-                            let arm_dl = crate::drivers::intc::apic::last_arm_deadline(
+                            let arm_dl = crate::drivers::hotpath::intc::apic::last_arm_deadline(
                                 crate::arch::cpu_id() as usize,
                             );
                             #[cfg(not(feature = "x86_64"))]
@@ -1425,8 +1425,8 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                             // only (budget 12/boot).
                             #[cfg(feature = "x86_64")]
                             {
-                                let hlate = if crate::drivers::timer::hpet::ready() {
-                                    crate::drivers::timer::hpet::read_time_nominal()
+                                let hlate = if crate::drivers::hotpath::timer::hpet::ready() {
+                                    crate::drivers::hotpath::timer::hpet::read_time_nominal()
                                         .saturating_sub(token_deadline)
                                         .saturating_mul(TNS_PER_TICK)
                                         / 1000
@@ -1847,7 +1847,7 @@ fn ww_latefire_budget_ok() -> bool {
 
 #[cfg(target_arch = "x86_64")]
 pub fn tick_trap_report(site: &str) {
-    use crate::drivers::intc::apic;
+    use crate::drivers::hotpath::intc::apic;
 
     let me = crate::arch::cpu_id() as usize;
     let tb_now = crate::timer::read_time();

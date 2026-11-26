@@ -4,7 +4,7 @@
 //!
 //! Kani proof harnesses for input event ABI constants and struct size.
 //!
-//! Types copied from: kernel/core/src/drivers/input/event.rs
+//! Types copied from: kernel/core/src/drivers/hotpath.rs
 
 #![cfg(kani)]
 

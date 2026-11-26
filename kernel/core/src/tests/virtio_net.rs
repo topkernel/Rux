@@ -12,7 +12,7 @@
 //! - Loopback device functionality
 
 use alloc::format;
-use crate::drivers::net::virtio_net;
+use crate::drivers::hotpath;
 use crate::net::buffer::SkBuff;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 

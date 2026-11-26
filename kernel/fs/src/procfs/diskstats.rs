@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 /// Generate /proc/diskstats content.
 pub fn generate() -> Vec<u8> {
     let mut out = String::new();
-    for stat in crate::drivers::blkdev::iostat::snapshot().iter() {
+    for stat in crate::drivers::hotpath::snapshot().iter() {
         // Linux's identity triple (major, minor, name) is the row label;
         // the 17 counter columns behind it are the macro's declaration
         // list — the merged/discard/flush zeros are named columns in

@@ -133,7 +133,7 @@ impl RawSocket {
         if us == 0 {
             return None;
         }
-        Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+        Some(crate::drivers::hotpath::timer::get_jiffies() + (us / 10_000).max(1))
     }
 
     fn recv_ready(&self) -> bool {
@@ -198,7 +198,7 @@ fn raw_wait_round(sock: &Arc<RawSocket>, deadline: Option<u64>) -> Result<(), i3
         return Err(-4);
     }
     if let Some(dl) = deadline {
-        if crate::drivers::timer::get_jiffies() >= dl {
+        if crate::drivers::hotpath::timer::get_jiffies() >= dl {
             return Err(-11);
         }
     }

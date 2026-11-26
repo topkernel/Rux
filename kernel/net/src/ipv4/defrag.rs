@@ -117,7 +117,7 @@ pub fn ip_defrag(
     src_ip: u32,
     dest_ip: u32,
 ) {
-    let now = crate::drivers::timer::get_jiffies();
+    let now = crate::drivers::hotpath::timer::get_jiffies();
     let id = u16::from_be(ip_hdr.id);
 
     // N2 guard: the rebuilt datagram's header is a 20-byte copy. A
@@ -174,7 +174,7 @@ pub fn ip_defrag(
                 dst: dest_ip,
                 id,
                 proto: ip_hdr.protocol,
-                expiry: now + IP_FRAG_TIMEOUT_SECS * crate::drivers::timer::HZ,
+                expiry: now + IP_FRAG_TIMEOUT_SECS * crate::drivers::hotpath::timer::HZ,
                 hdr,
                 data: alloc::vec::Vec::new(),
                 frags: alloc::vec::Vec::new(),

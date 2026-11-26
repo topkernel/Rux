@@ -882,13 +882,13 @@ pub fn dump_mem() {
         // phase counts on this proven raw path (pr_warn in the timer
         // softirq was dropped by printk on loaded boots).
         taskdump_raw_line(b"\nVWWAIT enter=");
-        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_ENTER.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_dec(crate::drivers::hotpath::VW_WAIT_ENTER.load(core::sync::atomic::Ordering::Relaxed));
         taskdump_raw_line(b" sched=");
-        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_SCHED.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_dec(crate::drivers::hotpath::VW_WAIT_SCHED.load(core::sync::atomic::Ordering::Relaxed));
         taskdump_raw_line(b" resp=");
-        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_RESP.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_dec(crate::drivers::hotpath::VW_WAIT_RESP.load(core::sync::atomic::Ordering::Relaxed));
         taskdump_raw_line(b" timeout=");
-        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_TIMEOUT.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_dec(crate::drivers::hotpath::VW_WAIT_TIMEOUT.load(core::sync::atomic::Ordering::Relaxed));
     let st = crate::mm::hotpath::buddy_stats();
     put_dec((st.used_bytes / 1024) as u64);
     taskdump_raw_line(b"K/");

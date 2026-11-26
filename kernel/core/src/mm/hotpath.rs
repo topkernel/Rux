@@ -13008,7 +13008,7 @@ pub fn vdso_data_tick() {
         }
         let epoch_ns = crate::timer::wall_epoch_offset_ns();
         x86_track::wr(24, epoch_ns);
-        let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+        let hz = crate::drivers::hotpath::intc::apic::TSC_FREQ.load(Ordering::Acquire);
         if hz >= 1_000_000 {
             // Interpolation bound: 50 ms of raw TSC. Refreshes happen
             // every tick (~10 ms); a healthy reader interpolates at most

@@ -166,7 +166,7 @@ impl IoCompletion {
     /// zero-serve family).
     pub fn complete_with_token(&self, status: i32, token: usize) {
         #[cfg(debug_assertions)]
-        crate::drivers::virtio::assert_no_virtio_lock("IoCompletion::complete");
+        crate::drivers::hotpath::assert_no_virtio_lock("IoCompletion::complete");
         self.status.store(status, Ordering::Release);
         self.token.store(token, Ordering::Release);
         self.done.store(true, Ordering::Release);
@@ -301,9 +301,9 @@ impl IoCompletion {
                 crate::sched::hotpath::dequeue_task(&*current);
                 // Final chance (GSD fix): kick the queue and drain
                 // completions once — recovers lost-kick stalls.
-                crate::drivers::virtio::vw_report("async-deadline");
-                crate::drivers::blkdev::kick_all_pending_disks();
-                crate::drivers::virtio::pci_process_async_completions();
+                crate::drivers::hotpath::vw_report("async-deadline");
+                crate::drivers::hotpath::kick_all_pending_disks();
+                crate::drivers::hotpath::pci_process_async_completions();
                 if self.done.load(Ordering::Acquire) {
                     crate::pr_err!("io_completion: recovered by final kick/drain");
                     result = self.status.load(Ordering::Acquire);
@@ -316,7 +316,7 @@ impl IoCompletion {
                 // dereferences this memory after we return (GSD fix).
                 // This also waits out any walker delivery of OUR entries
                 // that is still in flight (see `delivering`).
-                crate::drivers::virtio::abandon_pending_completion(
+                crate::drivers::hotpath::abandon_pending_completion(
                     self as *const _ as *mut _,
                 );
                 // The drained delivery may have completed us after the
@@ -397,7 +397,7 @@ impl IoCompletion {
             // re-sleeping — cheap when caught up, and it converts any
             // lost-IRQ engine into at most one extra 250 ms poll round
             // instead of a 10 s deadline batch stall.
-            crate::drivers::virtio::pci_rescue_all_lagged();
+            crate::drivers::hotpath::pci_rescue_all_lagged();
         }
         if deadline_armed && deadline_timer != 0 {
             crate::timer::del_timer(deadline_timer);

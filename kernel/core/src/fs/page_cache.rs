@@ -3421,7 +3421,7 @@ impl PageCache {
         if crate::sched::hotpath::current_is_dying() {
             return self.shrink(want);
         }
-        if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
+        if crate::drivers::hotpath::loop_io_claim_held_by_current() {
             SR_LOOP_DEFER.fetch_add(1, Ordering::Relaxed);
             return self.shrink(want);
         }
@@ -3567,7 +3567,7 @@ impl PageCache {
             // clean-only here, the deferred pages are flushed by the
             // writer-side dirty-balloon watermark or a later reclaim
             // outside any io claim.
-            if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
+            if crate::drivers::hotpath::loop_io_claim_held_by_current() {
                 SR_LOOP_DEFER.fetch_add(1, Ordering::Relaxed);
                 break;
             }

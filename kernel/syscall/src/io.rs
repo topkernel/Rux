@@ -1387,8 +1387,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // DMA_BUF_IOCTL_SYNC reaches them.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if crate::drivers::drm::is_drm_file(&file) {
-                let ret = crate::drivers::drm::drm_ioctl(request, arg);
+            if crate::drivers::hotpath::is_drm_file(&file) {
+                let ret = crate::drivers::hotpath::drm_ioctl(request, arg);
                 // oh-svc T1: name the llvmpipe displaytarget_map failure —
                 // the render_service assert (jit_tex->base, lp_setup.c:1072)
                 // fires exactly when the kms sw winsys's MAP_DUMB or its
@@ -1436,8 +1436,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 }
                 return ret;
             }
-            if crate::drivers::drm::is_prime_file(&file) {
-                if let Some(ret) = crate::drivers::drm::prime_file_ioctl(&file, request, arg) {
+            if crate::drivers::hotpath::is_prime_file(&file) {
+                if let Some(ret) = crate::drivers::hotpath::prime_file_ioctl(&file, request, arg) {
                     return ret;
                 }
             }
@@ -1445,10 +1445,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             // non-DRM fd (the sender's fd number leaked through a parcel)
             // fails here with ENOTTY before any DRM code runs — silent
             // userspace-side. Log it; fall through to the generic path.
-            crate::drivers::drm::trace_foreign_prime_ioctl(request, fd, 25 /* ENOTTY */);
+            crate::drivers::hotpath::trace_foreign_prime_ioctl(request, fd, 25 /* ENOTTY */);
         } else {
             // fd number closed: EBADF, same silent-userspace effect.
-            crate::drivers::drm::trace_foreign_prime_ioctl(request, fd, 9 /* EBADF */);
+            crate::drivers::hotpath::trace_foreign_prime_ioctl(request, fd, 9 /* EBADF */);
         }
     }
 
@@ -1483,7 +1483,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if let Some(ret) = crate::drivers::input::evdev::evdev_file_ioctl(&file, request, arg)
+            if let Some(ret) = crate::drivers::hotpath::evdev_file_ioctl(&file, request, arg)
             {
                 return ret;
             }
@@ -1523,7 +1523,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if let Some(ret) = crate::drivers::loop_dev::loop_file_ioctl(&file, request, arg) {
+            if let Some(ret) = crate::drivers::hotpath::loop_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }
@@ -1547,7 +1547,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
         if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
-            if let Some(ret) = crate::drivers::ashmem::ashmem_file_ioctl(&file, request, arg) {
+            if let Some(ret) = crate::drivers::hotpath::ashmem_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }

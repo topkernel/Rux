@@ -24,7 +24,7 @@
 use alloc::vec::Vec;
 use crate::fs::{File, FileOps};
 use crate::fs::dev_t::DevNo;
-use crate::drivers::net::space::{DeviceStats, NetDevice};
+use crate::drivers::types::{DeviceStats, NetDevice};
 use crate::net::buffer::SkBuff;
 
 /// One char-device row the owning driver leaf registers: the (devno,

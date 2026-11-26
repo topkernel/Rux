@@ -615,7 +615,7 @@ fn block_tag_csum(journal: &Journal, sequence: Tid, data: &[u8]) -> u32 {
 /// logical 0, resolved by the caller through Journal::jmap).
 fn write_journal_superblock(
     journal: &Journal,
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     sb_block: u64,
     new_start: u64,
     new_sequence: u32,

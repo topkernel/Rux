@@ -535,7 +535,7 @@ fn parse_uevent_action(buf: &[u8]) -> Option<&'static str> {
 // ============================================================================
 
 /// Live netdev accessor type (both loopback and virtio-net match).
-type NetDevGetter = fn() -> Option<&'static mut crate::drivers::net::space::NetDevice>;
+type NetDevGetter = fn() -> Option<&'static mut crate::drivers::types::NetDevice>;
 
 /// "0-3"-style CPU range for /sys/devices/system/cpu/{online,present,...}.
 fn cpu_range_str(count: usize) -> String {
@@ -598,7 +598,7 @@ fn add_net_device(
 
     // statistics/ subdirectory — live from the NetDevice stats block.
     let stats_dir = mk_dir(&dev, "statistics", KType::Net);
-    let fields: &[(&str, fn(&crate::drivers::net::space::DeviceStats) -> u64)] = &[
+    let fields: &[(&str, fn(&crate::drivers::types::DeviceStats) -> u64)] = &[
         ("rx_packets", |s| s.rx_packets),
         ("tx_packets", |s| s.tx_packets),
         ("rx_bytes", |s| s.rx_bytes),
@@ -1172,9 +1172,9 @@ pub fn register_drm_device(slot_name: &str) {
         ("renderD128", 128u32, "dri/renderD128"),
     ] {
         let node = mk_dir(&drm_dir, name, KType::Drm);
-        *node.devno.lock() = Some((crate::drivers::drm::DRM_MAJOR_NUM, minor));
+        *node.devno.lock() = Some((crate::drivers::hotpath::DRM_MAJOR_NUM, minor));
         *node.devname.lock() = Some(String::from(devname));
-        let (maj, min) = (crate::drivers::drm::DRM_MAJOR_NUM, minor);
+        let (maj, min) = (crate::drivers::hotpath::DRM_MAJOR_NUM, minor);
         attr_ro(&node, "dev", move || format!("{}:{}\n", maj, min).into_bytes());
         // <node>/device -> the PCI function (libdrm's legacy
         // "<node-path>/device" walk).
@@ -1220,7 +1220,7 @@ pub fn register_drm_device(slot_name: &str) {
     // Broadcast the node "add" uevents (coldboot parity; the events are
     // informational for this boot since the nodes predate userland).
     for (minor, devname) in [(0u32, "dri/card0"), (128u32, "dri/renderD128")] {
-        let maj = format!("{}", crate::drivers::drm::DRM_MAJOR_NUM);
+        let maj = format!("{}", crate::drivers::hotpath::DRM_MAJOR_NUM);
         let min = format!("{}", minor);
         let dn = String::from(devname);
         let extra: [(&str, &str); 3] = [
@@ -1289,7 +1289,7 @@ fn build_tree() -> Arc<KObject> {
         &net,
         "eth0",
         2,
-        crate::drivers::net::get_virtio_net_device_net,
+        crate::drivers::hotpath::get_virtio_net_device_net,
         [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
         1500,
         0x1 | 0x40 | 0x2, // UP|RUNNING|BROADCAST

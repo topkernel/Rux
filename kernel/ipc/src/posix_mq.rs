@@ -501,7 +501,7 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     let now_ns = (now_sec as i128) * 1_000_000_000i128 + (now_nsec as i128);
     let target_ns = (ts_sec as i128) * 1_000_000_000i128 + (ts_nsec as i128);
     let delta_ns = if target_ns > now_ns { target_ns - now_ns } else { 0 };
-    let hz = crate::drivers::timer::HZ as u128;
+    let hz = crate::drivers::hotpath::timer::HZ as u128;
     let timeout_jiffies = ((delta_ns as u128 * hz + 999_999_999u128) / 1_000_000_000u128) as u64;
     Ok(Some(crate::timer::get_jiffies() + timeout_jiffies))
 }

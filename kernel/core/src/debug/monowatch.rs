@@ -63,9 +63,9 @@ static REPORTS: AtomicU64 = AtomicU64::new(0);
 fn clocksource_name() -> &'static str {
     #[cfg(feature = "x86_64")]
     {
-        if crate::drivers::timer::hpet::ready() {
+        if crate::drivers::hotpath::timer::hpet::ready() {
             "hpet"
-        } else if crate::drivers::timer::tsc_active() {
+        } else if crate::drivers::hotpath::timer::tsc_active() {
             "tsc"
         } else {
             "pit-jiffies"

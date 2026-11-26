@@ -418,8 +418,8 @@ fn tramp_va(phys: usize) -> usize {
 /// scheduler pre-created the idle tasks and after the APIC driver is
 /// initialized; degrades to a no-op without a MADT/APIC.
 pub fn start_secondaries() {
-    let discovered = crate::drivers::intc::apic::cpu_count();
-    if discovered <= 1 || !crate::drivers::intc::apic::ready() {
+    let discovered = crate::drivers::hotpath::intc::apic::cpu_count();
+    if discovered <= 1 || !crate::drivers::hotpath::intc::apic::ready() {
         crate::print_status(
             "smp",
             "single CPU (no APIC/MADT secondaries)",
@@ -436,7 +436,7 @@ pub fn start_secondaries() {
     let mut failures = 0usize;
 
     for cpu in 1..target {
-        let lapic = crate::drivers::intc::apic::lapic_id(cpu);
+        let lapic = crate::drivers::hotpath::intc::apic::lapic_id(cpu);
         if lapic == u32::MAX {
             continue;
         }
@@ -457,13 +457,13 @@ pub fn start_secondaries() {
         );
 
         // INIT assert -> SIPI -> SIPI (MP spec bring-up sequence).
-        crate::drivers::intc::apic::send_init(lapic);
-        crate::drivers::intc::apic::delay_ms(10);
-        crate::drivers::intc::apic::send_sipi(lapic, (TRAMP_PHYS >> 12) as u8);
+        crate::drivers::hotpath::intc::apic::send_init(lapic);
+        crate::drivers::hotpath::intc::apic::delay_ms(10);
+        crate::drivers::hotpath::intc::apic::send_sipi(lapic, (TRAMP_PHYS >> 12) as u8);
         // Spec allows up to 200us before the second SIPI; the bounded
         // spin also covers slow TCG APs racing to set `started`.
         if !wait_started(cpu, 2_000_000) {
-            crate::drivers::intc::apic::send_sipi(lapic, (TRAMP_PHYS >> 12) as u8);
+            crate::drivers::hotpath::intc::apic::send_sipi(lapic, (TRAMP_PHYS >> 12) as u8);
         }
         if wait_started(cpu, 200_000_000) {
             expected += 1;
@@ -603,13 +603,13 @@ pub extern "C" fn ap_entry64() -> ! {
 
     // Local APIC on this CPU (also arms the periodic timer; delivery
     // waits for STI below).
-    crate::drivers::intc::apic::init_secondary();
+    crate::drivers::hotpath::intc::apic::init_secondary();
 
     // Per-CPU vCPU TSC-offset calibration while IRQs are still off and
     // before this CPU's first tick can serve read_time() (sc110: the
     // one-time ~25 s TSC-vs-HPET step tracked secondary online). No-op
     // unless the HPET-calibrated TSC timekeeper is active (tscclk).
-    crate::drivers::timer::x86_64::calibrate_cpu_tsc_offset(cpu);
+    crate::drivers::hotpath::timer::x86_64::calibrate_cpu_tsc_offset(cpu);
 
     // Publish the idle task as `current` so the first timer tick (which
     // can arrive right after STI) finds a valid task on this CPU, and

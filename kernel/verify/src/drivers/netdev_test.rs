@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for network device flags and ArpHrdType constants.
-//! Copied from: kernel/core/src/drivers/net/space.rs
+//! Copied from: kernel/core/src/drivers/hotpath.rs
 
 use proptest::prelude::*;
 

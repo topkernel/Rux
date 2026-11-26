@@ -1158,7 +1158,7 @@ fn timeout_to_deadline(us: u64) -> Option<u64> {
     if us == 0 {
         return None;
     }
-    Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+    Some(crate::drivers::hotpath::timer::get_jiffies() + (us / 10_000).max(1))
 }
 
 /// Which condition the wait loop re-checks after registering.
@@ -1310,7 +1310,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
         return Err(-4); // EINTR
     }
     if let Some(dl) = deadline {
-        if crate::drivers::timer::get_jiffies() >= dl {
+        if crate::drivers::hotpath::timer::get_jiffies() >= dl {
             // Linux SO_RCVTIMEO/SO_SNDTIMEO expiry surfaces as EAGAIN.
             return Err(-11);
         }
@@ -2332,7 +2332,7 @@ pub fn udp_proto_fd(fd: usize) -> Option<i32> {
 /// nanosleep timer-wakeup discipline (one-shot timer + INTERRUPTIBLE sleep
 /// + re-check) so the deadline is guaranteed even without peer ACKs.
 fn linger_drain_wait(tcp_fd: i32, secs: u32) {
-    use crate::drivers::timer;
+    use crate::drivers::hotpath::timer;
 
     fn drained(tcp_fd: i32) -> bool {
         let _g = crate::tcp::TCP_TABLE_LOCK.lock_irqsave();

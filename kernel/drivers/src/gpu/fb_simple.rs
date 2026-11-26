@@ -13,7 +13,7 @@
 //! - Format: xRGB 32bpp
 
 use crate::println;
-use super::framebuffer::{FrameBuffer, FrameBufferInfo};
+use super::{FrameBuffer, FrameBufferInfo};
 
 /// QEMU RISC-V virt platform default framebuffer address
 const FB_DEFAULT_ADDR: u64 = crate::arch::mm::memory_layout::mmio_alias(0x10000000);

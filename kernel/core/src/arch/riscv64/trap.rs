@@ -150,7 +150,7 @@ pub fn enable_timer_interrupt() {
     }
 
     // Step 2: Set the timer trigger
-    crate::drivers::timer::set_next_trigger();
+    crate::drivers::hotpath::timer::set_next_trigger();
 
     // Step 3: Enable global interrupts (sstatus.SIE = 1) if not already enabled
     // SAFETY: csrsi atomically sets the SIE bit in sstatus; enabling interrupts is safe.
@@ -672,7 +672,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     crate::fs::perf_ctr::timer_inc(cpu);
 
     // Re-arm timer: set stimecmp to a future deadline.
-    crate::drivers::timer::set_next_trigger();
+    crate::drivers::hotpath::timer::set_next_trigger();
 
     // Skip scheduler/schedule logic during early SMP boot (tp = hart_id,
     // no current task).  scheduler_tick() may call wake_up_process() which
@@ -720,7 +720,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     }
 
     // 1. Update jiffies
-    crate::drivers::timer::timer_interrupt_handler();
+    crate::drivers::hotpath::timer::timer_interrupt_handler();
 
     // 2. Scheduler tick
     crate::sched::hotpath::scheduler_tick();
@@ -757,7 +757,7 @@ fn handle_software_interrupt(_regs: &mut PtRegs, cpu: usize) {
 /// spurious/unmapped IRQs that bypass the flow handler.
 fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
 
-    if let Some(hwirq) = crate::drivers::intc::plic::claim(cpu) {
+    if let Some(hwirq) = crate::drivers::hotpath::intc::plic::claim(cpu) {
         let handled = if let Some(domain) = crate::interrupt::get_default_domain() {
             crate::interrupt::generic_handle_domain_irq(domain, hwirq as u32)
         } else {
@@ -766,7 +766,7 @@ fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
         // Only do fallback EOI for spurious/unmapped IRQs that bypassed
         // handle_fasteoi_irq. Normal IRQs already got EOI via irq_chip.irq_eoi.
         if !handled {
-            crate::drivers::intc::plic::complete(cpu, hwirq);
+            crate::drivers::hotpath::intc::plic::complete(cpu, hwirq);
         }
     }
 }

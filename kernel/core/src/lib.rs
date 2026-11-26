@@ -600,7 +600,7 @@ pub fn rust_main_tail() -> ! {
         // Without an HPET the calibrated-TSC timebase applies (hpet.rs).
         #[cfg(feature = "x86_64")]
         {
-            let ok = drivers::timer::hpet::init();
+            let ok = drivers::hotpath::timer::hpet::init();
             // sc109: the launcher's vDSO-less clock_gettime path paid an
             // HPET MMIO VM exit per call and burned its whole 3 s appspawn
             // watchdog (stime focus histogram: hpet driver page). The
@@ -616,7 +616,7 @@ pub fn rust_main_tail() -> ! {
                 && crate::cmdline::get_param("tscclk")
                     .map(|v| v != "0")
                     .unwrap_or(true)
-                && drivers::timer::hpet::calibrate_tsc();
+                && drivers::hotpath::timer::hpet::calibrate_tsc();
             print_status(
                 "timer",
                 if ok {
@@ -640,8 +640,8 @@ pub fn rust_main_tail() -> ! {
         // unreadable the offset stays 0 and the system runs on monotonic
         // boot time (the pre-RTC behaviour).
         #[cfg(feature = "x86_64")]
-        drivers::rtc::rtc_init_alias();
-        drivers::rtc::rtc_init_wall_clock();
+        drivers::hotpath::rtc_init_alias();
+        drivers::hotpath::rtc_init_wall_clock();
 
         // Initialize IRQ framework
         {
@@ -652,7 +652,7 @@ pub fn rust_main_tail() -> ! {
         // Initialize interrupt controller (PLIC on riscv64; the 8259 PIC
         // on x86_64 is programmed by the arch trap bring-up)
         {
-            drivers::intc::init();
+            drivers::hotpath::intc::init();
             #[cfg(feature = "riscv64")]
             print_status("intc", "PLIC @ 0x0C000000", true);
             #[cfg(feature = "riscv64")]
@@ -857,12 +857,12 @@ pub fn rust_main_tail() -> ! {
             // register_initcall calls verbatim at this exact point.
             crate::api::drivers::register_probe_initcalls();
             // First scan MMIO devices (virtio-blk-device)
-            let mmio_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Early);
+            let mmio_count = drivers::hotpath::run_initcalls(drivers::types::InitLevel::Early);
             if mmio_count > 0 {
                 print_status("driver", &format!("virtio-blk MMIO x{}", mmio_count), true);
             }
             // Then scan PCI devices (virtio-blk-pci)
-            let pci_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Device);
+            let pci_count = drivers::hotpath::run_initcalls(drivers::types::InitLevel::Device);
             if pci_count > 0 {
                 print_status("driver", &format!("virtio-blk PCI x{}", pci_count), true);
                 print_status("driver", "GenDisk registered", true);
@@ -902,7 +902,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize network devices (the Late initcall level)
         {
-            let device_count = drivers::initcalls::run_initcalls(drivers::initcalls::InitLevel::Late);
+            let device_count = drivers::hotpath::run_initcalls(drivers::types::InitLevel::Late);
             if device_count > 0 {
                 print_status("driver", &format!("virtio-net x{}", device_count), true);
             }
@@ -1105,15 +1105,15 @@ pub fn rust_main_tail() -> ! {
         // riscv64.
         {
             // Probe VirtIO-GPU device
-            if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
+            if let Some(mut gpu_device) = drivers::hotpath::probe_virtio_gpu() {
                 print_status("driver", "virtio-gpu probed", true);
                 // Initialize framebuffer
                 if let Some(fb_info) = gpu_device.init_framebuffer() {
                     print_status("gpu", &format!("{}x{} 32bpp framebuffer", fb_info.width, fb_info.height), true);
                     // Save framebuffer info for userspace mmap
-                    drivers::gpu::set_framebuffer_info(*fb_info);
+                    drivers::hotpath::set_framebuffer_info(*fb_info);
                     // Save GPU device for refresh
-                    drivers::gpu::set_gpu_device(gpu_device);
+                    drivers::hotpath::set_gpu_device(gpu_device);
                 } else {
                     print_status("gpu", "framebuffer init failed", false);
                 }
@@ -1125,7 +1125,7 @@ pub fn rust_main_tail() -> ! {
         // ========== Initialize Input System ==========
         {
             // Initialize PS/2 driver (does nothing on RISC-V)
-            drivers::input::init();
+            drivers::hotpath::input_init();
 
             // Initialize devfs (must be before evdev initialization)
             fs::leaf_glue::devfs::init();
@@ -1133,7 +1133,7 @@ pub fn rust_main_tail() -> ! {
             print_status("fs", "devfs mounted /dev", true);
             // /dev/fb0 — framebuffer char device (registered when the GPU
             // initialized successfully above)
-            if drivers::gpu::get_framebuffer_info().is_some() {
+            if drivers::hotpath::get_framebuffer_info().is_some() {
                 match crate::api::drivers::init_fbdev() {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),
                     Err(()) => print_status("driver", "/dev/fb0 registration failed", false),
@@ -1141,7 +1141,7 @@ pub fn rust_main_tail() -> ! {
                 // DRM/KMS nodes for the OpenHarmony display HDI (composer
                 // opens card0, the gbm gralloc opens renderD128). Needs
                 // the virtio-gpu device for the page-flip path.
-                match drivers::drm::init_drm() {
+                match drivers::hotpath::init_drm() {
                     Ok(()) => print_status("driver", "/dev/dri/card0 + renderD128 registered", true),
                     Err(()) => print_status("driver", "/dev/dri registration failed", false),
                 }
@@ -1173,7 +1173,7 @@ pub fn rust_main_tail() -> ! {
             }
 
             // Initialize VirtIO Input devices
-            let (kb_count, ptr_count) = drivers::input::init_virtio_input();
+            let (kb_count, ptr_count) = drivers::hotpath::init_virtio_input();
 
             // evdev nodes exist either way (init_evdev registers the two
             // slots), but an [ok] "driver" line is only honest when real
@@ -1273,7 +1273,7 @@ pub fn rust_main_tail() -> ! {
         #[cfg(feature = "x86_64")]
         {
             let t0 = timer::get_jiffies();
-            drivers::intc::apic::delay_ms(150);
+            drivers::hotpath::intc::apic::delay_ms(150);
             let t1 = timer::get_jiffies();
             print_status(
                 "timer",
@@ -1872,7 +1872,7 @@ fn mount_root_filesystem() {
     // Name resolution (Linux semantics): root=/dev/vdX selects THAT disk.
     // vda resolves to the first PCI disk, or the MMIO boot disk when no
     // PCI virtio-blk was found; vdb..vdz resolve to the PCI slots.
-    if let Some(disk) = drivers::virtio::get_pci_gen_disk_by_name(&dev_name) {
+    if let Some(disk) = drivers::hotpath::get_pci_gen_disk_by_name(&dev_name) {
         // [done]: the selection record; the capacity is on the per-disk
         // "driver:" line and the mount verdict follows as its own
         // "ext4 mounted /" line (serial-clean: was a raw pr_info).
@@ -1898,11 +1898,11 @@ fn mount_root_filesystem() {
 /// first, MMIO fallback), then rebuild the /proc and cgroup2 mounts the
 /// ext4 root overlay shadowed (same sequence the pre-OH boot used).
 fn mount_boot_disk_ext4() {
-    let disk: Option<&'static drivers::blkdev::GenDisk> =
-        drivers::virtio::get_pci_gen_disk().or_else(|| {
+    let disk: Option<&'static drivers::types::GenDisk> =
+        drivers::hotpath::get_pci_gen_disk().or_else(|| {
             // get_device() returns &'static VirtIOBlkDevice; the field
             // borrow is machine-long.
-            drivers::virtio::get_device().map(|v| &v.disk)
+            drivers::hotpath::virtio_blk_get_device().map(|v| &v.disk)
         });
     let Some(disk) = disk else {
         // No block device at all (initrd-only run) — nothing to mount.
@@ -1913,7 +1913,7 @@ fn mount_boot_disk_ext4() {
 
 /// Mount `disk`'s ext4 as THE root (full mount path with journal replay),
 /// then rebuild the /proc and cgroup2 mounts the ext4 overlay shadowed.
-fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
+fn mount_ext4_root_from(disk: &'static drivers::types::GenDisk) {
     let mount_result = crate::api::ext4::mount_root(disk);
     let mount_point = crate::config::EXT4_MOUNT_POINT;
     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());

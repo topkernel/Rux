@@ -686,11 +686,11 @@ pub fn init() {
     open_softirq(SoftirqIndex::Timer as usize, crate::api::net::tcp_timer_softirq);
     open_softirq(
         SoftirqIndex::NetRx as usize,
-        crate::drivers::net::virtio_net::net_rx_softirq_handler,
+        crate::drivers::hotpath::net_rx_softirq_handler,
     );
     open_softirq(
         SoftirqIndex::Block as usize,
-        crate::drivers::virtio::block_bh_handler,
+        crate::drivers::hotpath::block_bh_handler,
     );
     open_softirq(
         SoftirqIndex::Hrtimer as usize,

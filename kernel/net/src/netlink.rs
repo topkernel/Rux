@@ -200,7 +200,7 @@ fn iface_hw(index: u32) -> (u32, u32, [u8; 6], u16) {
             (flags, 65536, [0; 6], 772) // ARPHRD_LOOPBACK
         }
         ETH0_INDEX => {
-            if let Some(dev) = crate::drivers::net::get_virtio_net_device_net() {
+            if let Some(dev) = crate::drivers::hotpath::get_virtio_net_device_net() {
                 let mut mac = [0u8; 6];
                 mac.copy_from_slice(&dev.addr[..6]);
                 let mtu = dev.mtu;
@@ -223,7 +223,7 @@ fn iface_hw(index: u32) -> (u32, u32, [u8; 6], u16) {
 fn iface_set_up(index: u32, up: bool) {
     let dev = match index {
         LO_INDEX => rux::api::drivers::get_loopback_device(),
-        ETH0_INDEX => crate::drivers::net::get_virtio_net_device_net(),
+        ETH0_INDEX => crate::drivers::hotpath::get_virtio_net_device_net(),
         _ => return,
     };
     if let Some(dev) = dev {
@@ -541,7 +541,7 @@ impl NetlinkSocket {
         if us == 0 {
             return None;
         }
-        Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+        Some(crate::drivers::hotpath::timer::get_jiffies() + (us / 10_000).max(1))
     }
 
     fn recv_ready(&self) -> bool {
@@ -612,7 +612,7 @@ fn netlink_wait_round(
         return Err(-4);
     }
     if let Some(dl) = deadline {
-        if crate::drivers::timer::get_jiffies() >= dl {
+        if crate::drivers::hotpath::timer::get_jiffies() >= dl {
             return Err(-11);
         }
     }

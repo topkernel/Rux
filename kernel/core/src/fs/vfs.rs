@@ -815,7 +815,7 @@ pub fn sync_dirty_filesystems() -> Result<(), i32> {
     // metadata lands after the data it describes (ordered data).
     let _ = crate::api::ext4::sync_inode_tables(&flushed_targets);
     // And persist the disk's volatile cache (see sys_fsync).
-    crate::drivers::virtio::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
+    crate::drivers::hotpath::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
 }
 
 /// Unmount a filesystem from the dentry tree.
@@ -5996,7 +5996,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // DRM nodes + exported prime (dma-buf) fds: dma-buf must
                 // stat as a regular file with st_size == buffer size (the
                 // EGL/gbm importers validate through it).
-                if crate::drivers::drm::drm_file_stat(&file, stat).is_some() {
+                if crate::drivers::hotpath::drm_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 if mem_file_stat(&file, stat).is_some() {

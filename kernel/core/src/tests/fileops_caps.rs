@@ -94,7 +94,7 @@ fn check_errno_matrix() {
     // read/write, no poll slot). Epoll LOST this specimen to the
     // hilog-flood fix: its poll now reports real readiness (0 on an
     // empty epoll), NOT the fallback mask.
-    let watchdog_file = mk(Some(&crate::drivers::watchdog::WATCHDOG_OPS));
+    let watchdog_file = mk(Some(&crate::drivers::hotpath::watchdog::WATCHDOG_OPS));
     let r = watchdog_file.poll_dispatch(0x0001 | 0x0004); // POLLIN|POLLOUT
     if r != (0x0001 | 0x0040 | 0x0004 | 0x0100) {
         test_fail("errno-matrix", "poll fallback: want POLLIN|POLLRDNORM|POLLOUT|POLLWRNORM");
@@ -335,17 +335,17 @@ pub fn test_fileops_caps() {
     );
     check(
         "watchdog caps",
-        &crate::drivers::watchdog::WATCHDOG_OPS,
+        &crate::drivers::hotpath::watchdog::WATCHDOG_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
     );
     check(
         "evdev caps",
-        &crate::drivers::input::evdev::EVDEV_OPS,
+        &crate::drivers::hotpath::EVDEV_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
     check(
         "fb caps",
-        &crate::drivers::gpu::fbdev::FB_OPS,
+        &crate::drivers::hotpath::fbdev::FB_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
     );
     check(
@@ -387,12 +387,12 @@ pub fn test_fileops_caps() {
     );
     check(
         "tokenid caps",
-        &crate::drivers::access_tokenid::TOKENID_OPS,
+        &crate::drivers::hotpath::access_tokenid::TOKENID_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
     );
     check(
         "ashmem caps",
-        &crate::drivers::ashmem::ASHMEM_OPS,
+        &crate::drivers::hotpath::ASHMEM_OPS,
         Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
     );
     check(
@@ -413,12 +413,12 @@ pub fn test_fileops_caps() {
     // drops the exported GEM.
     check(
         "drm caps",
-        &crate::drivers::drm::DRM_OPS,
+        &crate::drivers::hotpath::DRM_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
     );
     check(
         "prime caps",
-        &crate::drivers::drm::PRIME_OPS,
+        &crate::drivers::hotpath::PRIME_OPS,
         Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
     );
 

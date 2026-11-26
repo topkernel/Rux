@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::drivers::virtio::queue::{Desc, UsedElem, AvailRing, UsedRing, VirtIOBlkReqHeader, VirtIOBlkResp};
+use crate::drivers::types::{Desc, UsedElem, AvailRing, UsedRing, VirtIOBlkReqHeader, VirtIOBlkResp};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_virtio_queue() {

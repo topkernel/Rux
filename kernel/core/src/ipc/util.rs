@@ -522,7 +522,7 @@ pub fn ipc_current_time() -> i64 {
     // against the CLINT-based wall clock within one test (msgctl01 ctime
     // 4s stale, msgrcv01 rtime 3s stale) — use wall_secs() so both
     // clocks tick from the same counter.
-    crate::drivers::rtc::wall_secs() as i64
+    crate::drivers::hotpath::wall_secs() as i64
 }
 
 /// Per-process semaphore undo entry.

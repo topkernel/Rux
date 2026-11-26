@@ -446,7 +446,7 @@ fn block_tag_csum_verify(
 /// block bytes first (reference jbd2_block_tag_csum_verify — a mismatch
 /// skips the block: "Invalid checksum recovering data block").
 fn replay_data(
-    device: &'static crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::types::GenDisk,
     journal_block: u64,
     fs_block: u64,
     journal: &Arc<Journal>,

@@ -840,7 +840,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     // a task whose comm still says dbus-daemon (posix_spawn/vfork child
     // pre-exec). Rate-limited; prints jiffies at start/end so the
     // fork->exec latency is measurable from the console.
-    let xt_now = crate::drivers::timer::get_jiffies();
+    let xt_now = crate::drivers::hotpath::timer::get_jiffies();
     let xt_pid = ::process::current_pid();
     let xt_on = {
         static XT_N: core::sync::atomic::AtomicUsize =
@@ -1276,7 +1276,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 crate::pr_info!(
                     "EXECTRACE: OK pid={} path={} dt_jiffies={}",
                     xt_pid, full_path.as_ref(),
-                    crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
+                    crate::drivers::hotpath::timer::get_jiffies().wrapping_sub(xt_now)
                 );
             }
             // sc209 (leg 14): latch render_service's tgid for the FXRS
@@ -1294,7 +1294,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 crate::pr_info!(
                     "EXECTRACE: ERR pid={} path={} err={} dt_jiffies={}",
                     xt_pid, full_path.as_ref(), e,
-                    crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
+                    crate::drivers::hotpath::timer::get_jiffies().wrapping_sub(xt_now)
                 );
             }
             // Roll back the credential changes: the old image keeps running.
@@ -3774,7 +3774,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
             .saturating_mul(1_000_000_000)
             .saturating_add(nsec);
         Some(
-            crate::drivers::timer::monotonic_ns_since_boot()
+            crate::drivers::hotpath::timer::monotonic_ns_since_boot()
                 .saturating_add(ns.max(1) as u64),
         )
     } else {
@@ -3813,7 +3813,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
 
         // Timeout expired?
         if let Some(dl) = deadline {
-            if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
+            if crate::drivers::hotpath::timer::monotonic_ns_since_boot() >= dl {
                 return -(errno::EAGAIN as i64);
             }
         }
@@ -3856,7 +3856,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                     expires_time,
                     rux::sched::hotpath::get_current_pid(),
                 );
-                crate::drivers::timer::rearm_for_hres();
+                crate::drivers::hotpath::timer::rearm_for_hres();
                 id
             })
             .unwrap_or(0);
@@ -4132,7 +4132,7 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
         }
     }
     // Return clock ticks since boot (simplified: use jiffies)
-    crate::drivers::timer::get_jiffies() as i64
+    crate::drivers::hotpath::timer::get_jiffies() as i64
 }
 
 /// sys_sysinfo - Get system information
@@ -4154,7 +4154,7 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         use crate::arch::uaccess_safe as ua;
         let base = info_ptr as usize;
         // uptime (seconds) - from jiffies
-        let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
+        let uptime = crate::drivers::hotpath::timer::get_jiffies() as u64 / crate::drivers::hotpath::timer::HZ as u64;
         let _ = ua::write_user::<u64>(base, uptime);
         // loads - zero
         let _ = ua::write_user::<u64>(base + 8, 0);
@@ -5663,7 +5663,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     };
 
     // Ticks (HZ=100) -> timeval: tv_sec = ticks/HZ, tv_usec = (ticks%HZ)*1e4.
-    const HZ: u64 = crate::drivers::timer::HZ;
+    const HZ: u64 = crate::drivers::hotpath::timer::HZ;
     let utv = (utime_ticks / HZ, (utime_ticks % HZ) * 10_000);
     let stv = (stime_ticks / HZ, (stime_ticks % HZ) * 10_000);
 

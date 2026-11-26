@@ -71,7 +71,7 @@ pub fn send_ipi_type(target: usize, ipi_type: IpiType) {
     if target >= MAX_CPUS {
         return;
     }
-    let lapic = crate::drivers::intc::apic::lapic_id(target);
+    let lapic = crate::drivers::hotpath::intc::apic::lapic_id(target);
     if lapic == u32::MAX {
         return;
     }
@@ -82,7 +82,7 @@ pub fn send_ipi_type(target: usize, ipi_type: IpiType) {
     if matches!(ipi_type, IpiType::TlbFlush) {
         TLB_IPI_SENT.fetch_add(1, Ordering::Relaxed);
     }
-    crate::drivers::intc::apic::send_ipi(lapic, ipi_type.vector() as u8);
+    crate::drivers::hotpath::intc::apic::send_ipi(lapic, ipi_type.vector() as u8);
 }
 
 /// Total TLB-shootdown IPIs sent since boot (x86; one per IPI, any
@@ -322,7 +322,7 @@ fn snapshot_self() {
         return;
     }
     let req = SNAP_REQ[cpu].load(Ordering::Acquire);
-    if let Some(s) = crate::drivers::intc::apic::lapic_timer_snapshot() {
+    if let Some(s) = crate::drivers::hotpath::intc::apic::lapic_timer_snapshot() {
         SNAP_LVT[cpu].store(s.lvt, Ordering::Relaxed);
         SNAP_TMICT[cpu].store(s.tmict, Ordering::Relaxed);
         SNAP_TMCCT[cpu].store(s.tmcct, Ordering::Relaxed);
@@ -331,7 +331,7 @@ fn snapshot_self() {
         SNAP_IRR7[cpu].store(s.irr7, Ordering::Relaxed);
         SNAP_ISR7[cpu].store(s.isr7, Ordering::Relaxed);
         SNAP_ARMSEQ[cpu].store(
-            crate::drivers::intc::apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
+            crate::drivers::hotpath::intc::apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
         SNAP_TB[cpu].store(crate::timer::read_time(), Ordering::Relaxed);
@@ -628,7 +628,7 @@ pub fn smp_call_function_timeout(
         unsafe { &raw mut (*csd).list as *mut ListHead },
     );
 
-    let hz = crate::drivers::timer::HZ as u64;
+    let hz = crate::drivers::hotpath::timer::HZ as u64;
     let deadline = crate::timer::get_jiffies() + max_ms * hz / 1000;
     // SAFETY: csd is a valid allocation we own until done is observed;
     // done is set only by the target after detaching the node.

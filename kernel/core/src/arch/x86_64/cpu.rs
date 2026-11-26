@@ -297,7 +297,7 @@ pub fn set_thread_id(tid: u64) {
 /// PIT; informational only — timekeeping uses [`read_time`]).
 #[inline]
 pub fn get_counter_freq() -> u64 {
-    crate::drivers::intc::apic::TSC_FREQ.load(core::sync::atomic::Ordering::Acquire)
+    crate::drivers::hotpath::intc::apic::TSC_FREQ.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Read the TSC cycle counter

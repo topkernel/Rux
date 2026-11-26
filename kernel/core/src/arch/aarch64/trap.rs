@@ -464,7 +464,7 @@ fn handle_syscall(regs: &mut PtRegs) {
 /// through the generic domain dispatch, whose flow handler EOIs via the
 /// chip. Fallback EOI only for unmapped INTIDs that bypassed the flow.
 fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
-    use crate::drivers::intc::gicv3;
+    use crate::drivers::hotpath::intc::gicv3;
 
     // Bounded drain: a level source whose handler fails to deassert
     // would otherwise loop forever inside one bracket. On bound-break
@@ -508,7 +508,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
     // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
     // line still high re-latches pending and storms).
-    crate::drivers::timer::set_next_trigger();
+    crate::drivers::hotpath::timer::set_next_trigger();
 
     // Skip scheduler/schedule logic during early boot (TPIDR holds the
     // cpu index, no current task yet — riscv64 twin guard).
@@ -547,7 +547,7 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     }
 
     // 1. Update jiffies (+ vDSO page refresh, timer softirqs)
-    crate::drivers::timer::timer_interrupt_handler();
+    crate::drivers::hotpath::timer::timer_interrupt_handler();
 
     // 2. Scheduler tick
     crate::sched::hotpath::scheduler_tick();
@@ -872,11 +872,11 @@ pub fn init_syscall() {
 pub fn enable_timer_interrupt() {
     // 1. Enable the timer PPI at this CPU's redistributor (idempotent;
     //    the distributor was brought up in intc::init).
-    crate::drivers::intc::gicv3::enable_ppi(crate::drivers::intc::gicv3::TIMER_PPI_INTID);
+    crate::drivers::hotpath::intc::gicv3::enable_ppi(crate::drivers::hotpath::intc::gicv3::TIMER_PPI_INTID);
 
     // 2. Arm the first grid deadline (sets CNTV_CVAL + enables the
     //    virtual timer).
-    crate::drivers::timer::set_next_trigger();
+    crate::drivers::hotpath::timer::set_next_trigger();
 
     // 3. Unmask the timer (enable=1, imask=0).
     // SAFETY: writing CNTV_CTL_EL0 arms the per-cpu virtual timer; the
@@ -905,7 +905,7 @@ pub fn disable_timer_interrupt() {
 /// Enable external interrupts (GICv3 CPU interface: redistributor wake,
 /// SGI/PPI bank config, ICC_* system-register enable — per CPU)
 pub fn enable_external_interrupt() {
-    crate::drivers::intc::gicv3::enable_cpu_interface();
+    crate::drivers::hotpath::intc::gicv3::enable_cpu_interface();
     // CPU-side unmask — the daifclr equivalent of the riscv64 twin's
     // csrs-sie. Enabling the GIC CPU interface alone leaves
     // PSTATE.DAIF.I set, and the kernel runs its whole boot with every

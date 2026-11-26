@@ -858,7 +858,7 @@ pub fn utime_ripsample_report() {
         return;
     }
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let j = crate::drivers::timer::x86_64::get_jiffies();
+    let j = crate::drivers::hotpath::timer::x86_64::get_jiffies();
     if j < LAST.load(Relaxed) + 60 * crate::config::KERNEL_HZ as u64 {
         return;
     }

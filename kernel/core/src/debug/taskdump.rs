@@ -403,10 +403,10 @@ pub fn vw_wait_counters_line() -> alloc::string::String {
     use core::sync::atomic::Ordering::Relaxed;
     alloc::format!(
         "VWWAIT enter={} sched={} resp={} timeout={}",
-        crate::drivers::virtio::queue::VW_WAIT_ENTER.load(Relaxed),
-        crate::drivers::virtio::queue::VW_WAIT_SCHED.load(Relaxed),
-        crate::drivers::virtio::queue::VW_WAIT_RESP.load(Relaxed),
-        crate::drivers::virtio::queue::VW_WAIT_TIMEOUT.load(Relaxed),
+        crate::drivers::hotpath::VW_WAIT_ENTER.load(Relaxed),
+        crate::drivers::hotpath::VW_WAIT_SCHED.load(Relaxed),
+        crate::drivers::hotpath::VW_WAIT_RESP.load(Relaxed),
+        crate::drivers::hotpath::VW_WAIT_TIMEOUT.load(Relaxed),
     )
 }
 
@@ -970,7 +970,7 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
 
     // (b) LAPIC id — hardware CPU identity, completely independent of
     // the GS base. gs_cpu vs lapic mismatch convicts misdirection.
-    a.lapic.store(crate::drivers::intc::apic::this_lapic_id(), Ordering::Relaxed);
+    a.lapic.store(crate::drivers::hotpath::intc::apic::this_lapic_id(), Ordering::Relaxed);
 
     // (c) The interrupted frame: CURRENT_PT_REGS[cpu] was swapped to
     // THIS IPI's PtRegs by trap_handler before dispatch, so its rip/rsp

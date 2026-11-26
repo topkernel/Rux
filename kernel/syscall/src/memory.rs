@@ -955,7 +955,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             .map(|f| rux::api::drivers::is_fb_file(&f))
                             .unwrap_or(false);
                         if is_fb {
-                            let info = match crate::drivers::gpu::get_framebuffer_info() {
+                            let info = match crate::drivers::hotpath::get_framebuffer_info() {
                                 Some(i) => i,
                                 None => return mmap_error::EINVAL,
                             };
@@ -1026,11 +1026,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     if fd >= 0 {
                         let drm_file = crate::fs::file::get_file_fd(fd as usize);
                         if let Some(file) = drm_file {
-                            if crate::drivers::drm::is_drm_file(&file)
-                                || crate::drivers::drm::is_prime_file(&file)
+                            if crate::drivers::hotpath::is_drm_file(&file)
+                                || crate::drivers::hotpath::is_prime_file(&file)
                             {
                                 let Some((phys, len)) =
-                                    crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
+                                    crate::drivers::hotpath::gem_mmap_resolve(&file, offset, actual_length)
                                 else {
                                     // oh-svc T1 attribution tap (known-gap 4):
                                     // rux:ohhunt (retired debug=ohhunt) gates it.
@@ -1041,8 +1041,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                             fd,
                                             offset,
                                             actual_length,
-                                            crate::drivers::drm::is_prime_file(&file),
-                                            crate::drivers::drm::is_drm_file(&file)
+                                            crate::drivers::hotpath::is_prime_file(&file),
+                                            crate::drivers::hotpath::is_drm_file(&file)
                                         );
                                     }
                                     return mmap_error::EINVAL;
@@ -1125,9 +1125,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         // valid Arc<File> or None.
                         let ashmem_file = crate::fs::file::get_file_fd(fd as usize);
                         if let Some(file) = ashmem_file {
-                            if crate::drivers::ashmem::is_ashmem_file(&file) {
+                            if crate::drivers::hotpath::is_ashmem_file(&file) {
                                 let shared = map_flags & map::MAP_SHARED != 0;
-                                return match crate::drivers::ashmem::ashmem_mmap(
+                                return match crate::drivers::hotpath::ashmem_mmap(
                                     &file,
                                     addr,
                                     actual_length,

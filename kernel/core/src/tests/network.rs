@@ -6,7 +6,7 @@
 //! Network subsystem test
 
 use crate::net::buffer::{alloc_skb, kfree_skb};
-use crate::drivers::net::{loopback_init, loopback_send, loopback};
+use crate::drivers::hotpath::{loopback_init, loopback_send, loopback};
 use super::{test_pass, test_fail, test_group_start};
 
 #[cfg(feature = "unit-test")]

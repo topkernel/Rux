@@ -13,7 +13,7 @@
 //! the framework WRAPPER of its own slot (e.g. the journal rows call
 //! jbd2 directly, never rux::api::ext4::journal_dirty).
 
-use crate::drivers::blkdev::GenDisk;
+use crate::drivers::types::GenDisk;
 use crate::errno;
 use rux::fs::bio;
 use rux::api::ext4::Ext4Hooks;
@@ -43,7 +43,7 @@ fn fsctx_mount_instance_row(src: &str, ro: bool) -> Result<(alloc::sync::Arc<Ino
     if src.starts_with("/dev/loop") {
         let idx: Option<u32> = src["/dev/loop".len()..].parse().ok();
         if let Some(idx) = idx {
-            let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
+            let disk = crate::drivers::hotpath::loop_disk(idx as usize)
                 .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
             let (root, effective_ro) = super::mount_loop_instance(disk, ro)?;
             return Ok((root, effective_ro));
@@ -55,7 +55,7 @@ fn fsctx_mount_instance_row(src: &str, ro: bool) -> Result<(alloc::sync::Arc<Ino
         .trim_start_matches("/dev/block/")
         .trim_start_matches("/dev/")
         .trim_matches('/');
-    let disk = crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed);
+    let disk = crate::drivers::hotpath::get_pci_gen_disk_by_name(trimmed);
     if let Some(disk) = disk {
         let (root, effective_ro) = super::mount_loop_instance(disk, ro)?;
         return Ok((root, effective_ro));
@@ -271,7 +271,7 @@ pub fn mount_instance_table_row(
     {
         let minor: Option<u32> = source["/dev/loop".len()..].parse().ok();
         if let Some(idx) = minor {
-            let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
+            let disk = crate::drivers::hotpath::loop_disk(idx as usize)
                 .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
             let (root, effective_ro) = super::mount_loop_instance(disk, mnt_flags.is_readonly())?;
             // Bring-up policy: the ext4 layer downgraded an rw request
@@ -311,7 +311,7 @@ pub fn mount_instance_table_row(
             .trim_start_matches("/dev/block/")
             .trim_start_matches("/dev/")
             .trim_matches('/');
-        crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed)
+        crate::drivers::hotpath::get_pci_gen_disk_by_name(trimmed)
     };
 
     if let Some(disk) = disk_of_source(source) {
@@ -353,9 +353,9 @@ pub fn mount_instance_table_row(
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
     let _fs = super::get_ext4_fs().ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
-    if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
+    if let Some(disk) = crate::drivers::hotpath::get_pci_gen_disk() {
         super::mount_ext4(disk).map_err(|e| e as i32)?;
-    } else if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
+    } else if let Some(virtio_dev) = crate::drivers::hotpath::virtio_blk_get_device() {
         // get_device() hands out a &'static VirtIOBlkDevice
         // (VIRTIO_BLK static), so its disk field borrows for the
         // machine's lifetime.
