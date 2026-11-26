@@ -4,12 +4,12 @@
 //!
 //! Futex key, hash, flags, and bitset invariant tests.
 //!
-//! Types copied from: kernel/core/src/sync/futex.rs
+//! Types copied from: kernel/core/src/sync/types.rs
 
 use proptest::prelude::*;
 
 // ============================================================================
-// Copied types from kernel/core/src/sync/futex.rs
+// Copied types from kernel/core/src/sync/types.rs
 // ============================================================================
 
 pub const FUTEX_WAIT: i32 = 0;

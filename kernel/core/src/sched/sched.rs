@@ -249,7 +249,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
 /// comment is now a compile fact.
 pub fn wake_up_enqueue_nested<'a>(
     task: *mut Task,
-    proof: &crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+    proof: &crate::sync::types::NestProof<'a, crate::sync::types::FutexBucketKey>,
 ) -> bool {
     wake_up_enqueue_opt(task, Some(proof))
 }
@@ -260,7 +260,7 @@ pub fn wake_up_enqueue_nested<'a>(
 /// (task.rs).
 pub fn wake_up_enqueue_opt(
     task: *mut Task,
-    nested: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+    nested: Option<&crate::sync::types::NestProof<'_, crate::sync::types::FutexBucketKey>>,
 ) -> bool {
     if task.is_null() {
         return false;
@@ -2076,7 +2076,7 @@ use crate::config::MAX_CPUS;
 use alloc::boxed::Box;
 use crate::api::process::alloc_pid;
 use core::arch::asm;
-use crate::sync::spinlock::RawSpinlock;
+use crate::sync::types::RawSpinlock;
 
 use crate::config::MAX_TASKS;
 
@@ -2115,7 +2115,7 @@ use crate::config::MAX_TASKS;
 /// RawSpinlock until that lands.
 pub struct GlobalRunQueue {
     /// Protects dl_rq, rt_rq, cfs_rq, nr_running
-    lock: crate::sync::spinlock::RawSpinlock,
+    lock: crate::sync::types::RawSpinlock,
     /// Deadline queue (EDF sorted by deadline)
     pub dl_rq: crate::sched::entities::DlRunQueue,
     /// Real-time queue (bitmap + per-priority lists)
@@ -2138,7 +2138,7 @@ impl GlobalRunQueue {
     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
     pub     fn new() -> Self {
         Self {
-            lock: crate::sync::spinlock::RawSpinlock::new(),
+            lock: crate::sync::types::RawSpinlock::new(),
             dl_rq: crate::sched::entities::DlRunQueue::new(),
             rt_rq: {
                 let mut rt = crate::sched::entities::RtRunQueue::new();
@@ -2199,12 +2199,12 @@ impl GlobalRunQueue {
     /// is identical to lock_irqsave.
     #[inline]
     #[track_caller]
-    pub fn lock_irqsave_nested<'a, Outer: crate::sync::lockkey::NestKey>(
+    pub fn lock_irqsave_nested<'a, Outer: crate::sync::hotpath::NestKey>(
         &self,
-        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+        _proof: &crate::sync::types::NestProof<'a, Outer>,
     ) -> GrqGuard<'_>
     where
-        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+        crate::sync::types::GrqKey: crate::sync::hotpath::CanNestInside<Outer>,
     {
         self.lock_irqsave()
     }
@@ -2213,13 +2213,13 @@ impl GlobalRunQueue {
     /// holder-naming rig (grq-lock-1st) — see [`lock_irqsave_site`].
     #[inline]
     #[track_caller]
-    pub fn lock_irqsave_nested_site<'a, Outer: crate::sync::lockkey::NestKey>(
+    pub fn lock_irqsave_nested_site<'a, Outer: crate::sync::hotpath::NestKey>(
         &self,
-        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+        _proof: &crate::sync::types::NestProof<'a, Outer>,
         site: u32,
     ) -> GrqGuard<'_>
     where
-        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+        crate::sync::types::GrqKey: crate::sync::hotpath::CanNestInside<Outer>,
     {
         self.lock_irqsave_site(site)
     }
@@ -5068,7 +5068,7 @@ fn __schedule() {
     clear_need_resched();
 
     // Context switch is an RCU quiescent state.
-    crate::sync::rcu::rcu_note_context_switch();
+    crate::sync::hotpath::rcu_note_context_switch();
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     // PER_CPU scribble heal (b81 GDB capture): the wild-write engine that
@@ -6682,7 +6682,7 @@ pub fn scheduler_tick() {
                         // or was never spinning), the next tick heals a
                         // still-stuck count normally.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        let acq_live = crate::sync::spinlock::acquire_evidence_fresh(
+                        let acq_live = crate::sync::hotpath::acquire_evidence_fresh(
                             cpu_id,
                             cur as usize,
                             now,
@@ -6773,7 +6773,7 @@ pub fn scheduler_tick() {
                                 // evidence age (jiffies since this CPU's
                                 // last contended-loop stamp by cur)
                                 ph(now.wrapping_sub(
-                                    crate::sync::spinlock::ACQUIRE_EVIDENCE[cpu_id]
+                                    crate::sync::hotpath::ACQUIRE_EVIDENCE[cpu_id]
                                         .jiffies
                                         .load(core::sync::atomic::Ordering::Relaxed),
                                 ));
@@ -8055,11 +8055,11 @@ pub fn find_task_by_pid(pid: Pid) -> *mut Task {
 
 
 /// Compatibility stubs — no longer meaningful with global RQ
-pub fn this_cpu_rq() -> Option<&'static crate::sync::spinlock::Spinlock<RunQueue>> {
+pub fn this_cpu_rq() -> Option<&'static crate::sync::types::Spinlock<RunQueue>> {
     None
 }
 
-pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::spinlock::Spinlock<RunQueue>> {
+pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::types::Spinlock<RunQueue>> {
     None
 }
 
@@ -9288,7 +9288,7 @@ pub fn cpu_idle_loop() -> ! {
 
         if is_idle {
             grq().mark_idle(cpu_id);
-            crate::sync::rcu::rcu_note_context_switch();
+            crate::sync::hotpath::rcu_note_context_switch();
             // WW_IDLE_PHASE 2: idle-marked, inside the R20-2 recheck window.
             ww_idle_phase_set(cpu_id, 2);
 

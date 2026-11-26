@@ -5,22 +5,23 @@
 //! The sync subsystem's type definitions (seed-core-design §2c.3).
 //!
 //! Definitions only. Every `struct`, `enum` and type alias of the
-//! subsystem lives here; every `impl` block stays with the functions
-//! that use it — an impl is code, a definition is data layout. The
-//! exceptions are definitions local to code: a type declared inside a
-//! function.
+//! subsystem lives here; every `impl` block lives in `hotpath.rs` beside
+//! the functions that use it — an impl is code, a definition is data
+//! layout. The exceptions are definitions local to code: a type declared
+//! inside a function of `hotpath.rs`.
 //!
 //! No constant lives here: none of these definitions names one. The
 //! array-length constants of the futex waiter pool, the futex hash and
 //! the PI pools size statics, not type definitions, and stay beside
-//! those statics in their files. The two lock-key traits (`NestKey`,
-//! `CanNestInside`) stay beside their impls in lockkey.rs: a trait is
-//! an interface, not a data layout.
+//! those statics in their sections of `hotpath.rs`. The two lock-key
+//! traits (`NestKey`, `CanNestInside`) stay beside their impls in the
+//! `lockkey` section of `hotpath.rs`: a trait is an interface, not a
+//! data layout.
 //!
 //! This file holds no `unsafe`. A field that was private to its old file
-//! is `pub(super)` here because the code that touches it stayed in that
-//! file: the visibility boundary is the sync directory, the smallest one
-//! Rust offers for a definition that lives in a sibling module.
+//! is `pub(super)` here because the code that touches it lives in the
+//! sibling module `hotpath`: the sync directory is the smallest
+//! visibility boundary Rust offers for that split.
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -31,7 +32,7 @@ use crate::process::Task;
 use crate::process::task::SchedPolicy;
 use crate::process::wait::WaitQueueHead;
 
-use super::lockkey::NestKey;
+use super::hotpath::NestKey;
 
 
 // ---------------------------------------------------------------------------
@@ -705,7 +706,7 @@ pub struct NestProof<'a, K: NestKey> {
     pub(super) _hold: PhantomData<&'a ()>,
 }
 
-/// A [`Spinlock<T>`](super::spinlock::Spinlock) whose position in the
+/// A [`Spinlock<T>`](super::types::Spinlock) whose position in the
 /// lock hierarchy is part of its type — the data-carrying twin of
 /// [`KeyedRawSpinlock`]. `lock_irqsave` returns the same protocol
 /// guard wrapped with the key (call sites unchanged: Deref/DerefMut to

@@ -83,7 +83,7 @@ static POOL_DRAINED: AtomicUsize = AtomicUsize::new(0); // oldest live entry
 /// Earliest deadline currently in the pool — relaxed peek for the alloc
 /// path so the common case costs one load, no lock.
 static EARLIEST_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
-static POOL_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlock::new(());
+static POOL_LOCK: crate::sync::types::Spinlock<()> = crate::sync::types::Spinlock::new(());
 
 /// Register the size class whose frees are deferred (first writer wins;
 /// call from the type's constructor). Only ONE size class is supported —

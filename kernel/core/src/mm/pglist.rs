@@ -11,7 +11,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 use super::zone::{Zone, ZoneType, ZoneStats, MAX_ORDER};
 use super::PAGE_SIZE;

@@ -269,8 +269,8 @@ static mut UDP_SOCKET_TABLE: UdpSocketTable = UdpSocketTable::new();
 /// mutated concurrently from syscalls (socket/bind/connect/close/send/recv)
 /// and the NetRx softirq (udp_rcv) on the 4-CPU kernel. irqsave because the
 /// softirq side can run inline at irq_exit.
-pub static UDP_TABLE_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+pub static UDP_TABLE_LOCK: crate::sync::types::Spinlock<()> =
+    crate::sync::types::Spinlock::new(());
 
 /// R24 (MED-9): per-socket receive budget — enqueue_packet drops new
 /// datagrams once the queued byte total exceeds this, so a remote flooder

@@ -1145,9 +1145,9 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
                         // OH bring-up: throttled unix-connect-failure trace
                         // — param/hilog clients retry forever against a
                         // missing node and hilog never reaches console.
-                        static UCONN_SEEN: crate::sync::spinlock::Spinlock<
+                        static UCONN_SEEN: rux::sync::types::Spinlock<
                             Option<alloc::vec::Vec<alloc::string::String>>,
-                        > = crate::sync::spinlock::Spinlock::new(None);
+                        > = rux::sync::types::Spinlock::new(None);
                         let mut print_it = false;
                         {
                             let mut seen = UCONN_SEEN.lock_irqsave();

@@ -30,7 +30,7 @@ use crate::debugfs::DebugFsNode;
 use rux::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
 use rux::fs::mount::{MntFlags, VfsMount};
 use rux::fs::superblock::{FileSystemType, SuperBlock};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// tracefs magic number (the reference: TRACEFS_MAGIC).
 const TRACEFS_MAGIC: u32 = 0x7472_6163;

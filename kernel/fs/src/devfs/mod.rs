@@ -21,7 +21,7 @@ use alloc::format;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use rux::fs::file::FileOps;
 use super::dev_t::DevNo;
 

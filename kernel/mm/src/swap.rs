@@ -14,7 +14,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 use rux::mm::PAGE_SIZE;
 

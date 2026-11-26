@@ -45,7 +45,7 @@ use crate::config::MAX_CPUS;
 use alloc::boxed::Box;
 use crate::process::pid::alloc_pid;
 use core::arch::asm;
-use crate::sync::spinlock::RawSpinlock;
+use crate::sync::types::RawSpinlock;
 use crate::config::MAX_TASKS;
 use crate::process;
 use crate::debug;

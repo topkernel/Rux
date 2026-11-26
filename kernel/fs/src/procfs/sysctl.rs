@@ -98,8 +98,8 @@ impl CorePattern {
 }
 
 /// The live core_pattern (read by the coredump policy, process).
-pub static CORE_PATTERN: crate::sync::Spinlock<CorePattern> =
-    crate::sync::Spinlock::new(CorePattern::new());
+pub static CORE_PATTERN: crate::sync::types::Spinlock<CorePattern> =
+    crate::sync::types::Spinlock::new(CorePattern::new());
 
 // ============================================================================
 // Generators (read side)
@@ -815,8 +815,8 @@ fn format_uuid_v4(b: &mut [u8; 16]) -> alloc::string::String {
 }
 
 pub fn generate_boot_id() -> Vec<u8> {
-    static BOOT_ID: crate::sync::spinlock::Spinlock<Option<alloc::vec::Vec<u8>>> =
-        crate::sync::spinlock::Spinlock::new(None);
+    static BOOT_ID: crate::sync::types::Spinlock<Option<alloc::vec::Vec<u8>>> =
+        crate::sync::types::Spinlock::new(None);
     let mut guard = BOOT_ID.lock();
     if guard.is_none() {
         let mut b = [0u8; 16];

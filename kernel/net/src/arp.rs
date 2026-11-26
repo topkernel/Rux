@@ -10,7 +10,7 @@ use crate::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;
 use crate::drivers::timer::get_jiffies;
 use crate::drivers::timer::HZ;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// ARP hardware types
 #[repr(C)]

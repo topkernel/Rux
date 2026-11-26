@@ -33,7 +33,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// One device's I/O counters.
 pub struct DiskStat {

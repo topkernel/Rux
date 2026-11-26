@@ -28,7 +28,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // CLONE_NEW* flag values (mirror process::fork; duplicated so this module

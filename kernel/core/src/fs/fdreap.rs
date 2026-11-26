@@ -64,8 +64,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// one wait amortizes it. The Weak pins the ArcInner ALLOCATION only —
 /// the File value inside has already been dropped (File::drop ran the
 /// whole close decision chain when the strong count hit zero).
-static RETIRED: crate::sync::spinlock::Spinlock<Vec<Weak<File>>> =
-    crate::sync::spinlock::Spinlock::new(Vec::new());
+static RETIRED: crate::sync::types::Spinlock<Vec<Weak<File>>> =
+    crate::sync::types::Spinlock::new(Vec::new());
 
 /// Wake ticket for fdreapd. Parks up() only when a batch threshold is
 /// crossed (a wake per close(2) cost one wakeup + IPI each and dirtied
@@ -73,8 +73,8 @@ static RETIRED: crate::sync::spinlock::Spinlock<Vec<Weak<File>>> =
 /// protocol's TICKET path); fdreapd's drain is pure memory
 /// reclamation, so batching costs nothing but a bounded, tiny queue
 /// depth.
-static TICKET: crate::sync::semaphore::Semaphore =
-    crate::sync::semaphore::Semaphore::new(0);
+static TICKET: crate::sync::types::Semaphore =
+    crate::sync::types::Semaphore::new(0);
 
 /// Reaper aliveness. While false (spawn failed), parks drain inline
 /// with a bounded forced grace in the closer — slower close, same
@@ -175,7 +175,7 @@ fn drain_with_grace() {
         return;
     }
     RETIRED_DEPTH.fetch_sub(batch.len(), Ordering::Relaxed);
-    if crate::sync::rcu::synchronize_rcu_forced(GP_BUDGET_MS, "fdreap-inline") {
+    if crate::sync::hotpath::synchronize_rcu_forced(GP_BUDGET_MS, "fdreap-inline") {
         // Drop the Weaks: each releases its ArcInner (the File value
         // itself already died at strong-count zero).
         drop(batch);
@@ -240,7 +240,7 @@ extern "C" fn fdreapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // One grace period covers the whole batch: every park (and its
         // slot-null store) precedes the ticket/wake that got us here,
         // which precedes this wait.
-        if !crate::sync::rcu::synchronize_rcu_forced_sleepy(GP_BUDGET_MS, "fdreap") {
+        if !crate::sync::hotpath::synchronize_rcu_forced_sleepy(GP_BUDGET_MS, "fdreap") {
             // Grace did not pass: NO release — requeue and re-arm the
             // ticket. Each retry paces itself on the bounded wait.
             GRACE_STALLS.fetch_add(1, Ordering::Relaxed);

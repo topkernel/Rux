@@ -39,7 +39,7 @@ pub struct VirtioGpuDevice {
     /// GPU_DEVICE spinlock, but that invariant lives in another module —
     /// this lock makes it local and future-proof (review RACE:
     /// "virtio-gpu desc 无锁").
-    cmd_lock: crate::sync::spinlock::Spinlock<()>,
+    cmd_lock: crate::sync::types::Spinlock<()>,
     /// Framebuffer information
     fb_info: Option<FrameBufferInfo>,
     /// Framebuffer pointer
@@ -161,7 +161,7 @@ impl VirtioGpuDevice {
         let mut device = Self {
             pci,
             ctrl_queue: None,
-            cmd_lock: crate::sync::spinlock::Spinlock::new(()),
+            cmd_lock: crate::sync::types::Spinlock::new(()),
             fb_info: None,
             fb_ptr: core::ptr::null_mut(),
             fb_layout: None,

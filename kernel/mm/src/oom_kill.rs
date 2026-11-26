@@ -19,7 +19,7 @@ use core::sync::atomic::Ordering;
 
 use crate::process::task::{Task, TaskState, TIF_MEMDIE};
 use rux::mm::mm_struct::MmFlags;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ==================== Constants ====================
 

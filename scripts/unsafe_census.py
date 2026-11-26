@@ -1627,12 +1627,10 @@ _LAYER_RULES = [
     ("arch/aarch64/", "unbuilt"),
     ("arch/", "framework"),
     ("mm/", "framework"),
-    ("sync/spinlock.rs", "framework"),
-    ("sync/rwlock.rs", "framework"),
-    ("sync/seqlock.rs", "framework"),
-    ("sync/percpu.rs", "framework"),
-    ("sync/rcu.rs", "framework"),
-    ("sync/lockkey.rs", "framework"),
+    # sync: every topic of the subsystem is a section of sync/hotpath.rs since
+    # pass 2 (seed-core pass 2); the file that holds the lock primitives is
+    # filed as framework (a path names one layer).
+    ("sync/hotpath.rs", "framework"),
     ("sync/", "service"),
     ("interrupt/", "framework"),
     ("drivers/virtio/", "framework"),

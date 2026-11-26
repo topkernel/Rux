@@ -64,7 +64,7 @@ pub use tasklet::{
 pub fn init() {
     irqdesc::init();
     softirq::init();
-    crate::sync::rcu::init();
+    crate::sync::hotpath::init();
     tasklet::init();
     // ksoftirqd::init() is called later from main.rs after sched::init()
 }

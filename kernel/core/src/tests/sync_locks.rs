@@ -14,8 +14,8 @@
 // successful try_write — this row reads the count INSIDE the section
 // (must be exactly base+SOFTIRQ_OFFSET: BH disable also disables
 // preemption) and AFTER the drop (must be back to the entry value).
-use crate::sync::rwlock::RwSpinlock;
-use crate::sync::seqlock::SeqLock;
+use crate::sync::types::RwSpinlock;
+use crate::sync::types::SeqLock;
 use super::{test_fail, test_group_start, test_pass};
 
 pub fn test_sync_locks() {
@@ -133,7 +133,7 @@ pub fn test_sync_locks() {
     // cross-CPU grant/handoff protocol is exercised by every mmap/fault
     // in the suite (vma_manager IS an Rwsem) and by the OH boots.
     {
-        use crate::sync::rwsem::Rwsem;
+        use crate::sync::types::Rwsem;
 
         let sem: Rwsem<u64> = Rwsem::new("test-rwsem", 7);
 

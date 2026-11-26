@@ -7,7 +7,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-use crate::sync::semaphore::{Semaphore, Mutex};
+use crate::sync::types::{Semaphore, Mutex};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_semaphore() {

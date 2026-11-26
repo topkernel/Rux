@@ -65,7 +65,7 @@ static RING: [UnEvent; RING_LEN] = [const {
 }; RING_LEN];
 
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
-static LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlock::new(());
+static LOCK: crate::sync::types::Spinlock<()> = crate::sync::types::Spinlock::new(());
 
 /// Record one PTE-clearing event. Cheap (one short spinlock section);
 /// never prints.

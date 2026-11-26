@@ -3081,8 +3081,8 @@ impl ExpireMap {
     }
 }
 
-static MNT_EXPIRE_STATE: crate::sync::spinlock::Spinlock<ExpireMap> =
-    crate::sync::spinlock::Spinlock::new(ExpireMap::new());
+static MNT_EXPIRE_STATE: rux::sync::types::Spinlock<ExpireMap> =
+    rux::sync::types::Spinlock::new(ExpireMap::new());
 
 /// sys_faccessat - Check file access permissions (syscall 48)
 ///

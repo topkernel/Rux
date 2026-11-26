@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Property-based tests for semaphore counter arithmetic.
-//! Copied from: kernel/core/src/sync/semaphore.rs
+//! Copied from: kernel/core/src/sync/hotpath.rs
 
 use proptest::prelude::*;
 

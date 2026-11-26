@@ -567,7 +567,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         // Return-to-user is a quiescent state (rcu.rs): report it here so
         // syscall-heavy CPUs complete grace periods without waiting for
         // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).
-        crate::sync::rcu::rcu_note_context_switch();
+        crate::sync::hotpath::rcu_note_context_switch();
         crate::debug::leakorigin::check_user_return();
     }
 }

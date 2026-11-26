@@ -35,7 +35,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::process::wait::WaitQueueHead;
-use crate::sync::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Highest VT number this kernel provides (/dev/tty1..=tty7).
 pub const NR_VT: u32 = 7;

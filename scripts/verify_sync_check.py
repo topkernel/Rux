@@ -223,7 +223,7 @@ MAPPINGS = [
     {
         "name": "sync/spinlock",
         "verify": "kernel/verify/src/sync/spinlock_test.rs",
-        "kernel": "kernel/core/src/sync/spinlock.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": "RawSpinlock",
         "compare": ["try_lock", "unlock", "is_locked"],
         "skip": ["lock", "new"],  # lock has deadlock warn stripped by design
@@ -241,7 +241,7 @@ MAPPINGS = [
         # (its guard+clears are pinned by unit tests instead).
         "name": "sync/mutex_model",
         "verify": "kernel/verify/src/sync/mutex_model.rs",
-        "kernel": "kernel/core/src/sync/mutex.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": None,
         "type_verify": "MutexState",
         "type_kernel": "SleepMutex",
@@ -383,7 +383,7 @@ MAPPINGS = [
     {
         "name": "sync/seqlock",
         "verify": "kernel/verify/src/sync/seqlock_test.rs",
-        "kernel": "kernel/core/src/sync/seqlock.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": "RawSeqLock",
         "compare": [
             "new", "try_write_lock", "write_unlock",
@@ -678,7 +678,7 @@ MAPPINGS = [
     {
         "name": "sync/futex_key",
         "verify": "kernel/verify/src/sync/futex_test.rs",
-        "kernel": "kernel/core/src/sync/futex.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": "FutexKey",
         "compare": ["new", "matches"],
         "skip": [],
@@ -688,7 +688,7 @@ MAPPINGS = [
     {
         "name": "sync/futex_flags",
         "verify": "kernel/verify/src/sync/futex_test.rs",
-        "kernel": "kernel/core/src/sync/futex.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": None,  # free function
         "compare": ["futex_to_flags"],
         "skip": [],
@@ -1044,7 +1044,7 @@ MAPPINGS = [
     {
         "name": "sync/rwlock_constants",
         "verify": "kernel/verify/src/sync/rwlock_test.rs",
-        "kernel": "kernel/core/src/sync/rwlock.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": None,  # constants only, no struct methods copied
         "compare": [],
         "skip": [],
@@ -1357,7 +1357,7 @@ MAPPINGS = [
     {
         "name": "sync/semaphore",
         "verify": "kernel/verify/src/sync/semaphore_test.rs",
-        "kernel": "kernel/core/src/sync/semaphore.rs",
+        "kernel": "kernel/core/src/sync/hotpath.rs",
         "type": "Semaphore",
         "compare": ["down", "down_trylock", "up", "count"],
         "skip": ["new", "down_interruptible", "init"],

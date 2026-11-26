@@ -8,7 +8,7 @@ use crate::drivers::virtio::queue;
 use crate::drivers::virtio::virtio_pci::VirtIOPCI;
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// VirtIO network device configuration
 ///

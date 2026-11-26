@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::drivers::blkdev::{GenDisk, ReqCmd, Request};
 use crate::fs::dev_t::{DevNo, LOOP_MAJOR, MISC_MAJOR};
 use crate::fs::file::File;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Number of loop devices (Linux's historical default).
 pub const N_LOOPS: usize = 8;
@@ -79,7 +79,7 @@ struct LoopDev {
     /// quiescent rounds stalled on the CPU, and fdreap's grace waits
     /// deferred (the fdreap RCU stall face). Waiters now park on the
     /// mutex's queue; the section is preemptible.
-    io_lock: crate::sync::mutex::SleepMutex,
+    io_lock: crate::sync::types::SleepMutex,
     /// Re-entrancy guard (pcachewedge lane, 2026-11-15): the pid whose
     /// request currently owns `io_lock` (0 = none). The backing-file
     /// write below runs SYNCHRONOUSLY under the lock; under memory
@@ -109,7 +109,7 @@ impl LoopDev {
             sizelimit: AtomicU64::new(0),
             flags: AtomicU64::new(0),
             name: Spinlock::new([0; 64]),
-            io_lock: crate::sync::mutex::SleepMutex::new_rt("loop-io", false),
+            io_lock: crate::sync::types::SleepMutex::new_rt("loop-io", false),
             io_owner_pid: AtomicU32::new(0),
             disk: Spinlock::new(None),
         }

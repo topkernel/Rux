@@ -54,7 +54,7 @@
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 const PAGE_SIZE: usize = 4096;
 const HEAP_MAX_PAGES: usize = 262144; // 1 GiB window / 4 KiB
@@ -296,8 +296,8 @@ struct Magazine {
 // restores the saved IRQ state at drop. The r8final len/MAG_DEPTH
 // guards stay — they defend against row CORRUPTION, which the type
 // cannot prevent — but the aliasing-by-construction hazard is gone.
-static MAGAZINES: crate::sync::percpu::CpuLocal<[Magazine; 8], { crate::config::MAX_CPUS }> =
-    crate::sync::percpu::CpuLocal::new([Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]);
+static MAGAZINES: crate::sync::types::CpuLocal<[Magazine; 8], { crate::config::MAX_CPUS }> =
+    crate::sync::types::CpuLocal::new([Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]);
 
 /// r8final forensics: times a magazine row was found with len >
 /// MAG_DEPTH (transient two-CPU entry via a cpu_id()/ti_cpu divergence,

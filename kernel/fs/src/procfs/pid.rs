@@ -1251,7 +1251,7 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
 /// INIT_EEXEC_CONTENT, so composer_host/render_service/bootanimation
 /// never started. The stored strings are just kept readable back.
 use alloc::collections::BTreeMap;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Attr kind indices (match ATTR_FILE_INO_OFF layout in mod.rs).
 pub const ATTR_EXEC: usize = 0;

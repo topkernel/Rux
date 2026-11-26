@@ -9,7 +9,7 @@
 //! Dispatch: handle_irq_event, handle_fasteoi_irq.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::process::task::Task;
 use alloc::boxed::Box;
 

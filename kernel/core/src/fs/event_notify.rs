@@ -14,7 +14,7 @@
 //! syscall/unsafe.rs with the same INV-SYSC-1 wording.
 
 use crate::list::ListHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ==================== poll/epoll event constants ====================
 
@@ -214,7 +214,7 @@ impl EpollWakeShard {
 
 pub static EPOLL_WAKE_SHARDED: [Spinlock<EpollWakeShard>; EPOLL_WAKE_SHARDS] =
     [const {
-        crate::sync::spinlock::Spinlock::new(EpollWakeShard {
+        crate::sync::types::Spinlock::new(EpollWakeShard {
             head: crate::list::ListHead::new(),
         })
     }; EPOLL_WAKE_SHARDS];
@@ -247,7 +247,7 @@ fn epoll_shard_index(file_id: u64) -> usize {
 }
 
 #[inline]
-pub fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<EpollWakeShard> {
+pub fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::types::Spinlock<EpollWakeShard> {
     &EPOLL_WAKE_SHARDED[epoll_shard_index(file_id)]
 }
 
@@ -577,8 +577,8 @@ pub struct SignalfdWakeRegistry {
     >,
 }
 
-static SIGNALFD_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<SignalfdWakeRegistry> =
-    crate::sync::spinlock::Spinlock::new(SignalfdWakeRegistry {
+static SIGNALFD_WAKE_REGISTRY: crate::sync::types::Spinlock<SignalfdWakeRegistry> =
+    crate::sync::types::Spinlock::new(SignalfdWakeRegistry {
         bindings: alloc::vec::Vec::new(),
     });
 

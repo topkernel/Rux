@@ -210,8 +210,8 @@ struct PendingReap {
 // the reap lock; ownership is exclusive (no concurrent access).
 unsafe impl Send for ReapClaim {}
 
-static PENDING: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
-    crate::sync::spinlock::Spinlock::new(Vec::new());
+static PENDING: crate::sync::types::Spinlock<Vec<PendingReap>> =
+    crate::sync::types::Spinlock::new(Vec::new());
 
 /// One drainer per tick (the harvest's CAS pattern).
 static DRAIN_ACTIVE: core::sync::atomic::AtomicBool =
@@ -232,8 +232,8 @@ static DRAIN_ACTIVE: core::sync::atomic::AtomicBool =
 // synchronize_rcu_expedited shape) when a round stalls.
 
 /// The in-flight grace batch (switch-stage graduates awaiting grace).
-static GRACE_BATCH: crate::sync::spinlock::Spinlock<Vec<PendingReap>> =
-    crate::sync::spinlock::Spinlock::new(Vec::new());
+static GRACE_BATCH: crate::sync::types::Spinlock<Vec<PendingReap>> =
+    crate::sync::types::Spinlock::new(Vec::new());
 /// The batch's target generation (0 = none open).
 static GRACE_TARGET: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
@@ -279,7 +279,7 @@ pub fn defer_reap_storage(task: *mut Task, parent_pid: u32) -> bool {
         parent_pid,
         r85_ticks: 0,
         grace: false,
-        needs: crate::sync::rcu::rcu_gen_now().wrapping_add(1),
+        needs: crate::sync::hotpath::rcu_gen_now().wrapping_add(1),
     });
     true
 }
@@ -436,13 +436,13 @@ pub fn reap_drain_tick() {
     // (the boot-63 latch root cause).
     let cur_target = GRACE_TARGET.load(Ordering::Acquire);
     let target = if cur_target == 0 {
-        let t = crate::sync::rcu::shared_grace_target_pub();
+        let t = crate::sync::hotpath::shared_grace_target_pub();
         GRACE_TARGET.store(t, Ordering::Release);
         if GRACE_WAITER_HELD
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            crate::sync::rcu::grace_waiter_hold();
+            crate::sync::hotpath::grace_waiter_hold();
         }
         GRACE_STALL_RUNS.store(0, Ordering::Release);
         t
@@ -455,7 +455,7 @@ pub fn reap_drain_tick() {
     // whose needs it covers are safe to free NOW; the rest wait for
     // the next round (the round handle advances generations until it
     // passes the oldest outstanding needs).
-    let watermark = crate::sync::rcu::rcu_grace_watermark();
+    let watermark = crate::sync::hotpath::rcu_grace_watermark();
     {
         let mut gb = GRACE_BATCH.lock();
         let mut i = 0;
@@ -471,7 +471,7 @@ pub fn reap_drain_tick() {
     }
     let batch_empty = GRACE_BATCH.try_lock().map(|b| b.is_empty()).unwrap_or(false);
 
-    if batch_empty || crate::sync::rcu::all_online_cpus_reported_pub(target) {
+    if batch_empty || crate::sync::hotpath::all_online_cpus_reported_pub(target) {
         // Close the round handle so the next tick opens a FRESH
         // generation for any newer needs — never reuse a target that
         // predates outstanding removals. Releasing the shared latch on
@@ -479,7 +479,7 @@ pub fn reap_drain_tick() {
         // who OPENS the next round; a waiter that latched this target
         // polls all-reported(target) on its own, and reports at later
         // generations still satisfy it.
-        crate::sync::rcu::shared_grace_done_pub();
+        crate::sync::hotpath::shared_grace_done_pub();
         GRACE_TARGET.store(0, Ordering::Release);
         GRACE_STALL_RUNS.store(0, Ordering::Release);
         if batch_empty
@@ -487,7 +487,7 @@ pub fn reap_drain_tick() {
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            crate::sync::rcu::grace_waiter_release();
+            crate::sync::hotpath::grace_waiter_release();
         }
     } else {
         // The drainer's own tick context is outside every RCU
@@ -496,14 +496,14 @@ pub fn reap_drain_tick() {
         // cpu was one that reported via switches alone, and long
         // user-mode stretches between switches stalled the round while
         // generations climbed around it).
-        crate::sync::rcu::report_self_quiescent();
+        crate::sync::hotpath::report_self_quiescent();
         // Stall watch: expedite by poking the lagging CPUs (the
         // reference's synchronize_rcu_expedited shape — a resched IPI
         // on a kernel-preempt host forces the IRQ-exit switch that
         // stores the QS report the round is waiting on).
         let runs = GRACE_STALL_RUNS.fetch_add(1, Ordering::Relaxed) + 1;
         if runs >= GRACE_NUDGE_RUNS {
-            let mut laggards = crate::sync::rcu::grace_lagging_cpus(target);
+            let mut laggards = crate::sync::hotpath::grace_lagging_cpus(target);
             let me = crate::arch::cpu_id() as usize;
             // Self-only stall (the drainer's own CPU between context
             // switches — the p4 storm's shape: the tick that opened

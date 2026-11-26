@@ -34,7 +34,7 @@ use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use core::sync::atomic::Ordering;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
@@ -101,8 +101,8 @@ pub const NAME_MAX: usize = 255;
 /// pid sendmsg02 preempt=0x2 inside the contended acquire, CPU1 spinning
 /// on GRQ in scheduler_tick). All users are syscall-context directory
 /// mutators, so sleeping is legal everywhere this lock is taken.
-pub static VFS_MUTATION_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new_rt("VFS-MUTATION", false);
+pub static VFS_MUTATION_LOCK: crate::sync::types::SleepMutex =
+    crate::sync::types::SleepMutex::new_rt("VFS-MUTATION", false);
 
 
 impl VfsPath {

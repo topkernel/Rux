@@ -17,7 +17,7 @@
 // discipline (same shape as INV-EXT4-ATIME).)
 use alloc::sync::Arc;
 use crate::errno::Errno;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
 

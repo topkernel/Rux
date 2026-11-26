@@ -57,7 +57,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::process::task::Task;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // Constants

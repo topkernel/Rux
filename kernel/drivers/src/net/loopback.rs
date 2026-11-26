@@ -7,8 +7,8 @@
 #![forbid(unsafe_code)]
 use crate::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use rux::net::buffer::SkBuff;
-use crate::sync::seqlock::SeqLock;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::SeqLock;
+use crate::sync::types::Spinlock;
 
 /// Loopback device statistics (protected by SeqLock)
 pub(crate) static LO_STATS: SeqLock<DeviceStats> = SeqLock::new(DeviceStats {

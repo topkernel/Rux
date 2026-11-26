@@ -3266,7 +3266,7 @@ pub fn get_tcp_manager() -> &'static TcpConnectionManager {
 /// guard (INV-SLOT-3; every mutation of the manager's Vecs runs under
 /// this lock, which the handler entries take before calling in).
 pub fn get_tcp_manager_locked(
-    _proof: &crate::sync::spinlock::SpinlockIrqGuard<'static, ()>,
+    _proof: &crate::sync::types::SpinlockIrqGuard<'static, ()>,
 ) -> &'static mut TcpConnectionManager {
     TCP_CONNECTION_MANAGER
         .get_mut_locked(_proof)
@@ -3450,8 +3450,8 @@ static mut TCP_SOCKET_TABLE: TcpSocketTable = TcpSocketTable::new();
 /// syscalls (accept/send/recv/close) and the Timer/NetRx softirqs on a
 /// 4-CPU kernel (the old 'single-core' comments were false). irqsave
 /// because the softirq side can run inline at irq_exit.
-pub static TCP_TABLE_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+pub static TCP_TABLE_LOCK: crate::sync::types::Spinlock<()> =
+    crate::sync::types::Spinlock::new(());
 
 /// Allocate TCP socket
 ///

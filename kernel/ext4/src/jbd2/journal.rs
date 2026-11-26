@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 use super::types::*;
 

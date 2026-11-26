@@ -6,7 +6,7 @@
 //!
 //! JBD2 transaction management
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;

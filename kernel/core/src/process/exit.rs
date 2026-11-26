@@ -134,8 +134,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         if crate::trace::EVENT_FUXSTUCK.armed()
             && HWEXIT_N.fetch_add(1, Relaxed2) < 96
         {
-            let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID.load(Relaxed2);
-            let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
+            let owner_tid = crate::sync::hotpath::FUXWATCH_OWNER_TID.load(Relaxed2);
+            let park_tgid = crate::sync::hotpath::FUXPARK_TGID.load(Relaxed2);
             let my_tgid = cur.tgid() as u32;
             let is_leader = dying_pid == my_tgid;
             let frozen = crate::api::sync::rwfrz_tgid_frozen(my_tgid);
@@ -922,10 +922,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         cur.set_fdtable(None);
 
         // ===== Clean up futex waiters =====
-        crate::sync::futex::futex_cleanup(cur);
+        crate::sync::hotpath::futex_cleanup(cur);
         // PI futexes: release held locks (owner-died handoff to the top
         // waiter) and leave every PI wait queue.
-        crate::sync::futex_pi::futex_pi_exit_cleanup(cur);
+        crate::sync::hotpath::futex_pi_exit_cleanup(cur);
 
         // ===== Clean up POSIX MQ fd entries =====
         crate::api::ipc::mq_fds_cleanup(cur);

@@ -815,8 +815,8 @@ pub(crate) fn dir_block_seal(fs: &Ext4FileSystem, dir_ino: u32, block_data: &mut
 /// One global sleeping mutex is coarse but correct: entry mutations
 /// are rare next to data I/O, and the lock is leaf-level in the lock
 /// order (journal / buffer locks are taken INSIDE, never the reverse).
-static ENTRY_MUTEX: crate::sync::semaphore::Mutex =
-    crate::sync::semaphore::Mutex::new();
+static ENTRY_MUTEX: crate::sync::types::Mutex =
+    crate::sync::types::Mutex::new();
 
 /// Find space for new entry in directory block
 ///

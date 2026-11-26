@@ -20,7 +20,7 @@ use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
 use alloc::vec::Vec;
 use alloc::sync::Arc;
-use crate::sync::rwlock::RwSpinlock;
+use crate::sync::types::RwSpinlock;
 
 use super::page_desc::Page;
 use super::vma::Vma;

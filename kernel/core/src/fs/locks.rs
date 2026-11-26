@@ -74,7 +74,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::fs::file::File;
 use crate::fs::inode::Inode;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Record-lock ownership token mirror (the tables storing it live in
 /// the fs crate's locks module).

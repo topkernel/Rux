@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering}
 
 extern crate alloc;
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ==================== Log Level Constants ====================
 

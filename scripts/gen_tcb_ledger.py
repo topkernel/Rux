@@ -47,13 +47,11 @@ RULES = [
     ("arch/aarch64/", "unbuilt"),
     ("arch/", "framework"),
     ("mm/", "framework"),
-    # sync: raw primitives are framework, syscall-facing logic is service
-    ("sync/spinlock.rs", "framework"),
-    ("sync/rwlock.rs", "framework"),
-    ("sync/seqlock.rs", "framework"),
-    ("sync/percpu.rs", "framework"),
-    ("sync/rcu.rs", "framework"),
-    ("sync/lockkey.rs", "framework"),
+    # sync: the raw primitives are framework, the syscall-facing logic
+    # service. Both are sections of sync/hotpath.rs since pass 2 (seed-core
+    # pass 2), and a path names one layer: the file that holds the lock
+    # primitives is filed as framework.
+    ("sync/hotpath.rs", "framework"),
     ("sync/", "service"),
     ("interrupt/", "framework"),
     # drivers: MMIO/DMA cores are framework, device logic is service

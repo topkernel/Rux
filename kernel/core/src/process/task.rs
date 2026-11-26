@@ -9,7 +9,7 @@
 use super::task_ext::TaskExtHandle;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use crate::mm::pagemap::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SignalStruct, SigPending};
@@ -2210,7 +2210,7 @@ impl Task {
     #[inline(never)]
     pub fn wake_up_in_futex_bucket<'a>(
         task: *mut Task,
-        proof: &'a crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+        proof: &'a crate::sync::types::NestProof<'a, crate::sync::types::FutexBucketKey>,
     ) -> bool {
         Self::wake_up_impl(task, Some(proof), false)
     }
@@ -2222,7 +2222,7 @@ impl Task {
     #[inline(never)]
     fn wake_up_impl(
         task: *mut Task,
-        bucket: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+        bucket: Option<&crate::sync::types::NestProof<'_, crate::sync::types::FutexBucketKey>>,
         sync: bool,
     ) -> bool {
         if task.is_null() {

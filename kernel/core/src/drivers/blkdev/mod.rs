@@ -13,7 +13,7 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Per-disk C-style operations table (the drivers-family ABI, round-5:

@@ -17,7 +17,7 @@
 //   - an out-of-range cpu id takes the None arm (the r8final
 //     survive-and-fall-back stance),
 //   - values written under a guard survive to the next window.
-use crate::sync::percpu;
+use crate::sync::hotpath;
 use super::{test_pass, test_fail, test_group_start};
 
 #[derive(Clone, Copy)]
@@ -26,10 +26,10 @@ struct Probe {
     b: u64,
 }
 
-static SLOT_A: percpu::CpuLocal<Probe, { crate::config::MAX_CPUS }> =
-    percpu::CpuLocal::new(Probe { a: 0, b: 0 });
-static SLOT_B: percpu::CpuLocal<u64, { crate::config::MAX_CPUS }> = percpu::CpuLocal::new(7);
-static SLOT_ZERO: percpu::CpuLocal<u64, 0> = percpu::CpuLocal::new(1);
+static SLOT_A: crate::sync::types::CpuLocal<Probe, { crate::config::MAX_CPUS }> =
+    crate::sync::types::CpuLocal::new(Probe { a: 0, b: 0 });
+static SLOT_B: crate::sync::types::CpuLocal<u64, { crate::config::MAX_CPUS }> = crate::sync::types::CpuLocal::new(7);
+static SLOT_ZERO: crate::sync::types::CpuLocal<u64, 0> = crate::sync::types::CpuLocal::new(1);
 
 pub fn test_percpu() {
     test_group_start("percpu-shape");
@@ -80,14 +80,14 @@ pub fn test_percpu() {
     // (The re-entry also taints BAD_PAGE, but the taint SET is not
     // compared: the small_alloc group earlier in this boot already
     // sets the same flag, so the aggregate is unchanged by design.)
-    let before_count = percpu::reentry_events();
+    let before_count = hotpath::reentry_events();
     let inner = SLOT_A.with(|_row| {
         // Re-entering the SAME slot while the outer guard is live must
         // return None (never hand out a second &mut) and count one
         // re-entry event.
         SLOT_A.with(|_row2| ())
     });
-    let ok = inner == Some(None) && percpu::reentry_events() == before_count + 1;
+    let ok = inner == Some(None) && hotpath::reentry_events() == before_count + 1;
     if ok {
         test_pass("re-entry refused + counted");
     } else {

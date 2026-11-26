@@ -11,7 +11,7 @@
 use core::fmt;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
+use crate::sync::types::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 #[cfg(any(feature = "riscv64", feature = "aarch64"))]
 use crate::arch::mm::fixmap::uart_virt_addr;

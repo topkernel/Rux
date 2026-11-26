@@ -26,8 +26,8 @@ struct Entry {
     f: MountFn,
 }
 
-static TABLE: crate::sync::spinlock::Spinlock<[Option<Entry>; MAX_ENTRIES]> =
-    crate::sync::spinlock::Spinlock::new([const { None }; MAX_ENTRIES]);
+static TABLE: crate::sync::types::Spinlock<[Option<Entry>; MAX_ENTRIES]> =
+    crate::sync::types::Spinlock::new([const { None }; MAX_ENTRIES]);
 
 /// Register `f` for every `names` alias (idempotent: a name registered
 /// twice keeps its first entry — boot inits can run repeatedly).

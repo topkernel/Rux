@@ -34,9 +34,9 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
-use crate::sync::rwlock::RwSpinlock;
-use crate::sync::rwsem::Rwsem;
-use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
+use crate::sync::types::RwSpinlock;
+use crate::sync::types::Rwsem;
+use crate::sync::types::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
 use crate::mm::page::VirtAddr;
@@ -74,13 +74,13 @@ impl GlobalPteLock {
 
     /// Whole-domain exclusive PTE section (the old global lock).
     #[inline]
-    pub fn lock(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, ()> {
+    pub fn lock(&self) -> crate::sync::types::RwSpinlockWriteGuard<'_, ()> {
         self.raw.write()
     }
 
     /// Whole-domain exclusive PTE section, IRQs saved.
     #[inline]
-    pub fn lock_irqsave(&self) -> crate::sync::rwlock::RwSpinlockIrqWriteGuard<'_, ()> {
+    pub fn lock_irqsave(&self) -> crate::sync::types::RwSpinlockIrqWriteGuard<'_, ()> {
         self.raw.write_irqsave()
     }
 }
@@ -132,13 +132,13 @@ impl PteLock {
 /// Split mode on all architectures (see PteLock::lock).
 pub struct PteGuard<'a> {
     _spin: SpinlockGuard<'a, ()>,
-    _epoch: crate::sync::rwlock::RwSpinlockReadGuard<'a, ()>,
+    _epoch: crate::sync::types::RwSpinlockReadGuard<'a, ()>,
 }
 
 /// Guard of a `PteLock::lock_irqsave()` section.
 pub struct PteIrqGuard<'a> {
     _spin: SpinlockIrqGuard<'a, ()>,
-    _epoch: crate::sync::rwlock::RwSpinlockIrqReadGuard<'a, ()>,
+    _epoch: crate::sync::types::RwSpinlockIrqReadGuard<'a, ()>,
 }
 
 /// PTE-section handle for page-table trees that have NO owning MmStruct:
@@ -660,7 +660,7 @@ impl MmStruct {
     /// vma_manager already uses inside a Box'd MmStruct.
     pub fn mm_surgery_guard(
         &self,
-    ) -> crate::sync::rwsem::RwsemWriteGuard<'_, ()> {
+    ) -> crate::sync::types::RwsemWriteGuard<'_, ()> {
         self.mm_surgery.write()
     }
 
@@ -1118,7 +1118,7 @@ impl MmStruct {
     /// preempt-disabled; a held section is preemptible. Task/syscall
     /// context only.
     #[inline]
-    pub fn vma_read(&self) -> crate::sync::rwsem::RwsemReadGuard<'_, VmaManager> {
+    pub fn vma_read(&self) -> crate::sync::types::RwsemReadGuard<'_, VmaManager> {
         self.vma_manager.read()
     }
 
@@ -1128,7 +1128,7 @@ impl MmStruct {
     /// writer. Refuses while any waiter is queued or handoff is
     /// pending (down_read_trylock semantics).
     #[inline]
-    pub fn vma_try_read(&self) -> Option<crate::sync::rwsem::RwsemReadGuard<'_, VmaManager>> {
+    pub fn vma_try_read(&self) -> Option<crate::sync::types::RwsemReadGuard<'_, VmaManager>> {
         self.vma_manager.try_read()
     }
 
@@ -1176,7 +1176,7 @@ impl MmStruct {
     /// spinning (only while the owner is on-CPU) and then parks
     /// uninterruptibly — it never spins the CPU away. Task/syscall
     /// context only.
-    pub fn vma_write(&self) -> crate::sync::rwsem::RwsemWriteGuard<'_, VmaManager> {
+    pub fn vma_write(&self) -> crate::sync::types::RwsemWriteGuard<'_, VmaManager> {
         self.vma_manager.write()
     }
 
@@ -1418,7 +1418,7 @@ impl Drop for MmStruct {
                 // monopolist windows; see synchronize_rcu_bounded. The
                 // bound matches the deferred_free wall-clock discipline
                 // (1.5 s) that still holds the struct free afterwards.
-                crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "mm-drop");
+                crate::sync::hotpath::synchronize_rcu_bounded_pollfirst(1500, "mm-drop");
             }
             if fp {
                 crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_RCU, fp_t_rcu);

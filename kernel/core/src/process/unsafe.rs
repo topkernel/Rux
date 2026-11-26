@@ -324,7 +324,7 @@ pub fn switch_to_kernel_root_on_exit() {
 /// contract the callee's doc states.
 pub fn apppark_rets(t: &Task) {
     // SAFETY: INV-PROC-APPPARK-1 — cur is the running dying task.
-    unsafe { crate::sync::futex::apppark_rets_public(t) }
+    unsafe { crate::sync::hotpath::apppark_rets_public(t) }
 }
 
 // ---- kernel-stack cache slot ops -------------------------------------

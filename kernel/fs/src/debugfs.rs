@@ -41,7 +41,7 @@ use crate::errno;
 use rux::fs::inode::{file_type, Ino, Inode, InodeMode, INodeOps, VfsDirEntry};
 use rux::fs::mount::{MntFlags, VfsMount};
 use rux::fs::superblock::{FileSystemType, SuperBlock};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// debugfs magic number (Linux: STATFS_DEBUGFS_MAGIC).
 const DEBUGFS_MAGIC: u32 = 0x6462_6720;

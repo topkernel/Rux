@@ -44,7 +44,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 const PAGE_SIZE: usize = 4096;
 

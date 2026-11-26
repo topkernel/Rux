@@ -26,7 +26,7 @@ use alloc::format;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 
 pub const ROOTFS_MAGIC: u32 = 0x73636673;  // "sfsf" - Simple File System

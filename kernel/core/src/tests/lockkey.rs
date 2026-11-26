@@ -15,9 +15,9 @@
 // used by the GRQ pattern behaves) is exercised here against REAL
 // keyed locks, and the GRQ pilot itself rides the whole suite (every
 // schedule/pick/wake path takes the keyed lock).
-use crate::sync::lockkey::{
-    FutexBucketKey, GrqKey, KeyedRawSpinlock, KeyedSpinlock, NestKey, NestProof, NetQueueKey,
-    NetStatsKey, WaiterSlotKey,
+use crate::sync::{
+    types::FutexBucketKey, types::GrqKey, types::KeyedRawSpinlock, types::KeyedSpinlock, hotpath::NestKey, types::NestProof, types::NetQueueKey,
+    types::NetStatsKey, types::WaiterSlotKey,
 };
 use super::{test_fail, test_group_start, test_pass};
 

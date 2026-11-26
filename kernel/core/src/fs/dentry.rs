@@ -16,7 +16,7 @@ use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicPtr, AtomicUsize, Ordering};
 use crate::fs::inode::Inode;
 use crate::fs::mount::MntFlags;
@@ -186,7 +186,7 @@ pub struct WalkClaim {
     /// Bank index claimed, or usize::MAX for the slow-path lock (whose
     /// guard we keep alive in `slow`).
     cpu: usize,
-    slow: Option<crate::sync::spinlock::SpinlockIrqGuard<'static, ()>>,
+    slow: Option<crate::sync::types::SpinlockIrqGuard<'static, ()>>,
 }
 
 impl WalkClaim {
@@ -1023,7 +1023,7 @@ impl Dentry {
     /// banked reader may still hold the old base pointer mid-read).
     fn big_memo_ensure_locked(
         &self,
-        guard: &mut crate::sync::spinlock::SpinlockGuard<'_, BTreeMap<String, Arc<Dentry>>>,
+        guard: &mut crate::sync::types::SpinlockGuard<'_, BTreeMap<String, Arc<Dentry>>>,
     ) {
         if guard.len() < CHILD_MEMO_BIG_MIN {
             return;

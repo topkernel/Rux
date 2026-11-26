@@ -143,7 +143,7 @@ pub struct TaskExt {
 
     /// The dequeued signal held for the tracer (PTRACE_GETSIGINFO /
     /// CONT(0) swallows it).
-    pub ptrace_siginfo: crate::sync::spinlock::Spinlock<
+    pub ptrace_siginfo: crate::sync::types::Spinlock<
         Option<crate::signal::SigInfo>,
     >,
 
@@ -215,7 +215,7 @@ impl TaskExt {
             tracer_pid: AtomicU32::new(0),
             ptrace_options: AtomicU64::new(0),
             ptrace_sigdeliver: AtomicU32::new(0),
-            ptrace_siginfo: crate::sync::spinlock::Spinlock::new(None),
+            ptrace_siginfo: crate::sync::types::Spinlock::new(None),
             ss_addr: AtomicU64::new(0),
             ss_active: AtomicBool::new(false),
             ss_saved_insn: AtomicU64::new(0),

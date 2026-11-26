@@ -38,7 +38,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::errno;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Upper bound on the module blob we copy into the kernel (Linux uses
 /// 16 MiB as a sanity limit for init_module; real RISC-V .ko files are

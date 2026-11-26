@@ -3000,8 +3000,8 @@ pub fn ext4_sync_file(
 // =====================================================================
 type DirtyDataMap =
     alloc::collections::BTreeMap<(u64, u64), alloc::collections::BTreeSet<u64>>;
-static DIRTY_DATA_BLOCKS: crate::sync::spinlock::Spinlock<DirtyDataMap> =
-    crate::sync::spinlock::Spinlock::new(alloc::collections::BTreeMap::new());
+static DIRTY_DATA_BLOCKS: crate::sync::types::Spinlock<DirtyDataMap> =
+    crate::sync::types::Spinlock::new(alloc::collections::BTreeMap::new());
 
 /// Note `blk` as a dirty data block of (fs, ino). Cheap: one BTreeSet
 /// insert under a short-held global lock; called only from paths that
@@ -3083,8 +3083,8 @@ fn settle_dirty_data_notes(fs_id: u64, ino: u64, still_dirty: &[u64]) {
 // =====================================================================
 type ResRuns = alloc::vec::Vec<(u64, u64)>; // sorted, merged [start, len)
 type DelallocResMap = alloc::collections::BTreeMap<(u64, u64), ResRuns>;
-static DELALLOC_RESERVATIONS: crate::sync::spinlock::Spinlock<DelallocResMap> =
-    crate::sync::spinlock::Spinlock::new(alloc::collections::BTreeMap::new());
+static DELALLOC_RESERVATIONS: crate::sync::types::Spinlock<DelallocResMap> =
+    crate::sync::types::Spinlock::new(alloc::collections::BTreeMap::new());
 /// Total reserved blocks across every (fs, ino) — the fs-wide claim the
 /// write-time gate checks against. Maintained INCREMENTALLY under the
 /// DELALLOC_RESERVATIONS lock (Relaxed atomics; every mutation holds the

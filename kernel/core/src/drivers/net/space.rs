@@ -5,7 +5,7 @@
 //! Network device base class
 
 use crate::net::buffer::SkBuff;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Maximum device name length
 pub const IFNAMSIZ: usize = 16;

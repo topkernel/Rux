@@ -46,8 +46,8 @@ struct Slot {
 // Round table under a spinlock: the heartbeat CAS admits ONE auditor,
 // so the lock is uncontended in the healthy case — it exists so the
 // slot array's exclusivity is type-checked, not review-enforced.
-static SLOTS: crate::sync::spinlock::Spinlock<[Slot; TABLE_N]> =
-    crate::sync::spinlock::Spinlock::new([const {
+static SLOTS: crate::sync::types::Spinlock<[Slot; TABLE_N]> =
+    crate::sync::types::Spinlock::new([const {
         Slot {
             pid: 0,
             sys: 0,

@@ -17,7 +17,7 @@
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 /// Page size
 const PAGE_SIZE: usize = 4096;

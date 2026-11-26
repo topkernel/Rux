@@ -16,7 +16,7 @@ use crate::fs::inode::Inode;
 use crate::fs::dentry::Dentry;
 use alloc::sync::Arc;
 use alloc::boxed::Box;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -424,7 +424,7 @@ pub struct File {
     /// which may sleep in block I/O (a Spinlock guard would pin
     /// preempt_count across that window — the exact hazard b31ccab fixed
     /// for VFS_MUTATION_LOCK). This is Linux's f_pos_lock role.
-    pub io_lock: crate::sync::semaphore::Mutex,
+    pub io_lock: crate::sync::types::Mutex,
     /// O_ASYNC signal destination (F_SETOWN / F_SETOWN_EX). kind 0 none,
     /// 1 process, 2 process group, 3 thread (F_OWNER_TID).
     pub f_owner: Spinlock<FileOwner>,
@@ -491,7 +491,7 @@ impl File {
             close_pending: core::sync::atomic::AtomicBool::new(false),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
             file_id: next_file_id(),
-            io_lock: crate::sync::semaphore::Mutex::new(),
+            io_lock: crate::sync::types::Mutex::new(),
             f_owner: Spinlock::new(FileOwner::none()),
             f_signum: core::sync::atomic::AtomicI32::new(0),
             dirent_cache: Spinlock::new(None),
@@ -1129,7 +1129,7 @@ pub struct FdTable {
     slots: alloc::boxed::Box<[FdSlot; MAX_FDS]>,
     /// Writer serialization + descriptor metadata (cloexec bits,
     /// allocation hint, count).
-    entry: crate::sync::spinlock::Spinlock<Box<FdTableEntry>>,
+    entry: crate::sync::types::Spinlock<Box<FdTableEntry>>,
 }
 
 impl FdTable {
@@ -1143,7 +1143,7 @@ impl FdTable {
                     ))
                 }; MAX_FDS],
             ),
-            entry: crate::sync::spinlock::Spinlock::new(Box::new(
+            entry: crate::sync::types::Spinlock::new(Box::new(
                 FdTableEntry {
                     cloexec_bits: [0; MAX_FDS / 64],
                     open_bits: [0; MAX_FDS / 64],
@@ -1371,7 +1371,7 @@ impl FdTable {
         // every report site (user-return, __schedule, idle) for its
         // duration; rcu_read_lock stays as the formal read-side marker.
         let irq = crate::arch::cpu::save_and_disable_irq();
-        crate::sync::rcu::rcu_read_lock();
+        crate::sync::hotpath::rcu_read_lock();
         // SAFETY: p was stored by a writer from an owned Arc
         // (install/dup/fork). Acquisition is CONDITIONAL (the
         // get_file_rcu shape): a CAS from a nonzero strong count. The
@@ -1386,7 +1386,7 @@ impl FdTable {
         } else {
             None
         };
-        crate::sync::rcu::rcu_read_unlock();
+        crate::sync::hotpath::rcu_read_unlock();
         crate::arch::cpu::restore_irq(irq);
         out
     }

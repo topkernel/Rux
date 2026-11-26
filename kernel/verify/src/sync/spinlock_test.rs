@@ -4,12 +4,12 @@
 //!
 //! RawSpinlock TAS protocol invariant tests.
 //!
-//! Types copied from: kernel/core/src/sync/spinlock.rs (simplified — no asm, no deadlock warn)
+//! Types copied from: kernel/core/src/sync/types.rs (simplified — no asm, no deadlock warn)
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // ============================================================================
-// Copied types from kernel/core/src/sync/spinlock.rs
+// Copied types from kernel/core/src/sync/types.rs
 // ============================================================================
 
 pub struct RawSpinlock {

@@ -14,7 +14,7 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::blkdev;
@@ -414,8 +414,8 @@ impl BlockCache {
     #[inline]
     fn lru_lock_under_bucket<'a, T>(
         &self,
-        _bucket_held: &crate::sync::spinlock::SpinlockGuard<'a, T>,
-    ) -> crate::sync::spinlock::SpinlockGuard<'_, LruState> {
+        _bucket_held: &crate::sync::types::SpinlockGuard<'a, T>,
+    ) -> crate::sync::types::SpinlockGuard<'_, LruState> {
         self.lru.lock()
     }
 
@@ -424,8 +424,8 @@ impl BlockCache {
     #[inline]
     fn lru_lock_under_bucket_irqsave<'a, T>(
         &self,
-        _bucket_held: &crate::sync::spinlock::SpinlockIrqGuard<'a, T>,
-    ) -> crate::sync::spinlock::SpinlockGuard<'_, LruState> {
+        _bucket_held: &crate::sync::types::SpinlockIrqGuard<'a, T>,
+    ) -> crate::sync::types::SpinlockGuard<'_, LruState> {
         self.lru.lock()
     }
 

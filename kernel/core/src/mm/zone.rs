@@ -31,7 +31,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use alloc::string::ToString;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 use super::PAGE_SIZE;
 use super::page_desc::{pfn_to_page, pfn_to_page_mut, PageFlag, page_desc};

@@ -20,7 +20,7 @@ use alloc::boxed::Box;
 use crate::fs::{File, FileOps, FileFlags};
 use crate::mm::page_alloc::{alloc_pages, free_pages};
 use crate::mm::zone::GfpFlags;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ==================== UAPI Constants ====================
 

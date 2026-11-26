@@ -18,7 +18,7 @@
 //!   freeze_scan, fuxwatch cmdline parse) — demand-driven dumps;
 //! - binder.rs's hdf_devmgr latch (fxdv_latch_devmgr).
 //! Sibling service crates (ipc binder_diag, process) reach the
-//! moved functions DIRECTLY at their historical crate::sync::futex::X
+//! moved functions DIRECTLY at their historical crate::sync::hotpath::X
 //! paths (the union module in sync's lib.rs — the allowed downward
 //! service edge; no row needed).
 //! The futex MECHANISM, futex_stuck_census itself, and the fuxwatch

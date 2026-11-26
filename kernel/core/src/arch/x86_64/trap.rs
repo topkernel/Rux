@@ -33,7 +33,7 @@
 use super::r#unsafe::SavedFrame;
 use super::cpu::{inb, outb, rdmsr, wrmsr};
 use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // Include trap.S assembly code (AT&T syntax — global_asm defaults to
 // Intel on x86 targets).
@@ -1201,7 +1201,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
             // never returns to user, so the EXIT report never fires;
             // its next syscall ENTRY still does). One gated store,
             // same fast-path shape as the exit report.
-            crate::sync::rcu::rcu_note_context_switch();
+            crate::sync::hotpath::rcu_note_context_switch();
             handle_syscall(regs_ref);
         } else {
             match vector {
@@ -1490,7 +1490,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     // the check validates whichever task actually returns to user.)
     if frame.user_mode() {
         // Return-to-user quiescent state (rcu.rs; see the riscv64 twin).
-        crate::sync::rcu::rcu_note_context_switch();
+        crate::sync::hotpath::rcu_note_context_switch();
         crate::debug::leakorigin::check_user_return();
     }
 }
@@ -2369,9 +2369,9 @@ fn handle_debug(regs: &mut PtRegs) {
         // (the store's own page), and only while the watch still owns it
         // — after a slot move the retired page must stay writable.
         let tid = crate::sched::get_current_pid() as u32;
-        if let Some(page) = crate::sync::futex::fuxwatch_take_step(tid) {
+        if let Some(page) = crate::sync::hotpath::fuxwatch_take_step(tid) {
             regs.rflags &= !(TF | RF);
-            if crate::sync::futex::fuxwatch_page_watched(page) {
+            if crate::sync::hotpath::fuxwatch_page_watched(page) {
                 if let Some(tk) = crate::sched::current() {
                     // SAFETY: current task accessor.
                     if let Some(aspace) = unsafe { (*tk).address_space() } {
@@ -2693,7 +2693,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
     // WE armed gets W restored and retried; only the log/step respects
     // the budget (fuxwatch_log_write retires the watch at the trip).
     if access & crate::arch::mm::page_fault::FaultFlags::WRITE != 0
-        && crate::sync::futex::fuxwatch_page_matches(fault_addr)
+        && crate::sync::hotpath::fuxwatch_page_matches(fault_addr)
     {
         let is_user = access & crate::arch::mm::page_fault::FaultFlags::USER != 0;
         let tid = crate::sched::get_current_pid() as u32;
@@ -2704,7 +2704,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // SAFETY: current task accessor.
             let aspace = unsafe { (*tk).address_space() }?;
             let root = aspace.root_ppn();
-            if !crate::sync::futex::fuxwatch_mm_armed(root) {
+            if !crate::sync::hotpath::fuxwatch_mm_armed(root) {
                 // neverword lane (nw1 conviction, safety net): an mm the
                 // arm round once covered but the ledger no longer lists
                 // (slot-latch reopen, fork-inherit of a W-cleared PTE)
@@ -2768,11 +2768,11 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // hw2: exact/old_word describe the WORD THAT FAULTED (either
             // slot) — slot-2 writes used to log with slot 1's exact=false
             // and slot 1's old value.
-            let w1 = crate::sync::futex::fuxwatch_addr();
-            let w2 = crate::sync::futex::fuxwatch2_addr();
+            let w1 = crate::sync::hotpath::fuxwatch_addr();
+            let w2 = crate::sync::hotpath::fuxwatch2_addr();
             let exact = (w1 != 0 && (fault_addr & !0x3) == (w1 & !0x3))
                 || (w2 != 0 && (fault_addr & !0x3) == (w2 & !0x3));
-            let old_word = crate::sync::futex::fuxwatch_read_word_at(root, fault_addr & !0x3);
+            let old_word = crate::sync::hotpath::fuxwatch_read_word_at(root, fault_addr & !0x3);
             if !is_user {
                 // Kernel writer (put_user on the watched page): named
                 // via a budgeted line, retried with W present.
@@ -2790,7 +2790,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                         old_word
                     );
                 }
-            } else if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word, fault_addr) {
+            } else if crate::sync::hotpath::fuxwatch_log_write(tid, rip, exact, old_word, fault_addr) {
                 // Step the writer: TF traps right after the store;
                 // RF masks fault-class re-entry for this insn.
                 regs.rflags |= (1 << 8) | (1 << 16);

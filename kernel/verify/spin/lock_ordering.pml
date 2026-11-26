@@ -3,9 +3,9 @@
 // Verifies: no deadlock cycle in lock acquisition
 //
 // Abstracted from:
-//   kernel/core/src/sync/spinlock.rs   — lock hierarchy documentation (lines 17-48)
+//   kernel/core/src/sync/hotpath.rs    — lock hierarchy documentation (lines 9464-9495)
 //   kernel/core/src/sched/sched.rs     — GRQ lock
-//   kernel/core/src/sync/futex.rs      — bucket lock, waiter slot lock
+//   kernel/core/src/sync/hotpath.rs    — bucket lock, waiter slot lock
 //
 // Hierarchy:
 //   Level 0: IRQ disable

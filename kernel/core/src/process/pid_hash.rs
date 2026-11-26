@@ -15,7 +15,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::ptr;
 use crate::process::task::Task;
-use crate::sync::rcu;
+use crate::sync::hotpath;
 
 /// Number of hash buckets.
 const PID_HASH_BUCKETS: usize = 256;
@@ -190,7 +190,7 @@ pub fn pid_hash_lookup_pinned(pid: u32) -> *mut Task {
 }
 
 pub fn pid_hash_lookup(pid: u32) -> *mut Task {
-    rcu::rcu_read_lock();
+    hotpath::rcu_read_lock();
 
     let idx = bucket_index(pid);
     // We are in an RCU read-side critical section. The bucket head is
@@ -211,7 +211,7 @@ pub fn pid_hash_lookup(pid: u32) -> *mut Task {
         found
     };
 
-    rcu::rcu_read_unlock();
+    hotpath::rcu_read_unlock();
 
     result
 }

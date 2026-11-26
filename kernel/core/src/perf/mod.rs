@@ -82,7 +82,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::process::wait::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ==================== ABI constants (uapi/linux/perf_event.h) ====================
 

@@ -36,7 +36,7 @@ use crate::tty::{termios_to_kernel_bytes, termios_from_kernel_bytes, TERMIOS_KER
 };
 use crate::process::wait::WaitQueueHead;
 use crate::signal::Signal;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // Device numbers / ioctl numbers

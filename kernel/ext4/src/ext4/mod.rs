@@ -31,7 +31,7 @@ pub mod csum;
 pub mod htree;
 pub mod seam;
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -3127,9 +3127,9 @@ fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 // Raw-pointer rows (Send-only container): the typed deref at use
 // rides the framework's boxed_ref edge (the registry's liveness
 // authority, as the comment below documents).
-static PENDING_REAPS: crate::sync::spinlock::Spinlock<
+static PENDING_REAPS: crate::sync::types::Spinlock<
     alloc::vec::Vec<(usize, u32)>,
-> = crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
+> = crate::sync::types::Spinlock::new(alloc::vec::Vec::new());
 
 /// Drain the deferred-delete queue. Called from ext4 entry points that
 /// already serialize on EXT4_BIG_LOCK (unlink/create/mkdir wrappers);
@@ -3186,7 +3186,7 @@ fn ext4_destroy_inode(inode: &mut rux::fs::inode::Inode) {
 /// (global journal handle, bitmap RMW, group descriptor lost-update).
 /// One CPU in ext4 at a time until per-inode locking exists.
 ///
-/// The primitive is `crate::sync::SleepMutex` (kernel/core/src/sync/mutex.rs)
+/// The primitive is `crate::sync::types::SleepMutex` (kernel/core/src/sync/mutex.rs)
 /// — the reference-recipe sleeping mutex for locks held across blocking
 /// I/O. History: a semaphore-backed mutex attempt (R7-A2) lost wakeups
 /// and was reverted; the pure-spin acquire could wedge the whole machine

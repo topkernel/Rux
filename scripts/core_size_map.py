@@ -60,8 +60,9 @@ HOT_FILES = re.compile(
     r"|sched/(sched|unsafe)\.rs"
     # the VFS walk, the block layer, the page cache, the dcache
     r"|fs/(vfs|bio|page_cache|dentry|buffer|file|unsafe)\.rs"
-    # the lock primitives and the per-CPU layer
-    r"|sync/(spinlock|rwlock|percpu|seqlock|unsafe)\.rs"
+    # the lock primitives and the per-CPU layer: sections of sync/hotpath.rs
+    # since pass 2 (the file holds every topic of the subsystem)
+    r"|sync/(hotpath|unsafe)\.rs"
     r"|interrupt/[^/]+\.rs"
     # the timekeeping core and the allocator entry points
     r"|timer\.rs|mm/(page_alloc|buddy_allocator|small_alloc|slab|page_desc|unsafe)\.rs"

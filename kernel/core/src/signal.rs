@@ -12,7 +12,7 @@
 //! - Signal sending (kill) and processing (do_signal)
 
 use crate::safety::bytes as cbytes;
-use crate::sync::rwlock::RwSpinlock;
+use crate::sync::types::RwSpinlock;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
 use alloc::boxed::Box;
@@ -244,7 +244,7 @@ pub struct SigPending {
 
 /// Signal queue backed by Spinlock<VecDeque<SigInfo>>
 pub struct SigQueue {
-    inner: crate::sync::spinlock::Spinlock<alloc::collections::VecDeque<SigInfo>>,
+    inner: crate::sync::types::Spinlock<alloc::collections::VecDeque<SigInfo>>,
 }
 
 unsafe impl Send for SigQueue {}
@@ -253,7 +253,7 @@ unsafe impl Sync for SigQueue {}
 impl SigQueue {
     pub const fn new() -> Self {
         Self {
-            inner: crate::sync::spinlock::Spinlock::new(alloc::collections::VecDeque::new()),
+            inner: crate::sync::types::Spinlock::new(alloc::collections::VecDeque::new()),
         }
     }
 

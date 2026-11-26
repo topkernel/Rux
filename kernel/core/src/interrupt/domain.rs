@@ -9,7 +9,7 @@
 
 #![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 use crate::config::PLIC_MAX_INTERRUPTS;
 use super::irqchip::IrqChip;

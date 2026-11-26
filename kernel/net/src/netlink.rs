@@ -34,7 +34,7 @@ use crate::errno::constants;
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::wait::WaitQueueHead;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::types::Spinlock;
 
 // ============================================================================
 // Constants
