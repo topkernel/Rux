@@ -3807,6 +3807,41 @@ pub fn schedule_dead_never_returns() {
         }
         schedule();
         rounds += 1;
+        // wedge-hunt diagnostic: name the first-retry refusal shape —
+        // whose slot does this CPU's current name now, and what does
+        // the runqueue hold? Budget: the first 8 dying tasks to retry.
+        if rounds == 1 {
+            static RETRY_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let rn = RETRY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if rn < 8 {
+                if let Some(cur) = current() {
+                    let self_ptr = cur as *mut Task;
+                    let self_pid = crate::sched::edges::task_shared(self_ptr).pid();
+                    let slot_pid = {
+                        let c = crate::arch::cpu_id() as usize;
+                        let s = cpu_state(c).current;
+                        if s.is_null() {
+                            -1i64
+                        } else {
+                            crate::sched::edges::task_shared(s).pid() as i64
+                        }
+                    };
+                    let nr = {
+                        let g = grq();
+                        let n = g.nr_running.load(core::sync::atomic::Ordering::Relaxed);
+                        let idle_bits = g.idle_cpus.load(core::sync::atomic::Ordering::Acquire);
+                        drop(g);
+                        (n, idle_bits)
+                    };
+                    let st = crate::sched::edges::task_shared(self_ptr).state().bits();
+                    crate::pr_warn!(
+                        "TERM-RETRY pid={} self_st={:#x} slot_pid={} nr={} idle_bits={:#x}",
+                        self_pid, st, slot_pid, nr.0, nr.1
+                    );
+                }
+            }
+        }
         // schedule() returning means it refused/repicked us once more;
         // loop and re-assert. sc192 (v3): the old "park in wfi like the
         // pre-v1 code did" fallback after 8 rounds is a PERMANENT CPU
@@ -4905,12 +4940,34 @@ fn __schedule() {
     // "switch-out complete" from "released, switch not yet started" —
     // the freed-under-its-own-schedule-chain producer (rip=0x1 /
     // rip=heap / #GP-on-ret at exit-storm time).
+    //
+    // WEDGE FIX (p4_fork_exec, 2026-11-27): the `prev` read below is the
+    // RESUMED frame's own binding — this code runs in the INCOMING
+    // task's context after the asm switch, so the `prev`/`switching`
+    // locals are that frame's values from ITS last suspension, not this
+    // switch's. The dying task this switch retired therefore kept
+    // terminal_switch_done=false + terminal_pacing=true FOREVER (the
+    // marker never lands for any exit switched out to a non-newborn
+    // task — the fork/exec storm shape): the reap drainer's switch stage
+    // never passed (the pacing gate blocks the sustained arm for a flag
+    // no retire site will ever clear), PENDING saturated at the cap,
+    // every reap fell back to the synchronous 300-jiffy RTS wait (the
+    // ~3 s per exec measured loop), and each RTS-DEFER parked the task
+    // on the reaper's dead_threads — a list a live reaper never drains.
+    // The real prev of THIS switch is the per-CPU slot the arch
+    // context_switch published for ret_from_fork; read it here. The
+    // newborn resume path (schedule_tail) consumes the same slot and
+    // already carried the correct prev — the two retire sites are
+    // mutually exclusive per switch (a resume is either ret_from_fork or
+    // a resumed __schedule tail, never both) and the stores are
+    // idempotent.
     if switching {
         SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
-        if !prev.is_null()
-            && crate::sched::current().map(|c| c as *mut Task) != Some(prev)
+        let real_prev = crate::arch::sched_switch_prev_task();
+        if !real_prev.is_null()
+            && crate::sched::current().map(|c| c as *mut Task) != Some(real_prev)
         {
-            let pt = crate::sched::edges::task_shared(prev);
+            let pt = crate::sched::edges::task_shared(real_prev);
             pt.terminal_switch_done
                 .store(true, core::sync::atomic::Ordering::Release);
             // The pacing flag retires with the switch: the tail that
