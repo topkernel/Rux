@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -251,5 +252,3 @@ impl Default for FsStruct {
     }
 }
 
-unsafe impl Send for FsStruct {}
-unsafe impl Sync for FsStruct {}

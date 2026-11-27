@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -191,13 +192,6 @@ pub struct Ext4FileSystem {
     /// the write path does not maintain checksums yet.
     pub read_only: bool,
 }
-
-// SAFETY: Ext4FileSystem is only accessed via &self methods that use bio layer
-// locking; device is a raw pointer but only used for I/O through the bio cache.
-unsafe impl Send for Ext4FileSystem {}
-// SAFETY: all mutable access goes through bio::bread/brelse which uses internal
-// locking; device pointer is read-only after initialization.
-unsafe impl Sync for Ext4FileSystem {}
 
 impl Ext4FileSystem {
     /// Create new ext4 filesystem instance
@@ -1077,14 +1071,14 @@ fn ext4_kill_sb(sb: *mut SuperBlock) {
     // s_fs_info carries the Ext4FileSystem Box::into_raw pointer. The
     // unmount path is the sole remaining user (mount-installed globals
     // are torn down first).
-    unsafe {
-        if let Some(fs_info) = (*sb).s_fs_info {
+    {
+        if let Some(fs_info) = crate::fs::edges::raw_ref(sb).s_fs_info {
             // Unregister BEFORE the free (the writeback resolver's
             // liveness authority).
             ext4_instance_unregister(fs_info as *mut Ext4FileSystem);
-            let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
+            let _fs = crate::fs::edges::box_take(fs_info as *mut Ext4FileSystem);
         }
-        let _sb = Box::from_raw(sb);
+        let _sb = crate::fs::edges::box_take(sb);
     }
 }
 
@@ -1122,7 +1116,7 @@ fn read_file_internal(device: &'static blkdev::GenDisk, path: &str, depth: u32) 
         // fallback stays for the pre-mount initramfs case.
         let g = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
         if !g.is_null() {
-            let fs_ref: &Ext4FileSystem = unsafe { &*g };
+            let fs_ref: &Ext4FileSystem = crate::fs::edges::raw_ref(g);
             return match fs_ref.lookup_path(path) {
                 Ok((_ino, inode)) => {
                     let size = inode.get_size() as usize;
@@ -1337,10 +1331,10 @@ pub fn ext4_instance_from_id(fs_id: u64) -> Option<&'static Ext4FileSystem> {
     for slot in EXT4_INSTANCES.iter() {
         let p = slot.load(Ordering::Acquire);
         if !p.is_null() && p as u64 == fs_id {
-            // SAFETY: the registry entry is published only for instances
+            // the registry entry is published only for instances
             // whose Box was leaked (static lifetime) and is cleared before
             // any free, so the pointer stays valid while it is listed.
-            return Some(unsafe { &*p });
+            return Some(crate::fs::edges::raw_ref(p));
         }
     }
     None
@@ -1699,10 +1693,8 @@ pub fn unmount_ext4() {
         // Unregister BEFORE the free: a page-cache entry that outlived this
         // filesystem must not dereference the freed box.
         ext4_instance_unregister(fs_ptr);
-        // SAFETY: global pointer is valid once initialized via mount_ext4
-        unsafe {
-            let _ = Box::from_raw(fs_ptr);
-        }
+        // global pointer is valid once initialized via mount_ext4
+        let _ = crate::fs::edges::box_take(fs_ptr);
     }
 }
 
@@ -1872,7 +1864,7 @@ pub fn ext4_fallocate_on(
     // it) or the boot GLOBAL (INV-EXT4-GLOBALFS) — both valid for the
     // mount; resolved through the framework edges.
     let fs: &Ext4FileSystem = if let Some(hint) = fs_hint {
-        crate::fs::unsafe_edges::static_ref_unchecked(hint as *mut Ext4FileSystem)
+        crate::fs::edges::static_ref_unchecked(hint as *mut Ext4FileSystem)
     } else {
         mounted_ext4_fs().ok_or(errno::Errno::IOError.as_neg_i32())?
     };
@@ -3147,7 +3139,7 @@ fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
         // ptr was created by Box::into_raw(Box::new(ext4_inode.clone()))
         // SAFETY: sb holds the Box leaked by into_raw in create_vfs_inode
         // (INV-EXT4-SBRES-1); this Drop is the single reclaim.
-        let _ = unsafe { alloc::boxed::Box::from_raw(ptr as *mut inode::Ext4Inode) };
+        let _ = crate::fs::edges::box_take(ptr as *mut inode::Ext4Inode);
         inode.sb = None;
     }
     if let Ok(fs) = get_ext4_fs_from_inode(inode) {
@@ -3472,17 +3464,17 @@ pub fn mounted_ext4_fs() -> Option<&'static Ext4FileSystem> {
     if p.is_null() {
         return None;
     }
-    // SAFETY: INV-EXT4-GLOBALFS above.
-    Some(unsafe { &*p })
+    // INV-EXT4-GLOBALFS above.
+    Some(crate::fs::edges::raw_ref(p))
 }
 
 /// Get Ext4FileSystem pointer from inode's private_data
 fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
     let fs_ptr = inode.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
-    // SAFETY: fs_ptr was stored as a raw pointer to the global
+    // fs_ptr was stored as a raw pointer to the global
     // Ext4FileSystem during create_vfs_inode; valid for the mount's
     // lifetime (the ONE audited inode->fs resolver).
-    Ok(unsafe { &*(fs_ptr as *const Ext4FileSystem) })
+    Ok(crate::fs::edges::raw_ref(fs_ptr as *const Ext4FileSystem))
 }
 
 /// Mutating-op variant of get_ext4_fs_from_inode: a read-only-mounted ext4
@@ -3512,8 +3504,8 @@ fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i
 /// resolution per direction.
 fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
     let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
-    // SAFETY: INV-EXT4-SBRES-1 above.
-    Ok(unsafe { &*(p as *const inode::Ext4Inode) })
+    // INV-EXT4-SBRES-1 above.
+    Ok(crate::fs::edges::raw_ref(p as *const inode::Ext4Inode))
 }
 
 /// The mutating twin of `sb_inode_of` (INV-EXT4-SBRES-1): for
@@ -3521,9 +3513,9 @@ fn sb_inode_of(inode: &Inode) -> Result<&inode::Ext4Inode, i32> {
 /// lock (EXT4_BIG_LOCK) or run in single-threaded creation contexts.
 fn sb_inode_of_mut(inode: &Inode) -> Result<&mut inode::Ext4Inode, i32> {
     let p = inode.sb.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
-    // SAFETY: INV-EXT4-SBRES-1 above; no aliasing shared borrow is live
+    // INV-EXT4-SBRES-1 above; no aliasing shared borrow is live
     // at the store sites that use this (see each caller's lock note).
-    Ok(unsafe { &mut *(p as *mut inode::Ext4Inode) })
+    Ok(crate::fs::edges::raw_mut(p as *mut inode::Ext4Inode))
 }
 
 /// Get file operations for ext4 regular files and directories
@@ -3827,11 +3819,10 @@ pub fn create_vfs_inode_in(
         {
             if tail_eof > inode.size.load(core::sync::atomic::Ordering::Relaxed) {
                 inode.size.store(tail_eof, core::sync::atomic::Ordering::Relaxed);
-                // SAFETY: sb was just installed above (Box::into_raw) and
+                // sb was just installed above (Box::into_raw) and
                 // the Arc is not shared yet — exclusive plain field write.
-                unsafe {
-                    (*(inode.sb.unwrap() as *mut inode::Ext4Inode)).size = tail_eof;
-                }
+                crate::fs::edges::raw_mut(inode.sb.unwrap() as *mut inode::Ext4Inode).size =
+                    tail_eof;
             }
         }
     }
@@ -3986,10 +3977,10 @@ pub fn mount_loop_instance(
                             break;
                         }
                     }
-                    // SAFETY: the slot's pointer is a registered instance
+                    // the slot's pointer is a registered instance
                     // (published under EXT4_BIG_LOCK; cleared by the same
                     // lock's invalidation path before any free).
-                    let fs_ref = unsafe { &*fs_ptr };
+                    let fs_ref = crate::fs::edges::raw_ref(fs_ptr);
                     // The requested read-only-ness only ever ADDS
                     // restrictions at the VFS mount flags (do_mount
                     // mirrors effective_ro); the instance itself stays
@@ -4041,7 +4032,7 @@ pub fn mount_loop_instance(
     // never outlive the registry row.
     loop_instance_publish(disk, fs_ptr);
     // fs_ptr is a leaked, valid instance pointer (registry-proven).
-    let fs_ref = crate::fs::unsafe_edges::static_ref_unchecked(fs_ptr);
+    let fs_ref = crate::fs::edges::static_ref_unchecked(fs_ptr);
     match fs_ref.read_inode(2) {
         Ok(ext4_inode) => Ok((create_vfs_inode_in(fs_ref, 2, &ext4_inode), fs_ref.read_only)),
         Err(_) => {
@@ -4052,8 +4043,8 @@ pub fn mount_loop_instance(
             // invariant as unmount).
             loop_instance_invalidate_locked(disk);
             ext4_instance_unregister(fs_ptr);
-            // SAFETY: reclaiming the just-leaked box.
-            unsafe { drop(alloc::boxed::Box::from_raw(fs_ptr)) };
+            // reclaiming the just-leaked box.
+            drop(crate::fs::edges::box_take(fs_ptr));
             Err(errno::Errno::InvalidArgument.as_neg_i32())
         }
     }

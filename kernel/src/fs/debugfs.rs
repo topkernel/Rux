@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -79,11 +80,6 @@ pub struct DebugFsNode {
     /// so userspace stream readers saw nothing).
     pub streaming: bool,
 }
-
-// SAFETY: every mutable field sits behind a Spinlock; the closures are
-// required to be Send + Sync at construction.
-unsafe impl Send for DebugFsNode {}
-unsafe impl Sync for DebugFsNode {}
 
 static ROOT: Spinlock<Option<Arc<DebugFsNode>>> = Spinlock::new(None);
 static INO_COUNTER: AtomicU64 = AtomicU64::new(2);
@@ -335,7 +331,7 @@ pub struct DebugFsEntryData {
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from debugfs_iget/create_root_inode.
 fn entry_of<'a>(inode: &'a Inode) -> Option<&'a DebugFsEntryData> {
-    crate::fs::unsafe_edges::privdata_ref::<DebugFsEntryData>(inode)
+    crate::fs::edges::privdata_ref::<DebugFsEntryData>(inode)
 }
 
 /// Resolve a child of `dir`.
@@ -482,7 +478,7 @@ fn debugfs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
         // SAFETY: the Box was leaked by into_raw at inode creation
         // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut DebugFsEntryData) });
+        drop(crate::fs::edges::box_take(ptr as *mut DebugFsEntryData));
     }
 }
 
@@ -524,7 +520,7 @@ pub struct DebugFsFileContent {
 fn debugfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // The snapshot box is this description's private data
     // (INV-FS-FILEPRIV-1, the framework edge).
-    let content = match crate::fs::unsafe_edges::file_privdata_ref::<DebugFsFileContent>(file) {
+    let content = match crate::fs::edges::file_privdata_ref::<DebugFsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -568,7 +564,7 @@ fn debugfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn debugfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // See the read op above (INV-FS-FILEPRIV-1).
-    let content = match crate::fs::unsafe_edges::file_privdata_ref::<DebugFsFileContent>(file) {
+    let content = match crate::fs::edges::file_privdata_ref::<DebugFsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -590,7 +586,7 @@ fn debugfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isi
 fn debugfs_file_close(file: &crate::fs::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(crate::fs::unsafe_edges::file_privdata_take::<DebugFsFileContent>(file));
+    drop(crate::fs::edges::file_privdata_take::<DebugFsFileContent>(file));
     0
 }
 

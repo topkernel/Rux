@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -217,12 +218,7 @@ pub fn get_vfs_root() -> Option<Arc<Dentry>> {
         // alive for the whole read. Building a temporary Arc from it and
         // forgetting the temporary leaves the leaked count untouched; the
         // clone handed out owns its own balanced increment.
-        unsafe {
-            let tmp = Arc::from_raw(p as *const Dentry);
-            let out = Arc::clone(&tmp);
-            core::mem::forget(tmp);
-            return Some(out);
-        }
+        return Some(crate::fs::edges::arc_clone_leak(p as *const Dentry));
     }
     VFS_STATE.lock().root_dentry.clone()
 }
@@ -400,16 +396,15 @@ fn apply_mnt_flags(
                 &crate::fs::ext4::EXT4_INODE_OPS as *const _,
             ) {
                 if let Some(p) = root_inode.private_data {
-                    // SAFETY: the fs instance lives for the mount;
+                    // the fs instance lives for the mount;
                     // read_only is a plain bool whose only writers
                     // are mount setup and this remount path.
-                    let forced_ro = unsafe {
-                        (*(p as *const crate::fs::ext4::Ext4FileSystem)).metadata_csum
-                    };
-                    unsafe {
-                        (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
-                            new_flags.is_readonly() || forced_ro;
-                    }
+                    let forced_ro = crate::fs::edges::raw_ref(
+                        p as *const crate::fs::ext4::Ext4FileSystem,
+                    )
+                    .metadata_csum;
+                    crate::fs::edges::raw_mut(p as *mut crate::fs::ext4::Ext4FileSystem)
+                        .read_only = new_flags.is_readonly() || forced_ro;
                 }
             }
         }
@@ -745,7 +740,7 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
         if busy.load(Ordering::Relaxed) {
             return;
         }
-        let task = unsafe { &*t };
+        let task =  &*t ;
         // Open descriptors: any file whose dentry sits in the subtree.
         if let Some(fdtable) = task.try_fdtable() {
             fdtable.for_each_file(|_fd, file| {
@@ -2902,7 +2897,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // the retirement drain, or is refreshed from a live owned Arc;
         // the *_arc_from_raw adopts ride INV-DENTRY-ADOPT-1. All walk
         // rows in this file ride this contract.)
-        let cur_d: &Dentry = unsafe { &*current_raw };
+        let cur_d: &Dentry = crate::fs::edges::raw_ref(current_raw);
 
         // ENOTDIR (Linux link_path_walk): `current` must be a directory to
         // walk INTO the next component — a regular file / FIFO / device in
@@ -2920,7 +2915,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
         if !cur_inode_raw.is_null() {
             // SAFETY: carried under the claim (see above).
-            let cur_inode = unsafe { &*cur_inode_raw };
+            let cur_inode = crate::fs::edges::raw_ref(cur_inode_raw);
             if !cur_inode.mode.is_directory() {
                 return Err(errno::Errno::NotADirectory.as_neg_i32());
             }
@@ -2993,19 +2988,19 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // as 87c51458; negstorm 8w+16w rc=0, 568,699 stale hits clean.)
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
-            if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() {
+            if (crate::fs::edges::raw_ref(p)).is_negative() && crate::dfx::fsw::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
                 let parent_gen = if !cur_inode_raw.is_null() {
                     // SAFETY: carried under the claim (see above).
-                    unsafe { &*cur_inode_raw }.dir_mut_gen_load()
+                    crate::fs::edges::raw_ref(cur_inode_raw).dir_mut_gen_load()
                 } else {
                     match cur_d.get_inode_fast() {
                         Some(i) => i.dir_mut_gen_load(),
                         None => 0,
                     }
                 };
-                if (unsafe { &*p }).neg_gen_load() != parent_gen {
+                if (crate::fs::edges::raw_ref(p)).neg_gen_load() != parent_gen {
                     // STALE memo: the parent mutated since the memo was
                     // inserted (through this dentry OR any bind alias).
                     // Detach and re-resolve from the filesystem — the
@@ -3038,7 +3033,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // Non-procfs walks pay exactly one fs_id compare here.
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
-            let child = unsafe { &*p };
+            let child = crate::fs::edges::raw_ref(p);
             if !child.is_negative() {
                 // SAFETY: raw mirror read under the walk claim (same
                 // contract as inode_ptr_walk's callers below); the claim
@@ -3046,7 +3041,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 let ino_ptr = child.inode_ptr_walk(cl);
                 if !ino_ptr.is_null() {
                     // SAFETY: non-null and claim-protected (see above).
-                    let inode = unsafe { &*ino_ptr };
+                    let inode = crate::fs::edges::raw_ref(ino_ptr);
                     if inode.fs_id == crate::fs::inode::FS_ID_PROCFS
                         && inode.private_data.is_none()
                         && inode.ino < 10000
@@ -3072,7 +3067,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     // SAFETY: current_raw is protected by the claim held
                     // by `claim` (still alive — dropped below, AFTER this
                     // strong-count increment).
-                    None => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
+                    None => crate::fs::dentry::dentry_arc_from_raw(current_raw),
                 });
                 drop(claim.take());
                 let pc_m = crate::dfx::fsw::pc_now();
@@ -3230,7 +3225,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_B_NS, pc_b);
         // SAFETY: child_raw came from lookup_child_walk under the claim
         // (memo slot or the child map — the claim pins its lifetime).
-        let c: &Dentry = unsafe { &*child_raw };
+        let c: &Dentry = crate::fs::edges::raw_ref(child_raw);
         // Negative dentry — file known not to exist
         if c.is_negative() {
             crate::dfx::fsw::note_neghit();
@@ -3291,7 +3286,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         if c.get_inode_gen() != gen_now {
             if !inode_raw.is_null() {
                 // SAFETY: read under the claim.
-                let cached = unsafe { &*inode_raw };
+                let cached = crate::fs::edges::raw_ref(inode_raw);
                 if let Some(fresh) = crate::fs::inode::icache_lookup(cached.ino, cached.fs_id) {
                     if Arc::as_ptr(&fresh) as *const crate::fs::inode::Inode != inode_raw {
                         c.set_inode(alloc::sync::Arc::clone(&fresh));
@@ -3320,7 +3315,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
         if hopped {
             // SAFETY: child_raw protected by the claim (see above).
-            let child_arc = unsafe { crate::fs::dentry::dentry_arc_from_raw(child_raw) };
+            let child_arc = crate::fs::dentry::dentry_arc_from_raw(child_raw);
             let landed = follow_mount(child_arc);
             current_raw = Arc::as_ptr(&landed);
             current = Some(landed);
@@ -3337,7 +3332,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 "{}{}={} ",
                 component,
                 if hopped { "*" } else { "" },
-                unsafe { &*current_raw }.get_name()
+                crate::fs::edges::raw_ref(current_raw).get_name()
             ));
         }
         // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
@@ -3347,18 +3342,18 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         let is_last = ci == components.len() - 1;
         let is_symlink = !hopped
             && !inode_raw.is_null()
-            && (unsafe { &*inode_raw }).mode.is_symlink();
+            && crate::fs::edges::raw_ref(inode_raw).mode.is_symlink();
         if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
             // Don't follow symlink on the final component
         } else if is_symlink {
             // SAFETY: inode_raw protected by the claim.
             let inode_arc =
-                unsafe { crate::fs::dentry::inode_arc_from_raw(inode_raw) };
+                crate::fs::dentry::inode_arc_from_raw(inode_raw);
             let d_arc = match current.take() {
                 Some(a) if Arc::as_ptr(&a) == current_raw => a,
                 // SAFETY: current_raw protected by the claim (still held —
                 // dropped below, after this increment).
-                _ => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
+                _ => crate::fs::dentry::dentry_arc_from_raw(current_raw),
             };
             cur_inode_raw = core::ptr::null();
             drop(claim.take());
@@ -3387,7 +3382,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     }
     let cl = claim.as_ref().unwrap();
     // SAFETY: protected by the claim (see the protocol).
-    let dentry_d: &Dentry = unsafe { &*current_raw };
+    let dentry_d: &Dentry = crate::fs::edges::raw_ref(current_raw);
 
     // Build VfsPath from final dentry — materialize BOTH owned Arcs
     // while the claim is held (the strong-count increments must not
@@ -3411,12 +3406,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
         // SAFETY: protected by the claim.
-        unsafe { crate::fs::dentry::inode_arc_from_raw(p) }
+        crate::fs::dentry::inode_arc_from_raw(p)
     };
     let dentry: Arc<Dentry> = match current.take() {
         Some(a) if Arc::as_ptr(&a) == current_raw => a,
         // SAFETY: protected by the claim.
-        _ => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
+        _ => crate::fs::dentry::dentry_arc_from_raw(current_raw),
     };
     drop(claim.take());
 
@@ -5436,9 +5431,8 @@ pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, 
     // close the descriptor and surface the error instead.
     if let Err(e) = vfs_unlink(&full) {
         // SAFETY: fd was just installed in the current task's table.
-        unsafe {
-            let _ = crate::fs::close_file_fd(fd);
-        }
+                    let _ = crate::fs::close_file_fd(fd);
+        
         return Err(e);
     }
     Ok(fd)
@@ -7141,22 +7135,22 @@ struct MemFileContent {
 fn mem_file_content(file: &File) -> Option<&MemFileContent> {
     // SAFETY: INV-MEMFILE-1 — the pointer, when present, is a live
     // Box<MemFileContent> owned by this File; shared read here.
-    let ptr = unsafe { *file.private_data.get() }?;
-    Some(unsafe { &*(ptr as *const MemFileContent) })
+    let ptr = crate::fs::edges::file_privdata_cell_read(file)?;
+    Some(crate::fs::edges::raw_ref(ptr as *const MemFileContent))
 }
 
 fn mem_file_content_mut(file: &File) -> Option<&mut MemFileContent> {
     // SAFETY: INV-MEMFILE-1 — sole mutable reach; mem-file ops are the
     // only private_data users for this File.
-    let ptr = unsafe { *file.private_data.get() }?;
-    Some(unsafe { &mut *(ptr as *mut MemFileContent) })
+    let ptr = crate::fs::edges::file_privdata_cell_read(file)?;
+    Some(crate::fs::edges::raw_mut(ptr as *mut MemFileContent))
 }
 
 /// Take the owned Box back (close path — frees the content).
 fn mem_file_take_owned(file: &File) -> Option<alloc::boxed::Box<MemFileContent>> {
     // SAFETY: INV-MEMFILE-1 — take() hands the unique ownership to us.
-    let ptr = unsafe { &mut *file.private_data.get() }.take()?;
-    Some(unsafe { alloc::boxed::Box::from_raw(ptr as *mut MemFileContent) })
+    let ptr = crate::fs::edges::file_privdata_ptr_take(file)?;
+    Some(crate::fs::edges::box_take(ptr as *mut MemFileContent))
 }
 
 /// Read operation for memory files
@@ -7329,11 +7323,9 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
         // SAFETY: private_data holds an Arc<TmpfsNode> placed by
         // tmpfs_make_inode; ManuallyDrop borrows the strong count
         // without claiming it.
-        let node = core::mem::ManuallyDrop::new(unsafe {
-            alloc::sync::Arc::from_raw(
-                inode.private_data.unwrap() as *const crate::fs::tmpfs::TmpfsNode,
-            )
-        });
+        let node = core::mem::ManuallyDrop::new(crate::fs::edges::arc_take(
+            inode.private_data.unwrap() as *const crate::fs::tmpfs::TmpfsNode,
+        ));
         if mode & PUNCH_HOLE != 0 {
             if mode & KEEP_SIZE == 0 {
                 // Linux: PUNCH_HOLE without KEEP_SIZE is EINVAL.
@@ -7411,26 +7403,26 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
     {
         let keep_size = mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE != 0;
         let fs_ptr2 = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
-        // SAFETY: fs_ptr2 is the ext4 instance from inode.private_data.
-        if let Ok(fresh) = unsafe { (*fs_ptr2).read_inode(inode.ino as u32) } {
+        // fs_ptr2 is the ext4 instance from inode.private_data.
+        let fs_ref2 = crate::fs::edges::raw_ref(fs_ptr2);
+        if let Ok(fresh) = fs_ref2.read_inode(inode.ino as u32) {
             if !keep_size {
                 let live = inode.size.load(core::sync::atomic::Ordering::Acquire);
                 if fresh.size > live {
                     inode.size.store(fresh.size, core::sync::atomic::Ordering::Release);
                 }
             }
-            // SAFETY: inode.sb is the Box<Ext4Inode> cached at open.
+            // inode.sb is the Box<Ext4Inode> cached at open.
             if let Some(ptr) = inode.sb {
-                unsafe {
-                    let cached = &mut *(ptr as *mut crate::fs::ext4::inode::Ext4Inode);
-                    cached.block = fresh.block;
-                    if !keep_size && fresh.size > cached.size {
-                        cached.size = fresh.size;
-                    }
-                    cached.blocks = fresh.blocks;
-                    cached.mtime = fresh.mtime;
-                    cached.ctime = fresh.ctime;
+                let cached =
+                    crate::fs::edges::raw_mut(ptr as *mut crate::fs::ext4::inode::Ext4Inode);
+                cached.block = fresh.block;
+                if !keep_size && fresh.size > cached.size {
+                    cached.size = fresh.size;
                 }
+                cached.blocks = fresh.blocks;
+                cached.mtime = fresh.mtime;
+                cached.ctime = fresh.ctime;
             }
         }
     }
@@ -7565,7 +7557,7 @@ pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
     inode.private_data = Some(pid as *mut u8);
 
     let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
-    crate::fs::unsafe_edges::file_inode_install(&file, alloc::sync::Arc::new(inode));
+    crate::fs::edges::file_inode_install(&file, alloc::sync::Arc::new(inode));
 
     get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
 }

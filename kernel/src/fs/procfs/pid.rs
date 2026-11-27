@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -150,10 +151,10 @@ impl PinnedTask {
         if p.is_null() { None } else { Some(PinnedTask { ptr: p }) }
     }
     fn get(&mut self) -> &'static mut crate::process::task::Task {
-        // SAFETY: pinned at construction; released only in Drop. The
+        // pinned at construction; released only in Drop. The
         // 'static lifetime mirrors find_task_by_pid's contract — the pin
         // extends the slot's validity for the whole borrow.
-        unsafe { &mut *self.ptr }
+        crate::process::unsafe_edges::borrow_task_mut(self.ptr)
     }
 }
 impl core::ops::Drop for PinnedTask {
@@ -318,7 +319,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     // count — single-threaded processes report 1, CLONE_THREAD groups
     // report the leader's nr_threads).
     let threads = {
-        let leader = unsafe { &*task.group_leader_ptr() };
+        let leader = crate::process::unsafe_edges::borrow_task(task.group_leader_ptr());
         leader.nr_threads().max(1)
     };
 
@@ -483,15 +484,15 @@ fn read_target_user_mm(
     while remaining > 0 {
         // SAFETY: root_ppn belongs to the pinned target mm (callers hold
         // a PinnedTask or are the current task); walk is read-only.
-        let Some((ppn, _pte)) = (unsafe { PageTableWalker::walk(root_ppn, va) }) else {
+        let Some((ppn, _pte)) = ( PageTableWalker::walk(root_ppn, va) ) else {
             break; // unmapped — truncated content, not a kernel error
         };
         let in_page_off = (va & 0xFFF) as usize;
         let copy = core::cmp::min(remaining, 4096 - in_page_off);
-        // SAFETY: ppn<<12+off is a mapped user page of the target; the
+        // ppn<<12+off is a mapped user page of the target; the
         // kernel linear mapping makes it readable here.
         let src = phys_to_virt(PhysAddr::new((ppn << 12) + in_page_off as u64)).0 as *const u8;
-        let chunk = unsafe { core::slice::from_raw_parts(src, copy) };
+        let chunk = crate::fs::edges::lin_slice(src, copy);
         out.extend_from_slice(chunk);
 
         remaining -= copy;
@@ -623,7 +624,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
             let nice = t.nice();
             let prio = 120 - nice;
             let threads = {
-                let leader = unsafe { &*t.group_leader_ptr() };
+                let leader = crate::process::unsafe_edges::borrow_task(t.group_leader_ptr());
                 leader.nr_threads().max(1)
             };
             // SchedPolicy already uses Linux's SCHED_* numbering
@@ -844,9 +845,8 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
             let mut p = start & !(crate::mm::page::PAGE_SIZE - 1);
             while p < end {
                 // SAFETY: read-only walk of this task's own page tables.
-                if unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, p as u64)
-                }
+                if                     crate::arch::mm::mm_ops::PageTableWalker::walk(root, p as u64)
+                
                 .is_some()
                 {
                     rss_pages += 1;
@@ -1000,8 +1000,8 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                 );
             }
             if let Some(file) = addr_space.get_vma_file(start) {
-                // SAFETY: read-only dentry access on the pinned file.
-                let dentry_opt = unsafe { &*file.dentry.get() };
+                // read-only dentry access on the pinned file.
+                let dentry_opt = crate::fs::edges::cell_ref(&file.dentry);
                 if let Some(dentry) = dentry_opt {
                     // d_path()-style: relative to the READING task's root.
                     let path = crate::fs::vfs::dentry_user_path(dentry);
@@ -1020,12 +1020,12 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                     // down already; maps paths then show no path (Linux
                     // shows the empty path for such VMAs too).
                     let file = match task.try_fdtable() {
-                        Some(ft) => unsafe { ft.get_file(fd as usize) },
+                        Some(ft) =>  ft.get_file(fd as usize) ,
                         None => None,
                     };
                     if let Some(file) = file {
                         // SAFETY: read-only dentry access on the fdtable file.
-                        let dentry_opt = unsafe { &*file.dentry.get() };
+                        let dentry_opt = crate::fs::edges::cell_ref(&file.dentry);
                         if let Some(dentry) = dentry_opt {
                             // /proc/<pid>/maps paths are d_path()-style:
                             // relative to the READING task's root.
@@ -1127,7 +1127,7 @@ pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
 
 /// Get the path string for a file descriptor's File object
 fn get_fd_path(file: &alloc::sync::Arc<crate::fs::File>) -> alloc::string::String {
-    let dentry_opt = unsafe { &*file.dentry.get() };
+    let dentry_opt = crate::fs::edges::cell_ref(&file.dentry);
     match dentry_opt {
         // /proc/<pid>/fd/N links are d_path()-style: relative to the
         // READING task's root (Linux readlink on these uses the reader's
@@ -1136,7 +1136,7 @@ fn get_fd_path(file: &alloc::sync::Arc<crate::fs::File>) -> alloc::string::Strin
         None => {
             // No dentry (pipe, socket, epoll, etc.)
             // Try to get inode number for display
-            let inode_opt = unsafe { &*file.inode.get() };
+            let inode_opt = crate::fs::edges::file_inode(file);
             match inode_opt {
                 Some(inode) => {
                     // Check if it looks like a pipe
@@ -1190,7 +1190,7 @@ pub fn generate_fd_link(pid: u64, fd: u32) -> Vec<u8> {
 /// Score is computed dynamically: total_vm + oom_score_adj * totalpages / 1000
 pub fn generate_oom_score(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
-    use crate::mm::pglist::first_online_node_mut;
+    use crate::mm::pglist::first_online_node;
     use crate::mm::zone::ZoneType;
 
     let task = if current_pid() as u64 == pid {
@@ -1205,8 +1205,8 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
     };
 
     // Get totalpages from zone
-    // SAFETY: read-only zone statistics — no concurrent mutation concern.
-    let totalpages = unsafe { first_online_node_mut() }
+    // read-only zone statistics — the safe accessor suffices.
+    let totalpages = first_online_node()
         .and_then(|node| {
             for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
                 if let Some(zone) = node.zone(zt) {
@@ -1219,7 +1219,7 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
         })
         .unwrap_or(0);
 
-    let score = unsafe { crate::mm::oom_kill::oom_badness(&*task, totalpages) };
+    let score =  crate::mm::oom_kill::oom_badness(&*task, totalpages) ;
     format!("{}\n", score).into_bytes()
 }
 
@@ -1241,7 +1241,7 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
         None => return b"0\n".to_vec(),
     };
 
-    let adj = unsafe { (*task).oom_score_adj() };
+    let adj =  (*task).oom_score_adj() ;
     format!("{}\n", adj).into_bytes()
 }
 

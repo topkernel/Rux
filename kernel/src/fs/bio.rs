@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -86,13 +87,6 @@ pub struct BufferHead {
     b_count: AtomicU32,
 }
 
-// SAFETY: BufferHead's mutable state (b_data) is protected by BufferState spinlock;
-// other fields are atomic or only accessed under lock.
-unsafe impl Send for BufferHead {}
-// SAFETY: all shared mutable state is protected by the BufferState spinlock;
-// b_data is only mutated under lock or from a single thread.
-unsafe impl Sync for BufferHead {}
-
 impl BufferHead {
     /// Create new buffer head
     pub fn new(blocknr: u64, size: u32) -> Self {
@@ -116,11 +110,11 @@ impl BufferHead {
     /// state already requires.
     pub fn new_uninit(blocknr: u64, size: u32) -> Self {
         let mut b_data = Vec::with_capacity(size as usize);
-        // SAFETY: the allocation holds `size` initialized bytes for the Vec's
+        // the allocation holds `size` initialized bytes for the Vec's
         // purposes; no read of b_data happens before the DMA completes and
         // BH_Uptodate is set (documented contract above). The capacity is
         // exactly `size`, so set_len stays in bounds.
-        unsafe { b_data.set_len(size as usize); }
+        crate::fs::edges::vec_set_len(&mut b_data, size as usize);
         Self {
             b_device: None,
             b_blocknr: blocknr,
@@ -278,7 +272,7 @@ impl CacheEntry {
             None
         } else {
             // SAFETY: INV-BIO-BH; Box-owned, non-null (checked).
-            Some(unsafe { &*self.bh })
+            Some(crate::fs::edges::raw_ref(self.bh))
         }
     }
 
@@ -295,7 +289,7 @@ impl CacheEntry {
         } else {
             // SAFETY: INV-BIO-BH + bucket lock held; single live &mut
             // window under the same lock the pre-conversion writes had.
-            Some(unsafe { &mut *self.bh })
+            Some(crate::fs::edges::raw_mut(self.bh))
         }
     }
 }
@@ -308,9 +302,16 @@ impl CacheEntry {
 /// The round-1 TaskRef shape applied to the buffer cache.
 #[inline]
 fn entry_ref(p: *mut CacheEntry) -> &'static CacheEntry {
-    // SAFETY: INV-BIO-ENTRY; entries are Box::into_raw allocations that
+    // INV-BIO-ENTRY; entries are Box::into_raw allocations that
     // live while linked under their locks.
-    unsafe { &*p }
+    crate::fs::edges::raw_ref(p)
+}
+
+/// The exclusive twin of [`entry_ref`] (INV-BIO-ENTRY; the bucket/lru
+/// lock serializes the write window).
+#[inline]
+fn entry_ref_mut(p: *mut CacheEntry) -> &'static mut CacheEntry {
+    crate::fs::edges::raw_mut(p)
 }
 
 impl Drop for CacheEntry {
@@ -318,9 +319,7 @@ impl Drop for CacheEntry {
         if !self.bh.is_null() {
             // SAFETY: self.bh was created by Box::into_raw in CacheEntry::new;
             // Drop is called once and bh is non-null (checked above), so this reclaims the Box.
-            unsafe {
-                let _ = Box::from_raw(self.bh);
-            }
+            let _ = crate::fs::edges::box_take(self.bh);
         }
     }
 }
@@ -366,14 +365,6 @@ pub struct BlockCache {
     /// Block size
     block_size: u32,
 }
-
-// SAFETY: BlockCache is only accessed via &self methods that use internal locking
-// (per-bucket Spinlock and LRU Spinlock) and atomic count; raw pointers are
-// confined to cache internals and never exposed without locks.
-unsafe impl Send for BlockCache {}
-// SAFETY: all shared mutable state (hash buckets, LRU list) is protected by
-// Spinlocks; raw pointer access is always under the appropriate bucket lock.
-unsafe impl Sync for BlockCache {}
 
 /// Leg-52 dfx counter: sync_all/sync_all_excluding walked a LINKED
 /// cache entry whose bh was NULL (the R11-1 crash family's read side).
@@ -444,42 +435,40 @@ impl BlockCache {
         // SAFETY: INV-BIO-ENTRY — lru lock held; entry and every neighbor
         // it names in prev/next are linked under the same lock, so the
         // whole relink is one raw-deref window.
-        unsafe {
-            let entry = &mut *entry_ptr;
+        let entry = entry_ref_mut(entry_ptr);
 
-            // R7-C1: an entry unlinked by evict_one Phase 1 (both links
-            // None) but still visible in the hash chain can race here via
-            // get(). Unlinking it again would drop lru.tail (lru_next None
-            // -> tail = lru_prev = None) and leave the real tail orphaned
-            // — instead treat it as a fresh insert (same as push_lru_head).
-            if entry.lru_prev.is_none() && entry.lru_next.is_none() && lru.head != Some(entry_ptr) {
-                Self::push_lru_head(lru, entry_ptr);
-                return;
-            }
-            if lru.head == Some(entry_ptr) {
-                return; // already at head
-            }
+        // R7-C1: an entry unlinked by evict_one Phase 1 (both links
+        // None) but still visible in the hash chain can race here via
+        // get(). Unlinking it again would drop lru.tail (lru_next None
+        // -> tail = lru_prev = None) and leave the real tail orphaned
+        // — instead treat it as a fresh insert (same as push_lru_head).
+        if entry.lru_prev.is_none() && entry.lru_next.is_none() && lru.head != Some(entry_ptr) {
+            Self::push_lru_head(lru, entry_ptr);
+            return;
+        }
+        if lru.head == Some(entry_ptr) {
+            return; // already at head
+        }
 
-            // Unlink from current position
-            if let Some(prev) = entry.lru_prev {
-                (*prev).lru_next = entry.lru_next;
-            }
-            if let Some(next) = entry.lru_next {
-                (*next).lru_prev = entry.lru_prev;
-            } else {
-                lru.tail = entry.lru_prev;
-            }
+        // Unlink from current position
+        if let Some(prev) = entry.lru_prev {
+            entry_ref_mut(prev).lru_next = entry.lru_next;
+        }
+        if let Some(next) = entry.lru_next {
+            entry_ref_mut(next).lru_prev = entry.lru_prev;
+        } else {
+            lru.tail = entry.lru_prev;
+        }
 
-            // Insert at head
-            entry.lru_prev = None;
-            entry.lru_next = lru.head;
-            if let Some(head) = lru.head {
-                (*head).lru_prev = Some(entry_ptr);
-            }
-            lru.head = Some(entry_ptr);
-            if lru.tail.is_none() {
-                lru.tail = Some(entry_ptr);
-            }
+        // Insert at head
+        entry.lru_prev = None;
+        entry.lru_next = lru.head;
+        if let Some(head) = lru.head {
+            entry_ref_mut(head).lru_prev = Some(entry_ptr);
+        }
+        lru.head = Some(entry_ptr);
+        if lru.tail.is_none() {
+            lru.tail = Some(entry_ptr);
         }
     }
 
@@ -494,17 +483,15 @@ impl BlockCache {
             return;
         }
         // SAFETY: INV-BIO-ENTRY — lru lock held; head is a linked entry.
-        unsafe {
-            let entry = &mut *entry_ptr;
-            entry.lru_prev = None;
-            entry.lru_next = lru.head;
-            if let Some(head) = lru.head {
-                (*head).lru_prev = Some(entry_ptr);
-            }
-            lru.head = Some(entry_ptr);
-            if lru.tail.is_none() {
-                lru.tail = Some(entry_ptr);
-            }
+        let entry = entry_ref_mut(entry_ptr);
+        entry.lru_prev = None;
+        entry.lru_next = lru.head;
+        if let Some(head) = lru.head {
+            entry_ref_mut(head).lru_prev = Some(entry_ptr);
+        }
+        lru.head = Some(entry_ptr);
+        if lru.tail.is_none() {
+            lru.tail = Some(entry_ptr);
         }
     }
 
@@ -513,21 +500,20 @@ impl BlockCache {
     fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
         // SAFETY: INV-BIO-ENTRY — lru lock held; prev/next are linked
         // entries under the same lock.
-        unsafe {
-            let entry = &*entry_ptr;
-            if let Some(prev) = entry.lru_prev {
-                (*prev).lru_next = entry.lru_next;
-            } else {
-                lru.head = entry.lru_next;
-            }
-            if let Some(next) = entry.lru_next {
-                (*next).lru_prev = entry.lru_prev;
-            } else {
-                lru.tail = entry.lru_prev;
-            }
-            (*entry_ptr).lru_prev = None;
-            (*entry_ptr).lru_next = None;
+        let entry = entry_ref(entry_ptr);
+        if let Some(prev) = entry.lru_prev {
+            entry_ref_mut(prev).lru_next = entry.lru_next;
+        } else {
+            lru.head = entry.lru_next;
         }
+        if let Some(next) = entry.lru_next {
+            entry_ref_mut(next).lru_prev = entry.lru_prev;
+        } else {
+            lru.tail = entry.lru_prev;
+        }
+        let em = entry_ref_mut(entry_ptr);
+        em.lru_prev = None;
+        em.lru_next = None;
     }
 
     /// Evict one entry from the LRU tail.
@@ -594,11 +580,11 @@ impl BlockCache {
                 if cp == victim {
                     // SAFETY: bucket lock held; cp/prev chain-linked
                     // (INV-BIO-ENTRY) — the unhash relink writes.
-                    unsafe {
+                    {
                         if let Some(pp) = prev {
-                            (*pp).hash_next = (*cp).hash_next;
+                            entry_ref_mut(pp).hash_next = entry_ref(cp).hash_next;
                         } else {
-                            bucket.head = (*cp).hash_next;
+                            bucket.head = entry_ref(cp).hash_next;
                         }
                     }
                     present = true;
@@ -619,14 +605,12 @@ impl BlockCache {
                 // Pinned between Phase 1 and Phase 2 — but we already
                 // unlinked it! Re-link at the head and abort.
                 // SAFETY: bucket lock held relink write (INV-BIO-ENTRY).
-                unsafe {
-                    (*victim).hash_next = bucket.head;
-                }
+                entry_ref_mut(victim).hash_next = bucket.head;
                 bucket.head = Some(victim);
                 return false;
             }
-            // SAFETY: bucket lock held; victim present in chain.
-            unsafe { (*victim).evicting = true; }
+            // bucket lock held; victim present in chain.
+            entry_ref_mut(victim).evicting = true;
         }
         // bucket lock released; entry is unpinnable and unhashed
 
@@ -683,7 +667,7 @@ impl BlockCache {
             }
             // SAFETY: victim is unhashed + unlinked + unpinnable; the
             // Box::into_raw from insertion is reclaimed exactly once.
-            let _ = unsafe { Box::from_raw(victim) };
+            let _ = crate::fs::edges::box_take(victim);
         }
         self.count.fetch_sub(1, Ordering::Release);
         true
@@ -754,13 +738,11 @@ impl BlockCache {
                 // after this, no new pins can arrive.
                 // SAFETY: bucket lock held; unhash relink write
                 // (INV-BIO-ENTRY).
-                unsafe {
-                    (*cp).evicting = true;
-                    if let Some(pp) = prev {
-                        (*pp).hash_next = (*cp).hash_next;
-                    } else {
-                        bucket.head = (*cp).hash_next;
-                    }
+                entry_ref_mut(cp).evicting = true;
+                if let Some(pp) = prev {
+                    entry_ref_mut(pp).hash_next = entry_ref(cp).hash_next;
+                } else {
+                    bucket.head = entry_ref(cp).hash_next;
                 }
             }
             victim = cp;
@@ -771,8 +753,8 @@ impl BlockCache {
             Self::remove_from_lru(&mut lru, victim);
         }
         crate::dfx::fsw::note_drop_block();
-        // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
-        unsafe { let _ = Box::from_raw(victim); }
+        // unhashed, LRU-unlinked, unpinnable; bh owned by it.
+        let _ = crate::fs::edges::box_take(victim);
         self.count.fetch_sub(1, Ordering::Release);
     }
 
@@ -898,11 +880,9 @@ impl BlockCache {
                         if prev.is_some() {
                             // SAFETY: prev/entry are chain-linked under the
                             // bucket lock (INV-BIO-ENTRY); relinking writes.
-                            unsafe {
-                                let prev_entry = &mut *prev.unwrap();
-                                prev_entry.hash_next = entry.hash_next;
-                                (*entry_ptr).hash_next = bucket.head;
-                            }
+                            let prev_entry = entry_ref_mut(prev.unwrap());
+                            prev_entry.hash_next = entry.hash_next;
+                            entry_ref_mut(entry_ptr).hash_next = bucket.head;
                             bucket.head = Some(entry_ptr);
                         }
                         // Move to LRU head (bucket lock held — enforces ordering)
@@ -984,7 +964,7 @@ impl BlockCache {
                         Self::move_to_lru_head(&mut lru, cp);
                         // SAFETY: entry_ptr was created by Box::into_raw
                         // above; never published, dropped on the dup path.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::edges::box_take(entry_ptr);
                         return Some(ce.bh);
                     }
                     current = ce.hash_next;
@@ -993,9 +973,7 @@ impl BlockCache {
                 // Insert at hash chain head
                 // SAFETY: entry_ptr is the freshly Box::into_raw'd entry;
                 // bucket lock held (INV-BIO-ENTRY relink write).
-                unsafe {
-                    (*entry_ptr).hash_next = bucket.head;
-                }
+                entry_ref_mut(entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
 
                 // Insert at LRU head (bucket lock held — enforces ordering)
@@ -1004,8 +982,8 @@ impl BlockCache {
             }
 
             self.count.fetch_add(1, Ordering::Release);
-            // SAFETY: entry_ptr linked above under the bucket lock.
-            Some(unsafe { (*entry_ptr).bh })
+            // entry_ptr linked above under the bucket lock.
+            Some(entry_ref(entry_ptr).bh)
         }
     }
 
@@ -1132,24 +1110,22 @@ impl BlockCache {
                         }
                         ce.bh().unwrap().get();
                         // SAFETY: our never-published entry, dropped.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::edges::box_take(entry_ptr);
                         return Some(ce.bh);
                     }
                     current = ce.hash_next;
                 }
                 // SAFETY: fresh Box::into_raw entry; bucket lock held
                 // (INV-BIO-ENTRY relink write).
-                unsafe {
-                    (*entry_ptr).hash_next = bucket.head;
-                }
+                entry_ref_mut(entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
                 let mut lru = self.lru_lock_under_bucket(&bucket);
                 Self::move_to_lru_head(&mut lru, entry_ptr);
             }
 
             self.count.fetch_add(1, Ordering::Release);
-            // SAFETY: entry_ptr linked above under the bucket lock.
-            Some(unsafe { (*entry_ptr).bh })
+            // entry_ptr linked above under the bucket lock.
+            Some(entry_ref(entry_ptr).bh)
         }
     }
 
@@ -1157,9 +1133,7 @@ impl BlockCache {
     pub fn put(&self, bh: *const BufferHead) {
         // SAFETY: bh is a raw pointer returned by get()/bread(); it points to a
         // valid BufferHead owned by a CacheEntry in the cache.
-        unsafe {
-            (*bh).put();
-        }
+        crate::fs::edges::raw_ref(bh).put();
     }
 
     /// Sync all dirty buffers.
@@ -1282,9 +1256,9 @@ impl BlockCache {
             while let Some(entry_ptr) = current {
                 // SAFETY: bucket lock held and the chain is being drained;
                 // Box::from_raw reclaims the CacheEntry and its BufferHead.
-                let next = unsafe {
-                    let next = (*entry_ptr).hash_next;
-                    let _ = Box::from_raw(entry_ptr);
+                let next = {
+                    let next = entry_ref(entry_ptr).hash_next;
+                    let _ = crate::fs::edges::box_take(entry_ptr);
                     next
                 };
                 current = next;
@@ -1334,12 +1308,10 @@ impl BlockCache {
                         // SAFETY: bucket lock held; the unhash relink
                         // write plus the guarded free (entry marked
                         // evicting first, so get() skips it).
-                        unsafe {
-                            (*entry_ptr).evicting = true;
-                            match prev {
-                                Some(pp) => (*pp).hash_next = next,
-                                None => bucket.head = next,
-                            }
+                        entry_ref_mut(entry_ptr).evicting = true;
+                        match prev {
+                            Some(pp) => entry_ref_mut(pp).hash_next = next,
+                            None => bucket.head = next,
                         }
                         let mut lru = self.lru.lock_irqsave();
                         Self::remove_from_lru(&mut lru, entry_ptr);
@@ -1349,7 +1321,7 @@ impl BlockCache {
                         // skips evicting entries).
                         // SAFETY: unhashed + evicting-marked + LRU-
                         // unlinked; the Box::into_raw reclaim.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::edges::box_take(entry_ptr);
                         self.count.fetch_sub(1, Ordering::Release);
                     } else {
                         // Pinned: keep the buffer for its holder, but
@@ -1435,9 +1407,9 @@ pub fn get_block_cache() -> &'static BlockCache {
 /// borrow lives only as long as the caller's handle borrow.
 #[inline]
 fn bh_pinned<'a>(bh: &'a *mut BufferHead) -> &'a BufferHead {
-    // SAFETY: INV-BIO-PIN — pinned by the caller's refcount; non-null
+    // INV-BIO-PIN — pinned by the caller's refcount; non-null
     // by the bread family's construction.
-    unsafe { &**bh }
+    crate::fs::edges::raw_ref(*bh)
 }
 
 /// Shared view of a pinned buffer's data block.
@@ -1452,7 +1424,7 @@ pub fn bh_data_mut<'a>(bh: &'a *mut BufferHead) -> &'a mut [u8] {
     // read-modify-write discipline), so the &mut window aliases no live
     // shared borrow. (Kept as the one documented mut edge rather than
     // rippling &mut through dozens of ext4 call sites this round.)
-    unsafe { &mut (**bh).b_data }
+    &mut crate::fs::edges::raw_mut(*bh).b_data
 }
 
 /// Block number of a pinned buffer (metadata loops).
@@ -1519,8 +1491,8 @@ pub fn drop_freed_block_forgotten(
     if let Some(bh) = get_block_cache().peek_buffer((mj, mi), blocknr) {
         // SAFETY: get_current_handle is task-local and null-safe; the
         // handle outlives this call (the freeing op's bracket).
-        if let Some(h) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
-            let _ = unsafe { crate::fs::jbd2::jbd2_journal_forget(&mut *h, bh) };
+        if let Some(h) = crate::fs::edges::current_jbd2_handle() {
+            let _ = crate::fs::edges::jbd2_forget(h, bh);
         }
         get_block_cache().put(bh);
     }
@@ -1562,7 +1534,7 @@ fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
     loop {
         // SAFETY: INV-BIO-PIN — the owner's reference pins the buffer
         // across this wait (the module doc above).
-        let bh_ref: &BufferHead = unsafe { &*bh };
+        let bh_ref: &BufferHead = crate::fs::edges::raw_ref(bh);
         let state = bh_ref.get_state();
         if !state.test(BufferState::BH_Req) {
             return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
@@ -1648,9 +1620,9 @@ pub fn bread_async(
                         // I/O, then complete.
                         // SAFETY: entry.bh passed the len guard above
                         // (non-null, block-sized); pinned before unlock.
-                        let (bh, status) = unsafe {
+                        let (bh, status) = {
                             let bh = entry.bh;
-                            (*bh).get();
+                            crate::fs::edges::raw_ref(bh).get();
                             (bh, wait_buffer_io_done(bh))
                         };
                         drop(bucket);
@@ -1671,11 +1643,9 @@ pub fn bread_async(
                     if prev.is_some() {
                         // SAFETY: bucket lock held; chain relink write
                         // (INV-BIO-ENTRY).
-                        unsafe {
-                            let prev_entry = &mut *prev.unwrap();
-                            prev_entry.hash_next = entry.hash_next;
-                            (*entry_ptr).hash_next = bucket.head;
-                        }
+                        let prev_entry = entry_ref_mut(prev.unwrap());
+                        prev_entry.hash_next = entry.hash_next;
+                        entry_ref_mut(entry_ptr).hash_next = bucket.head;
                         bucket.head = Some(entry_ptr);
                     }
                     let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
@@ -1694,8 +1664,8 @@ pub fn bread_async(
                     // rux:exthunt (retired dfx=exthunt): block-cache hit truth (buffer pointer +
                     // first bytes) — see exthunt_rxbit/exthunt_rxbhit.
                     // SAFETY: hit_bh passed the b_data length guard above.
-                    unsafe {
-                        let d = &(*hit_bh).b_data;
+                    {
+                        let d = bh_data(&hit_bh);
                         crate::fs::ext4::extent::exthunt_rxbhit(
                             blocknr,
                             d.as_ptr(),
@@ -1799,7 +1769,7 @@ pub fn bread_async(
                 } else {
                     // SAFETY: entry_ptr was created by Box::into_raw above;
                     // our I/O has finished and the entry was never published.
-                    let _ = unsafe { Box::from_raw(entry_ptr) };
+                    let _ = crate::fs::edges::box_take(entry_ptr);
                 }
                 // SAFETY: existing_bh was pinned in the dup walk above.
                 let settle = wait_buffer_io_done(existing_bh);
@@ -1821,9 +1791,7 @@ pub fn bread_async(
                 let mut bucket = cache.buckets[index].lock_irqsave();
                 // SAFETY: fresh Box::into_raw entry; bucket lock held
                 // (INV-BIO-ENTRY relink write).
-                unsafe {
-                    (*entry_ptr).hash_next = bucket.head;
-                }
+                entry_ref_mut(entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
 
                 let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
@@ -1831,8 +1799,8 @@ pub fn bread_async(
             }
 
             cache.count.fetch_add(1, Ordering::Release);
-            // SAFETY: entry_ptr linked above under the bucket lock.
-            Some(unsafe { (*entry_ptr).bh })
+            // entry_ptr linked above under the bucket lock.
+            Some(entry_ref(entry_ptr).bh)
         }
     }
 }
@@ -1853,9 +1821,9 @@ pub fn bread_async(
 /// corruption family), and callers must NOT free the DMA target (multi-block
 /// buffers are leaked by drain_batch; single-block buffers keep their pin).
 pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::IoCompletion) -> i32 {
-    // SAFETY: bh is a raw pointer returned by bread_async(); it points to a
+    // bh is a raw pointer returned by bread_async(); it points to a
     // valid BufferHead owned by a CacheEntry in the cache.
-    unsafe {
+    {
         let status = completion.wait();
         if status == 0 {
             // Zero-serve guard (the no-journal ext4 root-lookup family): a
@@ -1871,19 +1839,20 @@ pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::Io
             // misattribution loud. Token 0 = internal signal (cache hit,
             // in-flight branch, dup-path re-settle) — always accept.
             let token = completion.delivered_token();
-            if token != 0 && token != (*bh).b_data.as_ptr() as usize {
+            let bm = crate::fs::edges::raw_ref(bh);
+            if token != 0 && token != bm.b_data.as_ptr() as usize {
                 crate::pr_err!(
                     "bio: misattributed completion for block {} (token {:x} != buffer {:x}) — refusing to publish, reporting EIO",
-                    (*bh).b_blocknr,
+                    bm.b_blocknr,
                     token,
-                    (*bh).b_data.as_ptr() as usize
+                    bm.b_data.as_ptr() as usize
                 );
-                (*bh).clear_state_bit(BufferState::BH_Req);
+                bh_clear_state_bit(&bh, BufferState::BH_Req);
                 return -5;
             }
-            (*bh).set_state_bit(BufferState::BH_Uptodate);
+            bh_set_state_bit(&bh, BufferState::BH_Uptodate);
         }
-        (*bh).clear_state_bit(BufferState::BH_Req);
+        bh_clear_state_bit(&bh, BufferState::BH_Req);
         status
     }
 }
@@ -2086,7 +2055,7 @@ pub fn bfree_multi(bh: *mut BufferHead) {
         return;
     }
     // SAFETY: caller contract above; Box::into_raw in bread_async_multi.
-    unsafe { drop(Box::from_raw(bh)) };
+    drop(crate::fs::edges::box_take(bh));
 }
 
 // ============================================================================
@@ -2229,16 +2198,10 @@ impl WriteSource {
         match self {
             WriteSource::Owned(b) => b,
             WriteSource::Borrowed { ptr, len } => {
-                // SAFETY: the Borrowed variant's contract — `ptr..ptr+len`
+                // the Borrowed variant's contract — `ptr..ptr+len`
                 // names the caller's live, unmodified DMA source for the
                 // submission window (the write-batch discipline).
-                unsafe {
-                    if *len == 0 {
-                        &[]
-                    } else {
-                        core::slice::from_raw_parts(*ptr, *len)
-                    }
-                }
+                crate::fs::edges::kernel_slice_at(*ptr, 0, *len)
             }
         }
     }
@@ -2799,7 +2762,7 @@ pub fn sync_dirty_blocks_batched(
                 bh_pinned(&bh).set_state_bit(BufferState::BH_Dirty);
             }
             // SAFETY: same pin.
-            if !unsafe { (*bh).is_dirty() } {
+            if !crate::fs::edges::raw_ref(bh).is_dirty() {
                 get_block_cache().put(bh);
                 continue;
             }
@@ -2852,11 +2815,9 @@ pub fn sync_dirty_blocks_batched(
 /// transaction to commit; sync(2) writes the whole cache), and
 /// buffer-cache eviction (dirty victims are synced before reuse).
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
-    // get_current_handle reads the current task's handle slot (an
-    // ext4/namei unsafe fn — L4 territory; null-safe outside task ctx).
-    let journal_active = unsafe {
-        crate::fs::ext4::namei::get_current_handle().is_some()
-    };
+    // get_current_handle reads the current task's handle slot (task-local
+    // cell; null-safe outside task ctx) — the JHANDLE edge.
+    let journal_active = crate::fs::edges::current_jbd2_handle().is_some();
     if journal_active {
         crate::dfx::fsw::note_sync_dirty_skip();
         return Ok(());
@@ -2870,7 +2831,7 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     // bh is a raw pointer returned by bread() (INV-BIO-PIN).
     {
         // SAFETY: pinned by the caller's refcount; read-only.
-        let bh_ref: &BufferHead = unsafe { &*bh };
+        let bh_ref: &BufferHead = crate::fs::edges::raw_ref(bh);
         if let Some(dev) = bh_ref.b_device {
             let (mj, mi) = dev_key(dev);
             if publication_constrained(mj, mi, bh_ref.b_blocknr) {
@@ -2878,12 +2839,9 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
             }
         }
     }
-    // SAFETY: bh is a raw pointer returned by bread(); it points to a valid
+    // bh is a raw pointer returned by bread(); it points to a valid
     // BufferHead owned by a CacheEntry in the cache.
-    unsafe {
-        let bh_ref = &*bh;
-        bh_ref.sync()
-    }
+    crate::fs::edges::raw_ref(bh).sync()
 }
 
 /// Sync all dirty buffers
@@ -3244,18 +3202,17 @@ fn publication_capture_note_dirty(
         Some(t) => t,
         None => return,
     };
-    // SAFETY: journal_handle is set/cleared by this task around the
+    // journal_handle is set/cleared by this task around the
     // enclosing ext4 operation; it is null outside one.
-    let hptr = { (*task).journal_handle.get() };
+    let hptr = { crate::process::unsafe_edges::borrow_task(task).journal_handle.get() };
     if hptr.is_null() {
         return;
     }
-    // SAFETY: the handle lives on the owner task's stack for the whole
-    // syscall (see namei::set_current_handle).
-    let (mode, capture_id, capture_dev) = unsafe {
-        let h = &*hptr;
-        (h.capture_mode(), h.capture_post_id(), h.capture_dev_key())
-    };
+    // the handle lives on the owner task's stack for the whole
+    // syscall (INV-EXT4-JHANDLE-1).
+    let h = crate::fs::edges::raw_ref(hptr);
+    let (mode, capture_id, capture_dev) =
+        (h.capture_mode(), h.capture_post_id(), h.capture_dev_key());
     if capture_dev != dev_key(dev) {
         return;
     }
@@ -3264,7 +3221,7 @@ fn publication_capture_note_dirty(
             // SAFETY: same-task access (the hook runs in the owner's
             // syscall context); the Spinlock also covers any stray
             // cross-CPU marker (harmless superset — see the design note).
-            unsafe { (*hptr).h_pre_list.lock().push(blocknr) };
+            crate::fs::edges::raw_mut(hptr).h_pre_list.lock().push(blocknr);
         }
         CAPTURE_POST => {
             let mut pend = PENDING_PUBLICATIONS.lock();
@@ -3749,7 +3706,7 @@ fn sync_block_ordered(dev: (u32, u32), blocknr: u64) -> Result<(), i32> {
             // SAFETY: peek_buffer bumped the refcount; the bh stays valid
             // until the matching put below. sync() skips clean buffers,
             // so already-persisted blocks cost nothing.
-            let r = unsafe { (*bh).sync() };
+            let r = crate::fs::edges::raw_ref(bh).sync();
             get_block_cache().put(bh);
             r
         }
@@ -3798,15 +3755,14 @@ pub(crate) fn with_block_mut<T>(
     let bh = bread(device, blocknr).ok_or(crate::errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: INV-BIO-PIN — bread pinned the buffer; the &mut window
     // rides this function's exclusive scope (no other holder).
-    let data: &mut [u8] = unsafe { &mut (*bh).b_data };
+    let data: &mut [u8] = bh_data_mut(&bh);
     let out = f(data, bh);
     // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
-    unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
-    // SAFETY: get_current_handle is the task-local journal resolver
+    bh_set_state_bit(&bh, BufferState::BH_Dirty);
+    // get_current_handle is the task-local journal resolver
     // (null-safe); the handle pins its transaction.
-    if let Some(handle) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
-        // SAFETY: as above.
-        unsafe { let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh); }
+    if let Some(handle) = crate::fs::edges::current_jbd2_handle() {
+        let _ = crate::fs::edges::jbd2_dirty_metadata(handle, bh);
     }
     let sync_res = sync_dirty_buffer(bh);
     brelse(bh);
@@ -3825,14 +3781,14 @@ pub(crate) fn with_block_deferred_mut<T>(
 ) -> Result<T, i32> {
     let bh = bread(device, blocknr).ok_or(crate::errno::Errno::IOError.as_neg_i32())?;
     // SAFETY: INV-BIO-PIN — the &mut window rides this exclusive scope.
-    let data: &mut [u8] = unsafe { &mut (*bh).b_data };
+    let data: &mut [u8] = bh_data_mut(&bh);
     let out = f(data, bh);
     // SAFETY: as bh_set_state_bit (INV-BIO-PIN).
-    unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
-    // SAFETY: the task-local journal resolver (null-safe).
-    if let Some(handle) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
-        // SAFETY: the handle pins its transaction.
-        unsafe { let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh); }
+    bh_set_state_bit(&bh, BufferState::BH_Dirty);
+    // the task-local journal resolver (null-safe); the handle pins its
+    // transaction.
+    if let Some(handle) = crate::fs::edges::current_jbd2_handle() {
+        let _ = crate::fs::edges::jbd2_dirty_metadata(handle, bh);
     }
     brelse(bh);
     out
@@ -3849,7 +3805,7 @@ pub(crate) fn with_block<T>(
     let bh = bread(device, blocknr)?;
     // SAFETY: INV-BIO-PIN — bread pinned the buffer; the &mut window
     // rides this function's exclusive scope.
-    let data: &[u8] = unsafe { &(*bh).b_data };
+    let data: &[u8] = bh_data(&bh);
     let out = f(data);
     brelse(bh);
     Some(out)

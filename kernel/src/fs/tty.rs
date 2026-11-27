@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -441,11 +442,6 @@ pub struct TtyDevice {
     /// pty master's read buffer)
     output_fn: TtyOutputFn,
 }
-
-// SAFETY: all mutable state is behind Spinlock/atomics; fn pointers are
-// Send+Sync.
-unsafe impl Sync for TtyDevice {}
-unsafe impl Send for TtyDevice {}
 
 impl TtyDevice {
     pub const fn new(output_fn: TtyOutputFn, output_ctx: usize) -> Self {

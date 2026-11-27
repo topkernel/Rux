@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -197,7 +198,7 @@ fn inode_seals(inode: &Inode) -> u32 {
     // creation (before the inode was published through the fd table) and
     // only freed by destroy_inode when the last Arc drops — while we hold
     // one, the pointer is valid (INV-FS-PRIVDATA-1, the framework edge).
-    match crate::fs::unsafe_edges::privdata_ref::<MemfdState>(inode) {
+    match crate::fs::edges::privdata_ref::<MemfdState>(inode) {
         Some(state) => state.seals.load(core::sync::atomic::Ordering::Acquire),
         None => 0,
     }
@@ -210,7 +211,7 @@ fn memfd_destroy_inode(inode: &mut Inode) {
         // owned by this inode; the last Arc<Inode> is dropping now.
         // SAFETY: private_data holds the Box leaked by into_raw at inode
         // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { alloc::boxed::Box::from_raw(p as *mut MemfdState) });
+        drop(crate::fs::edges::box_take(p as *mut MemfdState));
     }
 }
 
@@ -434,7 +435,7 @@ pub fn add_seals(file: &File, seals: u32) -> Result<(), i32> {
 
     // private_data is the MemfdState Box owned by this memfd inode
     // (INV-FS-PRIVDATA-1, the framework edge; see inode_seals).
-    let state = match crate::fs::unsafe_edges::privdata_ref::<MemfdState>(&inode) {
+    let state = match crate::fs::edges::privdata_ref::<MemfdState>(&inode) {
         Some(state) => state,
         None => return Err(-(errno::constants::EINVAL as i32)),
     };

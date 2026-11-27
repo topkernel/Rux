@@ -298,7 +298,7 @@ fn any_unpinned(unpinned: &[UnpinRange], pgstart: usize, pgend: usize) -> bool {
 fn area_of<'a>(file: &'a crate::fs::file::File) -> Option<&'a AshmemArea> {
     // The area box is the description's private data (INV-FS-FILEPRIV-1,
     // the framework edge); the Arc<File> callers hold pins it.
-    crate::fs::unsafe_edges::file_privdata_ref::<AshmemArea>(file)
+    crate::fs::edges::file_privdata_ref::<AshmemArea>(file)
 }
 
 fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
@@ -376,7 +376,7 @@ fn ashmem_file_close(file: &crate::fs::file::File) -> i32 {
     // ops.close runs exactly once, on the final reference drop (close_fd
     // / fdtable teardown / deferred close_pending); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(crate::fs::unsafe_edges::file_privdata_take::<AshmemArea>(file));
+    drop(crate::fs::edges::file_privdata_take::<AshmemArea>(file));
     0
 }
 

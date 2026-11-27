@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -200,7 +201,7 @@ impl Default for Ext4SuperBlockOnDisk {
     fn default() -> Self {
         // SAFETY: Ext4SuperBlockOnDisk is #[repr(C)] with all integer fields;
         // zeroed memory is a valid representation.
-        unsafe { mem::zeroed() }
+        crate::fs::edges::zeroed_repr_c()
     }
 }
 
@@ -285,7 +286,7 @@ impl Default for Ext4GroupDesc {
     fn default() -> Self {
         // SAFETY: Ext4GroupDesc is #[repr(C)] with all integer fields;
         // zeroed memory is a valid representation.
-        unsafe { mem::zeroed() }
+        crate::fs::edges::zeroed_repr_c()
     }
 }
 

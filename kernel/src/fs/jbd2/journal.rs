@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -167,14 +168,7 @@ impl ListHead {
         // SAFETY: Caller must ensure `new` is a valid, live pointer to a
         // ListHead and that `self.next` (if non-null) is also valid. We are
         // inserting `new` between `self` and `self.next` in the list.
-        unsafe {
-            (*new).next = self.next;
-            (*new).prev = self as *mut _;
-            if !self.next.is_null() {
-                (*self.next).prev = new;
-            }
-            self.next = new;
-        }
+        crate::fs::edges::lh_insert_after(self as *mut _, new);
     }
 
     /// Add entry to tail of list
@@ -182,26 +176,14 @@ impl ListHead {
         // SAFETY: Caller must ensure `new` is a valid, live pointer to a
         // ListHead and that `self.prev` (if non-null) is also valid. We are
         // inserting `new` between `self.prev` and `self` in the list.
-        unsafe {
-            (*new).next = self as *mut _;
-            (*new).prev = self.prev;
-            if !self.prev.is_null() {
-                (*self.prev).next = new;
-            }
-            self.prev = new;
-        }
+        crate::fs::edges::lh_insert_before(self as *mut _, new);
     }
 
     /// Remove entry from list
     pub fn remove(entry: *mut ListHead) {
         // SAFETY: Caller must ensure `entry` is currently linked in a list,
         // so `entry.next` and `entry.prev` are valid pointers (or null sentinel).
-        unsafe {
-            if !(*entry).next.is_null() && !(*entry).prev.is_null() {
-                (*(*entry).next).prev = (*entry).prev;
-                (*(*entry).prev).next = (*entry).next;
-            }
-        }
+        crate::fs::edges::lh_remove(entry);
     }
 }
 

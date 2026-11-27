@@ -24,6 +24,7 @@
 // (INV-SYSRQ-1: the sysrq diagnostic family — task words/stacks
 // read through TaskBorrow/pins held across the print (the same
 // short-borrow contract as INV-TASKREF-1); diagnostics only.)
+#![forbid(unsafe_code)]
 use crate::errno;
 
 /// Execute one sysrq command. `cmd` is the command character.
@@ -132,7 +133,7 @@ fn signal_all_except_init(sig: i32) {
     let mut sent = 0u32;
     crate::process::pid_hash::pid_hash_for_each_task(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
-        let pid = unsafe { (*task).pid() };
+        let pid =  (*task).pid() ;
         if pid > 1 {
             let _ = crate::signal::send_signal(pid, sig);
             sent += 1;
@@ -157,7 +158,7 @@ fn dump_all_cpu_stacks() {
             continue;
         }
         // SAFETY: per-CPU current task pointer, read-only diagnostics.
-        let t: &crate::process::task::Task = unsafe { &**task };
+        let t: &crate::process::task::Task = crate::process::unsafe_edges::borrow_task(*task);
         crate::println!(
             "CPU{}: pid={} state={:#x} on_cpu={} idle={}",
             cpu,
@@ -201,7 +202,7 @@ fn print_task_stack_words(task: &crate::process::task::Task) {
     let mut shown = 0;
     for k in 0..80 {
         // SAFETY: diagnostic read within the task's own kernel stack.
-        let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+        let v = crate::fs::edges::volatile_read_at(base, k);
         if v >= lo && v < hi && (v & 1) == 0 {
             crate::println!("    {:#x}", v);
             shown += 1;
@@ -220,7 +221,7 @@ fn dump_blocked_tasks() {
     let mut count = 0u32;
     crate::process::pid_hash::pid_hash_for_each_task(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
-        let t: &crate::process::task::Task = unsafe { &*task };
+        let t: &crate::process::task::Task =  &*task ;
         let state = t.state().bits();
         // TASK_UNINTERRUPTIBLE / TASK_KILLABLE / TASK_NOLOAD: the states
         // a task can sit in while blocked on I/O.

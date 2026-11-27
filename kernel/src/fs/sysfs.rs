@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -180,11 +181,6 @@ pub struct KObject {
     /// attribute files
     pub attributes: Spinlock<BTreeMap<String, Arc<Attribute>>>,
 }
-
-// SAFETY: all mutable state (children/attributes/parent) sits behind
-// Spinlocks; closures are required to be Send + Sync at construction.
-unsafe impl Send for KObject {}
-unsafe impl Sync for KObject {}
 
 impl KObject {
     /// Create a root object (ino 1).
@@ -1953,13 +1949,13 @@ fn sysfs_mount_cb(
 fn sysfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         // SAFETY: the Box the mount callback stored (unmount path).
-        drop(unsafe { alloc::boxed::Box::from_raw(sb as *mut SysfsSuperBlock) });
+        drop(crate::fs::edges::box_take(sb as *mut SysfsSuperBlock));
     }
 }
 
 /// Get the sysfs superblock (if initialized).
 pub fn get_sysfs_sb() -> Option<&'static SysfsSuperBlock> {
-    crate::fs::unsafe_edges::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
+    crate::fs::edges::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
 }
 
 /// Initialize sysfs: register the filesystem type and build the KObject
@@ -2071,7 +2067,7 @@ pub struct SysfsEntryData {
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from sysfs_iget/create_root_inode.
 fn entry_of<'a>(inode: &'a Inode) -> Option<&'a SysfsEntryData> {
-    crate::fs::unsafe_edges::privdata_ref::<SysfsEntryData>(inode)
+    crate::fs::edges::privdata_ref::<SysfsEntryData>(inode)
 }
 
 /// Resolve a child of `dir` to (kobj, attr, link) for lookup/iget.
@@ -2327,7 +2323,7 @@ fn sysfs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
         // SAFETY: the Box was leaked by into_raw at inode creation
         // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut SysfsEntryData) });
+        drop(crate::fs::edges::box_take(ptr as *mut SysfsEntryData));
     }
 }
 
@@ -2393,7 +2389,7 @@ pub struct SysfsFileContent {
 /// read: serve from the open-time snapshot at the file position.
 fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by sysfs_open under this File.
-    let content = match crate::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+    let content = match crate::fs::edges::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2412,12 +2408,12 @@ fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// write: dispatch to the attribute store handler.
 fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
-    let inode = match unsafe { (*file.inode.get()).clone() } {
+    let inode = match crate::fs::edges::file_inode_arc(file) {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: inode provenance is the sysfs iget path.
-    let entry = match unsafe { entry_of(&inode) } {
+    let entry = match  entry_of(&inode)  {
         Some(e) => e,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2441,7 +2437,7 @@ fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see sysfs_file_read.
-    let content = match crate::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+    let content = match crate::fs::edges::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2463,7 +2459,7 @@ fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize
 fn sysfs_file_close(file: &crate::fs::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(crate::fs::unsafe_edges::file_privdata_take::<SysfsFileContent>(file));
+    drop(crate::fs::edges::file_privdata_take::<SysfsFileContent>(file));
     0
 }
 

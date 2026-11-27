@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -62,11 +63,7 @@ impl PipeBuffer {
     pub fn new(capacity: usize) -> Self {
         // Manually allocate and initialize vector to avoid vec! macro
         let ring_len = capacity + 1;
-        let mut data = Vec::with_capacity(ring_len);
-        unsafe {
-            core::ptr::write_bytes(data.as_mut_ptr(), 0, ring_len);
-            data.set_len(ring_len);
-        }
+        let data = crate::fs::edges::zeroed_vec(ring_len);
 
         Self {
             data,
@@ -104,11 +101,7 @@ impl PipeBuffer {
         }
 
         let ring_len = new_capacity + 1;
-        let mut data = Vec::with_capacity(ring_len);
-        unsafe {
-            core::ptr::write_bytes(data.as_mut_ptr(), 0, ring_len);
-            data.set_len(ring_len);
-        }
+        let mut data = crate::fs::edges::zeroed_vec(ring_len);
         for (i, b) in staged.iter().enumerate() {
             data[i] = *b;
         }
@@ -561,7 +554,7 @@ fn file_pipe_private(file: &File) -> Option<&'static Pipe> {
     if ptr.is_null() {
         return None;
     }
-    Some(unsafe { &*(ptr as *const Pipe) })
+    Some(crate::fs::edges::raw_ref(ptr as *const Pipe))
 }
 
 /// True when `file` is a pipe/fifo description (PIPE_OPS) — used by the
@@ -839,8 +832,8 @@ pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
 /// writable bytes.
 fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isize {
     if let Some(pipe_ptr) = file.private_data_ptr() {
-        // SAFETY: the &'static Pipe create_pipe stored (file-lifetime).
-        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+        // the &'static Pipe create_pipe stored (file-lifetime).
+        let pipe = crate::fs::edges::raw_ref(pipe_ptr as *const Pipe);
 
         // Check if non-blocking mode
         let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
@@ -863,11 +856,9 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
                 if user {
                     guard.read_user(dst as usize, count)
                 } else {
-                    // SAFETY: dst is a kernel pointer to count writable bytes
-                    // (the FileOps slice).
-                    // SAFETY: dst names `count` writable kernel bytes (the
+                    // dst names `count` writable kernel bytes (the
                     // FileOps read slice the caller had as a raw ptr).
-                    unsafe { guard.read(core::slice::from_raw_parts_mut(dst, count)) }
+                    guard.read(crate::fs::edges::kernel_slice_mut_at(dst, 0, count))
                 }
             } else {
                 0
@@ -981,8 +972,8 @@ pub fn pipe_write_user(file: &File, src: *const u8, count: usize) -> isize {
 /// `count` readable bytes.
 fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize {
     if let Some(pipe_ptr) = file.private_data_ptr() {
-        // SAFETY: the &'static Pipe create_pipe stored (file-lifetime).
-        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+        // the &'static Pipe create_pipe stored (file-lifetime).
+        let pipe = crate::fs::edges::raw_ref(pipe_ptr as *const Pipe);
 
         // Check if read end is closed
         if pipe.is_read_closed() {
@@ -1027,11 +1018,13 @@ fn pipe_write_common(file: &File, src: usize, count: usize, user: bool) -> isize
                 let count = if user {
                     guard.write_user(src + total_written, remaining)
                 } else {
-                    // SAFETY: src is a kernel pointer naming `count`
+                    // src is a kernel pointer naming `count`
                     // readable bytes (the FileOps slice the caller had).
-                    unsafe {
-                        guard.write(core::slice::from_raw_parts((src + total_written) as *const u8, remaining))
-                    }
+                    guard.write(crate::fs::edges::kernel_slice_at(
+                        src as *const u8,
+                        total_written,
+                        remaining,
+                    ))
                 };
                 // can_write held but 0 bytes copied: a USER fault on the
                 // source. Retrying would livelock (space never drains) —
@@ -1305,8 +1298,8 @@ pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
     let mut ready = 0u16;
 
     if let Some(pipe_ptr) = file.private_data_ptr() {
-        // SAFETY: the &'static Pipe create_pipe stored (file-lifetime).
-        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+        // the &'static Pipe create_pipe stored (file-lifetime).
+        let pipe = crate::fs::edges::raw_ref(pipe_ptr as *const Pipe);
 
         // Linux pipe_poll() branches on filp->f_mode: read-side readiness
         // (POLLIN/POLLRDNORM, POLLHUP when the writers are gone) is only
@@ -1349,7 +1342,7 @@ fn pipe_file_close(file: &File) -> i32 {
         file.clear_private_data();
         // Reconstruct the Arc from the raw pointer. This consumes one Arc refcount.
         // When the last close drops the last Arc, the Pipe is freed.
-        let pipe = unsafe { Arc::from_raw(pipe_ptr as *const Pipe) };
+        let pipe = crate::fs::edges::arc_take(pipe_ptr as *const Pipe);
 
         // Check file flags to determine whether to close read or write end
         if file.flags().is_readonly() || file.flags().is_rdwr() {
@@ -1394,7 +1387,7 @@ pub fn pipe_fionread(file: &File) -> Option<usize> {
     // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
     // while the File exists.
     let ptr = file.private_data_ptr()?;
-    let pipe = unsafe { &*(ptr as *const Pipe) };
+    let pipe = crate::fs::edges::raw_ref(ptr as *const Pipe);
     Some(pipe.available_read())
 }
 
@@ -1460,7 +1453,7 @@ pub fn pipe_get_sz(file: &File) -> Option<usize> {
     // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
     // while the File exists.
     let ptr = file.private_data_ptr()?;
-    let pipe = unsafe { &*(ptr as *const Pipe) };
+    let pipe = crate::fs::edges::raw_ref(ptr as *const Pipe);
     Some(pipe.capacity())
 }
 
@@ -1483,7 +1476,7 @@ pub fn pipe_set_sz(file: &File, size: usize) -> Result<usize, i32> {
         Some(p) => p,
         None => return Err(-(crate::errno::constants::EINVAL as i32)),
     };
-    let pipe = unsafe { &*(ptr as *const Pipe) };
+    let pipe = crate::fs::edges::raw_ref(ptr as *const Pipe);
     pipe.resize_checked(size)
 }
 
@@ -1545,10 +1538,10 @@ pub fn abort_uninstalled_end(file: &mut Arc<File>) {
     // caller breaks that, leave the op to that reference's drop instead
     // of racing it.
     if let Some(f) = Arc::get_mut(file) {
-        // SAFETY: exclusive &mut from get_mut — we are the sole owner and
+        // exclusive &mut from get_mut — we are the sole owner and
         // close() runs at most this once (File::drop sees close_pending
         // == false and will not run it again).
-        unsafe { f.close() };
+        f.close();
     }
 }
 
@@ -1586,9 +1579,9 @@ pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     // ET interests (a write holds the write File but raises the READ
     // end's readiness — see Pipe::epoll_read_fid).
     {
-        // SAFETY: read_ptr was just stored as this File's private slot;
+        // read_ptr was just stored as this File's private slot;
         // the binding runs before the fd is published (no reader yet).
-        let rd = unsafe { &*(read_ptr as *const Pipe) };
+        let rd = crate::fs::edges::raw_ref(read_ptr as *const Pipe);
         rd.set_epoll_read_fid(read_file.file_id);
         rd.set_epoll_write_fid(write_file.file_id);
     }

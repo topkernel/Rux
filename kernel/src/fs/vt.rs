@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -189,14 +190,13 @@ fn vtdev_poll(file: &crate::fs::file::File, events: u16) -> u16 {
 /// file description — the fput discipline in fs/file.rs).
 // SAFETY: private_data holds a leaked Box<DevNo> installed by devfs_open.
 fn vtdev_close(file: &crate::fs::file::File) -> i32 {
-    // SAFETY: the Box was leaked for this File; close runs once.
-    let ptr = match unsafe { *file.private_data.get() } {
+    let ptr = match crate::fs::edges::file_privdata_cell_read(file) {
         Some(p) => p,
         None => return 0,
     };
-    let devno = unsafe { alloc::boxed::Box::from_raw(ptr as *mut crate::fs::dev_t::DevNo) };
+    let devno = crate::fs::edges::box_take(ptr as *mut crate::fs::dev_t::DevNo);
     vt_closed(&devno);
-    unsafe { *file.private_data.get() = None };
+    crate::fs::edges::file_privdata_cell_clear(file);
     0
 }
 
@@ -225,11 +225,9 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
     // The VT number this fd was opened against (devfs_open stashed the
     // DevNo; minor 0 = the tty0 master view, which addresses the ACTIVE
     // VT — exactly Linux's semantics for /dev/tty0).
-    let vt = unsafe {
-        match *(file.private_data.get()) {
-            Some(p) => (*(p as *const crate::fs::dev_t::DevNo)).minor,
-            None => 1,
-        }
+    let vt = match crate::fs::edges::file_privdata_cell_read(file) {
+        Some(p) => crate::fs::edges::raw_ref(p as *const crate::fs::dev_t::DevNo).minor,
+        None => 1,
     };
     let _ = vt;
 
@@ -257,8 +255,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
             if arg == 0 || !crate::arch::uaccess::access_ok(arg, 4) {
                 return Some(-(constants::EFAULT as i64));
             }
-            // SAFETY: arg validated with access_ok(4) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, found) } {
+            if !crate::arch::uaccess_safe::write_user(arg, found) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -276,8 +273,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
                 buf[4..6].copy_from_slice(&m.acqsig.to_le_bytes());
                 buf[6..8].copy_from_slice(&m.frsig.to_le_bytes());
             }
-            // SAFETY: arg validated with access_ok(8) above.
-            if unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), 8) } > 0 {
+            if crate::arch::uaccess_safe::copy_out(arg, &buf) > 0 {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -287,10 +283,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
                 return Some(-(constants::EFAULT as i64));
             }
             let mut buf = [0u8; 8];
-            // SAFETY: arg validated with access_ok(8) above.
-            if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), arg as *const u8, 8) }
-                > 0
-            {
+            if crate::arch::uaccess_safe::copy_in(&mut buf, arg) > 0 {
                 return Some(-(constants::EFAULT as i64));
             }
             let mut m = VT_MODE.lock_irqsave();
@@ -324,7 +317,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
             buf[2..4].copy_from_slice(&0u16.to_le_bytes()); // v_signal
             buf[4..6].copy_from_slice(&mask.to_le_bytes());
             // SAFETY: arg validated with access_ok(6) above.
-            if unsafe { crate::arch::uaccess::copy_to_user(arg as *mut u8, buf.as_ptr(), 6) } > 0 {
+            if crate::arch::uaccess_safe::copy_out(arg, &buf[..6]) > 0 {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -381,7 +374,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(1) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u8, 0u8) } {
+            if !crate::arch::uaccess_safe::write_user(arg, 0u8) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -392,7 +385,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(1) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u8, KB_101) } {
+            if !crate::arch::uaccess_safe::write_user(arg, KB_101) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -409,7 +402,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(4) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, KD_MODE.load(Ordering::Acquire) as i32) } {
+            if !crate::arch::uaccess_safe::write_user(arg, KD_MODE.load(Ordering::Acquire) as i32) {
                 return Some(-(constants::EFAULT as i64));
             }
             0
@@ -419,7 +412,7 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
                 return Some(-(constants::EFAULT as i64));
             }
             // SAFETY: arg validated with access_ok(4) above.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, KB_MODE.load(Ordering::Acquire) as i32) } {
+            if !crate::arch::uaccess_safe::write_user(arg, KB_MODE.load(Ordering::Acquire) as i32) {
                 return Some(-(constants::EFAULT as i64));
             }
             0

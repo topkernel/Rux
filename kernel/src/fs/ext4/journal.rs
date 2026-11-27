@@ -9,6 +9,7 @@
 // (INV-JBD2-INIT-1: journal init — the on-disk superblock probe and
 // the handle setup ride INV-JBD2-BH-1's bread-pinned discipline at
 // mount time (single-threaded).)
+#![forbid(unsafe_code)]
 use alloc::sync::Arc;
 
 use crate::fs::bio;
@@ -74,22 +75,19 @@ impl Ext4FileSystem {
         // Read journal superblock (first block of the journal)
         // SAFETY: bio::bread returns a valid raw BufferHead pointer or None;
         // the None case returns early above.
-        let j_sb_bh = unsafe {
-            match bio::bread(self.device, journal_start_block) {
+        let j_sb_bh =             match bio::bread(self.device, journal_start_block) {
                 Some(b) => b,
                 None => {
                     crate::print_status("ext4", "journal superblock read failed", false);
                     return Err(EIO);
                 }
             }
-        };
+        ;
 
         // SAFETY: j_sb_bh is a valid BufferHead from bread(); b_data is a full
         // block-sized byte array, large enough to hold journal_superblock_t;
         // the pointer is valid for the lifetime of j_sb_bh.
-        let j_sb = unsafe {
-            &*((*j_sb_bh).b_data.as_ptr() as *const jbd2::journal_superblock_t)
-        };
+        let j_sb = crate::fs::edges::bh_view::<jbd2::journal_superblock_t>(j_sb_bh);
 
         // Validate magic number
         if u32::from_be(j_sb.s_header.h_magic) != JBD2_MAGIC_NUMBER {
@@ -131,12 +129,7 @@ impl Ext4FileSystem {
         if has_csum_v2or3 {
             csum_seed = crate::fs::ext4::csum::crc32c(0xFFFF_FFFF, &j_sb.s_uuid);
             let old = j_sb.s_checksum;
-            let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    (*j_sb_bh).b_data.as_ptr() as *const u8,
-                    core::mem::size_of::<jbd2::types::journal_superblock_t>(),
-                )
-            };
+            let bytes: &[u8] = crate::fs::edges::bh_bytes(j_sb_bh, core::mem::size_of::<jbd2::types::journal_superblock_t>());
             // SAFETY: j_sb is a & reference into the buffer; the checksum
             // field must be zeroed in the checksum input — clone-free
             // verify via a temporary copy of the 1024-byte region.

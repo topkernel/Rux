@@ -15,6 +15,7 @@
 // anonymous device numbers live in a locked map (stat_dev_for_fs
 // rows); update_cached_mode's volatile store is the advisory-field
 // discipline (same shape as INV-EXT4-ATIME).)
+#![forbid(unsafe_code)]
 use alloc::sync::Arc;
 use crate::errno::Errno;
 use crate::sync::spinlock::Spinlock;
@@ -313,7 +314,7 @@ pub struct INodeOps {
 /// already holds, and every other argument is a plain
 /// reference/scalar. Implementations that need raw access (ext4's
 /// block edges, per-FS private_data views) keep narrow inner audited
-/// blocks at their own bottoms — see fs/unsafe_edges.rs.
+/// blocks at their own bottoms — see fs/unsafe.rs.
 /// `None` slots are mapped to the caller's
 /// `unsupported` errno so each call site keeps its LTP-observed error
 /// precedence (mkdir-family sites answer EROFS, mknod EOPNOTSUPP,
@@ -607,7 +608,7 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
     if !p.is_null() {
         // SAFETY: snapshots are immutable once published; the pointer is
         // only ever replaced (never freed), so this reference stays valid.
-        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
+        if let Some(&d) = crate::fs::edges::raw_ref(p).0.get(&fs_id) {
             return d;
         }
     }
@@ -616,7 +617,7 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
     let p = ANON_DEV_MAP.load(Ordering::Acquire);
     if !p.is_null() {
         // SAFETY: see above.
-        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
+        if let Some(&d) = crate::fs::edges::raw_ref(p).0.get(&fs_id) {
             return d;
         }
     }
@@ -624,7 +625,7 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
     let mut next = alloc::collections::BTreeMap::new();
     if !p.is_null() {
         // SAFETY: see above; clone under the write lock.
-        next.clone_from(unsafe { &(*p).0 });
+        next.clone_from(&crate::fs::edges::raw_ref(p).0);
     }
     next.insert(fs_id, dev);
     let fresh = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(AnonDevMap(next)));
@@ -736,9 +737,6 @@ pub struct Inode {
     ref_count: AtomicU64,
 }
 
-unsafe impl Send for Inode {}
-unsafe impl Sync for Inode {}
-
 impl Drop for Inode {
     fn drop(&mut self) {
         // R20-FS4: reclaim filesystem-private data when the last Arc<Inode>
@@ -789,7 +787,7 @@ impl Inode {
         // SAFETY: self is a live shared Inode; the store is aligned and
         // u32-sized (see comment) — concurrent readers observe either the
         // old or the new full word.
-        unsafe { ptr.write_volatile(mode); }
+        crate::fs::edges::volatile_write(ptr, mode);
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     }
 
@@ -1211,7 +1209,7 @@ impl Clone for InodeHashBucket {
 }
 
 /// Inode hash table
-struct InodeCache {
+pub(super) struct InodeCache {
     /// Hash table (heap-allocated to avoid large stack allocation)
     buckets: alloc::boxed::Box<[InodeHashBucket]>,
     /// Number of entries in cache
@@ -1221,9 +1219,6 @@ struct InodeCache {
     /// Statistics
     stats: InodeCacheStats,
 }
-
-unsafe impl Send for InodeCache {}
-unsafe impl Sync for InodeCache {}
 
 /// Global Inode cache
 static ICACHE: Spinlock<Option<InodeCache>> = Spinlock::new(None);

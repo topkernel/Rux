@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -148,9 +149,6 @@ pub struct VfsMount {
     mnt_count: core::sync::atomic::AtomicU64,
     mnt_expired: core::sync::atomic::AtomicU64,
 }
-
-unsafe impl Send for VfsMount {}
-unsafe impl Sync for VfsMount {}
 
 impl VfsMount {
     pub fn new(mountpoint: Vec<u8>, root: Vec<u8>, flags: MntFlags, sb: Option<*mut u8>) -> Self {

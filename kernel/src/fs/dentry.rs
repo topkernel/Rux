@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -96,9 +97,6 @@ impl VfsMountInternal {
         }
     }
 }
-
-unsafe impl Send for VfsMountInternal {}
-unsafe impl Sync for VfsMountInternal {}
 
 // ============================================================================
 // Reader banks + deferred retirement (gap-fs lane)
@@ -319,18 +317,16 @@ pub fn dentry_drain_if_quiescent(parked: bool) {
 /// blocks the deferred-retirement drain that would otherwise free the
 /// target; increment_strong_count + from_raw under that claim is the
 /// audited adopt edge. Both adopt fns and every call site ride it.)
-pub unsafe fn dentry_arc_from_raw(p: *const Dentry) -> Arc<Dentry> {
-    Arc::increment_strong_count(p);
-    Arc::from_raw(p)
+pub fn dentry_arc_from_raw(p: *const Dentry) -> Arc<Dentry> {
+    crate::fs::edges::arc_adopt(p)
 }
 
 /// Same as [`dentry_arc_from_raw`] for inodes (the inode pointer mirror).
 ///
 /// # Safety
 /// See [`dentry_arc_from_raw`]; `p` non-null, loaded under a claim.
-pub unsafe fn inode_arc_from_raw(p: *const Inode) -> Arc<Inode> {
-    Arc::increment_strong_count(p);
-    Arc::from_raw(p)
+pub fn inode_arc_from_raw(p: *const Inode) -> Arc<Inode> {
+    crate::fs::edges::arc_adopt(p)
 }
 
 /// FNV-1a over the component bytes — the memo slot key.
@@ -381,16 +377,10 @@ const CHILD_MEMO_BIG_MAX_SLOTS: usize = 2048;
 /// (old base + new count would read past the old table). `nslots` is
 /// immutable after construction — the base pointer alone identifies a
 /// consistent (slots, len) pair.
-struct BigMemoTable {
+pub(super) struct BigMemoTable {
     nslots: usize,
     slots: alloc::vec::Vec<ChildMemoSlot>,
 }
-
-// SAFETY: the table's slots are shared-memory seqlock cells exactly like
-// the inline `memo` array inside Sync Dentry; cross-thread access goes
-// through the seqlock/children-lock protocol.
-unsafe impl Send for BigMemoTable {}
-unsafe impl Sync for BigMemoTable {}
 
 /// Plain (non-atomic) slot payload — read/written through the enclosing
 /// slot's seqlock (the sync::seqlock UnsafeCell discipline).
@@ -446,13 +436,13 @@ fn memo_slot_read(
     if s1 & 1 != 0 {
         return None; // refill in flight
     }
-    // SAFETY: seqlock-protected read (validated by the seq re-load
+    // seqlock-protected read (validated by the seq re-load
     // below; the sync::seqlock UnsafeCell discipline).
     // (INV-DENTRY-MEMO-1: the child-memo read family — seqlock odd/even
     // validation for the small slots, children-lock Release publication
     // + immutable nslots for the big table, walk-claim blocking the
     // drain; every memo/table row rides this.)
-    let d = unsafe { &*slot.data.get() };
+    let d = crate::fs::edges::cell_ref(&slot.data);
     let hit = d.ver == ver
         && d.hash == h
         && !d.child.is_null()
@@ -547,13 +537,6 @@ pub struct Dentry {
     /// protocol comment).
     inode_ptr: AtomicPtr<Inode>,
 }
-
-// (INV-DENTRY-SEND-1: Dentry/VfsMountInternal/BigMemoTable Sync/Send
-// are carried per-field — children/memo under their locks and seqlock,
-// the retirement banks under the drain lock; no field races through
-// a shared reference.)
-unsafe impl Send for Dentry {}
-unsafe impl Sync for Dentry {}
 
 impl Dentry {
     /// Create new dentry
@@ -713,9 +696,9 @@ impl Dentry {
         let out = if p.is_null() {
             None
         } else {
-            // SAFETY: p is non-null and kept alive by the inode slot or
+            // p is non-null and kept alive by the inode slot or
             // its pending retire; our claim blocks the drain.
-            Some(unsafe { inode_arc_from_raw(p) })
+            Some(inode_arc_from_raw(p))
         };
         drop(claim);
         out
@@ -908,7 +891,7 @@ impl Dentry {
             // drain that would free it. `nslots` is immutable after
             // construction, so the base pointer alone yields a
             // consistent (slots, len) pair even across a concurrent grow.
-            let table: &BigMemoTable = unsafe { &*big };
+            let table: &BigMemoTable = crate::fs::edges::raw_ref(big);
             let n = table.nslots;
             let slot = &table.slots[(h as usize) & (n - 1)];
             if let Some(p) = memo_slot_read(slot, ver, h, bytes) {
@@ -934,8 +917,8 @@ impl Dentry {
         let claim = WalkClaim::acquire();
         let out = match self.lookup_child_walk(&claim, name) {
             Some(p) => {
-                // SAFETY: loaded under the claim; see the protocol.
-                Some(unsafe { dentry_arc_from_raw(p) })
+                // loaded under the claim; see the protocol.
+                Some(dentry_arc_from_raw(p))
             }
             None => None,
         };
@@ -958,18 +941,18 @@ impl Dentry {
         // A fill that already matches the current version wins (another
         // CPU refilled between our miss and taking the lock).
         {
-            // SAFETY: children lock held — all refills serialize here.
-            let cur = unsafe { &*slot.data.get() };
+            // children lock held — all refills serialize here.
+            let cur = crate::fs::edges::cell_ref(&slot.data);
             if cur.ver == ver && cur.hash == h && !cur.child.is_null() {
                 return;
             }
         }
         let s = slot.seq.load(Ordering::Relaxed);
         slot.seq.store(s | 1, Ordering::Release); // odd — enter write
-        // SAFETY: children lock held (serializes writers); racing
+        // children lock held (serializes writers); racing
         // readers are guarded by the seqlock.
         {
-            let d = unsafe { &mut *slot.data.get() };
+            let d = crate::fs::edges::cell_ref_mut(&slot.data);
             d.ver = ver;
             d.hash = h;
             d.name_len = name.len() as u8;
@@ -986,22 +969,22 @@ impl Dentry {
             // SAFETY: published table (children lock held here
             // serializes this writer against every other refill);
             // `nslots` immutable after construction.
-            let table: &BigMemoTable = unsafe { &*big };
+            let table: &BigMemoTable = crate::fs::edges::raw_ref(big);
             let n = table.nslots;
             let bslot = &table.slots[(h as usize) & (n - 1)];
             // Same already-filled short-circuit as the inline slot.
             {
-                // SAFETY: children lock held — all refills serialize.
-                let cur = unsafe { &*bslot.data.get() };
+                // children lock held — all refills serialize.
+                let cur = crate::fs::edges::cell_ref(&bslot.data);
                 if cur.ver == ver && cur.hash == h && !cur.child.is_null() {
                     return;
                 }
             }
             let s = bslot.seq.load(Ordering::Relaxed);
             bslot.seq.store(s | 1, Ordering::Release); // odd — enter write
-            // SAFETY: children lock held; seqlock guards racing readers.
+            // children lock held; seqlock guards racing readers.
             {
-                let d = unsafe { &mut *bslot.data.get() };
+                let d = crate::fs::edges::cell_ref_mut(&bslot.data);
                 d.ver = ver;
                 d.hash = h;
                 d.name_len = name.len() as u8;
@@ -1040,7 +1023,7 @@ impl Dentry {
             // SAFETY: published table pointer (children lock held here,
             // and the pointer only changes under this lock); nslots is
             // immutable after construction.
-            unsafe { (*cur).nslots }
+            crate::fs::edges::raw_ref(cur).nslots
         };
         if want <= cur_slots {
             return;
@@ -1055,8 +1038,8 @@ impl Dentry {
         // SAFETY: children lock held — this cell's only writers are
         // here and the final Dentry drop (post-quiescence); lock-free
         // readers never touch the ownership cell.
-        let old = unsafe { (*self.big_memo.get()).replace(table) };
-        let base = match unsafe { &*self.big_memo.get() } {
+        let old = crate::fs::edges::cell_ref_mut(&self.big_memo).replace(table);
+        let base = match crate::fs::edges::cell_ref(&self.big_memo) {
             Some(b) => &**b as *const BigMemoTable as *mut BigMemoTable,
             None => return,
         };
@@ -1389,7 +1372,7 @@ impl Clone for DentryHashBucket {
 }
 
 /// Dentry hash table
-struct DentryCache {
+pub(super) struct DentryCache {
     /// Hash table (heap-allocated to avoid large stack allocation)
     buckets: alloc::boxed::Box<[DentryHashBucket]>,
     /// Number of entries in cache
@@ -1399,9 +1382,6 @@ struct DentryCache {
     /// Statistics
     stats: DentryCacheStats,
 }
-
-unsafe impl Send for DentryCache {}
-unsafe impl Sync for DentryCache {}
 
 /// Global Dentry cache
 static DCACHE: Spinlock<Option<DentryCache>> = Spinlock::new(None);

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -36,11 +37,7 @@ pub struct Page {
 impl Page {
     /// Create new page
     pub fn new() -> Self {
-        let mut data = Vec::with_capacity(PAGE_SIZE);
-        unsafe {
-            core::ptr::write_bytes(data.as_mut_ptr(), 0, PAGE_SIZE);
-            data.set_len(PAGE_SIZE);
-        }
+        let mut data = crate::fs::edges::zeroed_vec(PAGE_SIZE);
         Self {
             data,
             flags: AtomicUsize::new(0),
@@ -51,9 +48,7 @@ impl Page {
     /// Create page from data
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut data = Vec::with_capacity(PAGE_SIZE);
-        unsafe {
-            data.set_len(PAGE_SIZE);
-        }
+        crate::fs::edges::vec_set_len(&mut data, PAGE_SIZE);
         let copy_len = core::cmp::min(bytes.len(), PAGE_SIZE);
         data[..copy_len].copy_from_slice(&bytes[..copy_len]);
 
@@ -284,7 +279,7 @@ const CHUNK_ORDER: usize = 4;
 
 /// One fixed-size chunk: a page-allocation when the zone allocator can
 /// serve it, a heap Vec as the pre-zone-init / fallback path.
-enum FileChunk {
+pub(super) enum FileChunk {
     /// Physical address of an order-CHUNK_ORDER allocation.
     Page(usize),
     Heap(Vec<u8>),
@@ -302,11 +297,7 @@ impl FileChunk {
         // Fallback (early boot before zone init, or zone exhausted):
         // heap chunk. May itself fail on an exhausted heap — the caller
         // treats None as ENOMEM.
-        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);
-        unsafe {
-            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);
-            c.set_len(FILE_BUFFER_CHUNK);
-        }
+        let mut c = crate::fs::edges::zeroed_vec(FILE_BUFFER_CHUNK);
         Some(FileChunk::Heap(c))
     }
 
@@ -316,7 +307,7 @@ impl FileChunk {
     /// a deref; callers must not hold two live mutable slices into the
     /// same chunk, the FileBuffer lock serializes all access in
     /// practice).
-    fn base_ptr(&mut self) -> *mut u8 {
+    pub(super) fn base_ptr(&mut self) -> *mut u8 {
         match self {
             FileChunk::Page(phys) => {
                 crate::arch::mm::phys_to_virt(
@@ -350,11 +341,7 @@ impl FileBuffer {
     /// One zeroed chunk, allocated without transiting the (small) kernel
     /// stack: with_capacity mmaps from the heap directly.
     fn new_chunk() -> Vec<u8> {
-        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);
-        unsafe {
-            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);
-            c.set_len(FILE_BUFFER_CHUNK);
-        }
+        let mut c = crate::fs::edges::zeroed_vec(FILE_BUFFER_CHUNK);
         c
     }
 
@@ -388,10 +375,9 @@ impl FileBuffer {
             let n = core::cmp::min(FILE_BUFFER_CHUNK - co, to_read - done);
             // SAFETY: const cast of the chunk reference — read-only use;
             // all FileBuffer access is serialized by the inode data lock.
-            let src: &[u8] = unsafe {
+            let src: &[u8] = {
                 let fc = &self.chunks[ci] as *const FileChunk as *mut FileChunk;
-                let base = (*fc).base_ptr();
-                core::slice::from_raw_parts(base.add(co), n)
+                crate::fs::edges::chunk_view(fc, co, n)
             };
             buf[done..done + n].copy_from_slice(src);
             done += n;
@@ -424,10 +410,7 @@ impl FileBuffer {
             let co = pos % FILE_BUFFER_CHUNK;
             let n = core::cmp::min(FILE_BUFFER_CHUNK - co, writable - done);
             // SAFETY: &mut access; serialized by the inode data lock.
-            let dst: &mut [u8] = unsafe {
-                let base = self.chunks[ci].base_ptr();
-                core::slice::from_raw_parts_mut(base.add(co), n)
-            };
+            let dst: &mut [u8] = crate::fs::edges::chunk_view_mut(&mut self.chunks[ci], co, n);
             dst.copy_from_slice(&buf[done..done + n]);
             done += n;
         }
@@ -463,13 +446,7 @@ impl FileBuffer {
                     // &mut access to the chunk we own; the write stays
                     // inside the FILE_BUFFER_CHUNK-sized chunk.
                     // SAFETY: owned chunk, bounded tail zero.
-                    unsafe {
-                        core::ptr::write_bytes(
-                            c.base_ptr().add(tail),
-                            0,
-                            FILE_BUFFER_CHUNK - tail,
-                        );
-                    }
+                    crate::fs::edges::fill_bytes_at(c.base_ptr(), tail, 0, FILE_BUFFER_CHUNK - tail);
                 }
             }
         }

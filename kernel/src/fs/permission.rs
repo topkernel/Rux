@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -105,7 +106,7 @@ pub fn inode_permission(inode: &crate::fs::inode::Inode, mask: u32) -> bool {
         Some(task) => {
             // SAFETY: `task` is the current task pointer from sched::current();
             // its cred is immutable for the duration of this check.
-            let cred = unsafe { (*task).cred() };
+            let cred =  (*task).cred() ;
             generic_permission(
                 inode.mode.bits() as u16,
                 inode.uid.load(core::sync::atomic::Ordering::Relaxed),

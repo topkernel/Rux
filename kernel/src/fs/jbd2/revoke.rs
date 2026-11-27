@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -262,65 +264,50 @@ pub fn jbd2_journal_write_revoke_records(
         }
 
         // SAFETY: bio::bread returns a valid BufferHead or None.
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
+        let bh =             match bio::bread(device, abs_block) {
                 Some(b) => b,
                 None => return Err(EIO),
             }
-        };
+        ;
 
         let take = core::cmp::min(per_block, records.len() - idx);
-        // SAFETY: bh is valid; writes stay inside b_data.
-        unsafe {
-            let bh_ref = &mut *bh;
-            for b in bh_ref.b_data.iter_mut() {
+        // bh is valid; writes stay inside b_data.
+        {
+            let bh_ref = crate::fs::edges::bh_data_mut(bh);
+            for b in bh_ref.iter_mut() {
                 *b = 0;
             }
             let hdr = journal_revoke_header_t {
                 r_header: journal_header_t::new(JBD2_REVOKE_BLOCK, tid),
                 r_count: 0,
             };
-            core::ptr::copy_nonoverlapping(
-                &hdr as *const _ as *const u8,
-                bh_ref.b_data.as_mut_ptr(),
-                header_len,
+            bh_ref[..header_len].copy_from_slice(
+                &crate::fs::edges::struct_bytes(&hdr)[..header_len],
             );
             let mut off = header_len;
             for &(blocknr, _rtid) in &records[idx..idx + take] {
                 if entry_size == 8 {
-                    core::ptr::write_unaligned(
-                        bh_ref.b_data.as_mut_ptr().add(off) as *mut u64,
-                        blocknr.to_be(),
-                    );
+                    bh_ref[off..off + 8].copy_from_slice(&blocknr.to_be_bytes());
                 } else {
-                    core::ptr::write_unaligned(
-                        bh_ref.b_data.as_mut_ptr().add(off) as *mut u32,
-                        (blocknr as u32).to_be(),
-                    );
+                    bh_ref[off..off + 4].copy_from_slice(&(blocknr as u32).to_be_bytes());
                 }
                 off += entry_size;
             }
             // r_count: bytes used in this block (header + entries)
-            core::ptr::write_unaligned(
-                bh_ref.b_data.as_mut_ptr()
-                    .add(core::mem::size_of::<journal_header_t>()) as *mut u32,
-                (off as u32).to_be(),
-            );
+            bh_ref[core::mem::size_of::<journal_header_t>()
+                ..core::mem::size_of::<journal_header_t>() + 4]
+                .copy_from_slice(&(off as u32).to_be_bytes());
             // CSUM_V2/V3 tail (reference jbd2_descriptor_block_csum_set —
             // revoke blocks use the descriptor tail): crc32c(seed, whole
             // block with the tail zeroed), stored in the tail.
             if journal.has_csum_v2or3() {
-                let n = bh_ref.b_data.len();
-                bh_ref.b_data[n - tail_len..].fill(0);
-                let bytes: &[u8] = core::slice::from_raw_parts(
-                    bh_ref.b_data.as_ptr(),
-                    n,
-                );
-                let csum = crate::fs::ext4::csum::crc32c(journal.csum_seed(), bytes);
-                bh_ref.b_data[n - tail_len..]
+                let n = bh_ref.len();
+                bh_ref[n - tail_len..].fill(0);
+                let csum = crate::fs::ext4::csum::crc32c(journal.csum_seed(), &bh_ref);
+                bh_ref[n - tail_len..]
                     .copy_from_slice(&csum.to_be_bytes());
             }
-            bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
         }
         current_journal_block += 1;
         if current_journal_block >= journal.j_last {
@@ -352,22 +339,16 @@ pub fn scan_revoke_block(
         return;
     }
     // r_count bounds the used region.
-    let r_count = u32::from_be(unsafe {
-        core::ptr::read_unaligned(
-            data.as_ptr().add(core::mem::size_of::<journal_header_t>()) as *const u32,
-        )
-    }) as usize;
+    let r_count =
+        u32::from_be(crate::fs::edges::read_unaligned_u32(data, core::mem::size_of::<journal_header_t>()))
+            as usize;
     let used = r_count.min(data.len());
     let mut off = header_len;
     while off + entry_size <= used {
         let blocknr = if entry_size == 8 {
-            u64::from_be(unsafe {
-                core::ptr::read_unaligned(data.as_ptr().add(off) as *const u64)
-            })
+            u64::from_be(crate::fs::edges::read_unaligned_u64(data, off))
         } else {
-            u32::from_be(unsafe {
-                core::ptr::read_unaligned(data.as_ptr().add(off) as *const u32)
-            }) as u64
+            u32::from_be(crate::fs::edges::read_unaligned_u32(data, off)) as u64
         };
         let _ = insert_revoke_hash(journal, blocknr, tid);
         off += entry_size;
@@ -409,13 +390,13 @@ pub fn jbd2_journal_set_revoke_feature(journal: &Arc<Journal>) -> Result<(), i32
 
 /// Check if journal has revoke feature
 pub fn jbd2_journal_has_revoke_feature(journal: &Arc<Journal>) -> bool {
-    // SAFETY: `j_superblock` is null-checked above; when non-null it points
+    // `j_superblock` is null-checked above; when non-null it points
     // to a valid, initialized `journal_superblock_t` (set during mount).
-    unsafe {
+    {
         if journal.j_superblock.is_null() {
             return false;
         }
-        let sb = &*journal.j_superblock;
+        let sb = crate::fs::edges::raw_ref(journal.j_superblock);
         u32::from_be(sb.s_feature_incompat) & JBD2_FEATURE_INCOMPAT_REVOKE != 0
     }
 }
@@ -450,11 +431,11 @@ pub fn scan_revoke_records(
     }
 
     // Parse a revoke block and add records to the hash table.
-    // SAFETY: bh is a valid bio::BufferHead from the recovery path; b_data
+    // bh is a valid bio::BufferHead from the recovery path; b_data
     // points to a full journal block.
-    unsafe {
+    {
         let journal_block_size = journal.j_blocksize as usize;
-        let data = core::slice::from_raw_parts((*bh).b_data as *const u8, journal_block_size);
+        let data = crate::fs::edges::kernel_slice_at(crate::fs::edges::raw_ref(bh).b_data, 0, journal_block_size);
         scan_revoke_block(journal, data, tid);
     }
     Ok(0)

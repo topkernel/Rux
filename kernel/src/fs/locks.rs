@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -196,7 +197,7 @@ pub mod flock_ops {
 fn file_lock_key(file: &File) -> (u64, u64) {
     // SAFETY: inode is written once at open time and never mutated;
     // read-only access.
-    let inode_opt = crate::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = crate::fs::edges::file_inode_arc(file);
     match inode_opt.as_ref() {
         Some(inode) => (inode.fs_id, inode.ino),
         None => (u64::MAX, file.file_id),
@@ -814,7 +815,7 @@ pub fn ofd_release_file(file_id: u64) {
 pub fn posix_release_for_file(file: &File) {
     // SAFETY: inode is written once at open time and never mutated;
     // read-only access.
-    let inode_opt = crate::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = crate::fs::edges::file_inode_arc(file);
     if let Some(inode) = inode_opt.as_ref() {
         posix_release_on_close(inode);
     }
@@ -920,7 +921,7 @@ pub fn inode_open_register(inode: &Inode, write_access: bool) {
 /// lease (if any), waking blocked lease breakers.
 pub fn inode_open_unregister(file: &File) {
     // SAFETY: inode is written once at open time; read-only access.
-    let inode_opt = crate::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = crate::fs::edges::file_inode_arc(file);
     let inode = match inode_opt.as_ref() {
         Some(inode) => inode,
         None => return,
@@ -1008,7 +1009,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
 
     // Only regular files can carry leases (Linux fcntl_setlease).
     // SAFETY: inode written once at open; read-only access.
-    let inode = match crate::fs::unsafe_edges::file_inode(file) {
+    let inode = match crate::fs::edges::file_inode(file) {
         Some(i) => i,
         None => return Err(crate::errno::Errno::InvalidArgument),
     };
@@ -1110,7 +1111,7 @@ pub fn get_lease(file: &File) -> i16 {
         return flock_types_late::F_UNLCK;
     }
     // SAFETY: inode written once at open; read-only access.
-    let key = match crate::fs::unsafe_edges::file_inode(file) {
+    let key = match crate::fs::edges::file_inode(file) {
         Some(i) => inode_lock_key(i),
         // No-inode files can never have a lease — F_UNLCK.
         None => return flock_types_late::F_UNLCK,

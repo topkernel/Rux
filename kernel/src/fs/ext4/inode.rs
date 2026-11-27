@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -77,7 +78,7 @@ impl Default for Ext4InodeOnDisk {
     fn default() -> Self {
         // SAFETY: Ext4InodeOnDisk is #[repr(C)] with all fields being integer types;
         // zeroed memory is a valid representation for a default inode.
-        unsafe { mem::zeroed() }
+        crate::fs::edges::zeroed_repr_c()
     }
 }
 
@@ -445,12 +446,7 @@ pub fn read_inode(
 
     // Read inode from block buffer
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    let inode_bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            &mut inode_on_disk as *mut _ as *mut u8,
-            copy_len,
-        )
-    };
+    let inode_bytes = &mut crate::fs::edges::struct_bytes_mut(&mut inode_on_disk)[..copy_len];
 
     // metadata_csum: verify the inode's crc32c over the FULL inode_size
     // bytes from the buffer (the 128..inode_size extra bytes are part of
@@ -575,15 +571,10 @@ pub fn write_inode(
     // up to 44 bytes past the end of the block buffer (out of bounds).
     // The struct tail stays zeroed, matching read_inode's clamp.
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
+    // bounds checked above; in_block_offset + copy_len <= data.len().
     {
         let src = &data[in_block_offset..in_block_offset + copy_len];
-        let dst = unsafe {
-            core::slice::from_raw_parts_mut(
-                &mut inode_on_disk as *mut _ as *mut u8,
-                copy_len,
-            )
-        };
+        let dst = &mut crate::fs::edges::struct_bytes_mut(&mut inode_on_disk)[..copy_len];
         dst.copy_from_slice(src);
     }
 
@@ -603,13 +594,8 @@ pub fn write_inode(
     inode_on_disk.i_size_high = (inode.size >> 32) as u32;
 
     // Write inode to block buffer
-    // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
-    let inode_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &inode_on_disk as *const _ as *const u8,
-            copy_len,
-        )
-    };
+    // bounds checked above; in_block_offset + copy_len <= data.len().
+    let inode_bytes = &crate::fs::edges::struct_bytes(&inode_on_disk)[..copy_len];
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // metadata_csum write path: recompute the slot's crc32c over the
@@ -630,11 +616,9 @@ pub fn write_inode(
     bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
 
     // Journal the inode table block if a transaction is active
-    // SAFETY: bh is a valid buffer head from bio::bread
-    unsafe {
-        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
+    // bh is a valid buffer head from bio::bread
+    if let Some(handle) = crate::fs::edges::current_jbd2_handle() {
+        let _ = crate::fs::edges::jbd2_dirty_metadata(handle, bh);
     }
 
     // With an active handle the commit persists this block (write-through
@@ -822,14 +806,9 @@ pub fn write_inode_disk(
     }
 
     // Write inode to block buffer
-    // SAFETY: inode is a reference to an Ext4InodeOnDisk; copy_len bytes
+    // inode is a reference to an Ext4InodeOnDisk; copy_len bytes
     // fit within the block starting at in_block_offset (bounds-checked above).
-    let inode_bytes = unsafe {
-        core::slice::from_raw_parts(
-            inode as *const _ as *const u8,
-            copy_len,
-        )
-    };
+    let inode_bytes = &crate::fs::edges::struct_bytes(inode)[..copy_len];
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // metadata_csum write path: re-seal the full inode slot (see
@@ -849,12 +828,9 @@ pub fn write_inode_disk(
     bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
 
     // Journal the inode table block if a transaction is active
-    // SAFETY: bh is a valid buffer head from bio::bread
-    unsafe {
-        let handle_ptr = crate::fs::ext4::namei::get_current_handle();
-        if let Some(handle) = handle_ptr {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-        }
+    // bh is a valid buffer head from bio::bread
+    if let Some(handle) = crate::fs::edges::current_jbd2_handle() {
+        let _ = crate::fs::edges::jbd2_dirty_metadata(handle, bh);
     }
 
     let sync_res = bio::sync_dirty_buffer(bh);
@@ -927,19 +903,20 @@ pub fn persist_ioc_flags(vfs_inode: &crate::fs::inode::Inode, merged: u32) {
     let _guard = EXT4_BIG_LOCK.lock();
     if let Some(fs_ptr) = vfs_inode.private_data {
         let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
-        // SAFETY: private_data holds the Ext4FileSystem for
+        // private_data holds the Ext4FileSystem for
         // EXT4_INODE_OPS inodes (installed at mount/iget time).
-        unsafe {
-            if let Ok(mut on_disk) = read_inode(&*fs, vfs_inode.ino as u32) {
+        {
+            let fs = crate::fs::edges::raw_ref(fs);
+            if let Ok(mut on_disk) = read_inode(fs, vfs_inode.ino as u32) {
                 on_disk.i_flags =
                     (on_disk.i_flags & !FS_FL_USER_MODIFIABLE) | (merged & FS_FL_USER_MODIFIABLE);
-                if write_inode_disk(&*fs, vfs_inode.ino as u32, &on_disk).is_ok() {
+                if write_inode_disk(fs, vfs_inode.ino as u32, &on_disk).is_ok() {
                     // Keep the VFS-cached Ext4Inode copy in sync.
                     if let Some(sb) = vfs_inode.sb {
-                        // SAFETY: sb points at the Ext4Inode cache entry
+                        // sb points at the Ext4Inode cache entry
                         // for this inode (set at iget), exclusively
                         // reachable under EXT4_BIG_LOCK here.
-                        let cached = &mut *(sb as *mut Ext4Inode);
+                        let cached = crate::fs::edges::raw_mut(sb as *mut Ext4Inode);
                         cached.flags = on_disk.i_flags;
                     }
                 }

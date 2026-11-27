@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -80,9 +81,6 @@ pub struct SuperBlock {
     /// Private data (for specific filesystem)
     pub s_fs_info: Option<*mut u8>,
 }
-
-unsafe impl Send for SuperBlock {}
-unsafe impl Sync for SuperBlock {}
 
 impl SuperBlock {
     /// Create new superblock
@@ -211,13 +209,10 @@ impl FileSystemType {
     }
 }
 
-struct FsRegistry {
+pub(super) struct FsRegistry {
     /// Filesystem type list
     fs_types: Spinlock<[Option<&'static FileSystemType>; 32]>,
 }
-
-unsafe impl Send for FsRegistry {}
-unsafe impl Sync for FsRegistry {}
 
 impl FsRegistry {
     pub const fn new() -> Self {
