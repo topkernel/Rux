@@ -126,7 +126,7 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
 // the dfx subsystem's ONE audited unsafe file. The arms below absorbed
 // the last inline unsafe of the hunt/diagnostic modules (backtrace,
 // memwatch, scribble, wildwatch, taskdump, pstore,
-// ledger, mmforensics, oops, hung_task, slowtask,
+// ledger, mmforensics, oops, hung_task,
 // mod) — all sixteen now zero-unsafe with file-level forbid. Existing
 // INV-FOR-1..3 contracts are unchanged; the arms reuse those families
 // or extend them with new numbers.

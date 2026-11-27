@@ -566,10 +566,6 @@ pub fn timer_softirq_handler(_nr: usize) {
             // rate-capped inside) — the Gate-1 delivery adjudication
             // backdrop for the accountmgr->AMS StartUser oneway.
             crate::ipc::binder::ams46_audit();
-            // leg-33B: slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), self-gated +
-            // rate-capped inside) — leaf attribution for nested-call
-            // cascades (fs/futex stalls behind reader exhaustion).
-            crate::debug::slowtask::tick();
             // 17th successor: futex-stuck census (rux:fuxstuck (retired dfx=fuxstuck), self-gated
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.

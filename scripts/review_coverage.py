@@ -323,7 +323,6 @@ STATUS = {
 
     "kernel/src/arch/x86_64/uaccess.rs": ("part", "cr3: strncpy_from_user chunked rewrite reviewed (64B chunks, mid-chunk fault zero-fills tail, Ok/EFAULT shapes byte-loop-identical, NUL-at-0 success kept); duplicate shadowed limit pair removed"),    "kernel/src/console.rs": ("part", "arch UART arms: x86_64 16550 THRE/stall machinery, riscv64 raw sb, aarch64 PL011 (FR 0x18/IMSC 0x38/ICR 0x44) — PL011 init_irq follows the twins' ownership discipline (pre-arm drain, IRQ-owned RX, armed-flag fallback); cr3: batched TX family (puts_bytes lock-once, fmt::Write coalescing with \r\n expansion, ConsoleWriter staging with Drop flush, uart_write_kernel 32B chunk+cond_resched) — byte-identical streams, per-slice irqsave span is the one ledger note (ms-class at boot volumes) — PASS"),
     "kernel/src/debug/fsw.rs": ("todo", ""),
-    "kernel/src/debug/slowtask.rs": ("todo", ""),
     "kernel/src/drivers/access_tokenid.rs": ("todo", ""),
     "kernel/src/drivers/ashmem.rs": ("todo", ""),
     "kernel/src/drivers/gpu/fb_simple.rs": ("todo", ""),

@@ -106,11 +106,6 @@ pub mod fsw;
 /// branches — names where the hilogd storm's 28-58 us per-op wall goes;
 /// see debug/unixrd.rs.
 pub mod unixrd;
-/// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
-/// same syscall entry for >= 8 s get a line with args and the parked
-/// kernel-stack chain — attributes the leaf of nested-call cascades
-/// (fs stalls behind binder reader exhaustion). See debug/slowtask.rs.
-pub mod slowtask;
 /// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
 /// debug/forkprof.rs.

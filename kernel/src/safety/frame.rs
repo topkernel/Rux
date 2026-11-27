@@ -6,7 +6,7 @@
 //! Kernel-stack window primitive — the stack-forensics scanner family
 //! (unsafe-slim round 4).
 //!
-//! The diagnostic stack walkers (dfx taskdump/slowtask, the timer
+//! The diagnostic stack walkers (dfx taskdump, the timer
 //! ghost-scan, the TXN-HANG entry-frame readers) all re-implement one
 //! shape: given a stack's base/top bounds, walk candidate frame
 //! addresses and `read_volatile` words out of possibly-stale kernel

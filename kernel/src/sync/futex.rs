@@ -3833,7 +3833,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
 ///     (scheduling/priority territory).
 /// Locking: phase A walks the bucket chains under the bucket + nested slot
 /// locks (waiter_of discipline) copying POD only; phase B reads task state
-/// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
+/// under for_each_task (pid-hash per-bucket lock) — the
 /// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
 /// Zero cost when rux:fuxstuck (retired dfx=fuxstuck) is off (one switch load).
 pub fn futex_stuck_census() {

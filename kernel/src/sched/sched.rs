@@ -10241,7 +10241,7 @@ where
 /// Non-blocking variant of [`for_each_task`] for NON-PREEMPTIBLE contexts
 /// (the timer-softirq heartbeat slot and any IRQ-side diagnostic).
 ///
-/// lb325 wedge forensics (18th successor): both `debug::slowtask::audit` and
+/// lb325 wedge forensics (18th successor): both (the retired slow-entry audit and
 /// `futex_stuck_census` phase B walk tasks from the 1 Hz heartbeat, which
 /// runs with IF=0. A task-context pid-hash writer (insert/remove/for_each
 /// callback) that a timer interrupt suspends mid-critical-section holds its
@@ -10252,7 +10252,7 @@ where
 /// forever). Evidence: both vCPUs at the identical RIP inside
 /// `AtomicBool::compare_exchange` with RDI = pid_hash BUCKET_LOCK+22,
 /// RFL IF=0 on both, BUCKET_LOCK[22] the only held byte in the array, and
-/// the active frames `slowtask::audit → for_each_task →
+/// the active frames `audit → for_each_task →
 /// pid_hash_for_each_task → lock_bucket` / `futex_stuck_census →
 /// for_each_task → …`.
 ///
