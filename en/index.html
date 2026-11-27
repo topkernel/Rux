@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — A Linux ABI-compatible OS kernel written from scratch in Rust</title>
-<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop, 24.04 reaches the graphical targets with serial login, and unmodified OpenHarmony boots all 135+ services. ~409k lines of Rust, 349 syscalls, three architectures.">
+<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop, 24.04 reaches the graphical targets with serial login, and unmodified OpenHarmony boots all 135+ services. ~429k lines of Rust, 394 syscalls, three architectures.">
 <link rel="stylesheet" href="../css/style.css?v=19">
 </head>
 <body>
@@ -40,7 +40,7 @@
       <div class="hero-badges">
         <span class="chip">Rust no_std</span>
         <span class="chip">POSIX compatible</span>
-        <span class="chip">349 syscalls</span>
+        <span class="chip">394 syscalls</span>
         <span class="chip">x86_64 · riscv64 · aarch64</span>
         <span class="chip">ext4 / binder / ELF</span>
       </div>
@@ -79,8 +79,8 @@
 <section class="section-tight">
   <div class="container">
     <div class="stats">
-      <div class="stat"><div class="v">409<em>k+</em></div><div class="l">lines of Rust</div></div>
-      <div class="stat"><div class="v">349</div><div class="l">syscalls</div></div>
+      <div class="stat"><div class="v">429<em>k+</em></div><div class="l">lines of Rust</div></div>
+      <div class="stat"><div class="v">394</div><div class="l">syscalls</div></div>
       <div class="stat"><div class="v">4560<em>+</em></div><div class="l">test cases</div></div>
       <div class="stat"><div class="v">3</div><div class="l">architectures</div></div>
       <div class="stat"><div class="v">1139<em>/1869</em></div><div class="l">LTP passing</div></div>
@@ -148,13 +148,13 @@
       <div class="card">
         <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
         <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
-        <div class="nums">349 syscalls · LTP <b>1139/1869</b></div>
+        <div class="nums">394 syscalls · LTP <b>1139/1869</b></div>
         <a class="more" href="architecture/design.html#divergences">Divergence register →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust safety, with a ledger</h3>
         <p>All-Rust kernel (no_std). All 33 memory-corruption defects in history are individually filed: 23 in audited <code>unsafe</code>/assembly, 10 in safe code (all ownership/lock-protocol classes safe Rust does not type-check today); pointer-expression classes (OOB, wild pointers, format strings) are zero in safe code.</p>
-        <div class="nums">unsafe lines 2.2% (dual series) · Kani 164 proofs</div>
+        <div class="nums">unsafe lines 0.27% (19 audited files, machine gate rc=0) · Kani 164 proofs</div>
         <a class="more" href="security/index.html">Security section →</a>
       </div>
       <div class="card">
@@ -261,7 +261,7 @@
       <div class="card">
         <h3><span class="ico">🔐</span>Security</h3>
         <p>All 33 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 10 safe ownership-class), zero pointer-expression defects in safe code; 164 Kani harnesses prove the core unsafe code for all inputs.</p>
-        <div class="nums">unsafe lines 2.2% (dual series) · gaps stated plainly</div>
+        <div class="nums">unsafe lines 0.27% (401 files compile-time forbid) · gaps stated plainly</div>
         <a class="more" href="security/index.html">Security →</a>
       </div>
     </div>
@@ -308,7 +308,6 @@ make ubuntu-run <span class="c"># full Ubuntu 24.04 desktop (serial login: root 
       <div class="card">
         <h3><span class="ico">🏛️</span>Architecture</h3>
         <a href="architecture/design.html">Architecture &amp; module design (sched/mm/fs/IPC/net/drivers/observability)</a>
-        <a href="architecture/seedcore.html">Seed-Core architecture: the minimal-TCB deep-dive</a>
         <a href="architecture/structure.html">Code layout</a>
         <a href="architecture/boot.html">Boot flow (bzImage / image headers / three archs)</a>
         <a href="architecture/memory.html">Memory management</a>

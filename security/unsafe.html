@@ -44,7 +44,6 @@
     <a href="../performance/rttests.html">rt-tests</a>
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
-    <a href="../architecture/seedcore.html">晶核架构(Seed-Core)</a>
     <a href="../architecture/scheduler.html">调度器</a>
     <a href="../architecture/memory.html">内存管理</a>
     <a href="../architecture/filesystem.html">文件系统</a>
@@ -84,71 +83,69 @@
 
   <article class="doc-main">
     <h1>unsafe 审计记录</h1>
-    <div class="sub">内存安全 TCB 的定义、分层规则、逐目录预算与收缩路线 —— 回答"unsafe 到底有多少、在哪、受什么约束" · 正本:docs/architecture/kernel-layers.md、docs/development/tcb-ledger.md(脚本生成)</div>
+    <div class="sub">内存安全 TCB 的定义、收拢规则、机器 census 数字与后续路线 —— 回答"unsafe 到底有多少、在哪、受什么约束" · 正本:docs/architecture/safety-and-performance.md(收拢战役 + INV index)、docs/architecture/kernel-layers.md(分层规则)</div>
 
     <h2 id="definition"><span class="anchor">§1</span>内存安全 TCB 的定义</h2>
-    <p>本内核的内存安全 TCB(可信计算基)定义为:<b>内存安全性依赖人工评审而非 Rust 编译器的代码 —— 即每个 unsafe 块内的全部行</b>。其余代码内存安全由构造保证(编译器强制)。工程目标是以语言级隔离赋予宏内核<b>接近微内核的安全性</b>:将 unsafe TCB 收缩到一个小的特权 Framework 层。</p>
+    <p>本内核的内存安全 TCB(可信计算基)定义为:<b>内存安全性依赖人工评审而非 Rust 编译器的代码 —— 即每个 unsafe 块内的全部行</b>。其余代码内存安全由构造保证(编译器强制)。2026-11-27 收拢战役落地:这些行全部集中到 <b>19 个审计 <code>unsafe.rs</code> 文件</b>(每子系统一个集中文件 + 根集合),其余 401 个文件在编译器层面禁止 unsafe(机器门禁全库 rc=0)。unsafe 关键字 <b>1,022 行 / 全核 375,622 行 = 0.27%</b>(收拢前登记表 6,396 处 unsafe 区域),SAFETY 注记覆盖率 65.5%。</p>
     <div class="callout"><b>诚实边界(每份审计记录报告携带)</b>:Rust 的 unsafe 纪律只覆盖意外内存不安全。它不是对逻辑缺陷、ABI/规范违反或构建链污染的证明 —— 后者由形式验证、缺陷分类学与压力测试承担(见本栏其他页)。</div>
 
-    <h2 id="layers"><span class="anchor">§2</span>分层规则</h2>
+    <h2 id="layers"><span class="anchor">§2</span>收拢规则:审计集合与禁止集合</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>层</th><th>内容</th><th>unsafe 政策</th></tr></thead>
+      <thead><tr><th>集合</th><th>内容</th><th>unsafe 政策</th></tr></thead>
       <tbody>
-        <tr><td><b>Framework</b></td><td>硬件/特权 TCB:trap 入口、页表、上下文切换、裸 MMIO/DMA、uaccess、底层同步原语(arch/、mm/、interrupt/、virtio·intc·timer·pci 核心、console/printk/sbi/main/init 等)</td><td>允许 unsafe;每个块须携带 <code>// SAFETY:</code> 不变量注释,覆盖率入审计记录</td></tr>
-        <tr><td><b>service</b></td><td>全部面向用户态的层(syscall、fs、ipc、net、process、sched 上层、cgroup、procfs…)</td><td><code>#![forbid(unsafe_code)]</code> 为目标态(当前 165 个模块编译期禁止,service 层 89 个文件已无 unsafe)</td></tr>
-        <tr><td><b>diagnostics</b></td><td>dfx/ 取证仪、裸内存工具</td><td>单独统计 —— 诊断工具的 churn 不得藏进 Framework 桶</td></tr>
-        <tr><td><b>test</b></td><td>测试代码</td><td>不入头条口径</td></tr>
+        <tr><td><b>审计集合</b>(19 文件)</td><td>每个子系统一个 <code>unsafe.rs</code> 集中文件(arch/mm/fs/sched/process/drivers/ipc/net/sync/syscall/dfx/trace/timer/interrupt/perf/io_uring/safety/security)+ 根集合;硬件/特权操作(trap 入口、页表、上下文切换、裸 MMIO/DMA、uaccess、底层同步原语)都住在对应子系统的审计文件里</td><td>允许 unsafe;<b>每块携带 INV 契约</b>(编号的机器可验证前提声明),文件头注释携带契约清单;SAFETY 注记覆盖率 65.5%</td></tr>
+        <tr><td><b>禁止集合</b>(401 文件)</td><td>全库其余全部 <code>kernel/src</code> 文件</td><td>文件级 <code>#![forbid(unsafe_code)]</code> —— 编译器强制零 unsafe;<b>机器门禁 <code>scripts/gate_unsafe_mainline.py</code> 全库 rc=0</b>,审计文件之外出现任何 unsafe 即构建失败</td></tr>
+        <tr><td>tests</td><td>测试代码</td><td>不入头条口径</td></tr>
       </tbody>
     </table></div>
     <ul>
-      <li>分类器为<b>最长前缀匹配</b>;未匹配路径默认落入 service —— <b>新文件从最安全的桶开始,晋升须显式操作</b>。</li>
-      <li><b>胶囊边界</b>(Tock 模式):系统调用入口统一校验并翻译用户指针;内核其余部分不直接触用户内存。syscall/io.rs 的 69 个 unsafe token 清零是该模式的实例 —— 用户拷贝改走 arch/uaccess_safe.rs 的地址/切片类型化 copy_in/copy_out(Framework 新模块)。</li>
+      <li><b>新 unsafe 无处可放</b>:禁止集合里写 unsafe 是编译错误,不是评审意见;要加 unsafe 必须进对应子系统的审计文件并写 INV 契约 —— TCB 增长被编译器与门禁约束,而非约定约束。</li>
+      <li><b>用户内存边界</b>:系统调用入口统一校验并翻译用户指针;内核其余部分不直接触用户内存 —— 用户拷贝走 <code>arch/uaccess_safe.rs</code> 的地址/切片类型化 copy_in/copy_out(INV-UACCESS-1:内核侧操作数由类型系统证明,用户侧 access_ok 检查 + 异常表兜底)。</li>
     </ul>
 
-    <h2 id="numbers"><span class="anchor">§3</span>审计记录数字(脚本生成,双口径)</h2>
-    <h3>行口径(scripts/tcb_ledger.py,花括号匹配 unsafe 跨度,剥离注释与字面量)</h3>
+    <h2 id="numbers"><span class="anchor">§3</span>审计记录数字(机器 census + 行口径)</h2>
+    <h3>行口径</h3>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>目录</th><th class="num">unsafe 行</th><th class="num">unsafe 密度</th><th>说明</th></tr></thead>
+      <thead><tr><th>口径</th><th class="num">数值</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>全内核</td><td class="num">8,759 / 396,139 行(391 文件,2,424 个 unsafe 块);双口径 10,742 行(含 unsafe fn/impl 体)</td><td class="num"><b>2.2%</b>(双口径 <b>2.2%</b>)</td><td>预算规则:该百分比只降不升,升须逐发布说明</td></tr>
-        <tr><td>fs</td><td class="num">2,391</td><td class="num">3.1%</td><td>ext4 与页缓存构成预算的主要部分</td></tr>
-        <tr><td>syscall</td><td class="num">971</td><td class="num">2.4%</td><td>胶囊边界层</td></tr>
-        <tr><td>process / drivers</td><td class="num">218 / 400</td><td class="num">1.2% / 1.5%</td><td>process 已完成 typed-handle 转换(round 3b)</td></tr>
-        <tr><td>sched</td><td class="num">2,303</td><td class="num">10.9%</td><td>GRQ/切换路径</td></tr>
-        <tr><td>mm</td><td class="num">801</td><td class="num">4.0%</td><td>分配器内部 unsafe 内聚于原语</td></tr>
-        <tr><td>sync</td><td class="num">196</td><td class="num"><b>0.6%</b></td><td>目标形态的实例:每原语一个小 unsafe 核心,safe API 在上</td></tr>
+        <tr><td>unsafe 关键字行</td><td class="num"><b>1,022 / 375,622 行 = 0.27%</b></td><td>全部位于 19 个审计文件;收拢前登记表为 6,396 处 unsafe 区域</td></tr>
+        <tr><td>机器门禁</td><td class="num">rc=0</td><td><code>scripts/gate_unsafe_mainline.py</code> 全库扫描:审计文件之外零 unsafe</td></tr>
+        <tr><td>forbid 文件</td><td class="num">401</td><td>文件级 <code>#![forbid(unsafe_code)]</code>,摘属性即构建失败</td></tr>
+        <tr><td>SAFETY 注记覆盖</td><td class="num">65.5%</td><td>目标 95%(class 2-3 块)</td></tr>
       </tbody>
     </table></div>
-    <p>口径说明:双口径(块体 + <code>unsafe fn</code>/<code>impl</code> 体)是诚实总数,块体口径保留作趋势连续性;2026-11-20 起审计记录只统计 git 跟踪的源文件,陈旧生成物不再稀释分母。外部参照:Asterinas(USENIX ATC'25,同类 Rust 内核)按同类口径报告内存安全 TCB ~14%(参照点未按双口径公布)。</p>
-    <h3>token 口径(scripts/gen_tcb_ledger.py,分层规则表与 kernel-layers.md 同源)</h3>
+    <h3>区域口径(scripts/unsafe_census.py,2,046 个 unsafe 区域 / 46 文件)</h3>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>桶</th><th class="num">unsafe token</th><th>说明</th></tr></thead>
+      <thead><tr><th>子系统(审计文件)</th><th class="num">unsafe 区域</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>service</td><td class="num">1,322</td><td>收缩目标所在;forbid 78 个 service 文件由 CI 单调性检查保证只增不减</td></tr>
-        <tr><td>Framework</td><td class="num">1,055</td><td>逐块 SAFETY 注释覆盖(全构造口径)1,968/2,857 = <b>69%</b></td></tr>
-        <tr><td>diagnostics</td><td class="num">129</td><td>dfx 仪</td></tr>
-        <tr><td>test</td><td class="num">105</td><td>不入头条</td></tr>
+        <tr><td>arch</td><td class="num">1,131</td><td>三架构 trap/上下文切换/页表/内联汇编的集中地</td></tr>
+        <tr><td>fs</td><td class="num">135</td><td>ext4 与页缓存的裸块边界</td></tr>
+        <tr><td>sched</td><td class="num">106</td><td>GRQ/切换路径</td></tr>
+        <tr><td>drivers</td><td class="num">79</td><td>设备寄存器与 DMA 窗口</td></tr>
+        <tr><td>mm</td><td class="num">74</td><td>分配器内部 unsafe 内聚于原语</td></tr>
+        <tr><td>process / dfx / sync / ipc</td><td class="num">70 / 63 / 57 / 48</td><td>typed-handle、取证仪、同步原语、IPC 边界</td></tr>
+        <tr><td>其余(top+safety+net+perf+syscall+io_uring+interrupt+trace+security+timer)</td><td class="num">162</td><td>每子系统一个集中文件,逐块 INV 契约</td></tr>
+        <tr><td>tests</td><td class="num">105</td><td>不入头条口径</td></tr>
       </tbody>
     </table></div>
-    <p>service token 热点:fs 362、fs/ext4 197、sched 128、syscall 121、process 80。</p>
+    <p>口径说明:行口径(unsafe 关键字所在行)是头条数字;区域口径(unsafe 块/函数/impl 计数)是审计登记的单位,两者都由脚本机器生成。外部参照:Asterinas(USENIX ATC'25,同类 Rust 内核)按同类口径报告内存安全 TCB ~14%(参照点未按双口径公布)。</p>
 
-    <h2 id="forbid"><span class="anchor">§4</span>forbid 推广与收缩路线</h2>
+    <h2 id="forbid"><span class="anchor">§4</span>forbid 覆盖与后续路线</h2>
     <ul>
-      <li>当前:165 个模块带 <code>#![forbid(unsafe_code)]</code>(service 层 78),CI 单调性检查保证集合只增不减(摘属性即构建失败,scripts/unsafe_gate.py)。</li>
-      <li>目标(登记于 unsafe-5000-plan.md Layer 1):每个 service crate 达到 crate 级 forbid;带 unsafe 的 service 文件 122 → 全部清零或归入具名边模块。</li>
-      <li>SAFETY 注释覆盖(全构造口径)69%,目标 95%(class 2-3 块)。</li>
-      <li>分级审计计划:class 1(带检查的访问器读)→ class 3(裸指针 + 手写不变量);审计记录头条将增加 <b>"service 层 class-3 token 数"</b> —— 真正预测现场缺陷的量。审计覆盖门:scripts/review_coverage.py --check 在树内出现审计记录未登记文件时使构建失败。</li>
+      <li>当前:<b>401 个文件</b>带 <code>#![forbid(unsafe_code)]</code>,机器门禁 <code>scripts/gate_unsafe_mainline.py</code> 全库 rc=0 —— 收拢战役的目标态(审计文件之外零 unsafe)已达成并由机器强制。</li>
+      <li>SAFETY 注记覆盖 65.5%,目标 95%(class 2-3 块)。</li>
+      <li>分级审计继续:class 1(带检查的访问器读)→ class 3(裸指针 + 手写不变量);每个审计块的 INV 契约登记于 safety-and-performance.md 的 Primitive INV index。</li>
     </ul>
 
     <h2 id="argument"><span class="anchor">§5</span>分层论证:为什么这个形状值得信任</h2>
     <ul>
       <li><b>类消除论证</b>(对照 C 内核 CVE 史):越界写(bounds-checked slice)、Arc 属主的 use-after-free/double-free、类型化共享态数据竞争(Send/Sync)、迭代器失效(borrowck)、格式串注入(typed formatting)—— 这些主导类别在 safe 代码中<b>不可表达</b>;缺陷分类学的 0 例指针表达式缺陷是同一条论证的实证面(见 <a href="taxonomy.html">分类学</a>)。</li>
-      <li><b>密度论证</b>:sync 目录 2.8% 的 unsafe 密度是分层设计的活样本 —— unsafe 面积与原语复杂度成正比、与 API 面积无关。</li>
-      <li><b>配对论证</b>:每个 Framework 原语配 (a) Kani harness,(b) proptest,(c) Framework 收缩后 Verus 函数规约(登记的下一步,先做页标志/引用计数代数);RustBelt 作为信任锚引用而非构建依赖。</li>
-      <li><b>预算论证</b>:2.2%(双口径)的单调下降规则 + 每处新增 unsafe 须在 commit body 说明"为什么 safe 不可能"—— TCB 增长被流程约束而非约定约束。</li>
+      <li><b>密度论证</b>:审计文件的 unsafe 区域分布(arch 1,131 为三架构硬件操作的必然集中,sync 仅 57)是收拢设计的活样本 —— unsafe 面积与原语复杂度成正比、与 API 面积无关。</li>
+      <li><b>配对论证</b>:每个原语配 (a) Kani harness,(b) proptest,(c) Verus 函数规约(登记的下一步,先做页标志/引用计数代数);RustBelt 作为信任锚引用而非构建依赖。</li>
+      <li><b>预算论证</b>:0.27%(行口径)的单调下降规则 + 禁止集合里 unsafe 是编译错误 —— TCB 增长被编译器与机器门禁约束,而非约定约束。</li>
     </ul>
 
-    <div class="callout">复现:python3 scripts/gen_tcb_ledger.py --markdown(分层 token 口径);python3 scripts/tcb_ledger.py(行口径)。正本:docs/architecture/kernel-layers.md(分层规则 + forbid 运动)、docs/development/tcb-ledger.md(生成审计记录)。相关:<a href="formal.html">形式验证</a>(Kani 证 unsafe)、<a href="taxonomy.html">缺陷分类学</a>(居留地实证)。</div>
+    <div class="callout">复现:python3 scripts/gate_unsafe_mainline.py(机器门禁);python3 scripts/unsafe_census.py(区域口径)。正本:docs/architecture/safety-and-performance.md(unsafe 收拢战役记录 + Primitive INV index)、docs/architecture/kernel-layers.md(分层规则)。相关:<a href="formal.html">形式验证</a>(Kani 证 unsafe)、<a href="taxonomy.html">缺陷分类学</a>(居留地实证)。</div>
   </article>
 </div>
 </main>

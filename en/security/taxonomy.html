@@ -44,7 +44,6 @@
     <a href="../performance/rttests.html">rt-tests</a>
     <a href="../performance/microbench.html">Internal microbenchmarks</a><div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
-    <a href="../architecture/seedcore.html">Seed-Core architecture</a>
     <a href="../architecture/scheduler.html">Scheduler</a>
     <a href="../architecture/memory.html">Memory management</a>
     <a href="../architecture/filesystem.html">Filesystem</a>
@@ -143,7 +142,7 @@
 
     <h2 id="verdict"><span class="anchor">§7</span>The verdict: what these numbers support</h2>
     <ul>
-      <li><b>The class-elimination argument holds</b>: zero expression-level defects is consistent with safe code's structural immunity; 23 of 35 defects reside in explicitly audited unsafe — self-consistent with the layered model where the unsafe surface IS the TCB (2.2% of area / 2.2% on the dual series, the <a href="unsafe.html">ledger</a>).</li>
+      <li><b>The class-elimination argument holds</b>: zero expression-level defects is consistent with safe code's structural immunity; 23 of 35 defects reside in explicitly audited unsafe — self-consistent with the layered model where the unsafe surface IS the TCB (0.27% = 1,022 of 375,622 lines, the <a href="unsafe.html">ledger</a>).</li>
       <li><b>The residual class is named and addressed</b>: the 10 safe-class defects are all ownership/refcount/lock-protocol/stack-depth decisions — precisely the targets of model checking and property testing (loom lock protocols, Kani INV-M tables, proptest refcounts); the hardening register lists checked Refcount and stack-depth analysis as closure items.</li>
       <li><b>The defense lines work</b>: 6/33 caught by review before any boot; panic surfaces contained instance by instance; instrument misjudgments archived.</li>
       <li><b>A statement without hedging</b>: 33 defects over 3,358 commits ≈ 1% of all commits carried a memory-corruption defect, each with a fix and regression evidence — this is the empirical baseline for "safe enough", not an assertion.</li>

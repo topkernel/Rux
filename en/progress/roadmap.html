@@ -33,7 +33,6 @@
               <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
-    <a href="../architecture/seedcore.html">Seed-Core architecture</a>
     <a href="../architecture/scheduler.html">Scheduler</a>
     <a href="../architecture/memory.html">Memory management</a>
     <a href="../architecture/filesystem.html">Filesystem</a>
@@ -86,6 +85,7 @@
 
     <h2 id="now"><span class="anchor">§1</span>Current goals (2026-11)</h2>
     <ul>
+      <li><b>The unsafe-consolidation campaign landed (2026-11-27)</b>: the whole repo's unsafe lives in 19 audited unsafe.rs files, 401 files forbid it at the compiler, the machine gate is green repo-wide (rc=0); the unsafe keyword is 1,022 of 375,622 lines = 0.27%, SAFETY coverage 65.5%.</li>
       <li><b>Ubuntu 22.04 GNOME desktop: achieved and stability-verified</b> (x86_64 + KVM primary): 5/5 system starts green on main 188+ commits past the previous round (2026-11-16) — shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV.</li>
       <li><b>The full Ubuntu 24.04 desktop</b>: systemd 255 reaches multi-user + graphical targets with serial login (dev-ttyS0 found, getty started, prompt reached); gdm.service and systemd-logind start clean (the 90 s timeout's EROFS root cause fixed); <code>make ubuntu-run</code> boots the full 24.04 desktop by default — remaining face: greeter rendering (the chain is in place once the convoy family clears).</li>
       <li><b>OpenHarmony launcher → desktop</b>: /data mounting and the SystemUI lock screen achieved; advancing toward the full launcher home screen.</li>
@@ -149,6 +149,11 @@
         <div class="when">2026-11-16</div>
         <h4>Ubuntu 24.04 serial login + clean gdm start; 22.04 GNOME 5/5 stability verification; LTP official 1138 → expected 1139</h4>
         <p>24.04 reaches the graphical targets through systemd 255 and completes serial login; the gdm.service 90 s timeout's root cause (a namespace bind RO re-flag leaking EROFS to the shared root fs) fixed; the 22.04 GNOME desktop 5/5 green on main 188+ commits on; LTP scan3 official corrected 1138, expected 1139 with the tgkill03 fix (procfs pid-dentry revalidation) merged.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-11-27</div>
+        <h4>The unsafe-consolidation campaign lands — the whole repo's unsafe in 19 audited files, 0.27%</h4>
+        <p>The machine gate (gate_unsafe_mainline.py) is green repo-wide (rc=0); 401 files carry file-level forbid(unsafe_code); the unsafe keyword is 1,022 of 375,622 lines = 0.27% (6,396 regions before), SAFETY coverage 65.5%, every block under an INV contract. Six fixes land with the line: x86 reboot(POWER_OFF) real power-off (ACPI S5), the sc69-sc73 leak-count triple fix, riscv64 trap call-chain capture (25.9% with kernel frames), the apic.rs repair, the heap move to LAYOUT-8 (0x82200000), and 1000 Hz sampling readiness.</p>
       </div>
     </div>
 

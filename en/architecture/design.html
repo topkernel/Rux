@@ -33,7 +33,6 @@
                   <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="design.html">Design deep-dive</a>
-    <a href="seedcore.html">Seed-Core architecture</a>
     <a href="scheduler.html">Scheduler</a>
     <a href="memory.html">Memory management</a>
     <a href="filesystem.html">Filesystem</a>
@@ -85,30 +84,29 @@
     <div class="sub">Mechanisms, data structures and measured numbers per subsystem — numbers come from the repository docs; unmeasured items are marked as such</div>
 
     <h2 id="overview"><span class="anchor">§0</span>Overview</h2>
-<h2 id="seedcore"><span class="anchor">§0+</span>The Seed-Core Architecture: Rux's biggest difference from Linux</h2>
-    <p>The essential difference from Linux is not any subsystem's algorithm but <b>how the trusted computing base (TCB) is defined</b>. Linux is a ~28M-line C monolith: the type system does not check memory safety, so <b>the whole tree is TCB</b>. Rux turns the property into a <b>compile-time structure</b> — named after the materials-science metaphor: <b>Seed-Core</b>. The ~3,000 hand-written lines are the <b>seed crystal</b>; every service line <b>crystallizes</b> into safe code on the type-system lattice; the seed is tiny yet determines the integrity of the whole crystal.</p>
-    <p><b>The one criterion</b>, asked of every line: <code>can it live under #![forbid(unsafe_code)]?</code> YES → a service crate (compiler-guaranteed zero unsafe; negative-probe verified: adding unsafe must fail the crate's own build). NO → rux-core (under an INV contract/F-row, covered by the verification stack). No third bucket.</p>
-    <div class="callout" style="margin-top:8px"><b>Terminology.</b><b>INV contract</b>: every unsafe block retained in the core carries a numbered machine-verifiable precondition declaration. Example — INV-SCE-3 states: "the global run queue's storage is written exactly once by <code>grq_init</code> under the GRQ_READY flag's CAS; subsequent reads occur only after that flag's Acquire barrier" — specifying the memory-visibility condition the unsafe block depends on for correctness.Each declaration answers three questions:<b>what precondition must hold for the code to be correct</b>(e.g., "this page is mapped and aligned"),<b>what constraint must not be violated during execution</b>(e.g., "must not call any function that may free this pointer while held"), and<b>what cleanup is mandatory on exit</b>(e.g., "must release the reference count").Registered in docs/architecture/safety-and-performance.md, one-to-one with the code.<b>F-row</b>: for unsafe code argued non-rewritable in safe Rust (e.g., the context switch must manipulate CPU registers directly), a row in the irreducibility register records: owning function, line count, why no safe rewrite exists, and the counterpart in the reference implementation (e.g., Linux's entry.S).Together: every unsafe line among the ~3,000 core lines has an audit entry, 97%+ coverage.</div>
-    <p>The complete argument with all its measurements — the dependency direction, the four stay rules, the three call forms with the placement table, the interface design rules, the irreducible floor, the three-layer defense, the microkernel comparison, the industry landscape, the mechanism/policy separation with the S1 case study, the measured size, and the landing status — lives on the dedicated page: <a href="seedcore.html">Seed-Core deep-dive →</a> (design of record: <code>docs/architecture/seed-core-design.md</code>).</p>
-    <p>Rux is one source tree serving three architectures (riscv64 / x86_64 / aarch64), ~90% arch-independent. Externally it matches the Linux ABI across 349 syscalls; internally it is a clean-room design — every internal decision that differs from the mainstream is registered in the <a href="#divergences">design-divergence register</a> with compatibility evidence.</p>
+<h2 id="safety"><span class="anchor">§0+</span>The unsafe consolidation: zero unsafe outside 19 audited files</h2>
+    <p>The kernel's entire unsafe surface is consolidated into <b>19 audited files</b> (one <code>unsafe.rs</code> collection per subsystem plus the root collection); every other file — <b>401</b> of them — carries a file-level <code>#![forbid(unsafe_code)]</code>, so any new unsafe outside the audited files is a compile error. The machine gate (<code>scripts/gate_unsafe_mainline.py</code>) scans the whole repo green (rc=0). The unsafe keyword occupies <b>1,022 of 375,622 kernel lines = 0.27%</b> (the pre-campaign register held 6,396 unsafe regions); SAFETY-comment coverage is 65.5%.</p>
+    <div class="callout" style="margin-top:8px"><b>Terminology.</b><b>INV contract</b>: every unsafe block retained in an audited file carries a numbered machine-verifiable precondition declaration. Example — INV-SCE-3 states: "the global run queue's storage is written exactly once by <code>grq_init</code> under the GRQ_READY flag's CAS; subsequent reads occur only after that flag's Acquire barrier" — specifying the memory-visibility condition the unsafe block depends on for correctness.Each declaration answers three questions:<b>what precondition must hold for the code to be correct</b>(e.g., "this page is mapped and aligned"),<b>what constraint must not be violated during execution</b>(e.g., "must not call any function that may free this pointer while held"), and<b>what cleanup is mandatory on exit</b>(e.g., "must release the reference count").Registered in docs/architecture/safety-and-performance.md, one-to-one with the code; each audited file's header comment carries its subsystem's contract list.</div>
+    <p>Rux is one source tree serving three architectures (riscv64 / x86_64 / aarch64), ~90% arch-independent. Externally it matches the Linux ABI across 394 syscalls; internally it is a clean-room design — every internal decision that differs from the mainstream is registered in the <a href="#divergences">design-divergence register</a> with compatibility evidence.</p>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Subsystem</th><th class="num">Lines</th><th class="num">Share</th><th>Role</th></tr></thead>
         <tbody>
-          <tr><td>process/ + sched/ + sync/</td><td class="num">60,321</td><td class="num">16.7%</td><td>tasks / scheduling / synchronization</td></tr>
-          <tr><td>fs/ (ext4 · VFS · page cache · jbd2)</td><td class="num">76,886</td><td class="num">21.3%</td><td>filesystem stack and caches</td></tr>
-          <tr><td>arch/ (three port layers)</td><td class="num">45,175</td><td class="num">12.5%</td><td>boot / traps / context switch / TLB</td></tr>
-          <tr><td>syscall/</td><td class="num">41,041</td><td class="num">11.3%</td><td>syscall boundary (the capsule edge)</td></tr>
-          <tr><td>dfx/ + trace/ (syscost · kallsyms · watchdog · trace-event)</td><td class="num">23,737</td><td class="num">6.6%</td><td>diagnostics and observability</td></tr>
-          <tr><td>drivers/ (virtio · DRM · input)</td><td class="num">26,280</td><td class="num">7.3%</td><td>device drivers</td></tr>
-          <tr><td>ipc/ (binder · SysV · MQ)</td><td class="num">22,109</td><td class="num">6.1%</td><td>inter-process communication</td></tr>
-          <tr><td>net/ (TCP/IP · unix · netlink)</td><td class="num">20,637</td><td class="num">5.7%</td><td>network stack</td></tr>
-          <tr><td>mm/</td><td class="num">20,126</td><td class="num">5.6%</td><td>memory management</td></tr>
-          <tr><td>others (top-level files · interrupt · timer · perf · io_uring · safety · security · module)</td><td class="num">~25K</td><td class="num">2.2%</td><td>infrastructure and security modules</td></tr>
+          <tr><td>process/ + sched/ + sync/</td><td class="num">61,925</td><td class="num">16.5%</td><td>tasks / scheduling / synchronization</td></tr>
+          <tr><td>fs/ (ext4 · VFS · page cache · jbd2)</td><td class="num">78,193</td><td class="num">20.8%</td><td>filesystem stack and caches</td></tr>
+          <tr><td>arch/ (three port layers)</td><td class="num">52,047</td><td class="num">13.9%</td><td>boot / traps / context switch / TLB</td></tr>
+          <tr><td>syscall/</td><td class="num">40,310</td><td class="num">10.7%</td><td>syscall boundary</td></tr>
+          <tr><td>dfx/ + trace/ (syscost · kallsyms · watchdog · trace-event)</td><td class="num">24,432</td><td class="num">6.5%</td><td>diagnostics and observability</td></tr>
+          <tr><td>drivers/ (virtio · DRM · input)</td><td class="num">26,540</td><td class="num">7.1%</td><td>device drivers</td></tr>
+          <tr><td>ipc/ (binder · SysV · MQ)</td><td class="num">22,455</td><td class="num">6.0%</td><td>inter-process communication</td></tr>
+          <tr><td>net/ (TCP/IP · unix · netlink)</td><td class="num">20,707</td><td class="num">5.5%</td><td>network stack</td></tr>
+          <tr><td>mm/</td><td class="num">20,951</td><td class="num">5.6%</td><td>memory management</td></tr>
+          <tr><td>top-level files (main · lib.rs · config etc.)</td><td class="num">16,254</td><td class="num">4.3%</td><td>kernel entry and infrastructure</td></tr>
+          <tr><td>others (interrupt · timer · perf · io_uring · safety · security · module)</td><td class="num">11,808</td><td class="num">3.1%</td><td>infrastructure and security modules</td></tr>
         </tbody>
       </table>
     </div>
-    <p>The layering model (<code>docs/architecture/kernel-layers.md</code>): the Framework layer (arch/mm primitives/interrupt/virtio core/trace) allows <code>unsafe</code> with per-block <code>// SAFETY:</code> comments; the service layer targets 100% <code>forbid(unsafe_code)</code> (165 modules compile-time forbidden under the CI ratchet; 93 service files contain none); the syscall entry is the capsule boundary, validating and translating user pointers in one place.</p>
+    <p>The layering model (<code>docs/architecture/kernel-layers.md</code>): the whole kernel's unsafe lives in the 19 audited <code>unsafe.rs</code> files, every block under an INV contract; the other 401 files all carry compile-time <code>forbid(unsafe_code)</code> (machine gate rc=0; the unsafe keyword is 0.27% of the kernel); the syscall entry validates and translates user pointers in one place.</p>
 
     <div class="mod-anchor" id="sched"></div>
     <h2><span class="anchor">§1</span>Scheduler (kernel/src/sched/) · <a href="scheduler.html">deep-dive →</a></h2>
@@ -272,7 +270,7 @@
     <p>Thesis: <b>security checks happen at compile time and vanish from the fast paths — the fast design and the safe design are the same design.</b> Source: <code>docs/architecture/safety-and-performance.md</code>.</p>
     <ul>
       <li><b>Bug taxonomy v1</b> (3,358 deduplicated commits adjudicated one by one): of 33 memory-corruption defects, <b>23 live in explicit unsafe blocks/arch assembly</b> and <b>10 in safe code</b> — all ownership/refcount/lock-protocol classes safe Rust does not type-check today; <b>zero</b> pointer-expression defects (OOB/iterator invalidation/wild-pointer arithmetic/format strings) in safe code. 6 of 33 were caught by review before any boot.</li>
-      <li><b>The unsafe surface is enumerated and contracted</b>: 2.2% of lines (2.2% on the dual series); 165 modules compile-time forbid(unsafe_code) under the CI ratchet, 93 service files already unsafe-free; SAFETY comments cover 69%; 164 Kani harnesses prove the core unsafe code for all inputs.</li>
+      <li><b>The unsafe surface is enumerated and contracted</b>: the unsafe keyword is 0.27% of the kernel (1,022 of 375,622 lines), all of it inside the 19 audited unsafe.rs files; 401 files carry compile-time forbid(unsafe_code) and the machine gate is green repo-wide (rc=0); SAFETY comments cover 65.5%; 164 Kani harnesses prove the core unsafe code for all inputs.</li>
       <li><b>Every performance row is paired with its safety sentence</b>: e.g. the switch path carries typed per-CPU storage + keyed locks; lmbench/Geekbench numbers and the census-adjudicated structure share a table; the cost side (futex wake→run ~10 ms behind a running task, tick-quantized) is recorded as-is.</li>
       <li><b>The honest gap register v1</b>: KASLR (no boot entropy source), kernel text/rodata W^X tightening, compiler stack protectors, KASAN-style poisoning breadth, KCSAN watchpoints, kallsyms masking — each with what closing it looks like.</li>
     </ul>

@@ -36,7 +36,6 @@
     <a class="on" href="about.html">Introduction</a>
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Architecture and modules</a>
-    <a href="../architecture/seedcore.html">Seed-Core architecture</a>
     <a href="../architecture/scheduler.html">Scheduler</a>
     <a href="../architecture/memory.html">Memory management</a>
     <a href="../architecture/filesystem.html">Filesystem</a>
@@ -118,19 +117,20 @@
 
     <h2 id="safety"><span class="anchor">§4</span>Safety: not "Rust is safe", but the itemized bill</h2>
     <p>"Rust is safe" is a sentence everyone has heard too often. What is actually worth knowing is: what has gone wrong inside unsafe code, and how I manage it.</p>
-    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 396,139 lines. Measured by the in-tree ledger script:</p>
+    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 375,622 lines, measured after the consolidation campaign completed on 2026-11-27:</p>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Series</th><th>Lines</th><th>Share</th></tr></thead>
+      <thead><tr><th>Series</th><th>Value</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td><code>unsafe { … }</code> block bodies</td><td class="num">8,759</td><td class="num">2.2%</td></tr>
-        <tr><td><code>unsafe fn</code> / <code>unsafe impl</code> bodies</td><td class="num">2,539</td><td class="num">0.6%</td></tr>
-        <tr><td><b>dual series — the honest total</b></td><td class="num"><b>10,742</b></td><td class="num"><b>2.7%</b></td></tr>
+        <tr><td>unsafe keyword lines</td><td class="num"><b>1,022 lines = 0.27%</b></td><td>the pre-campaign register held 6,396 unsafe regions</td></tr>
+        <tr><td>files containing unsafe</td><td class="num"><b>19 audited unsafe.rs files</b></td><td>one collection per subsystem + the root; every block under an INV contract</td></tr>
+        <tr><td>forbid(unsafe_code) files</td><td class="num"><b>401</b></td><td>every other file forbids unsafe at the compiler</td></tr>
+        <tr><td>Machine gate</td><td class="num"><b>rc=0</b></td><td>gate_unsafe_mainline.py scans the whole repo: zero unsafe outside the audited files</td></tr>
       </tbody>
     </table></div>
-    <p>In the layered view, <code>kernel/src</code> carries 2,625 unsafe tokens, of which <b>1,174 sit outside the Framework layer</b> (the service tier). 165 modules carry <code>#![forbid(unsafe_code)]</code> — compiler-enforced zero-unsafe, ratcheted by CI so the set only grows; 93 service files hold no unsafe at all. 69% of unsafe constructs carry a written <code>// SAFETY:</code> contract, and CI fails when a region appears in the tree without a ledger entry.</p>
+    <p>The boundary is enforced by the compiler and the machine gate: unsafe in the forbidden set fails the build outright; adding unsafe means entering the subsystem's audited file with a numbered INV contract. SAFETY-comment coverage is 65.5%, target 95%.</p>
     <p><b>The defect history.</b> <b>35</b> memory-corruption-class bugs over Rux's whole history, each adjudicated individually: <b>23</b> had the defect inside unsafe code or assembly, <b>12</b> were in safe code — and every one of those twelve is an ownership, refcount, lock-protocol or stack-depth decision (the reduction campaign contributed two: a manual refcount release kept beside an RAII handle, and a self-referential list head left pointing at a dead constructor temporary — both caught by the data-integrity battery, both fixed at the protocol level). The classes that dominate the CVE history of C kernels — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are <b>zero</b> in safe code. Six of the 35 were caught in review before any boot ran them.</p>
     <p><b>Formal verification.</b> 164 Kani harnesses discharge the core unsafe code for all inputs; 1,184 host-side tests; loom enumerates the interleavings of the mutex, PI-chain and timer primitives; 4 SPIN models; Miri nightly.</p>
-    <div class="callout">"I am 90% safe Rust" is not the claim. The claim is: here is exactly what the remaining unsafe surface is, where it concentrates, and which tool watches it. That is auditable safety, not a slogan. See the <a href="../security/index.html">security overview</a> and the <a href="../security/taxonomy.html">defect taxonomy</a>.</div>
+    <div class="callout">"I am 99.7% safe Rust" is not the claim. The claim is: here is exactly what the remaining 0.27% is, where it concentrates (19 audited files), and which tool watches it. That is auditable safety, not a slogan. See the <a href="../security/index.html">security overview</a> and the <a href="../security/taxonomy.html">defect taxonomy</a>.</div>
 
     <h2 id="perf"><span class="anchor">§5</span>Performance: same machine, same accelerator — the wins and the losses both published</h2>
     <p>Every row is a QEMU + KVM comparison on the same host with the same accelerator; numbers from different environments are never mixed into one line.</p>
@@ -162,7 +162,7 @@
     <ul>
       <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
       <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
-      <li>The unsafe surface: 2.7% (10,742 lines) still depends on human review; the reduction target is ≤5,000 unsafe lines (≤1%) with a per-block irreducibility proof (docs/development/unsafe-5000-plan.md)</li>
+      <li>The unsafe surface: 0.27% (1,022 of 375,622 lines), all of it inside the 19 audited unsafe.rs files, every block under an INV contract (see the <a href="security/unsafe.html">ledger</a>)</li>
       <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
       <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
       <li>The 29 registered divergences need their compatibility evidence kept current</li>

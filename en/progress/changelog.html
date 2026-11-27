@@ -33,7 +33,6 @@
               <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
-    <a href="../architecture/seedcore.html">Seed-Core architecture</a>
     <a href="../architecture/scheduler.html">Scheduler</a>
     <a href="../architecture/memory.html">Memory management</a>
     <a href="../architecture/filesystem.html">Filesystem</a>
@@ -82,13 +81,19 @@
 
   <article class="doc-main">
     <h1>Changelog (highlights)</h1>
+    <h2 id="n1127"><span class="anchor">2026-11-27</span></h2>
+    <ul>
+      <li><b>The unsafe-consolidation campaign lands</b>: the whole repo's unsafe is collected into <b>19 audited <code>unsafe.rs</code> files</b> (one collection per subsystem plus the root), with the other <b>401 files</b> carrying file-level <code>forbid(unsafe_code)</code>; the machine gate (<code>gate_unsafe_mainline.py</code>) scans the repo green (rc=0). The unsafe keyword occupies <b>1,022 of 375,622 lines = 0.27%</b> (the pre-campaign register held 6,396 regions); SAFETY-comment coverage is 65.5%, every block under an INV contract.</li>
+      <li><b>Six fixes land with the line</b>: x86 <code>reboot(POWER_OFF)</code> performs a real power-off (ACPI S5); the sc69-sc73 leak-count triple fix (HZ calibration / verdict adjudication / boundary zeroing); riscv64 trap call-chain capture (25.9% of samples carry kernel frames); the apic.rs consolidation-damage repair; the riscv64 heap moved to the LAYOUT-8 window end 0x82200000; 1000 Hz sampling ready (carrier zeroed).</li>
+      <li><b>Site-wide unsafe numbers synced</b>: the security overview, the unsafe ledger, the about page and the code-structure page now reflect current main.</li>
+    </ul>
     <div class="sub">The full history: docs/progress/changelog.md and git log — this page records structural milestones only</div>
 
     <h2 id="n1120"><span class="anchor">2026-11-20</span></h2>
     <ul>
       <li><b>New Introduction page</b> (<a href="../about.html">about.html</a>, both languages): the project's position, the ABI contract, the AI working method, the unsafe detail, the performance comparison, what the tree contains and what is unfinished — collected on one page, linked from the top nav and the homepage buttons.</li>
       <li><b>Site figures refreshed to main @ 1689270d8</b>: kernel/ 679 files · <b>419,958 lines</b> (408,864 Rust); <b>349</b> system calls; in-kernel suite <b>1,584/1,584</b> (riscv64); <b>164</b> Kani harnesses; 1,184 host tests; <b>29</b> registered design divergences (the D-21 numbering collision is closed, D-29 fills the gap); the defect taxonomy holds 33 cases (23 unsafe/asm + 10 safe).</li>
-      <li><b>Unsafe ledger accounting fixed</b>: the ledger and census scripts now count git-tracked sources only — a stale generated file left by an older build (kernel/src/debug/ksyms_generated.rs, 27,625 lines, referenced by no module) had been diluting the denominator and reading low. The fix removed the dilution; every reduction round since re-banks on the dual series — see the ledger page for the current reading (2.2% dual).</li>
+      <li><b>Unsafe ledger accounting fixed</b>: the ledger and census scripts now count git-tracked sources only — a stale generated file left by an older build (kernel/src/debug/ksyms_generated.rs, 27,625 lines, referenced by no module) had been diluting the denominator and reading low. The fix removed the dilution; every reduction round since re-banks on the dual series; the consolidation campaign completed 2026-11-27 — see the ledger page for the current reading (0.27% by unsafe keyword lines).</li>
     </ul>
 
     <h2 id="n1116"><span class="anchor">2026-11-16</span></h2>

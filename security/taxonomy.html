@@ -44,7 +44,6 @@
     <a href="../performance/rttests.html">rt-tests</a>
     <a href="../performance/microbench.html">内部微基准</a><div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
-    <a href="../architecture/seedcore.html">晶核架构(Seed-Core)</a>
     <a href="../architecture/scheduler.html">调度器</a>
     <a href="../architecture/memory.html">内存管理</a>
     <a href="../architecture/filesystem.html">文件系统</a>
@@ -143,7 +142,7 @@
 
     <h2 id="verdict"><span class="anchor">§7</span>结论:这些数字支持什么</h2>
     <ul>
-      <li><b>类别论证成立</b>:表达式级缺陷类(0 例)与 safe 代码的结构性免疫一致;35 例中 23 例驻留于显式 audited unsafe —— 与"unsafe 面即 TCB"的分层模型自洽(2.2% 面积 / 2.2% 双口径,<a href="unsafe.html">审计记录页</a>)。</li>
+      <li><b>类别论证成立</b>:表达式级缺陷类(0 例)与 safe 代码的结构性免疫一致;35 例中 23 例驻留于显式 audited unsafe —— 与"unsafe 面即 TCB"的分层模型自洽(0.27% = 1,022/375,622 行,<a href="unsafe.html">审计记录页</a>)。</li>
       <li><b>残余类明确</b>:10 例 safe 类全部是所有权/引用计数/锁协议/栈深决策 —— 恰是模型检查与属性测试的靶(loom 锁协议、Kani INV-M 表、proptest 引用计数);硬化登记册将 checked Refcount、栈深分析列为闭合项。</li>
       <li><b>防线有效</b>:6/33 在任何启动前被评审捕获;panic 面逐实例收编;仪器误判有档案。</li>
       <li><b>不含糊的表述</b>:33 例/3,358 提交 ≈ 全史 1% 提交携带内存破坏缺陷,且全部带修复与回归证据 —— 这是"足够安全"的实证基线,而非断言。</li>
