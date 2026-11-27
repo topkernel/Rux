@@ -310,3 +310,56 @@ pub fn init_task_mut() -> &'static mut crate::process::task::Task {
     // single-threaded early boot, pre-publication.
     unsafe { INIT_TASK_STORAGE.assume_init_mut() }
 }
+
+// ---------------------------------------------------------------------------
+// INV-FDT-1: the boot-time FDT byte-access family (moved from cmdline.rs
+// by the root-file unsafe collection, 2026-11-27; also used by
+// arch/aarch64/smp.rs through the cmdline re-export).
+// ---------------------------------------------------------------------------
+
+/// The ONE audited read edge for boot-time FDT byte accesses
+/// (INV-FDT-1): boot.S maps the bootloader-provided DTB blob at its
+/// physical address for the machine's lifetime; every parse fn anchors
+/// the blob with the 0xd00dfeed magic check before walking, and the
+/// walkers keep their cursors inside [fdt, fdt+totalsize).
+#[inline]
+pub(crate) fn fdt_u8(p: *const u8) -> u8 {
+    // SAFETY: INV-FDT-1 — a 1-byte read inside the mapped DTB blob.
+    unsafe { p.read() }
+}
+
+/// Cursor advance inside the mapped DTB (INV-FDT-1): a safe wrapper so
+/// the walkers never hand-roll pointer arithmetic.
+#[inline]
+pub(crate) fn fdt_add(p: *const u8, n: isize) -> *const u8 {
+    // SAFETY: INV-FDT-1 — arithmetic within the mapped DTB blob; the
+    // walkers bound their loops by the header-derived `end`.
+    unsafe { p.offset(n) }
+}
+
+/// Big-endian u32 read at a cursor inside the mapped DTB (INV-FDT-1).
+#[inline]
+pub(crate) fn fdt_u32(p: *const u8) -> u32 {
+    // SAFETY: INV-FDT-1 — a 4-byte read inside the mapped DTB blob.
+    unsafe { u32::from_be_bytes(core::ptr::read_unaligned(p as *const [u8; 4])) }
+}
+
+// ---------------------------------------------------------------------------
+// INV-CMDLINE-STORAGE-1: the boot cmdline string's leaked storage (the
+// Box::leak slice the boot parse publishes through CMDLINE_PTR/LEN).
+// ---------------------------------------------------------------------------
+
+/// Materialize the stored boot cmdline as a `&'static str`.
+///
+/// INV-CMDLINE-STORAGE-1: ptr/len were set together by the boot parse
+/// (`Box::leak` of the bootargs string) — machine lifetime, never
+/// freed, `len` exactly the string's byte length; the bytes are UTF-8
+/// by construction (the parser slices the same string it stores).
+pub fn cmdline_str(ptr: *const u8, len: usize) -> Option<&'static str> {
+    // SAFETY: INV-CMDLINE-STORAGE-1 — machine-lifetime leaked slice,
+    // exact len, UTF-8 bytes.
+    unsafe {
+        let slice = core::slice::from_raw_parts(ptr, len);
+        core::str::from_utf8(slice).ok()
+    }
+}

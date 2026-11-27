@@ -12,6 +12,11 @@
 //! This module also provides device tree (FDT) parsing for:
 //! - bootargs from /chosen node
 //! - memory regions from /memory nodes (for memblock initialization)
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the FDT
+//! byte-access family (INV-FDT-1) and the cmdline storage materializer
+//! (INV-CMDLINE-STORAGE-1) live in kernel/src/unsafe.rs.
+#![forbid(unsafe_code)]
 
 use crate::println;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -76,32 +81,11 @@ const FDT_END: u32 = 0x9;
 /// # Returns
 /// - `Some(bootargs)`: Found bootargs string
 /// - `None`: Not found
-/// The ONE audited read edge for boot-time FDT byte accesses
-/// (INV-FDT-1): boot.S maps the bootloader-provided DTB blob at its
-/// physical address for the machine's lifetime; every parse fn anchors
-/// the blob with the 0xd00dfeed magic check before walking, and the
-/// walkers keep their cursors inside [fdt, fdt+totalsize).
-#[inline]
-pub(crate) fn fdt_u8(p: *const u8) -> u8 {
-    // SAFETY: INV-FDT-1 — a 1-byte read inside the mapped DTB blob.
-    unsafe { p.read() }
-}
-
-/// Cursor advance inside the mapped DTB (INV-FDT-1): a safe wrapper so
-/// the walkers never hand-roll pointer arithmetic.
-#[inline]
-pub(crate) fn fdt_add(p: *const u8, n: isize) -> *const u8 {
-    // SAFETY: INV-FDT-1 — arithmetic within the mapped DTB blob; the
-    // walkers bound their loops by the header-derived `end`.
-    unsafe { p.offset(n) }
-}
-
-/// Big-endian u32 read at a cursor inside the mapped DTB (INV-FDT-1).
-#[inline]
-pub(crate) fn fdt_u32(p: *const u8) -> u32 {
-    // SAFETY: INV-FDT-1 — a 4-byte read inside the mapped DTB blob.
-    unsafe { u32::from_be_bytes(core::ptr::read_unaligned(p as *const [u8; 4])) }
-}
+///
+/// The FDT byte-access edges (INV-FDT-1) live in kernel/src/unsafe.rs;
+/// this module re-exports them (the aarch64 smp bring-up walker imports
+/// them from here).
+pub(crate) use crate::boot_edges::{fdt_add, fdt_u32, fdt_u8};
 
 /// Parse the kernel command line from the bootloader DTB (`/chosen`).
 fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
@@ -248,10 +232,10 @@ fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 const MAX_MEMORY_REGIONS: usize = 8;
 
 pub fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_REGIONS] {
-    // SAFETY: MemoryRegion is a plain-data struct (usize fields only);
-    // all-zero bytes are a valid array of them.
+    // MemoryRegion is plain data (usize fields); the explicit empty
+    // region is the same all-zero bytes mem::zeroed produced.
     let mut regions: [MemoryRegion; MAX_MEMORY_REGIONS] =
-        unsafe { core::mem::zeroed() };
+        [MemoryRegion { base: 0, size: 0 }; MAX_MEMORY_REGIONS];
     let mut count = 0usize;
     let fdt = dtb_ptr as *const u8;
 
@@ -717,13 +701,11 @@ pub fn get_cmdline() -> Option<&'static str> {
         return None;
     }
 
-    // SAFETY (one storage edge): ptr/len were set together by the boot
-    // parse (Box::leak of the bootargs string) — machine-lifetime,
-    // never freed, len exactly the string's byte length.
-    unsafe {
-        let slice = core::slice::from_raw_parts(ptr, len);
-        core::str::from_utf8(slice).ok()
-    }
+    // INV-CMDLINE-STORAGE-1 (the audited storage edge in unsafe.rs):
+    // ptr/len were set together by the boot parse (Box::leak of the
+    // bootargs string) — machine-lifetime, never freed, len exactly the
+    // string's byte length.
+    crate::boot_edges::cmdline_str(ptr, len)
 }
 
 /// Parse command line arguments, get value for specified key
