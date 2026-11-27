@@ -1236,6 +1236,10 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
                 crate::dfx::taskdump::taskdump_dec(
                     t.terminal_switch_done.load(core::sync::atomic::Ordering::Acquire) as u64,
                 );
+                crate::dfx::taskdump::taskdump_raw_line(b" pac=");
+                crate::dfx::taskdump::taskdump_dec(
+                    t.terminal_pacing.load(core::sync::atomic::Ordering::Acquire) as u64,
+                );
                 crate::dfx::taskdump::taskdump_raw_line(b" st=");
                 crate::dfx::taskdump::taskdump_dec(t.state().bits() as u64);
                 crate::dfx::taskdump::taskdump_raw_line(b" slot=");

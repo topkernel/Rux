@@ -80,6 +80,31 @@ pub use x86_64::context::context_switch;
 #[cfg(feature = "aarch64")]
 pub use aarch64::context::context_switch;
 
+/// The prev task of THIS cpu's most recent context switch (the per-CPU
+/// slot `context_switch` publishes for ret_from_fork's schedule_tail).
+///
+/// Wedge-hunt (p4_fork_exec): the `__schedule` tail after
+/// `context_switch` runs in the INCOMING task's resumed frame, where the
+/// `prev` local is that frame's OWN binding from its last suspension —
+/// NOT the prev of the switch that just completed. The only source of
+/// the real prev after the asm switch is this slot; the tail's
+/// terminal-switch retire must read it here (schedule_tail already
+/// consumes the same slot for the newborn resume path).
+#[cfg(feature = "riscv64")]
+pub fn sched_switch_prev_task() -> *mut crate::process::task::Task {
+    crate::arch::riscv64::context::get_prev_task()
+}
+
+#[cfg(feature = "x86_64")]
+pub fn sched_switch_prev_task() -> *mut crate::process::task::Task {
+    crate::arch::x86_64::context::get_prev_task()
+}
+
+#[cfg(feature = "aarch64")]
+pub fn sched_switch_prev_task() -> *mut crate::process::task::Task {
+    crate::arch::aarch64::context::get_prev_task()
+}
+
 /// MPK (pkey) guard shim: the real implementation is x86_64-only; the
 /// other arches get always-off stubs so generic code (safety/dma.rs)
 /// compiles unchanged.

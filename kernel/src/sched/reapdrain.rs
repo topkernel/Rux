@@ -229,6 +229,11 @@ const GRACE_NUDGE_RUNS: u32 = 3;
 static R85_FREED: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
+/// wedge-hunt diagnostic: drainer samples blocked ONLY by the pacing
+/// gate (DEAD+off-CPU+unmarked but terminal_pacing still set).
+pub static PACED_BLOCKED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 /// Hand the storage free of a fully-released task to the drainer.
 /// `false` = over cap: the caller must run the synchronous fallback.
 pub fn defer_reap_storage(task: *mut Task, parent_pid: u32) -> bool {
@@ -288,6 +293,10 @@ fn switch_stage_done(claim: &ReapClaim) -> (bool, bool) {
         .terminal_pacing
         .load(core::sync::atomic::Ordering::Acquire)
     {
+        // wedge-hunt diagnostic: count the samples whose ONLY failing
+        // leg is the pacing gate. Nonzero growth while tsd stays 0
+        // names "entered the terminal loop, never switched out".
+        PACED_BLOCKED.fetch_add(1, Ordering::Relaxed);
         return (false, false);
     }
     // R85 physical truth: no CPU slot names this task. A task still
@@ -338,6 +347,23 @@ pub fn reap_drain_tick() {
     } else {
         DRAIN_BUDGET
     };
+    // wedge-hunt diagnostic: name the pacing-gate blocker growth and
+    // the pending depth on a budgeted cadence.
+    static DIAG_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let dn = DIAG_N.fetch_add(1, Ordering::Relaxed);
+    if dn < 8 || dn % 512 == 0 {
+        let paced = PACED_BLOCKED.load(Ordering::Relaxed);
+        let depth = depth;
+        crate::dfx::taskdump::taskdump_raw_line(b"REAP-DIAG run=");
+        crate::dfx::taskdump::taskdump_dec(dn as u64);
+        crate::dfx::taskdump::taskdump_raw_line(b" paced=");
+        crate::dfx::taskdump::taskdump_dec(paced as u64);
+        crate::dfx::taskdump::taskdump_raw_line(b" depth=");
+        crate::dfx::taskdump::taskdump_dec(depth as u64);
+        crate::dfx::taskdump::taskdump_raw_line(b" r85=");
+        crate::dfx::taskdump::taskdump_dec(R85_FREED.load(Ordering::Relaxed) as u64);
+        crate::dfx::taskdump::taskdump_raw_line(b"\n");
+    }
     // Snapshot-and-clear of the switch-stage candidates.
     let mut batch: Vec<PendingReap> = {
         let mut p = PENDING.lock();
