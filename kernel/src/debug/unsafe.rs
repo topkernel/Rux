@@ -126,7 +126,7 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
 // the dfx subsystem's ONE audited unsafe file. The arms below absorbed
 // the last inline unsafe of the hunt/diagnostic modules (backtrace,
 // memwatch, scribble, wildwatch, leakorigin, taskdump, pstore,
-// pathstash, ledger, mmforensics, oops, hung_task, slowtask,
+// ledger, mmforensics, oops, hung_task, slowtask,
 // mod) — all sixteen now zero-unsafe with file-level forbid. Existing
 // INV-FOR-1..3 contracts are unchanged; the arms reuse those families
 // or extend them with new numbers.
@@ -1091,7 +1091,7 @@ pub(crate) fn pstore_capture_write(
 }
 
 // ---------------------------------------------------------------------------
-// INV-FOR-1/2 extension arms (second wave: scribble/wildwatch/pathstash
+// INV-FOR-1/2 extension arms (second wave: scribble/wildwatch
 // specifics).
 // ---------------------------------------------------------------------------
 
@@ -1108,24 +1108,6 @@ pub(crate) fn t_running_on_cpu(task: *const Task) -> i32 {
     // SAFETY: INV-FOR-1 — atomic load through the possibly-stale
     /// adoption; plain data read.
     unsafe { (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed) }
-}
-
-/// The pathstash slot for `tid`, mutably (INV-FOR-1 stash arm: this
-/// task is the only writer for its tid slot; publication ordered via
-/// tid/len stores).
-pub(crate) fn pathstash_slot_mut(tid: u32) -> &'static mut super::pathstash::Slot {
-    // SAFETY: INV-FOR-1 — single-writer-per-slot diagnostic stash.
-    unsafe {
-        &mut (*core::ptr::addr_of_mut!(super::pathstash::SLOTS))
-            [(tid as usize) % super::pathstash::N]
-    }
-}
-
-/// The pathstash slot at index `i` (i < N by the caller's modulo),
-/// shared (INV-FOR-1 stash read arm: bytes utf8-checked by the caller).
-pub(crate) fn pathstash_slot_ref(i: usize) -> &'static super::pathstash::Slot {
-    // SAFETY: INV-FOR-1 — diagnostic read of the static slot table.
-    unsafe { &(*core::ptr::addr_of!(super::pathstash::SLOTS))[i] }
 }
 
 /// The kernel text range from the linker symbols (INV-FOR-2 image-bound

@@ -72,7 +72,6 @@ STATUS = {
     "kernel/src/debug/forkprof.rs": ("todo", ""),
     "kernel/src/debug/lostpark.rs": ("todo", ""),
     "kernel/src/sync/mutex.rs": ("part", "SleepMutex primitive (sync-realign: EXT4_BIG_LOCK/VFS_MUTATION_LOCK converted); reviewed from the fs/ lock-audit side for the sleeping-section contract; arch2 round: acquire loop re-read (R84 fair gate, wake-token spend, R7-B6b register-recheck, R85 epoch + anti-starve + deadline timer) — protocol closed under lost handoffs; release/Drop tails skimmed only"),
-    "kernel/src/debug/pathstash.rs": ("todo", ""),
     "kernel/src/debug/pstore.rs": ("todo", ""),
     "kernel/src/debug/sbi_debug.rs": ("part", "raw SBI printers"),
     "kernel/src/debug/scribble.rs": ("part", "task scribble hunter"),

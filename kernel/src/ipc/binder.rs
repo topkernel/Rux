@@ -6282,60 +6282,6 @@ pub fn txn_hang_audit() {
                 crate::drivers::virtio::vw_snap_direct();
             }
         }
-        // Leg-28 item 2 + leg-29A: name the FILE when the hung server
-        // thread is stuck in a file syscall family — the pathstash
-        // entry was written by this tid's own entry path (open family:
-        // sys_openat; regular-file writes: sys_write; fsync family:
-        // sys_fsync — sc310's hiview handler sat in fdatasync 43 min
-        // with only the raw fd visible).
-        // Family must MATCH the stash op: a writev to a pipe/socket
-        // never re-stashes (pipe fast path), so the slot would still
-        // hold an older open's path — printing it against a writev
-        // entry frame mislabels the file (seen on sc314A wave-1).
-        #[cfg(feature = "x86_64")]
-        let fam = if matches!(sys, 2 | 257 | 437) {
-            Some(crate::debug::pathstash::OP_OPEN)
-        } else if matches!(sys, 1 | 20) {
-            Some(crate::debug::pathstash::OP_WRITE)
-        } else if matches!(sys, 74 | 75) {
-            Some(crate::debug::pathstash::OP_SYNC)
-        } else if matches!(sys, 77 | 76) {
-            // x86_64 ABI: 77 ftruncate, 76 truncate (leg-36B).
-            Some(crate::debug::pathstash::OP_TRUNC)
-        } else {
-            None
-        };
-        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
-        let fam = if matches!(sys, 56 | 24) {
-            Some(crate::debug::pathstash::OP_OPEN)
-        } else if matches!(sys, 64 | 66) {
-            Some(crate::debug::pathstash::OP_WRITE)
-        } else if matches!(sys, 82 | 83) {
-            Some(crate::debug::pathstash::OP_SYNC)
-        } else if matches!(sys, 46 | 45) {
-            // asm-generic: 46 ftruncate, 45 truncate (leg-36B).
-            Some(crate::debug::pathstash::OP_TRUNC)
-        } else {
-            None
-        };
-        if let Some(want) = fam {
-            if let Some((op, p)) = crate::debug::pathstash::lookup_file(h.stid) {
-                if op == want {
-                    let opn = match op {
-                        crate::debug::pathstash::OP_OPEN => "open",
-                        crate::debug::pathstash::OP_WRITE => "write",
-                        crate::debug::pathstash::OP_SYNC => "sync",
-                        crate::debug::pathstash::OP_TRUNC => "truncate",
-                        _ => "?",
-                    };
-                    let _ = writeln!(
-                        w,
-                        "TXN-HANG txn{} file-op={} path='{}'",
-                        h.id, opn, p
-                    );
-                }
-            }
-        }
         // Leg-29A stuck-site probe: kernel-text words off the hung
         // thread's kernel stack, so the serial log names WHERE in the
         // kernel the handler is parked (sc310's RUNNING 43-min

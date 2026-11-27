@@ -3722,20 +3722,6 @@ pub fn sys_ftruncate(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let length = args[1] as i64;
 
-    // leg-36B: name the file if this thread later parks inside the
-    // truncate (break_lease / ext4 setattr extent-free IO). The fd is
-    // resolved in this task's own context — the audit cannot walk a
-    // foreign fd table from timer context.
-    {
-        let p = crate::sched::get_current_fdtable()
-            .and_then(|ft| ft.get_file(fd))
-            .map(|f| f.path())
-            .unwrap_or_default();
-        if !p.is_empty() {
-            crate::debug::pathstash::stash_file(crate::debug::pathstash::OP_TRUNC, &p);
-        }
-    }
-
     match crate::fs::vfs::vfs_ftruncate(fd, length) {
         Ok(()) => 0,
         Err(e) => e as i64,
@@ -3755,9 +3741,6 @@ pub fn sys_truncate(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    // leg-36B: truncate-family pathstash (see sys_ftruncate).
-    crate::debug::pathstash::stash_file(crate::debug::pathstash::OP_TRUNC, full_path.as_ref());
-
     match crate::fs::vfs::vfs_truncate(full_path.as_ref(), length) {
         Ok(()) => 0,
         Err(e) => e as i64,
@@ -5105,16 +5088,6 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                     {
                         return -(errno::EINVAL as i64);
                     }
-                    // rux:txnhunt (retired dfx=txnhunt) (leg-29A): name the file when this
-                    // fsync/fdatasync later draws a TXN-HANG — sc310's
-                    // hiview handler sat in fdatasync(fd) for 43 min
-                    // and the entry frame showed only the raw fd.
-                    // Lazy form (leg 44): skip the per-call File::path()
-                    // construction when the switch is off.
-                    crate::debug::pathstash::stash_file_lazy(
-                        crate::debug::pathstash::OP_SYNC,
-                        || file.path(),
-                    );
                     if is_ext4 {
                         let fs_ptr = match inode.private_data {
                             Some(p) => p as *const crate::fs::ext4::Ext4FileSystem,

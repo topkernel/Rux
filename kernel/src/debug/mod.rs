@@ -112,11 +112,6 @@ pub mod unixrd;
 /// preempt_count — names the producer of the leaked-count wake-strand
 /// family; see debug/leakorigin.rs.
 pub mod leakorigin;
-/// Last-open path stash for TXN-HANG (rux:txnhunt (retired dfx=txnhunt)): sys_openat stashes
-/// the resolved path at entry so the 1 Hz audit can name the file a
-/// hung server thread is stuck opening (leg-28 item 2: storage_daemon
-/// D-state open family); see debug/pathstash.rs.
-pub mod pathstash;
 /// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
 /// same syscall entry for >= 8 s get a line with args and the parked
 /// kernel-stack chain — attributes the leaf of nested-call cascades
