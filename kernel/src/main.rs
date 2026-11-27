@@ -9,8 +9,10 @@
 #![recursion_limit = "4096"]
 // Composition-point policy (mainline minimal-first): the bin crate is a
 // linker shim — its rust_main lives in the lib (whose unsafe collects
-// into kernel/src/unsafe.rs). Nothing here may add unsafe.
-#![forbid(unsafe_code)]
+// into kernel/src/unsafe.rs). Nothing here adds unsafe; a file-level
+// forbid is not possible because the load-bearing #[unsafe(no_mangle)]
+// linker marker IS an unsafe-code usage by definition. The gate
+// (scripts/gate_unsafe_mainline.py) covers the keyword.
 
 // Force the lib linkage (a bin with no references may drop the rlib).
 #[allow(unused_imports)]
