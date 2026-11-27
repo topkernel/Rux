@@ -111,11 +111,6 @@ pub mod unixrd;
 /// path) per sender pid with a tag histogram, and /dev/kmsg writes per
 /// caller; dumped on the syscost cadence; see debug/hilogcensus.rs.
 pub mod hilogcensus;
-/// Rapid zero-event epoll-return census (hilog-flood lane, cmdline
-/// `spinwatch=1`): counts a task's zero-event epoll_wait returns and
-/// dumps the interest set with live poll verdicts when a spinner is
-/// caught; see debug/spinwatch.rs.
-pub mod spinwatch;
 /// Leak-origin probe (cmdline `rux:leakhunt (retired dfx=leakhunt)`): records the call site of
 /// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
 /// moment a task returns to userspace (or is seen parked) with a nonzero

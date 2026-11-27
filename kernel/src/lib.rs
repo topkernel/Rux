@@ -950,15 +950,13 @@ pub fn rust_main_tail() -> ! {
         }
 
         // Bespoke-token compatibility arms (obs-hygiene tracepoint
-        // migration): the old `hilogcensus=1` / `spinwatch=1` cmdline
-        // tokens now flip the unified-framework events' enable switches
-        // (rux:hilog_census + rux:hilog_kmsg, rux:spinwatch +
-        // rux:spinwatch_fd). Run BEFORE trace_event= so an explicit
+        // migration): the old `hilogcensus=1` cmdline token now flips
+        // the unified-framework events' enable switches (rux:hilog_census
+        // + rux:hilog_kmsg). Run BEFORE trace_event= so an explicit
         // trace_event= spec (the canonical arming) can still override
         // what the alias armed.
         {
             debug::hilogcensus::compat_arm();
-            debug::spinwatch::compat_arm();
         }
 
         // The reference's trace_event= boot parameter: comma-separated
