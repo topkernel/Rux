@@ -58,7 +58,7 @@ pub fn ww_pick_walks() -> u64 {
     // trap handler re-trapped (sepc=trap_entry, silent wedge at the
     // first kswapd pick). Read the counter directly, like the
     // ww_pick_walk_inc closure row does.
-    crate::sched::hotpath::WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
+    crate::census::WW_PICK_WALKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// (on_cpu-mark heals, stale-claim heals) since boot — the two R85
@@ -67,8 +67,8 @@ pub fn ww_pick_walks() -> u64 {
 /// only suggest it.
 pub fn ww_heals() -> (u64, u64) {
     (
-        crate::sched::hotpath::WW_ONCPU_HEALS.load(Ordering::Relaxed),
-        crate::sched::hotpath::WW_CLAIM_HEALS.load(Ordering::Relaxed),
+        crate::census::WW_ONCPU_HEALS.load(Ordering::Relaxed),
+        crate::census::WW_CLAIM_HEALS.load(Ordering::Relaxed),
     )
 }
 
@@ -373,7 +373,7 @@ pub static FAIR_SCHED_CLASS: FairSchedClass = FairSchedClass::new();
 pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
         // s16 (WW5): one exact count per walk entry — the visits= field
         // on the strand line divides this by the strand window.
-        crate::sched::hotpath::ww_pick_walk_inc();
+        crate::census::ww_pick_walk_inc();
         // grq-10ns: cctx walk anatomy (picks entered / candidates
         // consulted — the denominator for the walk-cost evidence).
         crate::debug::hotpath::cctx_bump(&crate::debug::hotpath::FAIR_PICK_N);
@@ -888,7 +888,7 @@ pub fn cfs_pick_next_cpu(rq: &mut crate::sched::types::CfsRunQueue, cpu_id: usiz
             // thread's input on ohw29/30 precisely because this only
             // armed under schedtrace.
             if crate::sched::hotpath::sched_hist_armed() {
-                crate::sched::hotpath::sched_hist_refuse(task, skip_reason, cpu_id);
+                crate::census::sched_hist_refuse(task, skip_reason, cpu_id);
             }
             // Not allowed — count the refusal into the walk ring
             // (decision-time evidence for the PICK-SKIP-ALL report
@@ -1127,7 +1127,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
     pub fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
-        crate::sched::hotpath::WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::census::WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
         // 63rd: the heal event goes on the task's ring BEFORE the print
         // budget can swallow the line (a budgeted-out heal must still
         // appear in the victim's history).
@@ -1193,7 +1193,7 @@ pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
-        crate::sched::hotpath::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+        crate::census::WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
         if crate::sched::hotpath::sched_hist_armed() && !task.is_null() {
             rux::api::sched::sched_hist_ring(
                 crate::sched::r#unsafe::task_shared(task),

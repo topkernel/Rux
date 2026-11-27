@@ -172,7 +172,7 @@ fn generate_procs(node: &CgroupNode) -> Vec<u8> {
 
 fn generate_controllers() -> Vec<u8> {
     let mut s = String::new();
-    for name in hotpath::CONTROLLER_NAMES {
+    for name in sched_cgroup::CONTROLLER_NAMES {
         s.push_str(name);
         s.push(' ');
     }
@@ -322,7 +322,7 @@ fn apply_subtree_control(node: &CgroupNode, input: &str) -> i32 {
             controllers.subtree_control &= !clear;
             controllers.subtree_control |= set;
             // Only real controllers can ever be enabled.
-            controllers.subtree_control &= hotpath::ALL_CONTROLLERS;
+            controllers.subtree_control &= sched_cgroup::ALL_CONTROLLERS;
             0
         }
         None => errno::Errno::InvalidArgument.as_neg_i32(),
@@ -518,7 +518,7 @@ const CGROUP2_MAGIC: u32 = 0x6367_7270;
 /// Initialize the cgroup subsystem and register the cgroup2 fs type.
 pub fn init_cgroupfs() -> Result<(), i32> {
     // Core hierarchy first (root node).
-    hotpath::init_cgroup()?;
+    sched_cgroup::init_cgroup()?;
 
     // Superblock.
     if GLOBAL_CGROUP2_SB.load(Ordering::Acquire).is_null() {
@@ -613,7 +613,7 @@ pub fn create_root_inode() -> Arc<Inode> {
         None => {
             // Defensive: init_cgroupfs() must have run. init_cgroup() is
             // idempotent, so heal instead of failing the mount.
-            let _ = hotpath::init_cgroup();
+            let _ = sched_cgroup::init_cgroup();
             match hotpath::cgroup_root() {
                 Some(r) => r,
                 None => unreachable!("cgroup root cannot fail to initialize"),

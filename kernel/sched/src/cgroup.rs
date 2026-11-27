@@ -22,19 +22,19 @@
 //! One file per feature point (user order 2026-11-26): this file is the
 //! hierarchy/memory/policy operations consumed by cgroupfs and the mmap
 //! charge hooks.
-
 #![forbid(unsafe_code)]
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::process::types::Task;
 use crate::sched::hotpath::{
-    attach_task, detach_task, task_cgroup, uncharge_bytes, CGROUP_INO_STRIDE, CTRL_CPU, CTRL_MEMORY,
-    CTRL_PIDS, LIMIT_MAX,
+    attach_task, cgroup_root, current, detach_task, sched_clock, task_cgroup, uncharge_bytes,
+    CGROUP_ROOT_CELL, LIMIT_MAX,
 };
-use crate::sched::r#unsafe::task_shared;
+use crate::sched::r#unsafe::{task_borrow, task_shared};
 use crate::sched::types::CgroupNode;
 
 // ============================================================================
@@ -110,7 +110,7 @@ pub fn cgroup_rmdir(parent: &Arc<CgroupNode>, name: &str) -> Result<(), i32> {
     // A limited cgroup disappearing must not leave the tick-time walk
     // counting a dead node.
     if node.controllers.lock_irqsave().cpu_quota_ns.load(Ordering::Acquire) != LIMIT_MAX {
-        crate::sched::hotpath::CPU_LIMITED_NODES.fetch_sub(1, Ordering::AcqRel);
+        CPU_LIMITED_NODES.fetch_sub(1, Ordering::AcqRel);
     }
 
     let removed = children.remove(name);
@@ -186,9 +186,9 @@ pub fn task_cgroup_throttled(task: *const crate::process::types::Task) -> bool {
 /// refresh the period window.
 pub fn note_cpu_limit_changed(node: &Arc<CgroupNode>, was_limited: bool, now_limited: bool) {
     if was_limited && !now_limited {
-        crate::sched::hotpath::CPU_LIMITED_NODES.fetch_sub(1, Ordering::AcqRel);
+        CPU_LIMITED_NODES.fetch_sub(1, Ordering::AcqRel);
     } else if !was_limited && now_limited {
-        crate::sched::hotpath::CPU_LIMITED_NODES.fetch_add(1, Ordering::AcqRel);
+        CPU_LIMITED_NODES.fetch_add(1, Ordering::AcqRel);
         let now = crate::sched::hotpath::sched_clock();
         // SAFETY: nodes are never freed.
         let n = node;
@@ -358,4 +358,168 @@ pub fn format_subtree_control(bits: u32) -> String {
         }
     }
     s
+}
+
+
+pub fn init_cgroup() -> Result<(), i32> {
+    let mut guard = CGROUP_ROOT_CELL.lock();
+    if guard.is_none() {
+        *guard = Some(Arc::new(CgroupNode::new_root()));
+    }
+    Ok(())
+}
+
+fn cpu_charge_chain(node: &CgroupNode, delta_ns: u64) -> bool {
+    let mut throttled = false;
+    node.for_each_ancestor(|n| {
+        n.cpu_usage_total_ns.fetch_add(delta_ns, Ordering::AcqRel);
+        let controllers = n.controllers.lock_irqsave();
+        let quota = controllers.cpu_quota_ns.load(Ordering::Acquire);
+        if quota == LIMIT_MAX {
+            return;
+        }
+        drop(controllers);
+        let used = n.cpu_usage_period_ns.fetch_add(delta_ns, Ordering::AcqRel) + delta_ns;
+        if used > quota && !n.cpu_throttled.swap(true, Ordering::AcqRel) {
+            n.nr_throttled.fetch_add(1, Ordering::AcqRel);
+        }
+        if n.cpu_throttled.load(Ordering::Acquire) {
+            throttled = true;
+        }
+    });
+    throttled
+}
+
+fn cpu_period_rollover(now: u64) -> bool {
+    let mut unthrottled_any = false;
+
+    fn walk(node: &CgroupNode, now: u64, unthrottled_any: &mut bool) {
+        {
+            let controllers = node.controllers.lock_irqsave();
+            let quota = controllers.cpu_quota_ns.load(Ordering::Acquire);
+            let period = controllers.cpu_period_ns.load(Ordering::Acquire).max(1);
+            if quota != LIMIT_MAX {
+                let start = node.cpu_period_start_ns.load(Ordering::Acquire);
+                if now.saturating_sub(start) >= period {
+                    // New period: reset usage, move the window.
+                    node.cpu_period_start_ns.store(now, Ordering::Release);
+                    node.cpu_usage_period_ns.store(0, Ordering::Release);
+                    if node.cpu_throttled.swap(false, Ordering::AcqRel) {
+                        node.throttled_ns
+                            .fetch_add(now.saturating_sub(start), Ordering::AcqRel);
+                        *unthrottled_any = true;
+                    }
+                }
+            }
+        }
+        let children: Vec<Arc<CgroupNode>> = {
+            let guard = node.children.lock_irqsave();
+            guard.values().cloned().collect()
+        };
+        for c in children {
+            // SAFETY: nodes are never freed.
+            walk(&c, now, unthrottled_any);
+        }
+    }
+
+    if let Some(root) = cgroup_root() {
+        // SAFETY: nodes are never freed.
+        walk(&root, now, &mut unthrottled_any);
+    }
+    unthrottled_any
+}
+
+pub const CGROUP_TICK_NS: u64 = 1_000_000_000 / (crate::config::KERNEL_HZ as u64);
+
+pub const CTRL_CPU: u32 = 1 << 0;
+
+pub const CTRL_MEMORY: u32 = 1 << 1;
+
+pub const CTRL_PIDS: u32 = 1 << 2;
+
+pub const ALL_CONTROLLERS: u32 = CTRL_CPU | CTRL_MEMORY | CTRL_PIDS;
+
+pub const CONTROLLER_NAMES: [&str; 3] = ["cpu", "memory", "pids"];
+
+pub const CGROUP_INO_STRIDE: u64 = 32;
+
+pub static CPU_LIMITED_NODES: AtomicU64 = AtomicU64::new(0);
+
+pub fn cgroup_on_fork(parent: *mut Task, child: *mut Task) -> Result<(), i32> {
+    let node = match task_cgroup(parent) {
+        Some(n) => n,
+        None => {
+            // Parent is an unattached (kernel) task: the child inherits the
+            // implicit-root status — nothing to check or record.
+            return Ok(());
+        }
+    };
+
+    // pids.max along the whole ancestor chain (self first).
+    let mut cur = node;
+    loop {
+        {
+            let controllers = cur.controllers.lock_irqsave();
+            let max = controllers.pids_max.load(Ordering::Acquire);
+            if max != LIMIT_MAX {
+                drop(controllers);
+                if cur.subtree_task_count() as u64 >= max {
+                    return Err(crate::errno::Errno::TryAgain.as_neg_i32());
+                }
+            }
+        }
+        match cur.parent.as_ref() {
+            Some(p) => {
+                // SAFETY: nodes are never freed.
+                cur = p;
+            }
+            None => break,
+        }
+    }
+
+    // SAFETY (one adopt edge): the fork hook's just-built child (live,
+    // pre-enqueue — exclusive by construction).
+    let child_pid = crate::sched::r#unsafe::task_borrow(child)
+        .map(|t| t.pid())
+        .ok_or(crate::errno::Errno::TryAgain.as_neg_i32())?;
+    attach_task(node, child, child_pid);
+    Ok(())
+}
+
+pub fn cgroup_exit(task: *mut Task) {
+    let node = match task_cgroup(task) {
+        Some(n) => n,
+        None => return,
+    };
+    let pid = crate::sched::r#unsafe::task_shared(task).pid();
+    detach_task(node, pid);
+
+    // SAFETY (one adopt edge): live task handle for this context.
+    let charged = crate::sched::r#unsafe::task_borrow(task)
+        .map(|t| t.cgroup_mem_charged())
+        .unwrap_or(0);
+    if charged > 0 {
+        uncharge_bytes(node, charged);
+        // SAFETY: task is the exiting task; ledger reset is defensive.
+        crate::sched::r#unsafe::task_shared(task).sub_cgroup_mem_charged(charged);
+    }
+}
+
+pub fn cgroup_cpu_tick(current: *mut Task) -> bool {
+    if CPU_LIMITED_NODES.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+
+    let now = crate::sched::hotpath::sched_clock();
+    let unthrottled = cpu_period_rollover(now);
+
+    let throttled = match task_cgroup(current) {
+        Some(node) => cpu_charge_chain(node, CGROUP_TICK_NS),
+        None => false,
+    };
+
+    // Throttled → the CPU must switch away. Unthrottled → some runqueue
+    // may now hold pickable tasks that were being skipped; ask for a
+    // resched so they get reconsidered.
+    throttled || unthrottled
 }

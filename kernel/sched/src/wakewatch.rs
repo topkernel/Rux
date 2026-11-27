@@ -162,7 +162,7 @@ pub fn note_wake(task: *mut crate::process::Task) {
     if crate::trace::EVENT_WWCENSUS.armed() {
         let vr = crate::process::r#unsafe::borrow_task(task).sched_entity().get_vruntime();
         slot.wtie.store(
-            crate::sched::hotpath::ww_cfs_tie_mass_vr(vr),
+            crate::census::ww_cfs_tie_mass_vr(vr),
             Ordering::Release,
         );
     }
@@ -369,7 +369,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         // skipping it (ownership/affinity/throttle) or charging is
         // inflated (runaway).
         {
-            let (vr, minv, leftv) = crate::sched::hotpath::ww_cfs_geometry(task);
+            let (vr, minv, leftv) = crate::census::ww_cfs_geometry(task);
             ww_msg(b" vr=");
             ww_u64(vr.saturating_sub(minv) / 1_000_000);
             ww_msg(b"ms lead-lag=");
@@ -388,7 +388,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         // tie= — timeline entries keyed at or before the victim (the
         // min_vruntime tie-mass it stands behind; see ww_tie_mass).
         ww_msg(b" tie=");
-        ww_u64(crate::sched::hotpath::ww_cfs_tie_mass(task));
+        ww_u64(crate::census::ww_cfs_tie_mass(task));
         // wtie= — the same mass as it was AT WAKE (entry-time rank-1).
         // The discriminator: wtie ~ nr_running says deep-queue service
         // latency; wtie ~ 1 with visits in the hundreds says the walk

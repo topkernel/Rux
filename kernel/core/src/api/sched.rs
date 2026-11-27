@@ -102,6 +102,7 @@ pub struct SchedHooks {
     pub pick_giveups: fn() -> (u64, u64),
     pub ww_slot_mismatch_counters: fn() -> [u64; MAX_CPUS],
     pub ww_sched_snapshot: fn() -> [u64; 10],
+    pub ww_pick_walks: fn() -> u64,
     pub ww_stalled_cpu_state: fn(cpu: usize) -> (u64, u64, u64),
     pub debug_claim_inject: fn() -> usize,
     pub debug_oncpu_inject: fn() -> usize,
@@ -131,6 +132,11 @@ pub struct SchedHooks {
     pub note_task_freed: fn(task: *mut crate::process::types::Task),
     pub report_poisoned_rq_entry: fn(cpu: usize, raw: usize),
     pub psledger_task: fn(cpu: usize) -> usize,
+    pub reap_drain_tick: fn(),
+    pub cgroup_cpu_tick: fn(current: *mut crate::process::types::Task) -> bool,
+    pub cgroup_exit: fn(task: *mut crate::process::types::Task),
+    pub cgroup_on_fork: fn(parent: *mut crate::process::types::Task, child: *mut crate::process::types::Task) -> Result<(), i32>,
+    pub defer_reap_storage: fn(task: *mut crate::process::types::Task, parent_pid: u32) -> bool,
     pub psledger_cpu: fn(cpu: usize) -> u32,
     pub psledger_jif: fn(cpu: usize) -> u64,
     pub psledger_pk: fn(cpu: usize) -> u32,
@@ -185,6 +191,7 @@ impl SchedHooks {
         orphan_watch_clear: |task| Default::default(),
         pick_giveups: || Default::default(),
         ww_slot_mismatch_counters: || Default::default(),
+        ww_pick_walks: || Default::default(),
         ww_sched_snapshot: || Default::default(),
         ww_stalled_cpu_state: |cpu| Default::default(),
         debug_claim_inject: || Default::default(),
@@ -215,6 +222,11 @@ impl SchedHooks {
         note_task_freed: |task| Default::default(),
         report_poisoned_rq_entry: |cpu, raw| Default::default(),
         psledger_task: |_| Default::default(),
+        reap_drain_tick: || Default::default(),
+        cgroup_cpu_tick: |current| Default::default(),
+        cgroup_exit: |task| Default::default(),
+        cgroup_on_fork: |_parent, _child| Ok(()),
+        defer_reap_storage: |task, parent_pid| Default::default(),
         psledger_cpu: |_| Default::default(),
         psledger_jif: |_| Default::default(),
         psledger_pk: |_| Default::default(),
@@ -352,6 +364,7 @@ pub fn pick_giveups() -> (u64, u64) { (hooks().pick_giveups)() }
 
 #[inline]
 pub fn ww_slot_mismatch_counters() -> [u64; MAX_CPUS] { (hooks().ww_slot_mismatch_counters)() }
+pub fn ww_pick_walks() -> u64 { (hooks().ww_pick_walks)() }
 
 #[inline]
 pub fn ww_sched_snapshot() -> [u64; 10] { (hooks().ww_sched_snapshot)() }
@@ -379,6 +392,11 @@ pub fn heartbeat() { (hooks().heartbeat)() }
 
 #[inline]
 pub fn stallwatch_tick() { (hooks().stallwatch_tick)() }
+pub fn reap_drain_tick() { (hooks().reap_drain_tick)() }
+pub fn cgroup_cpu_tick(current: *mut crate::process::types::Task) -> bool { (hooks().cgroup_cpu_tick)(current) }
+pub fn cgroup_exit(task: *mut crate::process::types::Task) { (hooks().cgroup_exit)(task) }
+pub fn cgroup_on_fork(parent: *mut crate::process::types::Task, child: *mut crate::process::types::Task) -> Result<(), i32> { (hooks().cgroup_on_fork)(parent, child) }
+pub fn defer_reap_storage(task: *mut crate::process::types::Task, parent_pid: u32) -> bool { (hooks().defer_reap_storage)(task, parent_pid) }
 
 #[inline]
 pub fn preempt_check_wake(task: *mut Task) { (hooks().preempt_check_wake)(task) }

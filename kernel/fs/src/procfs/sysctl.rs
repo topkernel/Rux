@@ -197,7 +197,7 @@ pub fn generate_sched_schedstats() -> Vec<u8> {
 pub fn write_sched_schedstats(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v @ 0..=1) => {
-            crate::sched::hotpath::set_enabled(v == 1);
+            rux::sched::hotpath::set_enabled(v == 1);
             0
         }
         _ => -(crate::errno::constants::EINVAL as i32),
