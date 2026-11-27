@@ -17803,7 +17803,7 @@ pub mod x86_64 {
                                     let cow_res = unsafe {
                                         handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                                     };
-                                    crate::debug::schb::note_cow(cow_j0);
+                                    crate::debug::syscost::note_cow(cow_j0);
                                     match cow_res {
                                         crate::arch::mm::CowFaultResult::Resolved
                                         | crate::arch::mm::CowFaultResult::Retry => {
@@ -18111,7 +18111,7 @@ pub mod x86_64 {
                         let cow_j0 = crate::drivers::timer::get_jiffies();
                         let cow_res =
                             unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
-                        crate::debug::schb::note_cow(cow_j0);
+                        crate::debug::syscost::note_cow(cow_j0);
                         match cow_res {
                             crate::arch::mm::CowFaultResult::Resolved => {
                                 MmFaultResult::Handled

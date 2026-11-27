@@ -54,7 +54,7 @@ use core::sync::atomic::Ordering;
 //
 // All taskdump-family writers funnel here (putc/puts/put_hex/put_dec,
 // taskdump_raw_line, taskdump_dec): hung-task FTX stacks, WQLEAK,
-// memwatch census, small_alloc census lines, schb, the trap printers —
+// memwatch census, small_alloc census lines, the trap printers —
 // no call site changes, only the write discipline changed.
 
 struct DumpStage {

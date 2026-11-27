@@ -262,42 +262,6 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
     true
 }
 
-/// Packed-slab state for the SC-ANAT beat line (rux:schb (retired dfx=schb)):
-/// (blocks, live slots, fallback note). x86_64 only — every other arch
-/// keeps the plain power-of-two buddy allocation and reports zeros.
-#[cfg(target_arch = "x86_64")]
-pub fn kstack_slab_stats() -> (u64, u64, u64) {
-    let g = KSTACK_BLOCKS.lock();
-    let mut live: u64 = 0;
-    for bm in g.maps.iter() {
-        live += bm.count_ones() as u64;
-    }
-    (g.bases.len() as u64, live, 0)
-}
-
-/// Non-x86_64 shim: no packed slab — the beat line stays format-stable
-/// across arches (kb=0 ks=0 reads as "no slab", which is the truth).
-#[cfg(not(target_arch = "x86_64"))]
-pub fn kstack_slab_stats() -> (u64, u64, u64) {
-    (0, 0, 0)
-}
-
-// Leg-16 kernel-heap anatomy (rux:schb (retired dfx=schb)): live kernel-stack count and the
-// boot-max stack high-water in bytes. The high-water probe ZEROES each
-// fresh stack at alloc (outside every lock) and scans for the first
-// nonzero word from the bottom at free time — the depth distribution is
-// the evidence for any KERNEL_STACK_SIZE reduction, which at pidmax ~4800
-// is 128KB x ~2860 live tasks = ~358MB of the ~900MB heap floor (the
-// single largest per-task item; see SC-SESSIONS leg-15 close-out).
-static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
-static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
-
-/// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
-/// Both stay 0 unless rux:schb (retired dfx=schb) armed the probe at alloc time.
-pub fn kstack_anat() -> (u64, u64) {
-    (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
-}
-
 /// Plain buddy allocation of one kernel stack (the pre-slab path).
 /// On x86_64 this is only the packed-slab exhaustion fallback (the
 /// 128KB request is one perfectly-packed order-5 block); elsewhere it
@@ -396,16 +360,6 @@ fn stack_cache_alloc() -> *mut u8 {
                     prev.1
                 );
             }
-        }
-        if crate::trace::EVENT_SCHB.armed()
-            && crate::trace::EVENT_KSPROBE.armed()
-        {
-            // Fresh stack is visible to nobody else yet: zero it so the
-            // free-side scan can measure the true high-water, and count it.
-            // ~3 spawns/s x 128KB of memset across the OH boot — negligible
-            // next to the fork itself.
-            crate::process::edges::zero_bytes(bottom, KERNEL_STACK_SIZE);
-            KSTACK_LIVE.fetch_add(1, Ordering::Relaxed);
         }
         // fresh alloc also gets a canary
         crate::process::edges::write_volatile_u64(
@@ -518,14 +472,6 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 putchar(b'\n');
             }
         }
-    }
-    // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): the high-water scan + record
-    // stash lives in free_kernel_stack (needs self for comm/pid); this
-    // side only keeps the live count honest for the SC-ANAT kN column.
-    if crate::trace::EVENT_SCHB.armed()
-        && crate::trace::EVENT_KSPROBE.armed()
-    {
-        KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
     let mut cache = STACK_CACHE.lock();
     // SAFETY: stack_bottom was allocated by stack_cache_alloc().
@@ -4325,81 +4271,6 @@ impl Task {
                     putchar(b'\n');
                     self.kernel_stack = None;
                     return;
-                }
-            }
-
-            // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): high-water scan + record
-            // stash. The stack is dead (on_cpu cleared + RCU waited
-            // upstream), no locks held — safe to walk. Records stash the
-            // surviving return addresses for the next schbd beat (the
-            // in-context print was eaten by early-boot UART storms twice).
-            if crate::trace::EVENT_SCHB.armed()
-                && crate::trace::EVENT_KSPROBE.armed()
-            {
-                let base = stack_bottom as usize;
-                let mut off = 8usize; // skip the canary slot
-                while off < KERNEL_STACK_SIZE {
-                    // Bounds validated above (base..base+SIZE).
-                    let v = crate::process::edges::read_volatile_u64((base + off) as *const u64);
-                    if v != 0 {
-                        let hw = (KERNEL_STACK_SIZE - off) as u64;
-                        let old = KSTACK_HW.load(Ordering::Relaxed);
-                        if hw > old {
-                            KSTACK_HW.store(hw, Ordering::Relaxed);
-                            if hw > 40 * 1024 {
-                                use crate::console::putchar;
-                                const MSG: &[u8] = b"KSTACK-HW depth=";
-                                for &b in MSG { putchar(b); }
-                                let mut vv = hw;
-                                if vv == 0 { putchar(b'0'); }
-                                let mut dd = [0u8; 20]; let mut kk = 0;
-                                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
-                                while kk > 0 { kk -= 1; putchar(dd[kk]); }
-                                const P: &[u8] = b" pid=";
-                                for &b in P { putchar(b); }
-                                let mut pv = self.pid() as usize;
-                                if pv == 0 { putchar(b'0'); }
-                                let mut pd = [0u8; 10]; let mut pk = 0;
-                                while pv > 0 { pd[pk] = b'0' + (pv % 10) as u8; pk += 1; pv /= 10; }
-                                while pk > 0 { pk -= 1; putchar(pd[pk]); }
-                                const C: &[u8] = b" comm='";
-                                for &b in C { putchar(b); }
-                                for &cb in self.comm() { if cb != 0 { putchar(cb); } }
-                                // sc218 lesson: the region BELOW the first
-                                // nonzero word is a zeroed span (a memset'd
-                                // local or zero-initialised frames) — by
-                                // construction it carries no return
-                                // addresses. The surviving frames of the
-                                // deep chain sit just ABOVE `off`; walk
-                                // upward and print the first kernel-range
-                                // words (deepest surviving return
-                                // addresses, symbolisable with addr2line).
-                                const T: &[u8] = b"' tail:";
-                                for &b in T { putchar(b); }
-                                let mut shown = 0;
-                                let mut o2 = off;
-                                let o_end = off + 4096;
-                                while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
-                                    // In-bounds per loop guard.
-                                    let ra = crate::process::edges::read_volatile_u64((base + o2) as *const u64);
-                                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
-                                        putchar(b' ');
-                                        let mut sh2 = 64;
-                                        while sh2 > 0 {
-                                            sh2 -= 4;
-                                            let nb = ((ra >> sh2) & 0xF) as u8;
-                                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                        }
-                                        shown += 1;
-                                    }
-                                    o2 += 8;
-                                }
-                                putchar(b'\n');
-                            }
-                        }
-                        break;
-                    }
-                    off += 8;
                 }
             }
 

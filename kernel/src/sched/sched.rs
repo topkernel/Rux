@@ -7426,13 +7426,10 @@ pub fn wake_up_enqueue_opt(
                     // ate the heal — without this the zero-fire state is
                     // indistinguishable between "never reached" and
                     // "predicate always skips" (the lb17 capture: 21
-                    // PARKED-LEAK, 0 WAKE-HEAL). 110th: rides rux:schb (retired dfx=schb) —
-                    // ~56 direct-console lines rode the pre-launcher
-                    // window of every perf boot.
+                    // PARKED-LEAK, 0 WAKE-HEAL).
                     static WHS_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if WHS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60
-                        && crate::trace::EVENT_SCHB.armed()
                     {
                         use crate::debug::taskdump::putc_brief as putchar;
                         fn pdec(mut v: u64) {

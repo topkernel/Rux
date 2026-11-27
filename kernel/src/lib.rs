@@ -1057,11 +1057,6 @@ pub fn rust_main_tail() -> ! {
             print_status("fs", "fdreapd fd retire reaper", true);
         }
 
-        // sc-series soft-wedge heartbeat (rux:schb (retired dfx=schb)): same late-boot slot
-        // as khungtaskd — its timer wakeups need secondaries online. The
-        // switch gates everything; schbd prints its own armed line.
-        crate::debug::schb::init();
-
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();

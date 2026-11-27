@@ -174,7 +174,7 @@ pub(crate) fn fault_in_write(start: *mut u8, len: usize) -> bool {
                     root_ppn,
                     crate::arch::mm::VirtAddr::new(page as u64),
                 );
-                crate::debug::schb::note_cow(cow_j0);
+                crate::debug::syscost::note_cow(cow_j0);
                 match cow_res {
                     crate::arch::mm::CowFaultResult::Resolved
                     | crate::arch::mm::CowFaultResult::Retry => {

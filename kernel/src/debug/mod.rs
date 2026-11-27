@@ -98,9 +98,6 @@ pub mod pstore;
 /// The non-fatal Oops path: Linux-shaped report, pstore dmesg capture,
 /// task-death policy (Tranche 5); see debug/oops.rs.
 pub mod oops;
-/// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
-/// hunt, cmdline `rux:schb (retired dfx=schb)`); see debug/schb.rs.
-pub mod schb;
 /// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
 /// see debug/fsw.rs.
 pub mod fsw;
