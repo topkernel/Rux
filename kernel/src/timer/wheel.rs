@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -1075,26 +1076,8 @@ impl TimerWheel {
         *self = TimerWheel::new();
     }
 
-    /// Borrow the shared UNIT-TEST wheel. The wheel is ~67 KB of fixed
-    /// storage BY DESIGN (the R37 no-alloc discipline) — the suite runs
-    /// `run_all_tests` on the 64 KB BOOT STACK, so a stack-constructed
-    /// test wheel overflows it and the slot writes scribble over
-    /// whatever sits below the stack (the first version of the shape
-    /// tests did exactly that: the corruption surfaced as the
-    /// scheduler-group KERNPANIC / GRQ-deadlock family — CPU-3 idle
-    /// illegal-instruction, WAKE-STRANDED, then sys_sched_yield wedged
-    /// on the GRQ). Tests use this static exactly like the kernel uses
-    /// its `static TIMER_TABLE`: fixed .bss storage, never the stack.
-    ///
-    /// SAFETY (inside): the unit-test suite is single-threaded (boot
-    /// CPU, timer IRQs disabled before run_all_tests) and the test
-    /// group is non-reentrant, so the exclusive borrow is sound.
-    #[cfg(feature = "unit-test")]
-    pub fn test_shared() -> &'static mut TimerWheel {
-        static mut TEST_WHEEL: TimerWheel = TimerWheel::new();
-        // SAFETY: see the doc comment — single-threaded suite.
-        unsafe { &mut *core::ptr::addr_of_mut!(TEST_WHEEL) }
-    }
+    // `test_shared` (the unit-test wheel's static-mut edge) lives in
+    // timer/unsafe.rs — this subsystem's one audited unsafe file.
 
     /// Routing probe: which bucket would `abs_jiffies` route to at
     /// cursor `current`. Pure function; mirrors route_for exactly.

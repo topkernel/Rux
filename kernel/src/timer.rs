@@ -36,6 +36,8 @@ use crate::drivers::timer;
 
 pub mod nohz;
 pub mod oneshot;
+#[path = "timer/unsafe.rs"]
+pub mod edges;
 pub mod wheel;
 
 pub use oneshot::{WakeArmed, WakeSpent};

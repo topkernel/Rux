@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -362,11 +363,10 @@ pub fn sys_init_module_impl(umod: usize, len: usize) -> i64 {
     }
 
     let mut blob = vec![0u8; len];
-    // SAFETY: umod/len validated with access_ok; copy_from_user faults
-    // safely on bad pages and reports the uncopied tail.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(blob.as_mut_ptr(), umod as *const u8, len)
-    };
+    // Safe twin (uaccess_safe::copy_in): umod/len validated with
+    // access_ok; faults safely on bad pages and reports the uncopied
+    // tail.
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut blob, umod);
     if uncopied > 0 {
         return -(errno::Errno::BadAddress.as_i32() as i64);
     }
@@ -400,8 +400,9 @@ pub fn sys_finit_module_impl(fd: usize, _param_flags: u64) -> i64 {
 
     // File size from the backing inode.
     let size = {
-        // SAFETY: inode is set at open time; read-only access here.
-        let inode = unsafe { (*file.inode.get()).clone() };
+        // Safe twin (File::get_inode): the inode cell is write-once at
+        // open time; read-only access here.
+        let inode = file.get_inode().cloned();
         match inode {
             Some(i) => i.size.load(core::sync::atomic::Ordering::Relaxed) as usize,
             None => return -(errno::Errno::InvalidArgument.as_i32() as i64),
@@ -412,9 +413,9 @@ pub fn sys_finit_module_impl(fd: usize, _param_flags: u64) -> i64 {
     }
 
     let mut blob = vec![0u8; size];
-    // SAFETY: blob is a valid kernel buffer of `size` bytes; read_at
-    // validates its own inode references.
-    let n = unsafe { file.read_at(0, blob.as_mut_ptr(), size) };
+    // Safe twin (read_at_slice): blob is a valid kernel buffer of
+    // `size` bytes; read validates its own inode references.
+    let n = file.read_at_slice(0, &mut blob);
     if n < 0 {
         return n as i64;
     }
@@ -444,16 +445,10 @@ pub fn sys_delete_module_impl(name_user: usize, _flags: u64) -> i64 {
     const MODULE_NAME_LEN: usize = 56;
     let mut name_buf = [0u8; MODULE_NAME_LEN + 1];
     for i in 0..=MODULE_NAME_LEN {
-        // SAFETY: byte-by-byte access_ok-guarded user read; copy_from_user
-        // handles faulting pages (returns uncopied count).
+        // Safe twin (uaccess_safe::copy_in): byte-by-byte access_ok-
+        // guarded user read; faults are handled (returns uncopied count).
         let mut one = [0u8; 1];
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                one.as_mut_ptr(),
-                (name_user + i) as *const u8,
-                1,
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_in(&mut one, name_user + i);
         if uncopied > 0 {
             return -(errno::Errno::BadAddress.as_i32() as i64);
         }
