@@ -13,11 +13,16 @@
 //! - Debug registers
 //! - Other architecture-specific state
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::arch::asm;
 use super::pt_regs::{PtRegs, SR_FS_DIRTY, SR_FS_CLEAN, SR_FS_INITIAL, SR_FS_OFF, SR_FS};
 
 /// FPU state size (32 64-bit registers)
-const FPU_STATE_SIZE: usize = 32;
+pub(crate) const FPU_STATE_SIZE: usize = 32;
 
 /// sstatus.SUM bit mask
 pub const SR_SUM: u64 = 1 << 18;
@@ -124,89 +129,8 @@ impl ThreadStruct {
         }
     }
 
-    /// Save FPU state
-    ///
-    /// Only saves if FPU state is dirty (has been modified since last save).
-    /// After saving, sets FS to CLEAN in sstatus CSR.
-    ///
-    /// Runs on the current task's hart (see fpu_save_for_switch's note).
-    #[inline]
-    pub fn save_fpu(&mut self) {
-        // SAFETY: reading sstatus CSR is safe; FPU access is valid because this is called
-        // from a context where FPU may be active (FS == DIRTY check follows).
-        // SAFETY: sstatus CSR read (register-only).
-        let sstatus: u64 = unsafe {
-            let v;
-            asm!("csrr {}, sstatus", out(reg) v);
-            v
-        };
 
-        // Only save if FS == DIRTY (FPU has been used)
-        if (sstatus & SR_FS) == SR_FS_DIRTY {
-            self.__fstate_save();
-            // Set FS to CLEAN after saving
-            let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
-            // SAFETY: sstatus CSR write (FS field).
-            unsafe { asm!("csrw sstatus, {}", in(reg) new_sstatus) };
-        }
-    }
 
-    /// Restore FPU state
-    ///
-    /// Only restores if task has FPU state (fs field != OFF).
-    /// After restoring, sets FS to CLEAN in sstatus CSR.
-    ///
-    /// Runs on the current task's hart.
-    #[inline]
-    pub fn restore_fpu(&mut self) {
-        // SAFETY: restoring FPU registers only when fs != OFF ensures the saved state
-        // was previously valid; writing sstatus.FS is safe to re-enable FPU access.
-        // Only restore if task has FPU state
-        if self.fs != SR_FS_OFF as u32 {
-            self.__fstate_restore();
-            // Set FS to CLEAN after restoring
-            // SAFETY: sstatus CSR RMW (FS field).
-            unsafe {
-                let sstatus: u64;
-                asm!("csrr {}, sstatus", out(reg) sstatus);
-                let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
-                asm!("csrw sstatus, {}", in(reg) new_sstatus);
-            }
-        }
-    }
-
-    /// Save FPU state before context switch
-    ///
-    /// Saves current FPU state and records FS status in thread struct.
-    /// After this, FPU is disabled for this task.
-    ///
-    /// Runs on the outgoing task's hart inside the switch path.
-    #[inline]
-    pub fn fpu_save_for_switch(&mut self) {
-        // The asm targets are this struct's own typed arrays; the CSR
-        // RMW fences the register visibility.
-        // SAFETY: sstatus CSR read (register-only).
-        let sstatus: u64 = unsafe {
-            let v;
-            asm!("csrr {}, sstatus", out(reg) v);
-            v
-        };
-
-        let fs = sstatus & SR_FS;
-
-        // Save FS status for later restore
-        self.fs = fs as u32;
-
-        // Only save if FS == DIRTY (FPU has been used)
-        if fs == SR_FS_DIRTY {
-            self.__fstate_save();
-        }
-
-        // Disable FPU for this task
-        let new_sstatus = sstatus & !SR_FS;
-        // SAFETY: sstatus CSR write (FS field).
-        unsafe { asm!("csrw sstatus, {}", in(reg) new_sstatus) };
-    }
 
     /// Get saved FS status
     #[inline]
@@ -219,93 +143,9 @@ impl ThreadStruct {
     // Same discipline as the FPU methods above; see arch/riscv64/vext.rs
     // for the rationale (sstatus.VS lazy enable + Dirty-gated saves).
 
-    /// Save the live vector state before a context switch.
-    ///
-    /// Records the live sstatus.VS field, saves the registers/CSRs only
-    /// when the hardware marks them Dirty, then drops VS to Off for the
-    /// outgoing task (its first vector use after switch-in will trap
-    /// and lazily re-enable — or its saved state is restored instead).
-    ///
-    /// # Safety
-    /// Must run on the task's own hart inside the (IRQs-disabled)
-    /// switch path, exactly like [`Self::fpu_save_for_switch`].
-    #[inline]
-    pub unsafe fn vstate_save_for_switch(&mut self) {
-        let sstatus: u64;
-        asm!("csrr {}, sstatus", out(reg) sstatus);
 
-        let vs = sstatus & super::vext::SR_VS;
-        self.vs = vs as u32;
 
-        if vs == super::vext::SR_VS_DIRTY {
-            super::vext::vstate_save(&mut self.vcsrs, &mut self.vregs);
-        }
 
-        // Disable the vector unit for the outgoing task
-        let new_sstatus = sstatus & !super::vext::SR_VS;
-        asm!("csrw sstatus, {}", in(reg) new_sstatus);
-    }
-
-    /// Restore the task's vector state on switch-in.
-    ///
-    /// Tasks that never used vectors (vstate_valid == false) keep
-    /// VS=Off; their first vector instruction goes through the lazy
-    /// enable in the illegal-instruction handler. Tasks with a saved
-    /// image are reloaded and recorded Clean (live == buffer).
-    ///
-    /// # Safety
-    /// Must run on the incoming task's hart right after the register
-    /// switch, exactly like [`Self::restore_fpu`].
-    #[inline]
-    pub unsafe fn restore_vstate(&mut self) {
-        if self.vstate_valid {
-            super::vext::vstate_restore(&self.vcsrs, &self.vregs);
-            // Live state now equals the buffer: record Clean.
-            let sstatus: u64;
-            asm!("csrr {}, sstatus", out(reg) sstatus);
-            let new_sstatus =
-                (sstatus & !super::vext::SR_VS) | super::vext::SR_VS_CLEAN;
-            asm!("csrw sstatus, {}", in(reg) new_sstatus);
-        }
-    }
-
-    /// Save the live vector state WITHOUT disabling the unit (fork
-    /// path): the parent keeps running with its registers loaded; only
-    /// the Dirty flag drops to Clean. Mirrors [`Self::save_fpu`].
-    ///
-    /// # Safety
-    /// Must be called on the current task's hart.
-    #[inline]
-    pub unsafe fn save_vstate(&mut self) {
-        let sstatus: u64;
-        asm!("csrr {}, sstatus", out(reg) sstatus);
-
-        if (sstatus & super::vext::SR_VS) == super::vext::SR_VS_DIRTY {
-            super::vext::vstate_save(&mut self.vcsrs, &mut self.vregs);
-            // vstate_save leaves live == buffer: record Clean.
-            let new_sstatus =
-                (sstatus & !super::vext::SR_VS) | super::vext::SR_VS_CLEAN;
-            asm!("csrw sstatus, {}", in(reg) new_sstatus);
-        }
-    }
-
-    /// First vector use on this task (illegal-instruction trap with
-    /// VS=Off): initialize the hart's vector state to a defined
-    /// initial image, mark the buffer valid, and report success so the
-    /// trap handler enables VS in the saved sstatus and retries.
-    ///
-    /// # Safety
-    /// Must be called from the current task's trap context.
-    #[inline]
-    pub unsafe fn vstate_first_use(&mut self) -> bool {
-        if super::vext::vstate_first_use_init() {
-            self.vstate_valid = true;
-            self.vs = super::vext::SR_VS_INITIAL as u32;
-            true
-        } else {
-            false
-        }
-    }
 
     /// Mark the saved vector state Clean (post-fork inheritance).
     #[inline]
@@ -313,130 +153,7 @@ impl ThreadStruct {
         self.vs = super::vext::SR_VS_CLEAN as u32;
     }
 
-    /// Internal FPU save implementation
-    ///
-    /// Saves f0-f31 and fcsr to thread structure.
-    /// Temporarily enables FPU during save.
-    #[inline]
-    // Runs with FS verified Dirty; the fsd targets are this struct's own
-    // [u64; 32] array.
-    // IRREDUCIBLE F-ROW (F-FPU-1): the x32 fsd save — reference
-    // kernel arch/riscv/kernel/entry.S's fstate_save; no safe Rust
-    // shape touches the FP register file.
-    fn __fstate_save(&mut self) {
-        // SAFETY: temporary FS enable (register RMW).
-        unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) };
 
-        // Save floating-point registers f0-f31
-        unsafe {
-            asm!(
-                "fsd f0, 0*8({0})",
-                "fsd f1, 1*8({0})",
-                "fsd f2, 2*8({0})",
-                "fsd f3, 3*8({0})",
-                "fsd f4, 4*8({0})",
-                "fsd f5, 5*8({0})",
-                "fsd f6, 6*8({0})",
-                "fsd f7, 7*8({0})",
-                "fsd f8, 8*8({0})",
-                "fsd f9, 9*8({0})",
-                "fsd f10, 10*8({0})",
-                "fsd f11, 11*8({0})",
-                "fsd f12, 12*8({0})",
-                "fsd f13, 13*8({0})",
-                "fsd f14, 14*8({0})",
-                "fsd f15, 15*8({0})",
-                "fsd f16, 16*8({0})",
-                "fsd f17, 17*8({0})",
-                "fsd f18, 18*8({0})",
-                "fsd f19, 19*8({0})",
-                "fsd f20, 20*8({0})",
-                "fsd f21, 21*8({0})",
-                "fsd f22, 22*8({0})",
-                "fsd f23, 23*8({0})",
-                "fsd f24, 24*8({0})",
-                "fsd f25, 25*8({0})",
-                "fsd f26, 26*8({0})",
-                "fsd f27, 27*8({0})",
-                "fsd f28, 28*8({0})",
-                "fsd f29, 29*8({0})",
-                "fsd f30, 30*8({0})",
-                "fsd f31, 31*8({0})",
-                in(reg) self.fpu.as_mut_ptr(),
-                options(nostack)
-            );
-        };
-
-        // Save fcsr
-        // SAFETY: register-only CSR read.
-        unsafe { asm!("frcsr {0}", out(reg) self.fcsr) };
-
-        // Disable FPU
-        // SAFETY: register-only CSR clear.
-        unsafe { asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack)) };
-    }
-
-    /// Internal FPU restore implementation
-    ///
-    /// Restores f0-f31 and fcsr from thread structure.
-    /// Temporarily enables FPU during restore.
-    #[inline]
-    // Runs with fs != OFF so the saved state is valid; the fld sources
-    // are this struct's own [u64; 32] array.
-    // IRREDUCIBLE F-ROW (F-FPU-2): the x32 fld restore — reference
-    // kernel entry.S's fstate_restore.
-    fn __fstate_restore(&mut self) {
-        // SAFETY: temporary FS enable (register RMW).
-        unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) };
-
-        // Restore fcsr first
-        // SAFETY: register-only CSR write.
-        unsafe { asm!("fscsr {0}", in(reg) self.fcsr) };
-
-        // Restore floating-point registers f0-f31
-        unsafe {
-            asm!(
-                "fld f0, 0*8({0})",
-                "fld f1, 1*8({0})",
-                "fld f2, 2*8({0})",
-                "fld f3, 3*8({0})",
-                "fld f4, 4*8({0})",
-                "fld f5, 5*8({0})",
-                "fld f6, 6*8({0})",
-                "fld f7, 7*8({0})",
-                "fld f8, 8*8({0})",
-                "fld f9, 9*8({0})",
-                "fld f10, 10*8({0})",
-                "fld f11, 11*8({0})",
-                "fld f12, 12*8({0})",
-                "fld f13, 13*8({0})",
-                "fld f14, 14*8({0})",
-                "fld f15, 15*8({0})",
-                "fld f16, 16*8({0})",
-                "fld f17, 17*8({0})",
-                "fld f18, 18*8({0})",
-                "fld f19, 19*8({0})",
-                "fld f20, 20*8({0})",
-                "fld f21, 21*8({0})",
-                "fld f22, 22*8({0})",
-                "fld f23, 23*8({0})",
-                "fld f24, 24*8({0})",
-                "fld f25, 25*8({0})",
-                "fld f26, 26*8({0})",
-                "fld f27, 27*8({0})",
-                "fld f28, 28*8({0})",
-                "fld f29, 29*8({0})",
-                "fld f30, 30*8({0})",
-                "fld f31, 31*8({0})",
-                in(reg) self.fpu.as_ptr(),
-                options(nostack)
-            );
-        };
-
-        // Disable FPU
-        // SAFETY: register-only CSR clear.
-        unsafe { asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack)) };
-    }
 
     /// Get TLS pointer
     #[inline]
@@ -463,70 +180,12 @@ impl Default for ThreadStruct {
         Self::new()
     }
 }
-
 /// Initialize FPU
 ///
-/// Called when process first uses FPU
-#[inline]
-/// Once per CPU before FPU use (register-level init).
-/// IRREDUCIBLE F-ROW (F-FPU-3): zeroing the live FP register file —
-/// reference kernel fpu.S's fstate_clean; register-file init has no
-/// safe shape.
+/// Collected into `arch::arch_floor` (INV-ARCH-THREAD-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn fpu_init() {
-    // SAFETY: sstatus CSR RMW (FS field).
-    unsafe {
-        let mut sstatus: u64;
-        unsafe {
-        unsafe {
-        asm!("csrr {}, sstatus", out(reg) sstatus);
-    };
-    };
-        sstatus = (sstatus & !(0x3 << 13)) | (0x1 << 13);
-        asm!("csrw sstatus, {}", in(reg) sstatus);
-    }
-
-    // Zero all floating-point registers
-    unsafe {
-            asm!(
-                "fcvt.d.l f0, zero",
-                "fcvt.d.l f1, zero",
-                "fcvt.d.l f2, zero",
-                "fcvt.d.l f3, zero",
-                "fcvt.d.l f4, zero",
-                "fcvt.d.l f5, zero",
-                "fcvt.d.l f6, zero",
-                "fcvt.d.l f7, zero",
-                "fcvt.d.l f8, zero",
-                "fcvt.d.l f9, zero",
-                "fcvt.d.l f10, zero",
-                "fcvt.d.l f11, zero",
-                "fcvt.d.l f12, zero",
-                "fcvt.d.l f13, zero",
-                "fcvt.d.l f14, zero",
-                "fcvt.d.l f15, zero",
-                "fcvt.d.l f16, zero",
-                "fcvt.d.l f17, zero",
-                "fcvt.d.l f18, zero",
-                "fcvt.d.l f19, zero",
-                "fcvt.d.l f20, zero",
-                "fcvt.d.l f21, zero",
-                "fcvt.d.l f22, zero",
-                "fcvt.d.l f23, zero",
-                "fcvt.d.l f24, zero",
-                "fcvt.d.l f25, zero",
-                "fcvt.d.l f26, zero",
-                "fcvt.d.l f27, zero",
-                "fcvt.d.l f28, zero",
-                "fcvt.d.l f29, zero",
-                "fcvt.d.l f30, zero",
-                "fcvt.d.l f31, zero",
-                options(nostack)
-            );
-    };
-
-    // Zero fcsr
-    // SAFETY: register-only CSR write.
-    unsafe { asm!("fscsr zero") };
+    crate::arch::arch_floor::riscv64::thread::fpu_init()
 }
 
 // ==================== Offset constants (for assembly use) ====================

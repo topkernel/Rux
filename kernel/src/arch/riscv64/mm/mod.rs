@@ -26,7 +26,7 @@ pub use pagetable::*;
 pub mod mmu_init;
 pub use mmu_init::*;
 
-pub mod unsafe_edges;
+pub use crate::arch::arch_floor::riscv64::mm as unsafe_edges;
 pub use unsafe_edges::*;
 
 // Memory management operations (MmStruct extensions, COW)

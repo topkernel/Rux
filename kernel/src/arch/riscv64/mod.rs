@@ -7,7 +7,12 @@
 //!
 //! Supports RISC-V 64-bit (RV64GC) architecture
 
-pub mod unsafe_edges;
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
+pub use crate::arch::arch_floor::riscv64 as unsafe_edges;
 pub mod boot;
 pub mod pt_regs;
 pub mod trap;
@@ -30,66 +35,22 @@ use core::arch::asm;
 pub fn arch_init() {
     init();
 }
-
+/// Collected into `arch::arch_floor` (INV-ARCH-MOD-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init() {
-    println!("arch: Initializing RISC-V architecture...");
-
-    // Set up exception vector table
-    trap::init();
-
-    // Disable interrupts
-    // SAFETY: Clearing SIE in sstatus disables supervisor-mode interrupts.
-    // Reading and writing sstatus are plain CSR operations with no special preconditions.
-    unsafe {
-        // RISC-V: Clear sstatus.SIE (Supervisor Interrupt Enable)
-        let mut sstatus: u64;
-        asm!("csrrw {}, sstatus, zero", out(reg) sstatus);
-        sstatus &= !(1 << 1); // Clear SIE
-        asm!("csrw sstatus, {}", in(reg) sstatus);
-
-        println!("arch: Interrupts disabled in supervisor mode");
-    }
-
-    // Expose the counter CSRs to user mode (scounteren: CY/TM/IR/... all
-    // bits set — the same policy Linux uses on riscv). The vDSO data-page
-    // snapshot stores the CLINT `time` counter and the vDSO code
-    // interpolates with `rdtime`; without scounteren.TM a U-mode rdtime
-    // would raise an illegal instruction. (It previously interpolated with
-    // `rdcycle`, a DIFFERENT counter that drifts against the CLINT under
-    // TCG load — kernel mtime ran seconds away from vdso time(), breaking
-    // LTP utime01/02/03 before/after windows.)
-    // SAFETY: scounteren is an S-mode read/write CSR; setting all bits
-    // only permits U-mode reads of the counters.
-    unsafe {
-        let all: u64 = 0xffff;
-        asm!("csrw scounteren, {}", in(reg) all, options(nomem, nostack));
-    }
-
-    // Print CPU info
-    print_cpu_info();
-
-    println!("arch: Architecture initialization [DONE]");
+    crate::arch::arch_floor::riscv64::root::init()
 }
 
-fn print_cpu_info() {
+pub(crate) fn print_cpu_info() {
     // mhartid/mimpid/marchid are M-mode CSRs and trap when read from S-mode.
     // There is no reliable S-mode view of the implementation IDs (Linux gets
     // them from the device tree), so report the boot hart only.
     println!("arch: boot hart = {}", cpu_id());
 }
-
+/// Collected into `arch::arch_floor` (INV-ARCH-MOD-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_interrupts() {
-    // SAFETY: Setting SIE in sstatus enables supervisor-mode interrupts.
-    // This is called during normal kernel init with no special preconditions.
-    unsafe {
-        // Set sstatus.SIE (Supervisor Interrupt Enable)
-        let mut sstatus: u64;
-        asm!("csrrw {}, sstatus, zero", out(reg) sstatus);
-        sstatus |= 1 << 1; // Set SIE
-        asm!("csrw sstatus, {}", in(reg) sstatus);
-
-        println!("arch: Supervisor-mode interrupts enabled");
-    }
+    crate::arch::arch_floor::riscv64::root::enable_interrupts()
 }
 
 /// Get current CPU (hart) ID
@@ -105,31 +66,8 @@ pub fn enable_interrupts() {
 /// In S-mode, we cannot access mhartid CSR (only accessible from M-mode).
 // IRREDUCIBLE F-ROW (F-CSR-R2): the mod-level cpu_id/init CSR register
 // reads — reference arch/riscv's csr accesses; no safe CSR shape.
+/// Collected into `arch::arch_floor` (INV-ARCH-MOD-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn cpu_id() -> u64 {
-    // SAFETY: Reading tp is a pure register read. When tp < 0x1000 it holds a
-    // hart_id set by boot.S; otherwise it points to the current task_struct
-    // (set by trap.S), and the fixed ti_cpu offset is within the struct layout.
-    unsafe {
-        let tp_value: u64;
-        asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
-
-        // Check if tp is a small value (hart_id during early boot phase)
-        // Valid task_struct pointers should be in kernel address space (>= 0x80000000)
-        if tp_value < 0x1000 {
-            // Early boot phase, tp directly stores hart_id
-            tp_value
-        } else {
-            // tp points to task_struct, get hart_id from ti_cpu field
-            // ti_cpu offset in Task struct is 0x18 (24 bytes)
-            let ti_cpu_offset = 0x18;
-            let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-            let raw = (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed);
-            // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
-            if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
-                0
-            } else {
-                raw as u64
-            }
-        }
-    }
+    crate::arch::arch_floor::riscv64::root::cpu_id()
 }

@@ -8,6 +8,11 @@
 //! Devices like UART are mapped to fixed
 //! kernel virtual addresses to avoid conflicts with user space addresses.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::unsafe_edges::PtTable;
@@ -60,7 +65,7 @@ pub enum FixedAddress {
 }
 
 // Compile-time check
-const _: () = assert!((FixedAddress::EndOfFixedAddresses as usize) <= NUM_FIXMAP_SLOTS);
+pub(crate) const _: () = assert!((FixedAddress::EndOfFixedAddresses as usize) <= NUM_FIXMAP_SLOTS);
 
 // ==================== Fixmap API ====================
 
@@ -94,83 +99,19 @@ pub const fn is_fixmap_addr(virt: usize) -> bool {
 }
 
 // ==================== Fixmap Mapping Functions ====================
-
 /// Set a fixmap entry
 ///
-/// Maps the physical address to the fixed virtual address slot.
-///
-/// # Safety
-/// This function modifies the kernel page table directly.
-/// Caller must ensure the physical address is valid device memory.
-///
-/// # Arguments
-/// - `idx`: Fixmap slot index
-/// - `phys`: Physical address to map (must be page-aligned)
-/// - `flags`: Page table entry flags
+/// Collected into `arch::arch_floor` (INV-ARCH-FIXMAP-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
-    let idx_usize = idx as usize;
-    let virt = fix_to_virt(idx_usize);
-    let virt_addr = super::VirtAddr::new(virt as u64);
-    let phys_addr = super::PhysAddr::new(phys as u64);
-
-    // Get kernel root page table PPN (physical)
-    let root_ppn = super::mmu_init::root_page_table_ppn();
-
-    map_page(root_ppn, virt_addr, phys_addr, flags);
-
-    // Flush TLB for this address
-    // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-    unsafe {
-        core::arch::asm!(
-            "sfence.vma {virt}, zero",
-            virt = in(reg) virt,
-            options(nomem, nostack)
-        )
-    };
+    crate::arch::arch_floor::riscv64::mm::fixmap::set_fixmap(idx, phys, flags)
 }
-
 /// Clear a fixmap entry
 ///
-/// Unmaps the fixed virtual address slot.
-///
-/// # Safety
-/// This function modifies the kernel page table directly.
+/// Collected into `arch::arch_floor` (INV-ARCH-FIXMAP-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn clear_fixmap(idx: FixedAddress) {
-    let idx_usize = idx as usize;
-    let virt = fix_to_virt(idx_usize);
-
-    // Get the page table entry and clear it (typed walk)
-    let vpn2 = (virt >> 30) & 0x1FF;
-    let vpn1 = (virt >> 21) & 0x1FF;
-    let vpn0 = (virt >> 12) & 0x1FF;
-
-    let root = PtTable::static_root();
-    let pte2 = root.get(vpn2);
-
-    if pte2.is_valid() {
-        let Some(table1) = PtTable::from_phys(pte2.ppn() << PAGE_SHIFT) else {
-            return;
-        };
-        let pte1 = table1.get(vpn1);
-        if pte1.is_valid() && !pte1.is_leaf() {
-            let Some(table0) = PtTable::from_phys(pte1.ppn() << PAGE_SHIFT) else {
-                return;
-            };
-
-            // Clear the PTE
-            table0.set(vpn0, PageTableEntry::from_bits(0));
-
-            // Flush TLB
-            // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-            unsafe {
-                core::arch::asm!(
-                    "sfence.vma {virt}, zero",
-                    virt = in(reg) virt,
-                    options(nomem, nostack)
-                )
-            };
-        }
-    }
+    crate::arch::arch_floor::riscv64::mm::fixmap::clear_fixmap(idx)
 }
 
 // ==================== UART Fixmap Management ====================
@@ -180,33 +121,13 @@ pub const UART_PHYS: usize = 0x10000000;
 
 /// UART virtual address (set during init)
 /// Initialized to 0, set to fixmap address after early_ioremap
-static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
-
+pub(crate) static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
 /// Initialize UART fixmap
 ///
-/// Maps UART to FixEarlycon slot and returns the virtual address.
-/// This should be called early in boot, before console is used.
-///
-/// # Returns
-/// The virtual address of the UART mapping.
+/// Collected into `arch::arch_floor` (INV-ARCH-FIXMAP-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init_uart_fixmap() -> usize {
-    let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
-
-    // Device memory flags: RW, accessed, dirty, global
-    let flags = PageTableEntry::V
-        | PageTableEntry::R
-        | PageTableEntry::W
-        | PageTableEntry::A
-        | PageTableEntry::D
-        | PageTableEntry::G;
-
-    unsafe {
-        set_fixmap(FixedAddress::FixEarlycon, UART_PHYS, flags);
-    }
-
-    UART_VIRT_ADDR.store(virt, Ordering::Release);
-
-    virt
+    crate::arch::arch_floor::riscv64::mm::fixmap::init_uart_fixmap()
 }
 
 /// Get UART virtual address
