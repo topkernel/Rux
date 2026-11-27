@@ -857,6 +857,41 @@ impl BuddyAllocator {
         if self.initialized.load(Ordering::Acquire) == 0 {
             return;
         }
+        // LANE PROBE (ubu-dbg wild-jump hunt): a heap free whose block
+        // INTERSECTS any live task's kernel stack is the wrongful-free
+        // producer of the CPU1 idle-jump family (the freed block is
+        // re-handed by the buddy, the next kstack alloc zeroes it — the
+        // all-zero restored context — or the new tenant's writes land in
+        // the live frame). Stack-sized frees are rare; the task walk
+        // only runs on those. Prints only on the anomaly.
+        if layout.size() >= 65536 {
+            let addr = ptr as usize;
+            let end = addr + layout.size();
+            let mut hit: Option<(u32, usize, usize)> = None;
+            crate::sched::sched::for_each_task(|t| {
+                if hit.is_some() {
+                    return;
+                }
+                let bottom = t.kernel_stack_bottom();
+                if bottom == 0 {
+                    return;
+                }
+                let top = bottom + crate::process::task::KERNEL_STACK_SIZE;
+                if addr < top && end > bottom {
+                    hit = Some((t.pid() as u32, bottom, top));
+                }
+            });
+            if let Some((pid, bottom, top)) = hit {
+                let mut frames = [0u64; 8];
+                let s0 = crate::dfx::backtrace::current_frame_pointer();
+                crate::mm::edges::walk_fp_chain(s0, &mut frames);
+                crate::println!(
+                    "KSTACK-COLLIDE-FREE va={:#x} sz={:#x} stack=[{:#x},{:#x}) pid={} f0={:#x} f1={:#x} f2={:#x}",
+                    addr, layout.size(), bottom, top, pid,
+                    frames[0], frames[1], frames[2],
+                );
+            }
+        }
         // kmem:kfree — one event per free, at entry, before the
         // deferred-free interception decides where the block goes (the
         // reference fires kfree at kfree() entry, whatever the backend

@@ -2833,6 +2833,80 @@ pub mod riscv64 {
                                 tp);
                         }
                     }
+                    // LANE FORENSIC (ubu-dbg, wild-jump hunt): page
+                    // provenance at oops time. For the epc/sp pages, print
+                    // the allocator region bounds and the Page descriptor
+                    // state (flags/refcount/mapcount/order/free). A kernel
+                    // page that carries slab-shaped scribbles names its
+                    // double owner here — the crash path already prints,
+                    // so this adds nothing on healthy boots.
+                    {
+                        putfrag(b"oops-prov slab=");
+                        match crate::mm::slab::slab_region() {
+                            Some((s, e)) => {
+                                putb(b'[');
+                                puthex(s as u64);
+                                putb(b',');
+                                puthex(e as u64);
+                                putb(b')');
+                            }
+                            None => putfrag(b"none"),
+                        }
+                        let (hs, he) =
+                            crate::mm::buddy_allocator::HEAP_ALLOCATOR.heap_bounds();
+                        putfrag(b" heap=[");
+                        puthex(hs as u64);
+                        putb(b',');
+                        puthex(he as u64);
+                        putb(b')');
+                        putb(b'\n');
+                        // riscv64 linear map: VA = phys + PAGE_OFFSET - RAM_BASE
+                        const LVA_OFF: usize =
+                            0xffffffd600000000usize.wrapping_sub(0x80000000);
+                        let targets: [(&[u8], u64); 2] = [
+                            (b"epc", regs.epc as u64),
+                            (b"sp", regs.sp as u64),
+                        ];
+                        for (name, va) in targets {
+                            let v = va as usize;
+                            if v < LVA_OFF {
+                                continue;
+                            }
+                            let pfn = v.wrapping_sub(LVA_OFF) >> 12;
+                            let page = crate::mm::page_desc::pfn_to_page(pfn);
+                            if page.is_null() {
+                                putfrag(b"oops-prov ");
+                                putfrag(name);
+                                putfrag(b" pfn=0x");
+                                puthex(pfn as u64);
+                                putfrag(b" no-desc\n");
+                                continue;
+                            }
+                            // SAFETY: pfn_to_page returned a live descriptor
+                            // inside the vmemmap array; the accessor reads
+                            // are relaxed atomics — diagnostic-only, on the
+                            // already-crashed path.
+                            let pg = unsafe { &*page };
+                            putfrag(b"oops-prov ");
+                            putfrag(name);
+                            putfrag(b" va=0x");
+                            puthex(va);
+                            putfrag(b" pfn=0x");
+                            puthex(pfn as u64);
+                            putfrag(b" flags=0x");
+                            puthex(pg.flags().raw() as u64);
+                            use core::fmt::Write;
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let _ = write!(
+                                w,
+                                " rc={} mc={} ord={} free={}\n",
+                                pg.refcount(),
+                                pg.mapcount(),
+                                pg.order(),
+                                pg.is_free()
+                            );
+                        }
+                    }
                     // R9: dump the faulting task's children list raw — the
                     // recurring NULL-walk corruption must be photographed at
                     // the instant it faults (other CPUs sanitize the list if
