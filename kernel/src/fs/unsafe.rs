@@ -404,6 +404,44 @@ pub(crate) fn arc_take<T>(p: *const T) -> alloc::sync::Arc<T> {
     unsafe { alloc::sync::Arc::from_raw(p) }
 }
 
+/// The increment-only step of INV-FS-RAWADOPT-1: the caller re-derives
+/// its owning Arc separately (arc_take on the same pointer) — used where
+/// the count split is slot-keeps-one / caller-gets-new.
+pub(crate) fn arc_adopt_step<T>(p: *const T) {
+    // SAFETY: INV-FS-RAWADOPT-1 (increment half).
+    unsafe { alloc::sync::Arc::increment_strong_count(p) }
+}
+
+/// INV-FILE-ARC-1 atomic shims: load/CAS on the ArcInner strong word
+/// located by the boot-pinned layout probe (verify_arc_inner_layout).
+/// The caller pins the allocation; the protocol either wins a nonzero
+/// count or fails cleanly.
+pub(crate) fn atomic_load_relaxed(p: *const core::sync::atomic::AtomicUsize) -> usize {
+    // SAFETY: INV-FILE-ARC-1 (pinned layout, pinned allocation).
+    unsafe { (*p).load(core::sync::atomic::Ordering::Relaxed) }
+}
+
+/// The compare_exchange_weak (Acquire/Relaxed) twin of
+/// [`atomic_load_relaxed`] (INV-FILE-ARC-1).
+pub(crate) fn atomic_cx_weak_acquire(
+    p: *const core::sync::atomic::AtomicUsize,
+    cur: usize,
+    new: usize,
+) -> Result<usize, usize> {
+    // SAFETY: INV-FILE-ARC-1.
+    unsafe {
+        (*p).compare_exchange_weak(cur, new, core::sync::atomic::Ordering::Acquire, core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The plain byte-clear twin of [`cell_assign`] for Option slots
+/// (close-path store of None).
+pub(crate) fn cell_clear(c: &core::cell::UnsafeCell<Option<*mut u8>>) {
+    // SAFETY: the cell discipline (INV-FS-FILEPRIV-1 family) makes the
+    // store race-free at every call site.
+    unsafe { *c.get() = None }
+}
+
 /// INV-FS-RAWADOPT-1: claim-then-adopt of a leaked Arc allocation —
 /// the caller holds the protocol's claim (walk claim / pending-retire
 /// blocking), so increment_strong_count on the live allocation is
@@ -880,6 +918,16 @@ pub(crate) fn zeroed_vec(len: usize) -> alloc::vec::Vec<u8> {
         core::ptr::write_bytes(v.as_mut_ptr(), 0, len);
         v.set_len(len);
     }
+    v
+}
+
+/// INV-FS-VECFILL-2: fresh UNINITIALIZED staging buffer of exactly n
+/// bytes (capacity == n is the set_len proof); the caller fills it
+/// before any read of its contents.
+pub(crate) fn vec_set_len_uninit(n: usize) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::with_capacity(n);
+    // SAFETY: INV-FS-VECFILL-2.
+    unsafe { v.set_len(n) }
     v
 }
 

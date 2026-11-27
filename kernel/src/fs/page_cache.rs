@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -311,7 +312,7 @@ pub fn pcache_dirty_histogram() -> alloc::string::String {
             continue;
         }
         // SAFETY: wlock excludes removal; entry alive.
-        let entry = unsafe { &*p };
+        let entry = crate::fs::edges::raw_ref(p);
         let g = entry.lock.lock();
         let mut dirty_n = 0usize;
         let mut total_n = 0usize;
@@ -534,12 +535,9 @@ pub struct PageCache {
 /// the entry, so the strong count cannot transit zero. The round-1
 /// Arc-clone-from-raw shape, specialized to this table's claim protocol.
 fn claim_entry_arc(p: *mut InodePageCache) -> Arc<InodePageCache> {
-    // SAFETY: INV-PC-CLAIM — p was published by a writer from an owned
+    // INV-PC-CLAIM — p was published by a writer from an owned
     // Arc and the caller's claim keeps it alive across the increment.
-    unsafe {
-        Arc::increment_strong_count(p);
-        Arc::from_raw(p)
-    }
+    crate::fs::edges::arc_adopt(p)
 }
 
 /// Combine (fs_id, ino) into the single u64 map key. Distinct inputs map to
@@ -580,12 +578,10 @@ impl FrameWindow {
     #[inline]
     fn fill_from(&mut self, src: &[u8]) {
         let copy_len = core::cmp::min(src.len(), PAGE_SIZE);
-        // SAFETY: INV-PC-WIN — owned frame, PAGE_SIZE window, bounded copy.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, copy_len);
-            if copy_len < PAGE_SIZE {
-                core::ptr::write_bytes(self.ptr.add(copy_len), 0, PAGE_SIZE - copy_len);
-            }
+        // INV-PC-WIN — owned frame, PAGE_SIZE window, bounded copy.
+        crate::fs::edges::kcopy(self.ptr, 0, src.as_ptr(), 0, copy_len);
+        if copy_len < PAGE_SIZE {
+            crate::fs::edges::fill_bytes_at(self.ptr, copy_len, 0, PAGE_SIZE - copy_len);
         }
     }
 
@@ -593,16 +589,14 @@ impl FrameWindow {
     /// (INV-PC-WIN on both frames).
     #[inline]
     fn copy_frame_from(&mut self, src_phys: usize, copy_len: usize) {
-        // SAFETY: INV-PC-WIN — both frames live and owned/locked by the
-        /// caller's call (the old INV-PC-PAGECOPY argument).
-        unsafe {
-            let src = phys_to_virt_ptr(src_phys) as *const u8;
-            if copy_len > 0 {
-                core::ptr::copy_nonoverlapping(src, self.ptr, copy_len);
-            }
-            if copy_len < PAGE_SIZE {
-                core::ptr::write_bytes(self.ptr.add(copy_len), 0, PAGE_SIZE - copy_len);
-            }
+        // INV-PC-WIN on both frames — both frames live and owned/locked
+        // by the caller's call (the old INV-PC-PAGECOPY argument).
+        let src = phys_to_virt_ptr(src_phys) as *const u8;
+        if copy_len > 0 {
+            crate::fs::edges::kcopy(self.ptr, 0, src, 0, copy_len);
+        }
+        if copy_len < PAGE_SIZE {
+            crate::fs::edges::fill_bytes_at(self.ptr, copy_len, 0, PAGE_SIZE - copy_len);
         }
     }
 }
@@ -632,12 +626,10 @@ fn copy_page_page(dst_phys: usize, src_phys: usize, copy_len: usize) {
 /// (the partial-span writeback shape). INV-PC-PAGECOPY: off+n <= PAGE_SIZE.
 #[inline]
 fn copy_into_page(pfn: u64, off: usize, src: *const u8, n: usize) {
-    // SAFETY: INV-PC-PAGECOPY — the span is inside one frame by
+    // INV-PC-PAGECOPY — the span is inside one frame by
     // construction at every caller (the cursor arithmetic asserts it).
-    unsafe {
-        let dst = phys_to_virt_ptr(pfn_to_phys(pfn as usize));
-        core::ptr::copy_nonoverlapping(src, dst.add(off), n);
-    }
+    let dst = phys_to_virt_ptr(pfn_to_phys(pfn as usize));
+    crate::fs::edges::kcopy(dst, off, src, 0, n);
 }
 
 /// Exception-table user->frame copy (the DIO insert path). Returns the
@@ -645,15 +637,14 @@ fn copy_into_page(pfn: u64, off: usize, src: *const u8, n: usize) {
 /// primitive's own contract (any user address is sound to pass).
 #[inline]
 fn copy_user_into_page(pfn: u64, off: usize, user_addr: usize, n: usize) -> usize {
-    // SAFETY: INV-PC-PAGECOPY — the frame is this call's private
+    // INV-PC-PAGECOPY — the frame is this call's private
     // destination; the user source rides the exception-table primitive.
-    unsafe {
-        crate::arch::uaccess::copy_from_user(
-            phys_to_virt_ptr(pfn_to_phys(pfn as usize)).add(off),
-            user_addr as *const u8,
-            n,
-        )
-    }
+    let dst = phys_to_virt_ptr(pfn_to_phys(pfn as usize));
+    crate::fs::edges::copy_from_user_bytes_at(
+        crate::fs::edges::kernel_slice_mut_at(dst, off, n),
+        user_addr as *const u8,
+        0,
+    )
 }
 
 impl PageCache {
@@ -757,7 +748,7 @@ impl PageCache {
             }
             // SAFETY: p is a published-or-parked live entry (see the
             // liveness contract of the callers); `key` is write-once.
-            if unsafe { (*p).key } == key {
+            if crate::fs::edges::raw_ref(p).key == key {
                 return p;
             }
         }
@@ -781,7 +772,7 @@ impl PageCache {
             }
             // SAFETY: wlock excludes removal, so the slot's reference is
             // stable and the entry is alive; `key` is write-once.
-            if unsafe { (*p).key } == key {
+            if crate::fs::edges::raw_ref(p).key == key {
                 return Some(i);
             }
         }
@@ -839,7 +830,7 @@ impl PageCache {
                 // SAFETY: ptr's reference count is transferred to the
                 // slot; we re-constitute a second owning Arc for the
                 // caller via an increment + from_raw pair.
-                unsafe { Arc::increment_strong_count(ptr) };
+                crate::fs::edges::arc_adopt_step(ptr);
                 self.slots[slot].0.store(ptr, Ordering::Release);
                 return Some(crate::fs::edges::arc_take(ptr));
             }
@@ -850,10 +841,10 @@ impl PageCache {
                 continue;
             }
             // SAFETY: wlock excludes removal (stable slot reference).
-            if unsafe { (*p).key } == key {
+            if crate::fs::edges::raw_ref(p).key == key {
                 // SAFETY: the slot keeps its reference; ours is a new
                 // owning claim established while wlock blocks removal.
-                unsafe { Arc::increment_strong_count(p) };
+                crate::fs::edges::arc_adopt_step(p);
                 return Some(crate::fs::edges::arc_take(p));
             }
         }
@@ -883,7 +874,7 @@ impl PageCache {
             // SAFETY: the slot's reference is handed over here (the slot
             // no longer owns it); the parking Vec keeps it until the
             // reader-quiescent drain.
-            unsafe { Arc::from_raw(Arc::as_ptr(claimed)) }
+            crate::fs::edges::arc_take(Arc::as_ptr(claimed))
         };
         drop(w);
         self.park_and_drain(parked);
@@ -2044,7 +2035,7 @@ impl PageCache {
                     if p.is_null() || p as usize == PC_TOMBSTONE_BITS {
                         continue;
                     }
-                    let entry = unsafe { &*p };
+                    let entry = crate::fs::edges::raw_ref(p);
                     let has_dirty = {
                         let g = entry.lock.lock();
                         g.iter()
@@ -3284,7 +3275,7 @@ impl PageCache {
             }
             // SAFETY: wlock excludes removal, so the slot's reference is
             // stable and the entry is alive.
-            let entry = unsafe { &*p };
+            let entry = crate::fs::edges::raw_ref(p);
             let g = entry.lock.lock();
             let mut first: Option<u64> = None;
             let mut last: u64 = 0;
@@ -3690,7 +3681,7 @@ impl PageCache {
                             // SAFETY: wlock excludes removal; the entry is
                             // alive and keyed (write-once `key` checked by
                             // table_find).
-                            let entry = unsafe { &*ptr };
+                            let entry = crate::fs::edges::raw_ref(ptr);
                             let mut g = entry.lock.lock();
                             let verdict = match g.get(&page_index) {
                                 Some(cached) => {
@@ -3820,7 +3811,7 @@ impl PageCache {
                 continue;
             }
             // SAFETY: wlock excludes removal; the entry is alive.
-            let entry = unsafe { &*ptr };
+            let entry = crate::fs::edges::raw_ref(ptr);
             let mut g = entry.lock.lock();
             // Same candidate rule as the LRU walk: skip pinned and dirty,
             // give Referenced pages their second chance (activated, scan
@@ -3995,8 +3986,8 @@ pub fn page_cache_cap_pages() -> usize {
 /// mappings (the POSIX shm-over-mmap pattern) are written via the mapping
 /// itself, which stays coherent.
 pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) -> Option<u64> {
-    // SAFETY: inode is written once at open time and read-only afterwards.
-    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    // inode is written once at open time and read-only afterwards.
+    let inode = crate::fs::edges::cell_ref(&file.inode).as_ref()?;
     let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
     let cache = get_page_cache();
     let page_index = file_offset / PAGE_SIZE as u64;
@@ -4015,32 +4006,24 @@ pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) ->
     if bounce_phys == 0 {
         return None;
     }
-    // SAFETY: bounce_phys is a freshly allocated page frame owned here.
-    let bounce = unsafe {
-        core::ptr::write_bytes(
-            phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8,
-            0,
-            PAGE_SIZE,
-        );
-        phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8
-    };
-    // SAFETY: read_at validates its own file references; bounce is a full
+    // bounce_phys is a freshly allocated page frame owned here.
+    let bounce = phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8;
+    crate::fs::edges::fill_bytes(bounce, 0, PAGE_SIZE);
+    // read_at validates its own file references; bounce is a full
     // page of writable kernel memory.
-    let got = unsafe { file.read_at(file_offset, bounce, PAGE_SIZE) };
+    let got = file.read_at(file_offset, bounce, PAGE_SIZE);
     if got < 0 {
         free_page(bounce_phys);
         return None;
     }
-    // SAFETY: bounce holds PAGE_SIZE readable bytes (zero-filled tail).
-    unsafe {
-        cache.insert(
-            fs_id,
-            ino,
-            page_index,
-            0,
-            core::slice::from_raw_parts(bounce, PAGE_SIZE),
-        );
-    }
+    // bounce holds PAGE_SIZE readable bytes (zero-filled tail).
+    cache.insert(
+        fs_id,
+        ino,
+        page_index,
+        0,
+        crate::fs::edges::kernel_slice_at(bounce, 0, PAGE_SIZE),
+    );
     free_page(bounce_phys);
     cache.get_phys(fs_id, ino, page_index)
 }

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -276,27 +277,29 @@ fn next_file_id() -> u64 {
 /// caller-pins + CAS-nonzero-or-clean-fail protocol is the audited
 /// edge — every row of this family rides it.)
 #[inline]
-unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
+fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
     // std Arc layout on our 64-bit targets: ArcInner { strong:
     // AtomicUsize, weak: AtomicUsize, value: T }, and into_raw/as_ptr
     // point at `value` — the strong word sits two usize words back.
     // The assumption is pinned at boot by verify_arc_inner_layout().
-    let strong = (p as *const core::sync::atomic::AtomicUsize).sub(2);
-    // SAFETY: caller pins the allocation (see doc); the atomic protocol
-    // below either wins a nonzero count or fails cleanly.
-    let mut cur = unsafe { (*strong).load(Ordering::Relaxed) };
+    // the strong word sits two usize words back of `value` (std ArcInner
+    // layout, pinned by verify_arc_inner_layout).
+    #[allow(clippy::_ptr_offset_with_cast)]
+    let strong = (p as *const core::sync::atomic::AtomicUsize)
+        .wrapping_sub(2);
+    // caller pins the allocation (see doc); the atomic protocol
+    // below either wins a nonzero count or fails cleanly (INV-FILE-ARC-1,
+    // through the audited atomic edges).
+    let mut cur = crate::fs::edges::atomic_load_relaxed(strong);
     loop {
         if cur == 0 {
             return None;
         }
-        match unsafe {
-            (*strong).compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-        } {
+        match crate::fs::edges::atomic_cx_weak_acquire(
+            strong,
+            cur,
+            cur + 1,
+        ) {
             Ok(_) => return Some(crate::fs::edges::arc_take(p)),
             Err(c) => cur = c,
         }
@@ -315,21 +318,20 @@ pub(crate) fn verify_arc_inner_layout() {
         core::mem::size_of::<File>()
     );
     let probe = Arc::new(File::new(FileFlags::new(0)));
-    // SAFETY: read-only probe of the live Arc the function constructed.
-    let strong = unsafe {
-        (Arc::as_ptr(&probe) as *const core::sync::atomic::AtomicUsize).sub(2)
-    };
-    // SAFETY: probe is a live Arc; the word read is the refcount itself
+    // read-only probe of the live Arc the function constructed.
+    let strong = (Arc::as_ptr(&probe) as *const core::sync::atomic::AtomicUsize)
+        .wrapping_sub(2);
+    // probe is a live Arc; the word read is the refcount itself
     // under verification.
     assert_eq!(
-        unsafe { (*strong).load(Ordering::Relaxed) },
+        crate::fs::edges::atomic_load_relaxed(strong),
         1,
         "ArcInner strong-word offset assumption broken"
     );
     let clone = Arc::clone(&probe);
-    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 2);
+    assert_eq!(crate::fs::edges::atomic_load_relaxed(strong), 2);
     drop(clone);
-    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 1);
+    assert_eq!(crate::fs::edges::atomic_load_relaxed(strong), 1);
     // Weak interplay: a downgrade must keep the ArcInner alive at
     // strong-count zero (the fdreap parking depends on it).
     let weak = Arc::downgrade(&probe);
@@ -493,12 +495,12 @@ impl File {
         // File::drop unregisters. O_ACCMODE=3: O_WRONLY(1)/O_RDWR(2)
         // carry write access.
         crate::fs::locks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
-        unsafe { *self.inode.get() = Some(inode); }
+        crate::fs::edges::cell_assign(&self.inode, Some(inode));
     }
 
     /// Set dentry
     pub fn set_dentry(&self, dentry: Arc<Dentry>) {
-        unsafe { *self.dentry.get() = Some(dentry); }
+        crate::fs::edges::cell_assign(&self.dentry, Some(dentry));
     }
 
     /// Get the backing dentry of this open file description, if it has one.
@@ -509,19 +511,19 @@ impl File {
     /// a shared `&self` borrow is race-free.
     pub fn get_dentry(&self) -> Option<&Arc<Dentry>> {
         // SAFETY: no write to the cell after publication (see doc).
-        unsafe { &*self.dentry.get() }.as_ref()
+        crate::fs::edges::cell_ref(&self.dentry).as_ref()
     }
 
     /// Set file operations
     pub fn set_ops(&self, ops: &'static FileOps) {
-        unsafe { *self.ops.get() = Some(ops); }
+        crate::fs::edges::cell_assign(&self.ops, Some(ops));
     }
 
     /// Get file operations
     pub fn get_ops(&self) -> Option<&'static FileOps> {
-        // SAFETY: write-once cell (see get_inode doc); no write after
+        // write-once cell (see get_inode doc); no write after
         // the File is published to an fd table.
-        unsafe { *self.ops.get() }
+        *crate::fs::edges::cell_ref(&self.ops)
     }
 
     /// Get the backing inode of this open file description, if it has one.
@@ -532,12 +534,12 @@ impl File {
     pub fn get_inode(&self) -> Option<&Arc<Inode>> {
         // SAFETY: no write to the cell after publication (see doc), so a
         // shared read through the shared &self borrow is race-free.
-        unsafe { &*self.inode.get() }.as_ref()
+        crate::fs::edges::cell_ref(&self.inode).as_ref()
     }
 
     /// Set private data
     pub fn set_private_data(&self, data: *mut u8) {
-        unsafe { *self.private_data.get() = Some(data); }
+        crate::fs::edges::cell_assign(&self.private_data, Some(data));
     }
 
     /// Read-private-data twin of [`File::set_private_data`] (round-5):
@@ -549,9 +551,9 @@ impl File {
     /// The typed view/reclaim twins live in fs/unsafe.rs
     /// (INV-FS-FILEPRIV-1) — use those, never inline derefs.
     pub fn private_data_ptr(&self) -> Option<*mut u8> {
-        // SAFETY: a plain load of a pointer-sized word; the value is
+        // a plain load of a pointer-sized word; the value is
         // handed out as an opaque copy, not dereferenced here.
-        unsafe { *self.private_data.get() }
+        *crate::fs::edges::cell_ref(&self.private_data)
     }
 
     /// L4 name twin of [`Self::private_data_ptr`] (same slot-value
@@ -565,7 +567,7 @@ impl File {
     pub fn clear_private_data(&self) {
         // SAFETY: the store races no live handle (close is the last
         // user of this open file description).
-        unsafe { *self.private_data.get() = None };
+        crate::fs::edges::cell_clear(&self.private_data);
     }
 
     /// Take the private-data slot value out (the close-path reclaim
@@ -574,7 +576,7 @@ impl File {
     pub fn take_private_data(&self) -> Option<*mut u8> {
         // SAFETY: INV-FS-FILEPRIV-1; callers run in the release path
         // where no shared reader can race the cell.
-        unsafe { (*self.private_data.get()).take() }
+        crate::fs::edges::cell_ref_mut(&self.private_data).take()
     }
 
     /// Get close-on-exec flag
@@ -650,7 +652,7 @@ impl File {
     }
 
     /// Read file
-    pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
+    pub fn read(&self, buf: *mut u8, count: usize) -> isize {
         // f_mode enforcement: read on an O_WRONLY fd is EBADF (Linux)
         if self.flags().is_writeonly() {
             return -9;  // EBADF
@@ -659,9 +661,9 @@ impl File {
         if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
             return -9; // EBADF
         }
-        if let Some(ops) = *self.ops.get() {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             if let Some(read_fn) = ops.read {
-                let slice = core::slice::from_raw_parts_mut(buf, count);
+                let slice = crate::fs::edges::kernel_slice_mut_at(buf, 0, count);
                 let result = read_fn(self, slice);
                 if result > 0 {
                     // inotify IN_ACCESS (P0-4): one atomic load when no
@@ -678,7 +680,7 @@ impl File {
     }
 
     /// Write file
-    pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
+    pub fn write(&self, buf: *const u8, count: usize) -> isize {
         // f_mode enforcement: write on an O_RDONLY fd is EBADF (Linux)
         if self.flags().is_readonly() {
             return -9;  // EBADF
@@ -687,9 +689,9 @@ impl File {
         if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
             return -9; // EBADF
         }
-        if let Some(ops) = *self.ops.get() {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             if let Some(write_fn) = ops.write {
-                let slice = core::slice::from_raw_parts(buf, count);
+                let slice = crate::fs::edges::kernel_slice_at(buf, 0, count);
                 let result = write_fn(self, slice);
                 if result > 0 {
                     // inotify IN_MODIFY (P0-4): sqlite/editors/build tools.
@@ -705,8 +707,8 @@ impl File {
     }
 
     /// Seek file position
-    pub unsafe fn lseek(&self, offset: isize, whence: i32) -> isize {
-        if let Some(ops) = *self.ops.get() {
+    pub fn lseek(&self, offset: isize, whence: i32) -> isize {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             if let Some(lseek_fn) = ops.lseek {
                 return lseek_fn(self, offset, whence);
             }
@@ -727,13 +729,13 @@ impl File {
     ///
     /// Returns -ESPIPE for non-seekable objects (pipes/sockets — Linux
     /// pread on them fails with ESPIPE).
-    pub unsafe fn read_at(&self, offset: u64, buf: *mut u8, count: usize) -> isize {
+    pub fn read_at(&self, offset: u64, buf: *mut u8, count: usize) -> isize {
         // Unseekable objects first (pipes/sockets/fifos: no lseek op, no
         // inode): explicit-position reads fail ESPIPE BEFORE the f_mode
         // check — Linux rw_verify_area's FMODE_STREAM rejection (LTP
         // preadv202 expects ESPIPE on a pipe read end, and pread on an
         // O_WRONLY pipe write end is also ESPIPE, not EBADF).
-        let inode_opt = &*self.inode.get();
+        let inode_opt = crate::fs::edges::cell_ref(&self.inode);
         if !self.positional_capable() {
             // Two non-seekable classes must be told apart — the decision
             // and its ABI reasoning live in missing_op_errno(ReadAt):
@@ -749,9 +751,9 @@ impl File {
             return -9; // EBADF
         }
         // Native positional op: no shared-position access at all.
-        if let Some(ops) = *self.ops.get() {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             if let Some(read_at_fn) = ops.read_at {
-                let slice = core::slice::from_raw_parts_mut(buf, count);
+                let slice = crate::fs::edges::kernel_slice_mut_at(buf, 0, count);
                 let n = read_at_fn(self, offset, slice);
                 if n > 0 {
                     crate::fs::inotify::notify_file(
@@ -768,7 +770,7 @@ impl File {
         // files and returns 0 for on-disk inodes — pread on any ext4
         // file used to return 0 bytes (glibc's regcomp mmap'd locale
         // tables fine but every pread-based reader saw zeros).
-        if let Some(ops) = *self.ops.get() {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             // lseek presence marks the file seekable (pipes/sockets have
             // none); pread on them must stay ESPIPE.
             if ops.read.is_some() && ops.lseek.is_some() {
@@ -780,7 +782,7 @@ impl File {
             }
         }
 
-        let slice = core::slice::from_raw_parts_mut(buf, count);
+        let slice = crate::fs::edges::kernel_slice_mut_at(buf, 0, count);
         // Only seekable (inode-backed) files support offset reads.
         match inode_opt.as_ref() {
             Some(inode) if inode.ops.is_some() => {
@@ -807,7 +809,7 @@ impl File {
                 return true;
             }
         }
-        if let Some(inode) = unsafe { &*self.inode.get() }.as_ref() {
+        if let Some(inode) = crate::fs::edges::cell_ref(&self.inode).as_ref() {
             return inode.ops.is_some();
         }
         false
@@ -820,11 +822,11 @@ impl File {
     /// with O_APPEND the data is APPENDED regardless of the offset (LTP
     /// pwrite04/pwrite04_64: the second pwrite at offset 0 must extend
     /// the file from 2048 to 3072, not overwrite byte 0).
-    pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
+    pub fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
         // Unseekable first, before the f_mode check: pwrite on a pipe
         // (even its O_RDONLY read end) fails ESPIPE, not EBADF — Linux
         // rw_verify_area's FMODE_STREAM rejection (LTP pwritev202).
-        let inode_opt = &*self.inode.get();
+        let inode_opt = crate::fs::edges::cell_ref(&self.inode);
         if !self.positional_capable() {
             return -29; // ESPIPE
         }
@@ -851,14 +853,14 @@ impl File {
         // Disk-backed files (ext4) must write through their file ops;
         // inode.write_data targets the in-memory FileBuffer and would
         // desynchronize disk-backed files (pwrite silently lost).
-        if let Some(ops) = *self.ops.get() {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             // ext4 (session 25): native position-invariant write — the
             // set_pos/write/restore dance below raced concurrent plain
             // write()/read() on the same open file description (the write
             // twin of the R71 read_at race), and its trailing whole-inode
             // page-cache invalidate broke shared-mapping coherence.
             if core::ptr::eq(
-                ops as *const _,
+                *ops as *const _,
                 &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
             ) {
                 let n = crate::fs::ext4::file::ext4_file_write_at_vfs(self, offset, buf, count);
@@ -881,7 +883,7 @@ impl File {
             }
         }
 
-        let slice = core::slice::from_raw_parts(buf, count);
+        let slice = crate::fs::edges::kernel_slice_at(buf, 0, count);
         match inode_opt.as_ref() {
             Some(inode) if inode.ops.is_some() => {
                 // Serialize concurrent explicit-offset writers like
@@ -914,26 +916,26 @@ impl File {
     pub fn read_slice(&self, buf: &mut [u8]) -> isize {
         // SAFETY: the mutable slice guarantees buf.len() writable bytes —
         // exactly the (buf, count) contract read() requires.
-        unsafe { self.read(buf.as_mut_ptr(), buf.len()) }
+        self.read(buf.as_mut_ptr(), buf.len())
     }
 
     /// Slice-typed write(2) dispatch (see write()).
     pub fn write_slice(&self, buf: &[u8]) -> isize {
         // SAFETY: the shared slice guarantees buf.len() readable bytes —
         // exactly the (buf, count) contract write() requires.
-        unsafe { self.write(buf.as_ptr(), buf.len()) }
+        self.write(buf.as_ptr(), buf.len())
     }
 
     /// Slice-typed pread(2) dispatch (see read_at()).
     pub fn read_at_slice(&self, offset: u64, buf: &mut [u8]) -> isize {
         // SAFETY: the mutable slice guarantees buf.len() writable bytes.
-        unsafe { self.read_at(offset, buf.as_mut_ptr(), buf.len()) }
+        self.read_at(offset, buf.as_mut_ptr(), buf.len())
     }
 
     /// Slice-typed pwrite(2) dispatch (see write_at()).
     pub fn write_at_slice(&self, offset: u64, buf: &[u8]) -> isize {
         // SAFETY: the shared slice guarantees buf.len() readable bytes.
-        unsafe { self.write_at(offset, buf.as_ptr(), buf.len()) }
+        self.write_at(offset, buf.as_ptr(), buf.len())
     }
 
     /// Safe lseek(2) dispatch for `#![forbid(unsafe_code)]` syscall
@@ -942,7 +944,7 @@ impl File {
     pub fn lseek_op(&self, offset: isize, whence: i32) -> isize {
         // SAFETY: the only unsafe inside lseek() is the write-once ops
         // cell read (see get_ops); this entry adds no raw pointers.
-        unsafe { self.lseek(offset, whence) }
+        self.lseek(offset, whence)
     }
 
     /// Close file (runs the ops-table close hook at most once; the
@@ -974,12 +976,12 @@ impl File {
     pub fn path(&self) -> alloc::string::String {
         // SAFETY: dentry is written once at open time and never mutated
         // afterwards; read-only access here.
-        let dentry_opt = unsafe { (*self.dentry.get()).clone() };
+        let dentry_opt = crate::fs::edges::cell_ref(&self.dentry).clone();
         match dentry_opt {
             Some(dentry) => dentry.build_path(),
             None => {
                 // SAFETY: inode is written once at open; read-only access.
-                let inode_opt = unsafe { (*self.inode.get()).clone() };
+                let inode_opt = crate::fs::edges::cell_ref(&self.inode).clone();
                 match inode_opt {
                     Some(inode) => alloc::format!("anon_inode:[{}]", inode.ino),
                     None => alloc::string::String::from("anon_inode"),
@@ -1028,7 +1030,7 @@ impl Drop for File {
             // SAFETY: we own the File exclusively (refcount reached 0) and
             // close_fd already committed this close; ops.close was installed
             // at open time and never mutated afterwards.
-            unsafe { self.close(); }
+            self.close();
         }
     }
 }
@@ -1141,10 +1143,10 @@ impl FdTable {
         for i in 0..MAX_FDS {
             let p = parent.slots[i].0.load(core::sync::atomic::Ordering::Acquire);
             if !p.is_null() {
-                // SAFETY: p was published by a writer (install/dup/fork)
+                // p was published by a writer (install/dup/fork)
                 // and the parent table holds its reference for as long
                 // as the entry lock we hold blocks removal.
-                unsafe { Arc::increment_strong_count(p) };
+                crate::fs::edges::arc_adopt_step(p);
                 child.slots[i].0.store(p, core::sync::atomic::Ordering::Release);
             }
         }
@@ -1321,7 +1323,7 @@ impl FdTable {
         // the slot stays alive (and the slot immutable) for the whole
         // syscall; reconstruction is only needed to touch the refcount,
         // which this path never does.
-        Some(unsafe { &*(p as *const File) })
+        Some(crate::fs::edges::raw_ref(p as *const File))
     }
 
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
@@ -1349,7 +1351,7 @@ impl FdTable {
         // concurrently — the reference fget race outcome (EBADF).
         let p = self.slots[fd].0.load(Ordering::Acquire);
         let out = if !p.is_null() {
-            unsafe { file_arc_try_clone(p) }
+            file_arc_try_clone(p)
         } else {
             None
         };
@@ -1381,12 +1383,10 @@ impl FdTable {
                 if !p.is_null() {
                     // SAFETY: published by a writer; the table's reference
                     // is held by the slot for the duration of our lock.
-                    unsafe {
-                        Arc::increment_strong_count(p);
-                        let file = Arc::from_raw(p);
-                        f(fd, &file);
-                        drop(file);
-                    }
+                    crate::fs::edges::arc_adopt_step(p);
+                    let file = crate::fs::edges::arc_take(p);
+                    f(fd, &file);
+                    drop(file);
                 }
             }
         }
@@ -1571,7 +1571,7 @@ impl FdTable {
             // SAFETY: src is published and the entry lock blocks removal,
             // so the table's reference keeps it alive through our own
             // clone (the dup'd descriptor's reference).
-            unsafe { Arc::increment_strong_count(src) };
+            crate::fs::edges::arc_adopt_step(src);
             let dup_arc = crate::fs::edges::arc_take(src);
             // SAFETY: the swap takes the previous occupant's reference out
             // atomically (single-word, no torn window for readers).
@@ -1697,11 +1697,7 @@ pub fn set_cloexec_fd(fd: usize, on: bool) {
 /// (file, pipe, tty) that showed up directly in throughput under TCG
 /// (review SYSA-C1 fix in Wave 2R).
 pub fn alloc_staging_buf(n: usize) -> alloc::vec::Vec<u8> {
-    let mut v = alloc::vec::Vec::with_capacity(n);
-    // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer
-    // is filled by the caller before any read of its contents (see doc).
-    unsafe { v.set_len(n); }
-    v
+    crate::fs::edges::vec_set_len_uninit(n)
 }
 
 /// Append `len` bytes from user address `src_user` to `dst`, one copy,
@@ -1717,16 +1713,12 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
     // SAFETY: capacity covers start..start+len; copy_from_user fills all
     // of it or we return without exposing the bytes (set_len runs only
     // on the fully-copied path).
-    unsafe {
-        let copied_ok = crate::arch::uaccess::copy_from_user(
-            dst.as_mut_ptr().add(start),
-            src_user as *const u8,
-            len,
-        ) == 0;
+        let window = crate::fs::edges::kernel_slice_mut_at(dst.as_mut_ptr(), start, len);
+        let copied_ok =
+            crate::fs::edges::copy_from_user_bytes_at(window, src_user as *const u8, 0) == 0;
         if !copied_ok {
             return false;
-        }
-        dst.set_len(start + len);
+        crate::fs::edges::vec_set_len(&mut dst, start + len);
     }
     true
 }
@@ -1768,9 +1760,10 @@ pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
         // extend the borrow to 'static through the raw pointer.
         let tbl: &'static FdTable = (*cur).try_fdtable()?;
         tbl.get_file_borrow(fd).map(|f| {
-            // SAFETY: the slot's Arc is owned by the unshared table and
-            // cannot be retired for the duration of this syscall.
-            unsafe { core::mem::transmute::<&File, &'static File>(f) }
+            // the slot's Arc is owned by the unshared table and
+            // cannot be retired for the duration of this syscall
+            // (the lifetime-extension view rides RAWREF).
+            crate::fs::edges::raw_ref(f as *const File)
         }).map(FastFd::Borrowed)
     
 }
@@ -1829,7 +1822,7 @@ pub fn get_stdout() -> Option<Arc<File>> {
     get_file_fd(1)
 }
 
-pub unsafe fn get_stderr() -> Option<Arc<File>> {
+pub fn get_stderr() -> Option<Arc<File>> {
     get_file_fd(2)
 }
 
@@ -1838,7 +1831,7 @@ pub unsafe fn get_stderr() -> Option<Arc<File>> {
 // ============================================================================
 
 fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
-    if let Some(ref inode) = unsafe { &*file.inode.get() } {
+    if let Some(ref inode) = crate::fs::edges::cell_ref(&file.inode) {
         // Serialize the whole get_pos → read_data → set_pos sequence with
         // writers and other readers sharing this open file description:
         // without the lock, two CPUs fork-inheriting the same fd could
@@ -1886,7 +1879,7 @@ pub(crate) fn reg_file_close_pub(file: &File) -> i32 {
 }
 
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
-    if let Some(ref inode) = unsafe { &*file.inode.get() } {
+    if let Some(ref inode) = crate::fs::edges::cell_ref(&file.inode) {
         // Serialize the whole read-offset → write → update-pos sequence so
         // that two O_APPEND writers on SMP cannot interleave (their writes
         // would each position at the "old" end). Also protects plain
@@ -1957,7 +1950,7 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     let current_pos = file.get_pos() as i64;
 
     // Get file size
-    let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {
+    let file_size = if let Some(ref inode) = crate::fs::edges::cell_ref(&file.inode) {
         inode.get_size() as i64
     } else {
         return -9  // EBADF
