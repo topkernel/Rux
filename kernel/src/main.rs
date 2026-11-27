@@ -9,15 +9,15 @@
 #![recursion_limit = "4096"]
 // Composition-point policy (mainline minimal-first): the bin crate is a
 // linker shim — its rust_main lives in the lib (whose unsafe collects
-// into kernel/src/unsafe.rs). Nothing here adds unsafe; a file-level
-// forbid is not possible because the load-bearing #[unsafe(no_mangle)]
-// linker marker IS an unsafe-code usage by definition. The gate
-// (scripts/gate_unsafe_mainline.py) covers the keyword.
+// into kernel/src/unsafe.rs). Nothing here adds unsafe. (A file-level
+// forbid would be unusable here anyway: the load-bearing no_mangle
+// linker marker is an unsafe-code usage by definition, and the gate
+// counts the attribute's unsafe keyword.)
 
 // Force the lib linkage (a bin with no references may drop the rlib).
 #[allow(unused_imports)]
 use rux::*;
 
 #[cfg(not(feature = "skip_bin_link_check"))]
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub extern "C" fn __bin_composition_marker() {}
