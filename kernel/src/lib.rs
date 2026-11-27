@@ -1364,8 +1364,11 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-// LAYOUT-7 GAP FIX: 0x81c0_0000 -> 0x81e0_0000 (the 28MB window end).
-const KERNEL_HEAP_PHYS: usize = 0x81e0_0000;
+// LAYOUT-8 (restored): the unsafe-collection campaign's contract wrappers
+// pushed the image end to 0x81e01000, one page past the LAYOUT-7 heap base —
+// the heap moves to the 32MB window end (0x8220_0000), inside the existing
+// 34MB reserve (heap base - RAM base = 34MB, no gap). ~4MB headroom.
+const KERNEL_HEAP_PHYS: usize = 0x8220_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 // aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the
