@@ -137,8 +137,8 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Suite</th><th>Rux relative to Linux</th></tr></thead>
       <tbody>
-        <tr><td>lmbench, 27 rows</td><td><b>13 ahead</b>: semaphore 8.97×, context switch 5.1–6.3×, pipe 5.84×, page fault 2.8×, page-cache file read 1.45–1.54×; <b>13 behind or at parity</b>, the largest deficit file creation throughput at 22–26×, then loopback socket latency at 2.1–2.2×</td></tr>
-        <tr><td>Geekbench 5</td><td>single-core 114%, multi-core 107% (4-CPU pinned comparison)</td></tr>
+        <tr><td>lmbench, 27 rows</td><td><b>13 ahead</b>: semaphore 11.5×, context switch 9.8–10.1×, pipe 7.0×, page fault 2.8×, page-cache file read 1.45–1.54×; <b>13 behind or at parity</b>, the largest deficit file creation throughput at 22–26×, then loopback socket latency at 1.6×</td></tr>
+        <tr><td>Geekbench 5</td><td>single-core 111%, multi-core 109% (4-CPU pinned comparison)</td></tr>
         <tr><td>fio 3.36</td><td>4 KiB write + fsync 1.24× ahead; 1 MiB buffered write 1.19–1.25× ahead (11.7 GiB/s at 78 µs/op); 1 MiB direct write 0.75–0.83×, direct read 0.83×</td></tr>
         <tr><td>rt-tests v2.11</td><td>cyclictest SCHED_OTHER average 1.5× ahead; SCHED_FIFO minimum wins every clean pass, maximum 10× ahead, average 1.15–1.3× behind; hackbench 1.06–1.16× ahead on all three forms; pi_stress runs 273k–383k priority inversions cleanly</td></tr>
       </tbody>
@@ -156,7 +156,7 @@
       <li><b>Observability</b>: a unified trace-event framework with tracefs (semantics aligned), a symbol table, debugfs, task dumps</li>
       <li><b>Porting layer</b>: x86_64 / riscv64 / aarch64; about 90% of the kernel is architecture-independent</li>
     </ul>
-    <p>Because the host can use KVM directly, x86_64 is the primary platform for both function and performance work, while riscv64 and aarch64 carry the build and regression gates. The in-kernel test suite is <b>1,584/1,584</b> green on riscv64, and the desktop session passes a 2,100 s zero-panic gate.</p>
+    <p>Because the host can use KVM directly, x86_64 is the primary platform for both function and performance work, while riscv64 and aarch64 carry the build and regression gates. The in-kernel test suite is <b>1,596–1,597</b> green on riscv64, and the desktop session passes a 2,100 s zero-panic gate.</p>
 
     <h2 id="todo"><span class="anchor">§7</span>What is not finished</h2>
     <ul>

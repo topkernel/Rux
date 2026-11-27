@@ -89,8 +89,8 @@
       <table>
         <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th class="num">比值</th></tr></thead>
         <tbody>
-          <tr><td><b>多核总分</b></td><td class="num">7504</td><td class="num">7027</td><td><span class="chip ok">105%</span></td></tr>
-          <tr><td><b>单核总分</b></td><td class="num"><b>2465</b></td><td class="num">2165</td><td><span class="chip ok">110%</span></td></tr>
+          <tr><td><b>多核总分</b></td><td class="num">7690</td><td class="num">7027</td><td><span class="chip ok">109%</span></td></tr>
+          <tr><td><b>单核总分</b></td><td class="num"><b>2405</b></td><td class="num">2165</td><td><span class="chip ok">111%</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -157,7 +157,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;多核 7504 = 107%(最近两轮同类 7328–7504);单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
+    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;多核最新整板 7690 = 109%(main=36e91a197,42/42 负载出分、零 panic);单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
     
     <h2 id="platform"><span class="anchor">§2</span>测试平台与采集方法</h2>
@@ -165,7 +165,7 @@
       <li><b>测试平台</b>:9950X 宿主,q35 KVM <code>-cpu host -smp 4 -m 4G</code>,strong 构建(build-release-opt);一次启动跑完整轮,外层预算 2700 s、in-guest 900 s。</li>
       <li><b>分数采集</b>:本地 TLS 捕获服务(自签 CA 经 debugfs 注入 guest /etc/hosts,将 browser.geekbench.com 钉至 10.0.2.2;:443 捕获服务接 HTTPS 上传 POST,parse-capture.py 解析)—— 分数不经外网,过程可重放。</li>
       <li><b>本套件发现并修复的内核缺陷</b>:mprotect 跨 VMA 中段 ENOMEM;TCP RX 校验和读栈垃圾 —— 商用套件作为兼容性探针的价值实例。</li>
-      <li><b>口径注</b>:上方逐项表为 11-04 完整捕获(该轮 SC 2115);单核 AES-XTS 取修复后复测值(8047/8140),低分历史为串口打印税伪影(AES-NI 经探针证实无损)。11-15/11-16 总分为四连跑 best;逐项重捕获在补测队列。</li>
+      <li><b>口径注</b>:上方逐项表为 11-04 完整捕获(该轮 SC 2115);单核 AES-XTS 取修复后复测值(8047/8140),低分历史为串口打印税伪影(AES-NI 经探针证实无损)。最新整板(main=36e91a197):SC 2405 / MC 7690,42/42 负载出分、零 panic;逐项重捕获在补测队列。</li>
     </ul>
 
     <h2 id="rerun"><span class="anchor">§3</span>复现</h2>

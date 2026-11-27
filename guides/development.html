@@ -183,7 +183,7 @@
     <h2 id="first"><span class="anchor">§8</span>新手第一个任务</h2>
     <ol>
       <li><b>环境验证</b>:按<a href="getting-started.html">快速入门</a>完成构建,在 mrsh shell 里检查 <code>/proc</code>、<code>/dev</code>。</li>
-      <li><b>运行测试</b>:<code>make test</code> 看 1584 项断言全绿;挑一个域跑 LTP 快速集(<code>./run_quick.sh</code>)。</li>
+      <li><b>运行测试</b>:<code>make test</code> 看 1,596–1,597 项断言全绿;挑一个域跑 LTP 快速集(<code>./run_quick.sh</code>)。</li>
       <li><b>阅读一个模块</b>:推荐 <code>kernel/src/sched/</code>(11 个文件:调度类框架 stop/deadline/rt/fair/idle,主循环 <code>schedule()</code> → <code>__schedule()</code> → <code>context_switch()</code>),对照<a href="../architecture/design.html#sched">调度器设计页</a>。</li>
       <li><b>实现一个小探针</b>:仿照 <code>test/</code> 下现成 C 探针写一个系统调用探针,交叉编译后放进 rootfs 的 <code>/test/</code>,在 shell 里验证。</li>
       <li><b>认领一个小修复</b>:挑一个失败 LTP 用例或小 bug,在工作树里走完 §2/§3 流程,体验从分支到合并门禁的完整链路。</li>

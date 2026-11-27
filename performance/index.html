@@ -88,29 +88,29 @@
     <p>本页所有与 Linux 的对照均为<b>同机同加速</b>:同一宿主(9950X)、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一镜像形状、同一静态基准二进制。不含任何裸机对照。</p>
     <div class="card-grid grid-2">
       <div class="card">
-        <h3><span class="ico">📏</span>lmbench 同机对照:21 项中 14 项领先/持平、7 项落后</h3>
-        <p><b>领先</b>:lat_pipe <b>4.6×</b>、lat_ctx 2P <b>4.0–4.5×</b>、lat_ctx 8P <b>3.6×</b>、bw_pipe <b>3.7×</b>、lat_sem <b>2.9×</b>、bw_unix <b>2.1×</b>、lat_unix <b>1.4×</b>、fstat <b>1.3×</b>;bcopy/bzero/mem_rd/usleep 持平偏领先,bw_file_rd 快于计时器粒度。</p>
-        <p><b>落后</b>(Rux/Linux):open <b>1.92×</b>、read_cached <b>1.84×</b>、stat <b>1.28×</b>、write <b>1.06×</b>;null 已到<b>持平</b>(0.97×);fork/exec <b>0.75–0.79×</b>(领先)。存储与实时路径见下方对照。</p>
-        <div class="nums">领先最高 4.6× · 落后最大 2.5× · 数据见 <a href="lmbench.html">lmbench 页</a></div>
+        <h3><span class="ico">📏</span>lmbench 同机对照:26 行中 19 行领先/持平、7 行落后</h3>
+        <p><b>领先</b>:lat_sem <b>11.5×</b>、lat_ctx 2P <b>10.1×</b>、lat_ctx 8P <b>9.8×</b>、lat_pipe <b>7.0×</b>、bw_pipe <b>3.7×</b>、bw_unix <b>2.1×</b>、lat_unix <b>1.4×</b>、fstat <b>1.3×</b>;bcopy/bzero/mem_rd/usleep 持平偏领先,bw_file_rd 快于计时器粒度。</p>
+        <p><b>落后</b>(Rux/Linux):open <b>1.71×</b>、read <b>1.55×</b>、write <b>1.30×</b>、stat <b>1.13×</b>;null 已<b>反超</b>(0.91×);fork/exec 持平带 <b>1.05–1.19×</b>。存储与实时路径见下方对照。</p>
+        <div class="nums">领先最高 11.5× · 落后最大 1.71× · 数据见 <a href="lmbench.html">lmbench 页</a></div>
       </div>
       <div class="card">
         <h3><span class="ico">⚡</span>存储与实时路径对照:相位探针归因 + 按 Linux 形态改造</h3>
         <p>存储 I/O 用<b>两侧同机对账</b>(共享 tracefs 时间线+相位括号+双方 perf)归因,再按 Linux 实现形态改造:<b>fsync 路径重造</b>(未写盘区成批转换+邻接合并、每 inode 脏块笔记 O(dirty) 扫描、inode 表块搭同一刷写窗)——<b>0.30× 到领先 ~1.24×</b>;<b>同步等待先有界轮询后睡眠</b>(4k 随机写 0.97×、随机读写 0.96×、随机读 0.90×,平价范围);<b>直读物理连续段批量提交</b>(1M 顺序读 226× 落后到 0.62×);<b>缓冲写用户页直拷入帧</b>(0.94×,测试平台的物理下限:冷帧 RFO 两侧共付);<b>目录增量填充</b>(getdents <b>领先 1.95×</b>);<b>close 条件引用获取+readahead 状态内嵌</b>(openclose 1.59×、read_cached 1.66×,剩余主导=open 侧路径游走)。实时:<b>定时器到期改在硬中断顶部派发</b>(rt_wakesys 3.3 µs 持平)、<b>PI futex 按 Linux 形态</b>(pi_stress 132,074 反转)、cyclictest FIFO 平均 104→69 µs(最大 263,同机交替启动重新测量中)。</p>
         <div class="nums">逐项数据见 <a href="fio.html">fio 页</a> 与 <a href="rttests.html">rt-tests 页</a> · 方法与证据 docs/test/perf-campaign-2026-11-17.md</div>
-        <h3><span class="ico">🏁</span>Geekbench 5:单核 2465 / 多核 7504</h3>
-        <p>单核总分 <b>2465 vs 2165(114%)</b>、多核总分 <b>7504 vs 7027(107%)</b>。</p>
+        <h3><span class="ico">🏁</span>Geekbench 5:单核 2405 / 多核 7690</h3>
+        <p>单核总分 <b>2405 vs 2165(111%)</b>、多核总分 <b>7690 vs 7027(109%)</b>。</p>
         <div class="nums">逐项数据见 <a href="geekbench.html">Geekbench 页</a> · 测试平台注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
-    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。同期修复的 5 个正确性 bug 见 §2 表后清单。</div>
+    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(read/write/stat/open 1.13–1.71×;null 已反超)。同期修复的 5 个正确性 bug 见 §2 表后清单。</div>
 
         <h2 id="suites"><span class="anchor">§2</span>套件地图(每套件一页)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>套件</th><th>类型</th><th>状态</th><th>页</th></tr></thead>
         <tbody>
-          <tr><td>lmbench 3.0-a9</td><td>微基准(延迟 + 带宽,同机 Linux 对照)</td><td><span class="chip ok">2026-11-16 全量 standing + perf-2x 三轮</span></td><td><a href="lmbench.html">lmbench</a></td></tr>
-          <tr><td>Geekbench 5.5.1</td><td>综合套件(21 项逐负载,4-CPU Linux 对照)</td><td><span class="chip ok">SC 2465 / MC 7504,逐位复现确认</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
+          <tr><td>lmbench 3.0-a9</td><td>微基准(延迟 + 带宽,同机 Linux 对照)</td><td><span class="chip ok">2026-11-28 最新读数 re-bank(逐行标注 tree)</span></td><td><a href="lmbench.html">lmbench</a></td></tr>
+          <tr><td>Geekbench 5.5.1</td><td>综合套件(21 项逐负载,4-CPU Linux 对照)</td><td><span class="chip ok">SC 2405 / MC 7690(main=36e91a197)</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
           <tr><td>fio 3.36</td><td>存储 I/O(引擎枚举 + 数据完整性 + 组级吞吐)</td><td><span class="chip ok">同机同镜像同二进制对照(吞吐/延迟/持久化路径)</span></td><td><a href="fio.html">fio</a></td></tr>
           <tr><td>rt-tests v2.11(cyclictest/hackbench/pi_stress)</td><td>实时延迟 + 调度压力</td><td><span class="chip ok">cyclictest/hackbench/pi_stress 同机对照(最新一轮)</span></td><td><a href="rttests.html">rt-tests</a></td></tr>
           <tr><td>内部微基准(pbench + Tier 带 + 刷盘墙 + cctx)</td><td>门禁采集器与历史 A/B</td><td><span class="chip ok">Tier 1 带 + 刷盘墙同机对照 + 切换解剖 + pbench 同机 A/B</span></td><td><a href="microbench.html">内部微基准</a></td></tr>
@@ -187,7 +187,7 @@
       <li><b>COW 缺页跨 CPU shootdown</b>:SMP-8 下 +58%(18.42 µs)的诚实缺口,影响 fork 密集服务图 —— 下一主攻方向。</li>
       <li><b>lat_syscall open 1.61× / stat 1.32×</b>:open 尾部(memo 命中 80–90 ns + fd 装配);stat 尾部 v3 因 call_rcu 契约已修而解锁重试。</li>
       <li><b>lat_syscall null 1.18× / write 1.14×</b>:入口路径下限;null 的 2× 已论证为两侧共享的 syscall RTT 物理下限,目标收敛到持平;write 距持平 6 ns。</li>
-      <li><b>Geekbench 单核余差复核</b>:文本压缩 94% / 导航 81% / PDF 85% / Clang 88% / 人脸 87% 等待隔离复跑(AES-XTS 已根因修复,105–106%;单核 2465 = 114%)。</li>
+      <li><b>Geekbench 单核余差复核</b>:文本压缩 94% / 导航 81% / PDF 85% / Clang 88% / 人脸 87% 等待隔离复跑(AES-XTS 已根因修复,105–106%;单核 2405 = 111%)。</li>
       <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);修复后才能取得 TCP 吞吐读数。</li>
       <li><b>补测队列</b>:fio 吞吐基准(同机 Linux 对照,direct=1 绕页缓存);Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>

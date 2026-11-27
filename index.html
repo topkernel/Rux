@@ -71,7 +71,7 @@
 <div class="ln"> </div>
 <div class="ln"><span class="c"># ③ 内核自带测试套件</span></div>
 <div class="ln"><span class="p">$</span> make test</div>
-<div class="ln"><span class="ok">1584 / 1584 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="ok">1596–1597 passed ✓</span> <span class="dim">(riscv64)</span></div>
 <div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
     </div>
   </div>
@@ -133,7 +133,7 @@
         <thead><tr><th>架构</th><th>QEMU 机型</th><th>加速</th><th>用户态</th><th>当前状态</th></tr></thead>
         <tbody>
           <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM(主平台)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME 桌面 5/5 · 24.04 图形目标 + 串口登录 · LTP/性能主战场</span></td></tr>
-          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG(MTTCG)</td><td>Ubuntu 22.04 (glibc) / musl 最小根文件系统</td><td><span class="chip ok"><span class="dot g"></span>桌面 + 内核套件 1584/1584</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG(MTTCG)</td><td>Ubuntu 22.04 (glibc) / musl 最小根文件系统</td><td><span class="chip ok"><span class="dot g"></span>桌面 + 内核套件 1596–1597 通过</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>交互 shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / 信号 / 内核套件全绿</span></td></tr>
         </tbody>
       </table>
@@ -256,13 +256,13 @@
       <div class="card">
         <h3><span class="ico">🛡️</span>稳定性与压力</h3>
         <p>内核套件三架构全绿、桌面会话 2100 秒门 ×3、调度事件普查/heal 自愈 MISS=0;22.04 GNOME 桌面在 188+ 提交后的 main 上 5/5 次启动稳定性验证(shell 5 s、成帧 9.1 s,零 panic/OOM/SIGSEGV);stress-fleet 常驻 11 台 QEMU 并发测试集群(随机化测试/模糊测试/内存压力);riscv64 启动参数矩阵 smp{2,4,6,8} × mem{1,2,4,8}G 十六格全部干净启动(此前多个 panic/挂起格)。</p>
-        <div class="nums">make test <b>1584/1584</b> · 启动矩阵 <b>16/16</b> · GNOME <b>5/5</b></div>
+        <div class="nums">make test <b>1596–1597</b> · 启动矩阵 <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">稳定性 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📊</span>性能</h3>
-        <p>三层门禁 + 六大看护域。与 Linux 在同一测试平台对照(2026-11-16 standing,Linux 列 = 同一测试平台的 guest 内核):lmbench 21 项配对中 14 项领先或持平(管道 4.6×、上下文切换 4.0–4.5×、信号量 2.9×)、7 项落后(裸系统调用带 1.2–2.5×,open 最大 1.9–2.5×);Geekbench 5 单核 2465 / 多核 7504(对 Linux 4-CPU 锚 113% / 114%);文件系统刷盘 128MB(x86_64 KVM):fsync 11.55→3.04 s、msync 13.95→3.31 s、sync 11.30→3.31 s。</p>
-        <div class="nums">21 项配对中 14 项领先/持平 · 全表见栏目</div>
+        <p>三层门禁 + 六大看护域。与 Linux 在同一测试平台对照(Linux 列 = 同一测试平台的 guest 内核,Rux 列为各行最新实测):lmbench 26 行配对中 19 行领先或持平(信号量 11.5×、上下文切换 9.8–10.1×、管道 7.0×)、7 行落后(裸系统调用带 1.13–1.71×,open 最大 1.71×);Geekbench 5 单核 2405 / 多核 7690(对 Linux 4-CPU 锚 111% / 109%);文件系统刷盘 128MB(x86_64 KVM):fsync 11.55→3.04 s、msync 13.95→3.31 s、sync 11.30→3.31 s。</p>
+        <div class="nums">26 行配对中 19 行领先/持平 · 全表见栏目</div>
         <a class="more" href="performance/index.html">性能测试 →</a>
       </div>
       <div class="card">

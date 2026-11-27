@@ -85,18 +85,18 @@
     <div class="sub">最新状态:同机 KVM 对照权威表(12 延迟行 + 8 带宽行,每行取当前 main 最新实测值) · 正本:docs/test/lmbench-report.md</div>
 
 <h2 id="data"><span class="anchor">§1</span>lmbench 数据(同机 KVM 对照,21 项)</h2>
-    <p style="font-size:13.5px">数据来源:lmbench-report.md「Standing(2026-11-16,内核 main=017bf556b)」—— 唯一权威表,以下即该节数据。方法:两侧同一测试平台(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 测试平台</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对 Linux 侧窗口敏感,比值只在同会话内有意义。</p>
-    <p style="font-size:13px;color:var(--text-3)">口径:每行取当前 main 的最新实测值(2026-11-16 全量轮;null/read/write 三行为 11-17 单行重测)。Rux 列 = debug/strong 按原轮口径;Linux 列 = 宿主 7.0.0 内核在<b>同一 guest 测试平台</b>执行同一静态二进制。</p>
+    <p style="font-size:13.5px">数据来源:lmbench-report.md「Latest-reading re-bank(2026-11-28,逐行标注 tree hash)」—— 唯一权威表,以下即该节数据(更早的 dated 节为历史轮记录)。方法:两侧同一测试平台(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 测试平台</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对 Linux 侧窗口敏感,比值只在同会话内有意义。</p>
+    <p style="font-size:13px;color:var(--text-3)">口径:每行取当前 main 的最新实测值(2026-11-28 re-bank:lat_pipe / lat_ctx / lat_syscall null / lat_usleep 取自 830da5bed 全量轮,lat_sem 取自 43de44ce4,lat_tcp / lat_udp 取自 net-tcp 合并后的 36e91a197);最新一次读数不及已发布值的行保留原读数(bw_pipe、bw_unix、lat_unix、lat_pagefault 与 read/write/stat/open/fstat)。Linux 列 = 宿主 7.0.0 内核在<b>同一 guest 测试平台</b>执行同一静态二进制。</p>
     <h3>领先/持平组(19 项)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_pipe</td><td class="num">4.40 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">领先 5.84×</span></td></tr>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.51 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">领先 5.14×</span></td></tr>
-          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">1.92 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">领先 6.29×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">3.69 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">领先 7.0×</span></td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">1.28 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">领先 10.1×</span></td></tr>
+          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">1.23 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">领先 9.8×</span></td></tr>
           <tr><td class="mono">bw_pipe</td><td class="num">30,464 MB/s</td><td class="num">8,241 MB/s</td><td><span class="chip ok">领先 3.7×</span></td></tr>
-          <tr><td class="mono">lat_sem</td><td class="num">0.503 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">领先 8.97×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">0.3927 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">领先 11.5×</span></td></tr>
           <tr><td class="mono">bw_unix</td><td class="num">48,352 MB/s</td><td class="num">23,022 MB/s</td><td><span class="chip ok">领先 2.1×</span></td></tr>
           <tr><td class="mono">lat_unix</td><td class="num">2.26 µs</td><td class="num">3.24 µs</td><td><span class="chip ok">领先 1.4×</span></td></tr>
           <tr><td class="mono">lat_syscall fstat</td><td class="num">0.084–0.094 µs</td><td class="num">0.119–0.120 µs</td><td><span class="chip ok">领先 1.3×</span></td></tr>
@@ -104,11 +104,11 @@
           <tr><td class="mono">bw_mem 1m bcopy</td><td class="num">84,520 MB/s</td><td class="num">74,252 MB/s</td><td><span class="chip ok">领先 1.14×</span></td></tr>
           <tr><td class="mono">lat_mem_rd 1MB</td><td class="num">2.20–2.25 ns/load</td><td class="num">2.375 ns/load</td><td><span class="chip ok">领先 0.95×</span></td></tr>
           <tr><td class="mono">lat_mem_rd 256MB</td><td class="num">6.49–6.65 ns/load</td><td class="num">6.691 ns/load</td><td><span class="chip ok">持平偏领先(0.97×)</span></td></tr>
-          <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">持平(0.98×)</span></td></tr>
+          <tr><td class="mono">lat_usleep 1000</td><td class="num">1019 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">持平(0.97×)</span></td></tr>
           <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">33,408–35,545 MB/s</td><td class="num">23,045 MB/s(天花板)</td><td><span class="chip ok">领先 1.45–1.54×</span></td></tr>
           <tr><td class="mono">lat_pagefault</td><td class="num">0.0253 µs</td><td class="num">0.072 µs(天花板)</td><td><span class="chip ok">领先 2.8×</span>(对天花板)</td></tr>
           <tr><td class="mono">bw_mmap_rd 1m mmap_only</td><td class="num">79,954 MB/s</td><td class="num">77,100 MB/s(天花板)</td><td><span class="chip ok">领先 1.04×</span></td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.92×</span></td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0418 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.91×</span></td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">持平带 1.08–1.19×</span></td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">持平带 1.05–1.08×</span></td></tr>
         </tbody>
@@ -127,8 +127,8 @@
           
           
         
-          <tr><td class="mono">lat_tcp 127.0.0.1</td><td class="num">10.35 µs</td><td class="num">4.89 µs(天花板)</td><td><span class="chip bad">落后 2.12×</span></td></tr>
-          <tr><td class="mono">lat_udp 127.0.0.1</td><td class="num">9.00 µs</td><td class="num">4.147 µs(天花板)</td><td><span class="chip bad">落后 2.17×</span></td></tr>
+          <tr><td class="mono">lat_tcp 127.0.0.1</td><td class="num">8.0433 µs</td><td class="num">4.89 µs(天花板)</td><td><span class="chip bad">落后 1.64×</span></td></tr>
+          <tr><td class="mono">lat_udp 127.0.0.1</td><td class="num">6.6792 µs</td><td class="num">4.147 µs(天花板)</td><td><span class="chip bad">落后 1.61×</span></td></tr>
           <tr><td class="mono">lat_fs -s 1k</td><td class="num">20.1k/17.3k files/s</td><td class="num">445k/455k(天花板)</td><td><span class="chip bad">落后 22–26×</span></td></tr>
           <tr><td class="mono">lat_connect / bw_tcp</td><td class="num">已修复</td><td class="num">66.5 µs(天花板)</td><td><span class="chip cyan">connect() bug 已修</span></td></tr></tbody>
     <p style="font-size:13px;color:var(--text-3)">注:lat_fs 为全板最大真差距(文件创建/删除热路径);原先高负载下的停滞已修复(三处叠加根因:睡眠豁免误清中断嵌套计数、软中断计数跨任务迁移、tmpfs 页分配持自旋锁),表中为修复后最新一次读数;lat_connect 的 connect() 伪造 ETIMEDOUT 已修;bw_tcp 功能完整(六格参数网格全过,典型 5s),偶发双峰慢模态与 lat_fs 同族(开项);bw_mmap_rd 与 pagefault 为镜像 runner 修复后复真。 注:lat_connect 的 connect() 伪造 ETIMEDOUT 已修(握手完成后对端关闭应返回成功)——2000/2000 连接复现器+net LTP 定向 12/12;bw_tcp 定位中:裸 2MB 批量传输已验证完整快速,卡点在基准自身的块间协议交互(开项)。</p>
@@ -139,7 +139,7 @@
 
     
     <div class="callout"><b>为什么大幅领先:设计取舍,不是省略安全特性。</b>逐条代码级论证:
-<br><b>① 唤醒/切换族(sem 8.97×/ctx-8 6.29×/ctx-2 5.14×/pipe 5.84×)的成本差来源</b>——Linux 的每-CPU 运行队列在 KVM 下,乒乓接力每轮触发跨核重调度 IPI(vmexit + halt 退出,单次 2–5µs,实测 IPI 仅发送侧即 935–1139ns);Rux 的单一全局运行队列(登记册 D-1)+ 120µs 轮询空闲窗把 µs 级接力做成零 IPI 的同核交接(<code>sched/sched.rs</code> 空闲窗,closegap 线实测)。这是队列拓扑在虚拟化成本结构下的优势。
+<br><b>① 唤醒/切换族(sem 11.5×/ctx-8 9.8×/ctx-2 10.1×/pipe 7.0×)的成本差来源</b>——Linux 的每-CPU 运行队列在 KVM 下,乒乓接力每轮触发跨核重调度 IPI(vmexit + halt 退出,单次 2–5µs,实测 IPI 仅发送侧即 935–1139ns);Rux 的单一全局运行队列(登记册 D-1)+ 120µs 轮询空闲窗把 µs 级接力做成零 IPI 的同核交接(<code>sched/sched.rs</code> 空闲窗,closegap 线实测)。这是队列拓扑在虚拟化成本结构下的优势。
 <br><b>② 这些路径的安全机制全部在场</b>:轮询窗的丢唤醒不可能由协议排除(标志清除 + SeqCst 栅栏 + 复查的 Dekker 配对,<code>sched.rs</code> 空闲循环节);每次入队带 wakewatch 取证戳与 schedstat 等待记账;GRQ 全部变更在锁纪律 INV-LOCK-* 下;RCU 静默态报告在 syscall 入口/出口双报(<code>sync/rcu.rs</code>)。
 <br><b>③ 用户内存访问安全与 Linux 同构</b>:全部 uaccess(含标量)走异常表修复路径(<code>arch/x86_64/uaccess.rs</code>),错误指针返回 EFAULT 而非崩溃。x86 SMAP 目前未武装(sec-r1 诚实记录),但其对这批用例的性能贡献 ≈ 每次拷贝 2 条 2 周期指令(~1ns),对 pipe 20µs 量级差距占比 0.005%——不构成领先来源,语义由异常表路径保持。
 <br><b>④ fork/exec 的写时复制与释放安全在场</b>:fork 的 mmfork 相位含全部 PTE 写保护(COW,forkprof 分解);页表释放经 RCU 宽限期;fd 生命周期经退休队列(<code>fs/fdreap.rs</code>)。

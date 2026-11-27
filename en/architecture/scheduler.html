@@ -172,7 +172,7 @@
       <li><b>Lazy FPU</b>: save (xsaveopt) only if prev actually used FP since switch-in; the restore moves into the #NM handler (CR0.TS); the kernel binary is disassembly-verified to contain no compiler-emitted FP. fpusave 51 ns + fpurest 76 ns per switch.</li>
       <li><b>FSGSBASE</b>: CPUID-gated; FS/GS moves become wrfsbase/rdfsbase (393 ns of the per-switch cost); without hardware, wrmsr fallback; per-task cached mirrors avoid rdmsr on the switch path.</li>
       <li><b>PCID</b>: dual-CPUID-gated (PCID+INVPCID); every mm owns a 12-bit PCID and the CR3 write carries tag+NOFLUSH — switching back to a previous mm keeps its cached translations instead of a full flush (pre-PCID CR3 reload was 543 ns, the largest single switch cost); INVPCID type 0 precise single-page / type 3 full; ASIDs are synchronously flushed on all CPUs before returning to the pool.</li>
-      <li><b>Measured</b> (median of 3 interleaved A/B): <code>lat_ctx -s64 2</code> 4.97→<b>2.07 µs</b> (−58%), <code>-s64 8</code> 4.68→1.94 µs (−59%). Same-test platform lmbench authoritative row (smp2 KVM, same guest, same binary): <b>2.51 vs 12.84–12.97 µs (ahead 5.14×; -s64 8: 1.92 vs 12.06–12.08, ahead 6.29×)</b>.</li>
+      <li><b>Measured</b> (median of 3 interleaved A/B): <code>lat_ctx -s64 2</code> 4.97→<b>2.07 µs</b> (−58%), <code>-s64 8</code> 4.68→1.94 µs (−59%). Same-test platform lmbench authoritative row (smp2 KVM, same guest, same binary; latest reading per row): <b>1.28 vs 12.84–12.97 µs (ahead 10.1×; -s64 8: 1.23 vs 12.06–12.08, ahead 9.8×)</b>.</li>
     </ul>
 
     <h2 id="instruments"><span class="anchor">§8</span>Forensic instruments and gate bands</h2>

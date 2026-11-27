@@ -70,7 +70,7 @@
 <div class="ln"> </div>
 <div class="ln"><span class="c"># ③ In-kernel test suite</span></div>
 <div class="ln"><span class="p">$</span> make test</div>
-<div class="ln"><span class="ok">1584 / 1584 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="ok">1596–1597 passed ✓</span> <span class="dim">(riscv64)</span></div>
 <div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
     </div>
   </div>
@@ -129,7 +129,7 @@
         <thead><tr><th>Architecture</th><th>QEMU machine</th><th>Accel</th><th>Userspace</th><th>Status</th></tr></thead>
         <tbody>
           <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME desktop 5/5 · 24.04 graphical targets + serial login · main LTP/perf test platform</span></td></tr>
-          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1584/1584</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1596–1597 passed</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>Interactive shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / signals / kernel suite green</span></td></tr>
         </tbody>
       </table>
@@ -249,13 +249,13 @@
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
         <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; the 22.04 GNOME desktop stability-verified across 5 of 5 system starts on main 188+ commits past the previous round (shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV); a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
-        <div class="nums">make test <b>1584/1584</b> · boot matrix <b>16/16</b> · GNOME <b>5/5</b></div>
+        <div class="nums">make test <b>1596–1597</b> · boot matrix <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">Stability →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📊</span>Performance</h3>
-        <p>Three gate tiers + six guarded domains. Same-test platform vs Linux (2026-11-16 standing; the Linux column is a guest kernel in the same test platform): lmbench 14 of 21 paired cases ahead or at parity (pipe 4.6×, context switch 4.0–4.5×, semaphore 2.9×), 7 behind (the plain-syscall band 1.2–2.5×, open worst at 1.9–2.5×); Geekbench 5 SC 2465 / MC 7504 (vs the Linux 4-CPU anchor 113% / 114%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
-        <div class="nums">14 of 21 paired cases · full ledger</div>
+        <p>Three gate tiers + six guarded domains. Same-test platform vs Linux (the Linux column is a guest kernel in the same test platform; the Rux column carries each row's latest reading): lmbench 19 of 26 paired rows ahead or at parity (semaphore 11.5×, context switch 9.8–10.1×, pipe 7.0×), 7 behind (the plain-syscall band 1.13–1.71×, open worst at 1.71×); Geekbench 5 SC 2405 / MC 7690 (vs the Linux 4-CPU anchor 111% / 109%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
+        <div class="nums">19 of 26 rows ahead or at parity · full ledger</div>
         <a class="more" href="performance/index.html">Performance →</a>
       </div>
       <div class="card">

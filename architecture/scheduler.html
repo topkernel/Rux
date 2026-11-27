@@ -172,7 +172,7 @@
       <li><b>惰性 FPU</b>:仅当 prev 任务自切入后实际使用过浮点单元才执行保存(xsaveopt);恢复移入 #NM 缺陷处理器(CR0.TS 置位);内核二进制经反汇编验证不含编译器生成的浮点指令。fpusave 51 ns + fpurest 76 ns/切换。</li>
       <li><b>FSGSBASE</b>:CPUID 门控;FS/GS 读写改用 wrfsbase/rdfsbase(该项占每切换 393 ns);无硬件支持时回退 wrmsr;每任务缓存镜像消除切换期 rdmsr。</li>
       <li><b>PCID</b>:CPUID 双门控(PCID+INVPCID);每 mm 分配 12-bit PCID,CR3 写携带 tag+NOFLUSH —— 切回先前 mm 时保留 TLB 缓存,不再执行全冲刷(PCID 前 CR3 重载 543 ns,为切换最大单项);INVPCID type 0 单页精确失效 / type 3 全冲刷;ASID 回收前于全部 CPU 同步冲刷。</li>
-      <li><b>实测</b>(3 次交错 A/B 取中位):<code>lat_ctx -s64 2</code> 4.97→<b>2.07 µs</b>(−58%)、<code>-s64 8</code> 4.68→1.94 µs(−59%)。lmbench 同机权威行(smp2 KVM,同 guest 同二进制):<b>2.51 vs 12.84–12.97 µs(领先 5.14×;-s64 8:1.92 vs 12.06–12.08,领先 6.29×)</b>。</li>
+      <li><b>实测</b>(3 次交错 A/B 取中位):<code>lat_ctx -s64 2</code> 4.97→<b>2.07 µs</b>(−58%)、<code>-s64 8</code> 4.68→1.94 µs(−59%)。lmbench 同机权威行(smp2 KVM,同 guest 同二进制,取各行最新实测):<b>1.28 vs 12.84–12.97 µs(领先 10.1×;-s64 8:1.23 vs 12.06–12.08,领先 9.8×)</b>。</li>
     </ul>
 
     <h2 id="instruments"><span class="anchor">§8</span>观测仪器与门禁带</h2>

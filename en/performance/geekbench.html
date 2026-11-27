@@ -89,8 +89,8 @@
       <table>
         <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
-          <tr><td><b>Multi-core total</b></td><td class="num">7504</td><td class="num">7027</td><td><span class="chip ok">105%</span></td></tr>
-          <tr><td><b>Single-core total</b></td><td class="num"><b>2465</b></td><td class="num">2165</td><td><span class="chip ok">110%</span></td></tr>
+          <tr><td><b>Multi-core total</b></td><td class="num">7690</td><td class="num">7027</td><td><span class="chip ok">109%</span></td></tr>
+          <tr><td><b>Single-core total</b></td><td class="num"><b>2405</b></td><td class="num">2165</td><td><span class="chip ok">111%</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -156,7 +156,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); after the gb-opt round the multi-core total stands at 7504 = 107% (latest two-run class 7328–7504); Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
+    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); the latest full board reads 7690 = 109% (main=36e91a197, 42/42 workloads scored, zero panics); Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
 
     
     <h2 id="platform"><span class="anchor">§2</span>Test platform and capture method</h2>
@@ -164,7 +164,7 @@
       <li><b>Test platform</b>: the 9950X host, q35 KVM <code>-cpu host -smp 4 -m 4G</code>, the strong build (build-release-opt); one boot per full run, 2700 s outer / 900 s in-guest budget.</li>
       <li><b>Score capture</b>: a local TLS capture server (a self-signed CA injected into the guest /etc/hosts via debugfs, pinning browser.geekbench.com to 10.0.2.2; a :443 server receives the HTTPS upload POST, parsed by parse-capture.py) — scores never touch the external network and the process is replayable.</li>
       <li><b>Kernel bugs this suite found and fixed</b>: mprotect returning ENOMEM for mid-VMA resizes; the TCP RX checksum reading stack garbage — commercial suites as compatibility probes.</li>
-      <li><b>An accounting note</b>: the per-workload tables above are the 11-04 full capture (that round's SC 2115); the single-core AES-XTS takes the post-fix re-measurement (8047/8140), the historical low being the serial-print-tax artifact (AES-NI probe-verified intact). The 11-15/11-16 totals are the four-boot best; a per-workload re-capture is in the queue.</li>
+      <li><b>An accounting note</b>: the per-workload tables above are the 11-04 full capture (that round's SC 2115); the single-core AES-XTS takes the post-fix re-measurement (8047/8140), the historical low being the serial-print-tax artifact (AES-NI probe-verified intact). The latest full board (main=36e91a197) reads SC 2405 / MC 7690 with 42/42 workloads scored and zero panics; a per-workload re-capture is in the queue.</li>
     </ul>
 
     <h2 id="rerun"><span class="anchor">§3</span>Reproducing</h2>

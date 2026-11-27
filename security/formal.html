@@ -89,7 +89,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>装置</th><th>方法</th><th>证明对象</th><th class="num">规模(当前树)</th><th>节奏</th></tr></thead>
       <tbody>
-        <tr><td class="mono">make verify</td><td>镜像同步检查 + 属性测试 + 单元测试</td><td>被镜像进宿主 crate 的内核算法</td><td class="num">1,184 个 #[test](含 proptest!) + 内核内 1,584 个用例</td><td><span class="chip ok">每次 push</span></td></tr>
+        <tr><td class="mono">make verify</td><td>镜像同步检查 + 属性测试 + 单元测试</td><td>被镜像进宿主 crate 的内核算法</td><td class="num">1,184 个 #[test](含 proptest!) + 内核内 1,596–1,597 个用例</td><td><span class="chip ok">每次 push</span></td></tr>
         <tr><td class="mono">make kani</td><td>符号执行,对全部输入证明断言与 panic 可达性</td><td>核心 unsafe 代码与协议不变量</td><td class="num">164 个 #[kani::proof](34 文件)</td><td><span class="chip cyan">nightly CI</span></td></tr>
         <tr><td class="mono">make spin</td><td>Promela 模型检查(状态穷举 + LTL)</td><td>锁序 / futex 等待唤醒 / 中断-抢占 / 调度出入队</td><td class="num">4 个模型,全 PASS</td><td><span class="chip cyan">nightly CI</span></td></tr>
         <tr><td class="mono">loom</td><td>并发交错枚举(受抢占界约束)</td><td>SleepMutex 交接状态机</td><td class="num">8 场景(5 清洁 + 3 预植必捕)</td><td><span class="chip cyan">nightly CI</span></td></tr>
@@ -135,7 +135,7 @@
 
     <h2 id="proptest"><span class="anchor">§5</span>属性测试与 Miri</h2>
     <ul>
-      <li><b>规模</b>:verify crate 1,184 个 #[test](164 文件),其中 proptest! 块若干(proptest 1.5,每测试默认 256 例,PROPTEST_CASES 可调);内核内另有 1,584 个用例(unit-test feature,QEMU 内 make test 执行)。</li>
+      <li><b>规模</b>:verify crate 1,184 个 #[test](164 文件),其中 proptest! 块若干(proptest 1.5,每测试默认 256 例,PROPTEST_CASES 可调);内核内另有 1,596–1,597 个用例(unit-test feature,QEMU 内 make test 执行)。</li>
       <li><b>覆盖面</b>:buddy 对齐/对合性、引用计数非负且无下溢释放、VMA 不重叠、Newton 法整平方根与水位线公式、Sv39 PTE/Satp 编码、RFC 1071 校验和 / RFC 6298 RTT / RFC 5681 拥塞控制、最长前缀匹配、ARP 缓存 LRU、路径规范化与根逃逸防护、Unix DAC 判定(含 CAP_DAC_OVERRIDE)、ext4 间接块/namei/超级块/分配器、OOM badness 评分(10 项:OOM_SCORE_ADJ_MIN 免疫、饱和规避、小 totalpages 无调整、对称性)、CFS 权重表单调性、deadline 带宽钳制、futex 键匹配、能力代数(De Morgan/子集/补)、cmdline 解析、JBD2 标签算术。</li>
       <li><b>边界如实声明</b>:不覆盖裸指针/内联汇编/GlobalAlloc 实现、运行期并发与中断行为、需 QEMU 的系统集成 —— "verify 回答'算法是否正确',单元测试回答'实现是否正确'",集成面由 LTP/压力并发集群承担。</li>
       <li><b>Miri</b>:对 verify crate 全量以 <code>-Zmiri-disable-isolation</code> 解释执行,检出任何 UB 即 fail(nightly,360 分钟预算)。</li>

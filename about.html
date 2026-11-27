@@ -137,8 +137,8 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>测试类别</th><th>Rux 相对 Linux</th></tr></thead>
       <tbody>
-        <tr><td>lmbench 27 项</td><td><b>13 项领先</b>:信号量 8.97×、上下文切换 5.1–6.3×、管道 5.84×、缺页 2.8×、页缓存文件读 1.45–1.54×;<b>13 项落后或持平</b>,最大差距 = 文件创建吞吐 22–26×,其次是回环 socket 延迟 2.1–2.2×</td></tr>
-        <tr><td>Geekbench 5</td><td>单核 114% · 多核 107%(4 CPU 钉核对照)</td></tr>
+        <tr><td>lmbench 27 项</td><td><b>13 项领先</b>:信号量 11.5×、上下文切换 9.8–10.1×、管道 7.0×、缺页 2.8×、页缓存文件读 1.45–1.54×;<b>13 项落后或持平</b>,最大差距 = 文件创建吞吐 22–26×,其次是回环 socket 延迟 1.6×</td></tr>
+        <tr><td>Geekbench 5</td><td>单核 111% · 多核 109%(4 CPU 钉核对照)</td></tr>
         <tr><td>fio 3.36</td><td>4K 写 + fsync 1.24× 领先;1M 缓冲写 1.19–1.25× 领先(11.7 GiB/s,78 µs/op);1M 直写 0.75–0.83×、直读 0.83×</td></tr>
         <tr><td>rt-tests v2.11</td><td>cyclictest SCHED_OTHER 平均 1.5× 领先;SCHED_FIFO 最小值每轮胜、最大值 10× 领先、平均值落后 1.15–1.3×;hackbench 三形态 1.06–1.16× 领先;pi_stress 273k–383k 次优先级反转干净退出</td></tr>
       </tbody>
@@ -156,7 +156,7 @@
       <li><b>可观测性</b>:统一 trace-event 框架 + tracefs(语义对齐)、符号表、debugfs、任务转储</li>
       <li><b>架构移植层</b>:x86_64 / riscv64 / aarch64,约 90% 内核代码架构无关</li>
     </ul>
-    <p>因为 host 可以直接用 KVM,x86_64 是功能与性能主战场,riscv64 和 aarch64 承担构建与回归门禁;内核自带测试套件在 riscv64 上 <b>1,584/1,584</b> 全绿,桌面会话通过 2,100 秒零 panic 门禁。</p>
+    <p>因为 host 可以直接用 KVM,x86_64 是功能与性能主战场,riscv64 和 aarch64 承担构建与回归门禁;内核自带测试套件在 riscv64 上 <b>1,596–1,597</b> 全绿,桌面会话通过 2,100 秒零 panic 门禁。</p>
 
     <h2 id="todo"><span class="anchor">§7</span>我还没做完的事</h2>
     <ul>

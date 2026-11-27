@@ -168,7 +168,7 @@ $ _</code></pre>
     <pre><code>make test                          <span class="c"># riscv64 (default)</span>
 PLATFORM=x86_64 make test          <span class="c"># x86_64</span>
 PLATFORM=aarch64 make test         <span class="c"># aarch64</span></code></pre>
-    <p>All assertions run inside the QEMU guest. Current baseline: <b>riscv64 1584/1584</b> (2026-11-20), <b>x86_64 1263/1263</b> (2026-11-01, 76 test files) across memory / process / fs / ipc / signal / network / driver / syscall.</p>
+    <p>All assertions run inside the QEMU guest. Current baseline: <b>riscv64 1596–1597</b> (2026-11-28; one environment-dependent SKIP), <b>x86_64 1263/1263</b> (2026-11-01, 76 test files) across memory / process / fs / ipc / signal / network / driver / syscall.</p>
     <h3>LTP</h3>
     <pre><code>make ltp            <span class="c"># build LTP on the host (needs sdk; 1,838 official binaries)</span>
 <span class="c"># inside the Rux shell:</span>

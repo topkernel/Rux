@@ -168,7 +168,7 @@ $ _</code></pre>
     <pre><code>make test                          <span class="c"># riscv64(默认)</span>
 PLATFORM=x86_64 make test          <span class="c"># x86_64</span>
 PLATFORM=aarch64 make test         <span class="c"># aarch64</span></code></pre>
-    <p>所有断言在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>)。当前基线:<b>riscv64 1584/1584</b>(2026-11-20)、<b>x86_64 1263/1263</b>(2026-11-01,76 个测试文件),覆盖 memory / process / fs / ipc / signal / network / driver / syscall 八大类。</p>
+    <p>所有断言在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>)。当前基线:<b>riscv64 1596–1597</b>(2026-11-28,单一环境相关 SKIP)、<b>x86_64 1263/1263</b>(2026-11-01,76 个测试文件),覆盖 memory / process / fs / ipc / signal / network / driver / syscall 八大类。</p>
     <h3>LTP 兼容性测试</h3>
     <pre><code>make ltp            <span class="c"># 宿主侧构建 LTP(需 sdk;1838 个官方二进制)</span>
 <span class="c"># 在 Rux shell 里:</span>
