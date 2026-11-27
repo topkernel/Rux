@@ -1353,8 +1353,8 @@ fn event_of(file: &crate::fs::File) -> Option<&'static PerfEvent> {
 
 fn perf_close(file: &crate::fs::File) -> i32 {
     let Some(ptr) = (edges::privdata_get(file)) else { return 0 };
-    // SAFETY: see event_of.
-    let ev = unsafe { &*(ptr as *const PerfEvent) };
+    // Registry edge as in event_of (INV-PERF-EVENTREF-1).
+    let ev = edges::event_ref(ptr);
     let id = ev.id;
     let was_armed = unregister(id);
     if was_armed {

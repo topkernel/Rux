@@ -509,10 +509,9 @@ pub fn io_uring_mmap_handler(
     // after — a concurrent close() could free the ring in between).
     let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = file.get_private_data().ok_or(-9)?;
-        // SAFETY: under the lifecycle lock, close() cannot clear+free the
-        // ring between the read and try_ref.
-        let ring = unsafe { &*(ring_ptr as *const IoUring) };
+        let ring_ptr = file.get_private_data().ok_or(-9)? as *const IoUring;
+        // Pinned deref edge lives in the audited unsafe.rs (INV-IOURING-PIN-1).
+        let ring = edges::ring_ref(ring_ptr);
         if !ring.try_ref() {
             return Err(-9); // EBADF: ring being torn down
         }
