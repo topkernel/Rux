@@ -222,7 +222,6 @@ pub(crate) fn shutdown_cascade(cmd: u32) {
     crate::debug::fsw::dump();
     crate::debug::cctx::dump();
     crate::debug::unixrd::dump();
-    crate::debug::hilogcensus::dump();
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::get_current_pid();

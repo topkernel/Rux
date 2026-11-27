@@ -106,11 +106,6 @@ pub mod fsw;
 /// branches — names where the hilogd storm's 28-58 us per-op wall goes;
 /// see debug/unixrd.rs.
 pub mod unixrd;
-/// OH log-fabric per-caller census (hilog-flood lane, cmdline
-/// `hilogcensus=1`): counts unix DGRAM writev sends (the libhilog record
-/// path) per sender pid with a tag histogram, and /dev/kmsg writes per
-/// caller; dumped on the syscost cadence; see debug/hilogcensus.rs.
-pub mod hilogcensus;
 /// Leak-origin probe (cmdline `rux:leakhunt (retired dfx=leakhunt)`): records the call site of
 /// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
 /// moment a task returns to userspace (or is seen parked) with a nonzero

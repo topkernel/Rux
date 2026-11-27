@@ -949,16 +949,6 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "diagnostic subsystem", true);
         }
 
-        // Bespoke-token compatibility arms (obs-hygiene tracepoint
-        // migration): the old `hilogcensus=1` cmdline token now flips
-        // the unified-framework events' enable switches (rux:hilog_census
-        // + rux:hilog_kmsg). Run BEFORE trace_event= so an explicit
-        // trace_event= spec (the canonical arming) can still override
-        // what the alias armed.
-        {
-            debug::hilogcensus::compat_arm();
-        }
-
         // The reference's trace_event= boot parameter: comma-separated
         // set_event tokens applied before the first userspace
         // instruction (kernel/trace/trace_events.c __setup).
