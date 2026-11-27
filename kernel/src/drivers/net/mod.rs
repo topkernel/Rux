@@ -3,6 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Network device driver
+#![forbid(unsafe_code)]
 
 
 pub mod space;
