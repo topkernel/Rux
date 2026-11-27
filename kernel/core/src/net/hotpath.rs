@@ -30,7 +30,6 @@
 //! is a never-used `pub(crate)` fn, dead-code warned at base).
 
 use super::types::{EthProtocol, IpProtocol, SkBuff};
-use core::sync::atomic::AtomicU64;
 
 // pass 3 (seed-core §2c.5): the audited unsafe operations moved to
 // net::r#unsafe; the historical net::hotpath:: paths of the pub ones
@@ -121,8 +120,9 @@ impl Drop for SkBuff {
     }
 }
 
-/// SkBuff global allocator ID
-static SKBUFF_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(0);
+// (SKBUFF_ALLOCATOR_ID, a never-referenced static, deleted at the shrink
+// stage — the allocation table's zero-user class: no qualified reference
+// anywhere in the tree.)
 
 impl SkBuff {
 
