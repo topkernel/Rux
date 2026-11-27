@@ -7,6 +7,10 @@
 #![no_main]
 #![feature(lang_items, alloc_error_handler, linkage)]
 #![recursion_limit = "4096"]
+// Composition-point policy (mainline minimal-first): the bin crate is a
+// linker shim — its rust_main lives in the lib (whose unsafe collects
+// into kernel/src/unsafe.rs). Nothing here may add unsafe.
+#![forbid(unsafe_code)]
 
 // Force the lib linkage (a bin with no references may drop the rlib).
 #[allow(unused_imports)]
