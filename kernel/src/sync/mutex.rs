@@ -65,6 +65,7 @@
 //! (VFS_MUTATION_LOCK -> EXT4_BIG_LOCK is the sanctioned order), and
 //! everything it protects is above the state spinlock. It must never
 //! be taken while holding any spinlock.
+#![forbid(unsafe_code)]
 
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
@@ -81,7 +82,7 @@ fn locked_owner_alive_wait(owner: &u32) -> bool {
     if t.is_null() {
         return false;
     }
-    let alive = unsafe { !(*t).state().is_dead() };
+    let alive = !crate::sched::edges::task_shared(t).state().is_dead();
     crate::process::task::Task::task_put(t);
     alive
 }
@@ -316,9 +317,9 @@ impl SleepMutex {
             // tripwire separately watches a dead-owner leak.
             return OptimisticProbe::Stop;
         }
-        let on_cpu = unsafe {
-            (*t).ti_on_cpu.load(core::sync::atomic::Ordering::Acquire)
-        };
+        let on_cpu = crate::sched::edges::task_shared(t)
+            .ti_on_cpu
+            .load(core::sync::atomic::Ordering::Acquire);
         crate::process::task::Task::task_put(t);
         if on_cpu {
             OptimisticProbe::Spin
@@ -837,10 +838,10 @@ impl SleepMutex {
             };
             if rtq > 0 {
                 if let Some(wtask) = self.wait.wake_up_one_hiprio() {
-                    let wpid = unsafe {
-                        (*(wtask as *mut crate::process::task::Task)).pid()
-                            as u32
-                    };
+                    let wpid = crate::sched::edges::task_shared(
+                        wtask as *mut crate::process::task::Task,
+                    )
+                    .pid() as u32;
                     crate::sync::futex_pi::rt_release_handoff(
                         self as *const _ as usize,
                         wpid,
@@ -919,10 +920,10 @@ impl SleepMutex {
                 };
                 if rtq > 0 {
                     if let Some(wtask) = self.wait.wake_up_one_hiprio() {
-                        let wpid = unsafe {
-                            (*(wtask as *mut crate::process::task::Task))
-                                .pid() as u32
-                        };
+                        let wpid = crate::sched::edges::task_shared(
+                            wtask as *mut crate::process::task::Task,
+                        )
+                        .pid() as u32;
                         crate::sync::futex_pi::rt_release_handoff(
                             self as *const _ as usize,
                             wpid,

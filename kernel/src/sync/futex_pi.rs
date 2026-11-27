@@ -75,6 +75,7 @@
 //!   word: every word_read/word_cas on a PI state is guarded by
 //!   `key_is_kernel` (the key's uaddr is a kernel static — writing it
 //!   would corrupt kernel memory).
+#![forbid(unsafe_code)]
 
 use crate::arch::cpu;
 use crate::process::task::{SchedPolicy, Task, TaskState};
@@ -138,7 +139,7 @@ fn task_live_rank(task: *mut Task) -> Option<(Option<u32>, i32)> {
 /// blocker itself for LOCK_PI, or cmp_requeue_pi for a requeued
 /// waiter) and freed by whoever ends the park (the sleeper on every
 /// exit path; the handoff only marks `handed`).
-struct PiWaiter {
+pub(crate) struct PiWaiter {
     task: *mut Task,
     /// Nice snapshot at enqueue time — the CFS ordering key (lower
     /// wins, FIFO among equals; the plain side uses the same rule).
@@ -178,11 +179,6 @@ fn waiter_rank(idx: usize) -> (u8, u32) {
     }
 }
 
-// SAFETY: PiWaiter slots are only accessed while the per-slot spinlock
-// is held; the task raw pointer is only dereferenced by the waker after
-// a non-null check — the same contract as the plain Waiter.
-unsafe impl Send for PiWaiter {}
-unsafe impl Sync for PiWaiter {}
 
 /// Per-futex-word PI state: owner TID plus a priority-ordered waiter
 /// chain.

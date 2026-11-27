@@ -9,6 +9,7 @@
 //!
 //! Grace period: all CPUs must pass through at least one quiescent state
 //! (context switch, idle loop, or return to user mode).
+#![forbid(unsafe_code)]
 
 // (INV-RCU-1: the RCU family — grace-period state is per-CPU
 // counters under the gp lock; the callback trampolines' raw fn words
@@ -61,7 +62,7 @@ impl RcuHead {
 // ============================================================================
 
 /// Per-CPU callback list head (static, zero-initialized, `init()` called at boot).
-static mut RCU_CBS: [ListHead; MAX_CPUS] = {
+pub(crate) static mut RCU_CBS: [ListHead; MAX_CPUS] = {
     const INIT: ListHead = ListHead::new();
     [INIT; MAX_CPUS]
 };
@@ -129,14 +130,11 @@ pub fn call_rcu(head: &mut RcuHead) {
     }
 
     lock_cb_list(cpu);
-    // SAFETY: the cb_list lock is held for this CPU, so RCU_CBS[cpu] is
-    // not accessed concurrently; head.list was initialised via init()
-    // (the RcuHead protocol) and the intrusive rewire is the list's own
-    // audited operation (the reference's blist_add_tail counterpart) —
-    // it mutates THIS node's links, hence &mut in the signature.
-    unsafe {
-        head.list.add_tail(&mut RCU_CBS[cpu]);
-    }
+    // The cb_list lock is held for this CPU, so RCU_CBS[cpu] is not
+    // accessed concurrently; head.list was initialised via init() (the
+    // RcuHead protocol) and the intrusive rewire crosses the audited
+    // INV-SY-7 list edge.
+    crate::sync::edges::rcu_call_enqueue(head, cpu);
     unlock_cb_list(cpu);
 
     // Raise softirq so callbacks get processed promptly.
@@ -542,10 +540,11 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     let cur = crate::sched::sched::grq_diag_cpu_currents();
                     let t = cur[stuck].2 as *mut crate::process::task::Task;
                     if !t.is_null() {
-                        // SAFETY: diagnostic read of stable fields on the
+                        // Diagnostic read of stable fields on the
                         // per-CPU current Task (idle/static or heap; both
-                        // stay valid while current on that CPU).
-                        let tk = unsafe { &*t };
+                        // stay valid while current on that CPU) — crosses
+                        // the audited INV-SCE-2 edge.
+                        let tk = crate::sched::edges::task_shared(t);
                         use core::fmt::Write as _;
                         let cb = tk.comm();
                         let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
@@ -574,9 +573,9 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                             // the Task exists); races cost at worst a
                             // torn-but-bounded word.
                             for k in 0..96 {
-                                let v = unsafe {
-                                    core::ptr::read_volatile(base.wrapping_sub(k))
-                                };
+                                let v = crate::sync::edges::read_volatile_u64(
+                                    base.wrapping_sub(k) as usize,
+                                );
                                 #[cfg(feature = "x86_64")]
                                 let (lo, hi) = (0xffff_ffff_8020_0000u64, 0xffff_ffff_8200_0000u64);
                                 #[cfg(not(feature = "x86_64"))]
@@ -659,8 +658,8 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                 continue;
             }
         };
-        // SAFETY: current is this task's own pointer.
-        let my_pid = unsafe { (*current).pid() };
+        // current is this task's own pointer (INV-SCE-2 edge).
+        let my_pid = crate::sched::edges::task_shared(current).pid();
         // r16 (mechanism B — the GB lost-wake-mid-exit, re-landed): the
         // one-shot wake below is keyed by PID, and a group member's
         // do_exit used to free its pid BEFORE its opportunistic sweep, so
@@ -712,10 +711,9 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
         let target = crate::drivers::timer::get_jiffies() + 1;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {
-            // SAFETY: current is this task's own pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
+            // current is this task's own pointer (INV-SCE-1 edge).
+            crate::sched::edges::task_mut(current)
+                .set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             // Re-check QS AFTER marking sleeping: the last missing
             // reporter typically reports in the microseconds between
             // the failed check at the loop top and here (the fd-close
@@ -727,12 +725,13 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             // 1.07 us but mean 2.45 us, every stall ending at a jiffy
             // boundary) — back into the microsecond poll window.
             if all_online_cpus_reported(gen) {
-                // SAFETY: current is this task's own pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                // current is this task's own pointer (INV-SCE-1 edge).
+                {
+                    let tk = crate::sched::edges::task_mut(current);
+                    tk.set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while
                     // still executing — take ourselves back off.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::dequeue_task(tk);
                 }
                 crate::timer::del_timer(timer_id);
                 continue;
@@ -740,12 +739,13 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             // Re-check the one-shot AFTER marking sleeping: it may have
             // fired between arming and set_state (khungtaskd lesson).
             if crate::drivers::timer::get_jiffies() >= target {
-                // SAFETY: current is this task's own pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                // current is this task's own pointer (INV-SCE-1 edge).
+                {
+                    let tk = crate::sched::edges::task_mut(current);
+                    tk.set_state(TaskState::new(TaskState::RUNNING));
                     // NEW-C2: a racing wake may have enqueued us while
                     // still executing — take ourselves back off.
-                    crate::sched::dequeue_task(&*current);
+                    crate::sched::dequeue_task(tk);
                 }
                 crate::timer::del_timer(timer_id);
             } else {
@@ -864,36 +864,17 @@ pub fn rcu_softirq_handler(_nr: usize) {
     let mut batch = ListHead::new();
     {
         lock_cb_list(cpu);
-        // SAFETY: We hold cb_list lock for this CPU, so RCU_CBS[cpu] is only
-        // accessed by us.  The list pointers were initialised in init().
-        unsafe {
-            if !RCU_CBS[cpu].is_empty() {
-                // Splice the list into `batch`.
-                batch.next = RCU_CBS[cpu].next;
-                batch.prev = RCU_CBS[cpu].prev;
-                (*batch.next).prev = &mut batch;
-                (*batch.prev).next = &mut batch;
-                RCU_CBS[cpu].init();
-            }
-        }
+        // We hold cb_list lock for this CPU, so RCU_CBS[cpu] is only
+        // accessed by us. The list pointers were initialised in init().
+        // The splice crosses the audited INV-SY-7 edge.
+        crate::sync::edges::rcu_detach_batch(cpu, &mut batch);
         unlock_cb_list(cpu);
     }
 
-    // Invoke all callbacks.
-    // SAFETY: We detached the entire callback list above and now own it
-    // exclusively.  Each RcuHead was registered via call_rcu with a valid
-    // func pointer and remains valid until the callback executes.
-    unsafe {
-        let sentinel = &mut batch as *mut ListHead;
-        let mut node = batch.next;
-        while node != sentinel {
-            let next = (*node).next;
-            let head = node as *mut RcuHead;
-            let func = (*head).func;
-            func(head as *mut core::ffi::c_void);
-            node = next;
-        }
-    }
+    // Invoke all callbacks: we detached the entire callback list above
+    // and now own it exclusively. The walk crosses the audited
+    // INV-SY-7 edge.
+    crate::sync::edges::rcu_invoke_batch(&mut batch);
 
     // Advance global generation so `synchronize_rcu()` callers can make progress.
     RCU_GEN.fetch_add(1, Ordering::AcqRel);
@@ -906,9 +887,9 @@ pub fn rcu_softirq_handler(_nr: usize) {
 /// Initialize the RCU subsystem (called once during boot).
 pub fn init() {
     for i in 0..MAX_CPUS {
-        // SAFETY: Called once during boot before any CPU uses RCU — no
-        // concurrent access to RCU_CBS[i].
-        unsafe { RCU_CBS[i].init(); }
+        // Called once during boot before any CPU uses RCU — no
+        // concurrent access to RCU_CBS[i]; ListHead::init is safe.
+        crate::sync::edges::rcu_cbs_init(i);
         RCU_QS_GEN[i].store(0, Ordering::Relaxed);
     }
 

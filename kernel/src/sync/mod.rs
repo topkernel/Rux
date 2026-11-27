@@ -10,6 +10,11 @@
 //! - Futex (Fast Userspace Mutex)
 //! - Spinlock / RwSpinlock
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): the former `edges` collection renamed to
+// `unsafe.rs` on disk (2026-11-25 edges->unsafe.rs ruling), module
+// named `edges` so every existing call site stays stable.
+#[path = "unsafe.rs"]
 pub mod edges;
 pub mod semaphore;
 pub mod condvar;
