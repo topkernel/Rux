@@ -195,6 +195,102 @@ pub fn ipv4_send_src_ttl(
     })
     .ok_or(())?;
 
+    // R-NETTX-1 (2026-11-28, TCP-connect-hang hunt): the emit is the
+    // CONTRACT of this function — every upper-layer sender (TcpTxBatch::
+    // emit_all, BuiltUdp::emit, icmp, raw) hands the built skb here and
+    // treats Ok as "on the wire". The 5a9e1545d unsafe-slim rewrite
+    // dropped the tail that hands the packet to ip_output: the skb was
+    // built, checksummed, and silently freed. Every IPv4 transmit died
+    // at once — no TCP SYN ever left (both loopback and virtio-net
+    // connects hung in SYN_SENT forever: lat_tcp/lat_connect/bw_tcp
+    // TIMEOUT 2/2, netprobe connect(10.0.2.2:443) EINPROGRESS then
+    // select=0 soerr=0, zero tcp-in segments), no UDP datagram, no ICMP
+    // echo reply. Loopback UDP/TCP and netdev UDP share this one root —
+    // the resolve rc=0 in the GB logs was served from the image's
+    // /etc/hosts pin, which is why the dead TX went unnoticed there.
+    //
+    // W3: TX fragmentation — an IP packet above the Ethernet MTU
+    // (loopback excepted: its MTU is effectively 64KB and loopback_send
+    // frames are never wire-bound) is split into MTU-sized fragments at
+    // 8-byte boundaries with MF/frag_off set. The old pre-5a9e1545d code
+    // handed the oversized packet to the driver, which dropped it (UDP
+    // >1472B sendto always failed with EIO).
+    if (dest_ip >> 24) != 127 && skb.len as usize > crate::config::ETH_MTU as usize {
+        return ip_fragment_output(skb);
+    }
+
+    ip_output(skb)
+}
+
+/// W3: split a fully-built IP packet (header + payload in `skb`) into
+/// MTU-sized fragments and transmit each through the normal output path.
+/// Consumes and frees `skb`. Restored with the R-NETTX-1 emit fix in
+/// safe-edge form (data_all/hdr_mut; no raw slices): unlike the deleted
+/// pre-5a9e1545d version, the WHOLE original header (options included)
+/// is copied into every fragment — the old hdr_len clamp at 20 bytes
+/// corrupted fragments of options-bearing datagrams.
+fn ip_fragment_output(skb: SkBuff) -> Result<(), ()> {
+    // The clamped safe view of the whole datagram (header + payload).
+    let pkt = skb.data_all();
+    if pkt.len() < IPHDR_LEN {
+        return Err(());
+    }
+    // The header parse validated IHL >= 5 upstream (push_hdr built a
+    // 0x45/option-less header here), but stay defensive: ihl bytes must
+    // lie inside the packet for the header copy below.
+    let ihl_bytes = ((pkt[0] & 0x0F) as usize) * 4;
+    if ihl_bytes < IPHDR_LEN || ihl_bytes > pkt.len() {
+        return Err(());
+    }
+    let (header, payload) = pkt.split_at(ihl_bytes);
+
+    // Payload bytes per fragment, 8-byte aligned per RFC 791.
+    let frag_payload = (crate::config::ETH_MTU as usize - ihl_bytes) & !7;
+    if frag_payload == 0 {
+        return Err(());
+    }
+
+    // All fragments share the original datagram's ID.
+    let id = u16::from_be_bytes([header[4], header[5]]);
+
+    let mut off = 0usize;
+    while off < payload.len() {
+        let end = core::cmp::min(off + frag_payload, payload.len());
+        let last = end == payload.len();
+
+        let flen = ihl_bytes + (end - off);
+        let mut frag = match crate::net::buffer::alloc_skb(crate::config::ETH_MTU as u32) {
+            Some(f) => f,
+            None => {
+                // Mid-datagram allocation failure: the already-sent
+                // fragments will be discarded by the receiver on timeout.
+                return Err(());
+            }
+        };
+        if frag.skb_put_data(&header).is_err() || frag.skb_put_data(&payload[off..end]).is_err() {
+            frag.free();
+            return Err(());
+        }
+        // Patch the fragment's own header fields and re-checksum (the
+        // copied header still carries the original tot_len/frag_off/check).
+        if let Some(fh) = frag.hdr_mut::<IpHdr>() {
+            fh.tot_len = (flen as u16).to_be();
+            fh.id = id.to_be();
+            let frag_bits = ((off / 8) as u16)
+                | if last { 0 } else { ip_frag_flags::MF };
+            fh.frag_off = frag_bits.to_be();
+            fh.check = 0;
+            let hdr_bytes = crate::safety::bytes::bytes_of(fh);
+            fh.check = checksum::ip_checksum(&hdr_bytes[..IPHDR_LEN]).to_be();
+        }
+
+        // Each fragment is its own Ethernet frame (ARP resolution per dest
+        // is cached after the first).
+        let _ = ip_output(frag);
+
+        off = end;
+    }
+
     Ok(())
 }
 
