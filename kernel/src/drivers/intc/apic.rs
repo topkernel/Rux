@@ -562,10 +562,10 @@ pub static TIMER_ARM_COUNTS: [AtomicU32; crate::config::MAX_CPUS] =
 pub static TIMER_ARM_TB: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
 
-/// rt-r4 (cycdbg fire-late discriminator): the deadline this CPU's LAPIC
-/// was last armed at (0 = never armed). Read at a late fire to separate
-/// "one-shot armed at a LATER deadline" (kernel coarse arm) from "armed
-/// at the deadline, KVM delivered late" (host term).
+/// The deadline this CPU's LAPIC was last armed at (0 = never armed).
+/// Read by the tick-trap diagnostics to separate "one-shot armed at a
+/// LATER deadline" (kernel coarse arm) from "armed at the deadline,
+/// KVM delivered late" (host term).
 pub fn last_arm_deadline(cpu: usize) -> u64 {
     if cpu >= crate::config::MAX_CPUS {
         return 0;
