@@ -2491,22 +2491,6 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::sched::defer_exit_notify(notify_parent, current_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);
-        // 125th waitid leg: reaper forensics — record + print every
-        // leader ZOMBIE (exit time, decoded status, parent, SPAWN age,
-        // last-syscall latch) so the REAP4/REAPW arms can time the reap
-        // and ZLINGER can catch the never-reaped case. rux:schedtrace (retired dfx=schedtrace)-
-        // gated (debug/reaper.rs). Non-leaders never reach ZOMBIE (the
-        // deferred-release tail above), so this fires per process.
-        if crate::debug::reaper::on() {
-            crate::debug::reaper::on_zombie(
-                current_pid,
-                exit_code,
-                notify_parent,
-                cur.comm(),
-                cur.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
-                cur.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
-            );
-        }
         if fp {
             crate::debug::forkprof::add(crate::debug::forkprof::P_EX_NOTIFY, fp_t_notify);
             crate::debug::forkprof::add(crate::debug::forkprof::P_EX_TOTAL, fp_t0);

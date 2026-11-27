@@ -1645,24 +1645,6 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         // reports eligible stopped children too)
         match crate::process::exit::do_wait_nonblock(wait_pid, wstatus, options) {
             Ok(child_pid) => {
-                // 125th waitid leg: the WNOHANG reap path the first wait4
-                // arm missed (glib-style reaper threads poll WNOHANG) —
-                // same rux:schedtrace (retired dfx=schedtrace) gate, debug/reaper.rs.
-                if crate::debug::reaper::on() {
-                    let st = if wstatus.is_null() {
-                        0
-                    } else {
-                        // SAFETY: access_ok-validated in the prologue.
-                        crate::arch::uaccess_safe::UserPtr::<i32>::new(wstatus as usize).read()
-                            .unwrap_or(0)
-                    };
-                    crate::debug::reaper::on_reap_wait4(
-                        crate::process::current_pid(),
-                        child_pid,
-                        st,
-                        true,
-                    );
-                }
                 fill_rusage();
                 report_wait_pid(child_pid)
             }
@@ -1683,25 +1665,6 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         };
         let r = match crate::process::exit::do_wait(wait_pid, wstatus, options) {
             Ok(child_pid) => {
-                // 125th: the app death reason at the reaper — the launcher
-                // cycle dies young with no init-side exit line (appspawn
-                // reaps it); this names code-vs-signal per reap. Now routed
-                // through debug/reaper.rs (SPAWN/ZEXIT join + status decode).
-                if crate::debug::reaper::on() {
-                    let st = if wstatus.is_null() {
-                        0
-                    } else {
-                        // access_ok-validated in the prologue.
-                        crate::arch::uaccess_safe::read_user::<i32>(wstatus as usize)
-                            .unwrap_or(0)
-                    };
-                    crate::debug::reaper::on_reap_wait4(
-                        crate::process::current_pid(),
-                        child_pid,
-                        st,
-                        false,
-                    );
-                }
                 fill_rusage();
                 Ok(report_wait_pid(child_pid))
             }
@@ -1722,35 +1685,6 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
 /// hash (reaped) or lives in another namespace.
 fn report_wait_pid(global_pid: u32) -> i64 {
     crate::process::ns::wait_vpid(global_pid) as i64
-}
-
-/// 125th waitid leg: the reaper forensics print for a SUCCESSFUL waitid
-/// event (rux:schedtrace (retired dfx=schedtrace), debug/reaper.rs). Reads back the siginfo waitid
-/// just wrote (si_code at offset 8, si_pid at 16, si_status at 24 — the
-/// write_siginfo layout); infop was access_ok-validated above.
-fn reaper_note_waitid(idtype: i32, id: i32, options: i32, infop: *mut u8, via_pidfd: bool) {
-    if !crate::debug::reaper::on() {
-        return;
-    }
-    // SAFETY: infop points at a validated 128-byte user buffer that
-    // do_waitid just filled; each read is an exception-table uaccess.
-    let si_code = crate::arch::uaccess_safe::UserPtr::<i32>::new(infop as usize + 8).read()
-        .unwrap_or(0);
-    let si_pid = crate::arch::uaccess_safe::UserPtr::<u32>::new(infop as usize + 16).read()
-        .unwrap_or(0);
-    let si_status = crate::arch::uaccess_safe::UserPtr::<i32>::new(infop as usize + 24).read()
-        .unwrap_or(0);
-    crate::debug::reaper::on_reap_waitid(
-        crate::process::current_pid(),
-        si_pid,
-        si_code,
-        si_status,
-        idtype,
-        id,
-        options,
-        options & WNOWAIT_OPT != 0,
-        via_pidfd,
-    );
 }
 
 /// sys_waitid - wait for child process state change (Linux ABI)
@@ -1818,23 +1752,9 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
             infop,
             options,
         ) {
-            Ok(true) => {
-                // 125th waitid leg: reaper forensics (debug/reaper.rs).
-                reaper_note_waitid(1, data.pid as i32, options, infop, true);
-                0
-            }
+            Ok(true) => 0,
             Ok(false) if nonblock => -(errno::EAGAIN as i64),
-            Ok(false) => {
-                if crate::debug::reaper::on() {
-                    crate::debug::reaper::poll_note(
-                        crate::process::current_pid(),
-                        3,
-                        id,
-                        options,
-                    );
-                }
-                0
-            }
+            Ok(false) => 0,
             Err(e) => e as i32 as i64,
         };
     };
@@ -1877,19 +1797,8 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
     match crate::process::exit::do_waitid(idtype, wait_id, infop, options) {
         // Ok(false) = WNOHANG, no event: Linux returns 0 and leaves
         // infop untouched (the old -EAGAIN broke every poll loop).
-        Ok(true) => {
-            // 125th waitid leg: the launcher/systemui reap path hunt —
-            // log who reaped which child with what status (incl. WNOWAIT
-            // peeks, marked -nw by debug/reaper.rs). rux:schedtrace (retired dfx=schedtrace)-gated.
-            reaper_note_waitid(idtype, id, options, infop, false);
-            0
-        }
-        Ok(false) => {
-            if crate::debug::reaper::on() {
-                crate::debug::reaper::poll_note(crate::process::current_pid(), idtype, id, options);
-            }
-            0
-        }
+        Ok(true) => 0,
+        Ok(false) => 0,
         Err(e) => e as i32 as i64,
     }
 }
@@ -3186,12 +3095,6 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 // safely copied user data.
                 Ok(_) => {
                     current.set_comm(&buf);
-                    // 125th waitid leg: SPAWN clock for com.*-named tasks
-                    // (the OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated
-                    // (debug/reaper.rs).
-                    if crate::debug::reaper::on() {
-                        crate::debug::reaper::note_nameset(current.pid(), &buf);
-                    }
                 },
                 Err(_) => return -(errno::EFAULT as i64),
             }

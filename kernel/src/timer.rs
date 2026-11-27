@@ -1159,16 +1159,6 @@ fn softirq_diagnostics(current: u64) {
         crate::debug::metawatch::tick(current);
     }
 
-    // rux:schedtrace (retired dfx=schedtrace) reaper forensics (125th waitid leg): 1 Hz zombie-
-    // linger scan — names un-reaped children and what the non-reaping
-    // parent is blocked on instead (debug/reaper.rs).
-    if crate::trace::EVENT_SCHEDTRACE.armed()
-        && current.saturating_sub(LAST_REAPER_SCAN.load(Ordering::Relaxed)) >= 100
-    {
-        LAST_REAPER_SCAN.store(current, Ordering::Relaxed);
-        crate::debug::reaper::zombie_scan(current);
-    }
-
     // rux:ledger (retired dfx=ledger): run a pending on-demand accounting census latched by the
     // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
     // from IRQ context is the classic self-wedge); this softirq already
@@ -1443,7 +1433,6 @@ static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 static LAST_PHANTOM_RELINK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Jiffies of the last reaper zombie-linger scan (rux:schedtrace (retired dfx=schedtrace)).
-static LAST_REAPER_SCAN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Jiffies of the last wildwatch canary verify (rux:wildwatch (retired dfx=wildwatch)).
 static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
