@@ -6815,19 +6815,9 @@ pub fn bwr_park_audit() {
         };
         let age = stack_age(s);
         let stack_nonempty = !s.stack.is_empty();
-        // 62nd: the fuxwatch owner-of-record row — force-printed regardless
-        // of the filters below. The M2 freeze's last acquirer (latched in
-        // fuxwatch_log_write on every 0->1 write) parks in a shape the
-        // census previously skipped (own-stack BLOCK_THREAD node, no chain
-        // hit): tid344's park was invisible for 20 boots while it WAS in
-        // the snapshot set the whole time.
-        let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID
-            .load(core::sync::atomic::Ordering::Relaxed);
-        let is_owner = owner_tid != 0 && s.tid == owner_tid;
         let suspicious = (stack_nonempty && age >= 100)
             || h2_write_only
-            || (in_bwr_ioctl && s.todo_len > 0)
-            || is_owner;
+            || (in_bwr_ioctl && s.todo_len > 0);
         // Bucket first, decide printing after.
         if stack_nonempty && age >= 100 {
             stack_holders += 1;
@@ -6835,7 +6825,7 @@ pub fn bwr_park_audit() {
                 futex_parked_stack += 1;
             }
         }
-        if !stack_nonempty && !in_bwr_ioctl && !is_owner {
+        if !stack_nonempty && !in_bwr_ioctl {
             if sys == SYS_FUTEX {
                 futex_waiters += 1;
             } else {
@@ -6851,7 +6841,7 @@ pub fn bwr_park_audit() {
         // print budget — on a wedged boot the pandemic's peripheral
         // parks crowd out exactly the rows the chain walk needs.
         let samgr_row = s.pid == crate::ipc::binder::binder_sareg_samgr_pid();
-        if printed >= 24 && !samgr_row && !is_owner {
+        if printed >= 24 && !samgr_row {
             continue;
         }
         printed += 1;
@@ -7007,9 +6997,8 @@ pub fn bwr_park_audit() {
                 core::sync::atomic::AtomicU32::new(0);
             // 78th: dedicated samgr budget — first-come ordering let
             // non-samgr hung-txn rows eat all 3 scans before the walk
-            // reached the samgr load-waiters, so the chain-driven
-            // FUXWATCH2 arm and the live-word publish never fired. samgr
-            // rows count against MS_S only.
+            // reached the samgr load-waiters. samgr rows count against
+            // MS_S only.
             static MS_S: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             static MS_BURST: core::sync::atomic::AtomicU32 =
@@ -7036,39 +7025,13 @@ pub fn bwr_park_audit() {
             } else {
                 MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
             };
-            if (eligible && budget_ok || is_owner)
+            if eligible && budget_ok
                 && park == "FUTEX"
                 && !task_raw.is_null()
                 && crate::trace::EVENT_FUXSTUCK.armed()
             {
                 match crate::sync::futex::ffrt_mutex_scan(task_raw) {
                     Some(t) => {
-                        // 77th: auto-arm fuxwatch slot 2 on the live
-                        // contended mutex word (chain-detected; shifts
-                        // per boot). Only when the slot is free and a
-                        // samgr-thread scan found it.
-                        let w2 = crate::sync::futex::FRMTX_LIVE_WORD
-                            .load(core::sync::atomic::Ordering::Relaxed);
-                        if w2 != 0
-                            && s.pid as u32
-                                == crate::ipc::binder::binder_sareg_samgr_pid()
-                        {
-                            if crate::sync::futex::FUXWATCH2_ADDR
-                                .compare_exchange(
-                                    0,
-                                    w2,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                )
-                                .is_ok()
-                            {
-                                crate::pr_debug!(
-                                    "FUXWATCH2-CHAIN word={:#x} (live contended FFRT mutex)",
-                                    w2
-                                );
-                                crate::debug::taskdump::ensure_defer_thread();
-                            }
-                        }
                         alloc::format!(" mscan[{}]", t)
                     }
                     None => alloc::string::String::new(),
@@ -7076,87 +7039,6 @@ pub fn bwr_park_audit() {
             } else {
                 alloc::string::String::new()
             }
-        };
-        // 62nd: the owner row's dedicated payload — the deep frame chain
-        // (rbp chain + spill window, offline-symbolized), the wake
-        // history of its park word, the live park state (age + woken +
-        // other waiters), and the PARK WORD'S OWN SHAPE (if the word is
-        // an l word of a mutex the ±64MB heap map never swept — the
-        // worker-pool-region classes — arm fuxwatch2 on it and dump its
-        // object window). Deep + shape once per boot; wakes + park
-        // state every burst.
-        let owner_txt = if is_owner {
-            static OWNER_DEEP_DONE: core::sync::atomic::AtomicBool =
-                core::sync::atomic::AtomicBool::new(false);
-            // oh67: the one-shot deep dump spent itself on the first
-            // (benign, early) owner row in every boot — re-arm while the
-            // latched holder has been holding >30 s, budget 3 stuck-dumps.
-            static OWNER_DEEP_STUCK: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            let owner_age_j = now.wrapping_sub(
-                crate::sync::futex::FUXWATCH_OWNER_J
-                    .load(core::sync::atomic::Ordering::Relaxed),
-            );
-            let stuck_dump = owner_age_j > 300
-                && OWNER_DEEP_STUCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3;
-            let wakes = crate::sync::futex::fuxw_word_wake_summary(a0 as u64, now);
-            let (page, pwoken, pothers) =
-                crate::sync::futex::fuxw_owner_park_state(s.tid, a0 as u64, now);
-            let mut deep = alloc::string::String::new();
-            if OWNER_DEEP_DONE
-                .compare_exchange(
-                    false,
-                    true,
-                    core::sync::atomic::Ordering::Relaxed,
-                    core::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
-                || stuck_dump
-            {
-                use core::fmt::Write as _;
-                let body = match crate::sync::futex::deep_ufw(task_raw) {
-                    Some(t) => t,
-                    None => alloc::string::String::from("none"),
-                };
-                let _ = write!(deep, " FUX-OWNER-DEEP[{}]", body);
-                // The park word's own object shape: an l word here names
-                // M3 (the inner mutex the ±64MB arena scan missed).
-                match crate::sync::futex::fuxw_word_shape(task_raw, a0 as u64) {
-                    Some(sh) => {
-                        let _ = write!(deep, " FUX-OWNER-SHAPE[{}]", sh);
-                        // Arm slot 2 on the shape-detected l word (the
-                        // address of the l word = a0-0x8 for the
-                        // mutexPrivate/musl-mutex layout).
-                        let wl = (a0 as u64).wrapping_sub(0x8);
-                        crate::sync::futex::FUXWATCH2_ADDR.compare_exchange(
-                            0,
-                            wl,
-                            core::sync::atomic::Ordering::Relaxed,
-                            core::sync::atomic::Ordering::Relaxed,
-                        );
-                        let _ = write!(deep, " M3-ARM l={:#x}", wl);
-                    }
-                    None => {
-                        let _ = write!(deep, " FUX-OWNER-SHAPE[cv-word]");
-                    }
-                }
-            }
-            alloc::format!(
-                " OWNER-LATCH(owner_tid={} latch_age={}ms) park[age={}ms woken={} others={}] wakes[{}]{}",
-                owner_tid,
-                now.wrapping_sub(
-                    crate::sync::futex::FUXWATCH_OWNER_J
-                        .load(core::sync::atomic::Ordering::Relaxed)
-                )
-                .saturating_mul(10),
-                page,
-                pwoken,
-                pothers,
-                wakes,
-                deep
-            )
-        } else {
-            alloc::string::String::new()
         };
         // 81st (ohw126 frontier): the sync-holder futex park verdict.
         // A thread parked in FUTEX while STILL holding a sync txn (the
@@ -7288,7 +7170,7 @@ pub fn bwr_park_audit() {
         }
         let _ = writeln!(
             w,
-            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}{}",
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}",
             s.pid,
             s.tid,
             comm_of(task_raw),
@@ -7309,7 +7191,6 @@ pub fn bwr_park_audit() {
             stx,
             chain_txt,
             mscan_txt,
-            owner_txt,
             parkv_txt
         );
     }
@@ -11336,7 +11217,7 @@ fn binder_transaction(
                 // a wifi request flipped SAREG_SAMGR_PID to
                 // wifi_manager_se (877), and the drifted latch silently
                 // disarmed every samgr-keyed instrument downstream
-                // (OH67_M2/OH68 holder decode, the FUXWATCH2-CHAIN arm,
+                // (OH67_M2/OH68 holder decode, the chain scan,
                 // mscan eligibility). The samgr proxy descriptor is the
                 // 22-char UTF-16 string "ohos.samgr.accessToken" at
                 // parcel offset 12 with u32 length 0x16 at offset 8 —

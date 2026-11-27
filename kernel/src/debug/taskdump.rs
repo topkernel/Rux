@@ -1455,10 +1455,6 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // this pass drains. Cheap when nothing is pending: two ring
         // scans of atomics.
         crate::ipc::binder::dump_latched_maps_taskctx();
-        // sc57 (57th): fuxwatch arm round — clears W on the watched
-        // word's page in every mapping mm (kthread context; TLB
-        // shootdown via flush_tlb_all is safe here).
-        crate::sync::futex::fuxwatch_arm_round();
         // 83rd: drive the OPEN sqwalk pass (frozen-rwlock reader
         // naming) — kthread context ONLY: ohw151's 594 MB-window bursts
         // in the timer softirq held softirq-context locks across

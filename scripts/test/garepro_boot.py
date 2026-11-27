@@ -8,9 +8,10 @@ init, stream serial, report a verdict. Two probes:
   --probe garepro (default): GLib gthreadpool spawn-protocol repro
     (test/garepro.c). Mimics GLib's global thread-pool spawner
     protocol with raw glibc pthreads and pre-arms its spawn mutex at a
-    fixed mmap address (0x313370100) so the kernel RWFRZ-WATCH futex
-    tracer can watch the word from t=0 (rwfrzwatch=0x313370100
-    appended automatically, --rwfrz to add rwfrzbudget=<n>).
+    fixed mmap address (0x313370100) so a futex-word tracer can watch
+    the word from t=0 (the boot-address watchpoint params were removed
+    with the fuxwatch engine; the fuxstuck census auto-traces on its
+    own gate).
 
   --probe tsleep: timed-wait completion isolation (test/tsleep.c).
     Five groups (usleep / poll timeout / clock_nanosleep ABSTIME /
@@ -87,7 +88,7 @@ def main():
     ap.add_argument("--append-cmdline", default="",
                     help="extra kernel cmdline tokens (bisect levers)")
     ap.add_argument("--rwfrz", default="",
-                    help="garepro only: rwfrzbudget value ('' = 20000, 'off' = no tracer)")
+                    help="garepro only: legacy rwfrzbudget value (tracer removed with the fuxwatch engine; ignored)")
     ap.add_argument("--no-alarm", action="store_true",
                     help="garepro only: build with -DNO_ALARM (no SIGALRM/ualrm)")
     ap.add_argument("--alarm-us", default="3000000",
@@ -120,13 +121,7 @@ def main():
     img = os.path.join(WT, "work", f"{tag}-x86.img")
     build_image(img, binp, args.probe)
 
-    if args.probe == "tsleep":
-        tracer = ""  # no watched word: keep serial clean of the flood
-    elif args.rwfrz == "off":
-        tracer = "rwfrzwatch=0x313370100"
-    else:
-        tracer = ("rwfrzwatch=0x313370100 rwfrzbudget="
-                  + (args.rwfrz or "20000"))
+    tracer = ""  # boot-address watchpoints removed (fuxwatch engine deleted)
 
     cmdline = (f"root=/dev/vda rw init={initpath} console=ttyS0 {tracer}"
                + (f" {args.append_cmdline}" if args.append_cmdline else ""))
