@@ -28,6 +28,11 @@
 //! full-flushes; generation rollover (stage 2) remains the refinement
 //! for large concurrent pools.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::arch::asm;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
@@ -40,10 +45,10 @@ pub const ASID_RESERVED: u16 = 1; // Reserved for early boot
 pub const ASID_FIRST: u16 = 2;
 
 /// Number of 64-bit words covering MAX_ASID+1 bits (256 ASIDs -> 4 words)
-const ASID_WORDS: usize = (MAX_ASID as usize + 1 + 63) / 64;
+pub(crate) const ASID_WORDS: usize = (MAX_ASID as usize + 1 + 63) / 64;
 
 /// Global ASID allocator state: word 0 starts with ASID 0 and 1 reserved.
-static ASID_BITMAP: [AtomicU64; ASID_WORDS] = {
+pub(crate) static ASID_BITMAP: [AtomicU64; ASID_WORDS] = {
     let mut words = [const { AtomicU64::new(0) }; ASID_WORDS];
     words[0] = AtomicU64::new(0b11); // ASID 0 and 1 reserved
     words
@@ -114,108 +119,40 @@ pub fn asid_usage_count() -> u32 {
 }
 
 // ==================== TLB invalidation ====================
-
 /// Flush the entire TLB (all EL1, all ASIDs)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-6): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_all() {
-    // SAFETY: tlbi vmalle1ais broadcasts full invalidation to all PEs;
-    // callers have repaired the affected translations first.
-    unsafe {
-        asm!(
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::arch::arch_floor::aarch64::mm::asid::flush_tlb_all()
 }
-
 /// Flush all entries for one ASID
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-5): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_asid(asid: u16) {
-    // SAFETY: ASID-scoped inner-shareable invalidation. The operand's
-    // ASID field lives in bits [63:48].
-    unsafe {
-        asm!(
-            "tlbi aside1is, {a}",
-            "dsb ish",
-            "isb",
-            a = in(reg) ((asid & 0xFF) as u64) << 48,
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::arch::arch_floor::aarch64::mm::asid::flush_tlb_asid(asid)
 }
-
 /// Flush one page in one ASID.
 ///
-/// `asid == 0` follows the riscv64 convention "all address spaces" and
-/// emits `tlbi vaae1is` (invalidate by VA across ALL ASIDs); a nonzero
-/// ASID emits `tlbi vae1is` scoped to that ASID.
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_page(vaddr: usize, asid: u16) {
-    let pn = ((vaddr >> 12) & 0x0000_FFFF_FFFF_F) as u64;
-    // SAFETY: page-scoped invalidation; operand = VA[47:12] | ASID<<48.
-    unsafe {
-        if asid == 0 {
-            asm!(
-                "tlbi vaae1is, {v}",
-                "dsb ish",
-                "isb",
-                v = in(reg) pn,
-                options(nostack, preserves_flags)
-            );
-        } else {
-            asm!(
-                "tlbi vae1is, {v}",
-                "dsb ish",
-                "isb",
-                v = in(reg) pn | (((asid & 0xFF) as u64) << 48),
-                options(nostack, preserves_flags)
-            );
-        }
-    }
+    crate::arch::arch_floor::aarch64::mm::asid::flush_tlb_page(vaddr, asid)
 }
-
 /// Flush a VA range in one ASID (page-granular loop; asid 0 = all ASIDs,
-/// see flush_tlb_page)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_range(start: usize, end: usize, asid: u16) {
-    let mut va = start & !0xFFF;
-    while va < end {
-        let pn = ((va >> 12) & 0x0000_FFFF_FFFF_F) as u64;
-        // SAFETY: per-page invalidation (see flush_tlb_page).
-        unsafe {
-            if asid == 0 {
-                asm!(
-                    "tlbi vaae1is, {v}",
-                    v = in(reg) pn,
-                    options(nostack, preserves_flags)
-                );
-            } else {
-                asm!(
-                    "tlbi vae1is, {v}",
-                    v = in(reg) pn | (((asid & 0xFF) as u64) << 48),
-                    options(nostack, preserves_flags)
-                );
-            }
-        }
-        va += 0x1000;
-    }
-    // SAFETY: completion barrier after the loop.
-    unsafe {
-        asm!("dsb ish", "isb", options(nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::mm::asid::flush_tlb_range(start, end, asid)
 }
-
 /// Flush kernel-half (global) entries
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_kernel() {
-    // SAFETY: full flush is the conservative kernel-halves choice
-    // (aarch64 has no separate kernel-only tlbi op at EL1 short of
-    // vmalle1; kernel mappings are global/nG=0 so this is correct).
-    unsafe {
-        asm!(
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::arch::arch_floor::aarch64::mm::asid::flush_tlb_kernel()
 }
 
 // ==================== Composed "satp" register ====================
@@ -239,37 +176,20 @@ pub fn satp_to_ppn(satp: usize) -> usize {
 pub fn read_satp() -> usize {
     super::pagetable::get_satp().0 as usize
 }
-
 /// Write the composed value: switch TTBR0_EL1 (root PPA + ASID in
-/// [63:48], the TCR_EL1.A1=0 tag source) with a full flush. The
-/// switch_mm path may prefer ASID-scoped invalidation once generation
-/// rollover lands (stage 2); today every switch flushes.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn write_satp(satp: usize) {
-    let ppn = satp_to_ppn(satp) as u64;
-    let asid = (satp_to_asid(satp) & 0xFF) as u64;
-    let ttbr0 = (ppn << 12) & 0x0000_FFFF_FFFF_F000 | (asid << 48);
-    // SAFETY: TTBR0 switch (root + ASID) with full invalidation. The
-    // order matches the canonical arm64 switch_mm: root write, barrier,
-    // invalidation, context-sync.
-    unsafe {
-        asm!(
-            "msr ttbr0_el1, {t}",
-            "dsb ish",
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            t = in(reg) ttbr0,
-            options(nostack)
-        );
-    }
+    crate::arch::arch_floor::aarch64::mm::asid::write_satp(satp)
 }
 
 // ==================== ASID context helper ====================
 
 /// RAII-ish ASID context (riscv64 parity)
 pub struct AsidContext {
-    asid: AtomicU16,
-    generation: core::sync::atomic::AtomicU64,
+    pub(crate) asid: AtomicU16,
+    pub(crate) generation: core::sync::atomic::AtomicU64,
 }
 
 impl AsidContext {

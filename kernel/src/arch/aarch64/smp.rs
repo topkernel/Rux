@@ -25,6 +25,11 @@
 //! riscv64 backend runs on the tp register (small value = cpu index until
 //! the scheduler stores the task pointer).
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use crate::arch::aarch64::MAX_CPUS;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -34,19 +39,19 @@ pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
 // The boot.S secondary stub hardcodes the stack stride and the legal cpu
 // index ceiling as immediates; pin them here so a config change cannot
 // silently desynchronize the two languages.
-const _: () = assert!(
+pub(crate) const _: () = assert!(
     STACK_SIZE == 0x10000,
     "boot.S secondary_start assumes 64KB (0x10000) per-cpu boot stacks"
 );
-const _: () = assert!(
+pub(crate) const _: () = assert!(
     MAX_CPUS <= 4,
     "boot.S secondary_start parks cpu indices >= 4 (MAX_CPUS must stay <= 4)"
 );
 
-static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub(crate) static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Actual boot CPU ID, saved by init()
-static BOOT_CPU_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+pub(crate) static BOOT_CPU_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Get the boot CPU ID (the core that ran rust_main)
 pub fn boot_hart_id() -> usize {
@@ -58,7 +63,7 @@ pub fn boot_cpu_id() -> usize {
     boot_hart_id()
 }
 
-fn mark_cpu_started(cpu: usize) {
+pub(crate) fn mark_cpu_started(cpu: usize) {
     if cpu < MAX_CPUS {
         CPU_STARTED[cpu].store(1, Ordering::Release);
     }
@@ -68,44 +73,12 @@ fn mark_cpu_started(cpu: usize) {
 pub fn cpu_started(cpu: usize) -> bool {
     cpu < MAX_CPUS && CPU_STARTED[cpu].load(Ordering::Acquire) == 1
 }
-
 /// Get current CPU's index.
 ///
-/// Protocol (same shape as the riscv64 tp protocol, via TPIDR_EL1):
-/// - Early boot: TPIDR_EL1 = cpu index (small value set by boot.S /
-///   the PSCI secondary stub)
-/// - After scheduling: TPIDR_EL1 = task_struct pointer; the cpu index
-///   lives in task_struct.ti_cpu at the fixed offset
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-12): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn cpu_id() -> usize {
-    // IRREDUCIBLE F-ROW (F-TP-A1): TPIDR_EL1 is outside Rust's memory
-    // model — reference kernel arch/arm64's current_thread_info()-class
-    // read (__my_cpu_offset). Pure register read; the ti_cpu deref is
-    // the one raw edge below.
-    let tp: u64 = unsafe {
-        let v;
-        core::arch::asm!("mrs {}, tpidr_el1", out(reg) v, options(nomem, nostack, pure));
-        v
-    };
-
-    if tp < 0x1000 {
-        tp as usize
-    } else {
-        {
-            let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
-            let cpu_ptr = (tp as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-            // SAFETY: tp was set by the entry path to a live Task; the
-            // TI_CPU offset read is a relaxed atomic load.
-            let raw = unsafe { (*cpu_ptr).load(Ordering::Relaxed) };
-            // Defensive: clamp negative or out-of-range (see the riscv64
-            // twin — initial -1 sign-extends to usize::MAX)
-            if raw < 0 || (raw as usize) >= crate::arch::aarch64::MAX_CPUS {
-                0
-            } else {
-                raw as usize
-            }
-        }
-    }
+    crate::arch::arch_floor::aarch64::smp::cpu_id()
 }
 
 #[inline]
@@ -129,17 +102,12 @@ pub fn init() -> bool {
 }
 
 // ==================== MPIDR_EL1 → cpu index ====================
-
 /// Read MPIDR_EL1 (affinity fields of the current core).
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-11): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_mpidr() -> u64 {
-    // SAFETY: MPIDR_EL1 is a read-only identification register accessible
-    // at EL1; the read has no side effects.
-    unsafe {
-        let v: u64;
-        core::arch::asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack, pure));
-        v
-    }
+    crate::arch::arch_floor::aarch64::smp::read_mpidr()
 }
 
 /// Linux arm64 affinity pack: MPIDR affinity levels folded into a linear
@@ -166,68 +134,35 @@ pub fn index_to_mpidr(cpu: usize) -> u64 {
 
 /// PSCI 0.2 function IDs (SMC64/HVC64 calling convention where the
 /// entry point is 64-bit wide).
-const PSCI_VERSION: u64 = 0x8400_0000;
-const PSCI_CPU_ON: u64 = 0xC400_0003;
+pub(crate) const PSCI_VERSION: u64 = 0x8400_0000;
+pub(crate) const PSCI_CPU_ON: u64 = 0xC400_0003;
 
 /// PSCI return codes (negative errno-style, delivered in x0).
-const PSCI_NOT_SUPPORTED: i64 = -1;
-const PSCI_INVALID_PARAMS: i64 = -2;
-const PSCI_DENIED: i64 = -3;
-const PSCI_ALREADY_ON: i64 = -4;
+pub(crate) const PSCI_NOT_SUPPORTED: i64 = -1;
+pub(crate) const PSCI_INVALID_PARAMS: i64 = -2;
+pub(crate) const PSCI_DENIED: i64 = -3;
+pub(crate) const PSCI_ALREADY_ON: i64 = -4;
 
 /// Conduit instruction detected from the DTB /psci node ("hvc" or "smc").
 /// QEMU virt advertises hvc; the fallback default matches.
-static CONDUIT_HVC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub(crate) static CONDUIT_HVC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 /// CPU_ON function id from the DTB /psci node (QEMU 0.2 node carries
 /// 0xc4000003; kept overridable for a 1.x node that renumbers it).
-static CPU_ON_FN: AtomicU32 = AtomicU32::new(PSCI_CPU_ON as u32);
+pub(crate) static CPU_ON_FN: AtomicU32 = AtomicU32::new(PSCI_CPU_ON as u32);
 /// PSCI version reported by PSCI_VERSION (0 = probe not run / unsupported).
-static PSCI_VERSION_REG: AtomicU32 = AtomicU32::new(0);
-
+pub(crate) static PSCI_VERSION_REG: AtomicU32 = AtomicU32::new(0);
 /// Issue a PSCI call through the detected conduit. Returns x0 (signed).
-#[inline]
-fn psci_call(fnid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    if CONDUIT_HVC.load(Ordering::Relaxed) {
-        // SAFETY: HVC #0 at EL1 is the PSCI conduit (firmware call); the
-        // register contract is the PSCI 0.2 calling convention. The call
-        // clobbers x0-x3 (return + returns-in-x1/x2/x3 for CPU_ON none).
-        unsafe {
-            core::arch::asm!(
-                "hvc #0",
-                inlateout("x0") fnid => ret,
-                in("x1") a1,
-                in("x2") a2,
-                in("x3") a3,
-                lateout("x1") _,
-                lateout("x2") _,
-                lateout("x3") _,
-                options(nostack)
-            );
-        }
-    } else {
-        // SAFETY: SMC #0 conduit variant (same calling convention).
-        unsafe {
-            core::arch::asm!(
-                "smc #0",
-                inlateout("x0") fnid => ret,
-                in("x1") a1,
-                in("x2") a2,
-                in("x3") a3,
-                lateout("x1") _,
-                lateout("x2") _,
-                lateout("x3") _,
-                options(nostack)
-            );
-        }
-    }
-    ret
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-10): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn psci_call(fnid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    crate::arch::arch_floor::aarch64::smp::psci_call(fnid, a1, a2, a3)
 }
 
 /// Parse the DTB `/psci` node for the conduit method and the CPU_ON
 /// function id. Mirrors the manual FDT walk in cmdline.rs (arch-neutral,
 /// no heap). Returns false when no /psci node exists (caller defaults).
-fn detect_psci_from_dtb() -> bool {
+pub(crate) fn detect_psci_from_dtb() -> bool {
     // The DTB physical address is fixed by QEMU before boot and the
     // linear map covers all of RAM; the walk uses the shared FDT read
     // edge (INV-FDT-1, cmdline.rs) — same proof, one audited site.
@@ -335,7 +270,7 @@ fn detect_psci_from_dtb() -> bool {
 // ==================== Boot-complete handshake ====================
 
 /// Flag set by boot CPU after ALL initialization is complete.
-static BOOT_COMPLETE: core::sync::atomic::AtomicBool =
+pub(crate) static BOOT_COMPLETE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Called by boot CPU just before entering cpu_idle_loop.
@@ -361,16 +296,8 @@ pub fn is_boot_complete() -> bool {
 
 // ==================== Saved boot-core MMU state ====================
 
-/// Saved TTBR1_EL1 (kernel root) from the boot core, for the secondary
-/// stub in boot.S (the aarch64 counterpart of riscv64's BOOT_HART_SATP).
-#[no_mangle]
-pub static BOOT_HART_TTBR: AtomicU64 = AtomicU64::new(0);
-/// Saved TCR_EL1 from the boot core.
-#[no_mangle]
-pub static BOOT_HART_TCR: AtomicU64 = AtomicU64::new(0);
-/// Saved MAIR_EL1 from the boot core.
-#[no_mangle]
-pub static BOOT_HART_MAIR: AtomicU64 = AtomicU64::new(0);
+
+
 
 use core::sync::atomic::AtomicU64;
 
@@ -386,178 +313,16 @@ extern "C" {
 /// `#[no_mangle]` + `#[used]`: boot.S `secondary_start` indexes this
 /// array by cpu index before any Rust code runs on the core.
 #[repr(align(16))]
-struct BootStack([u8; STACK_SIZE]);
-
-#[no_mangle]
-#[used]
-pub static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] =
-    [const { BootStack([0u8; STACK_SIZE]) }; MAX_CPUS];
+pub(crate) struct BootStack(pub(crate) [u8; STACK_SIZE]);
 
 /// Start secondary CPUs via PSCI CPU_ON.
-/// Must be called AFTER console + scheduler initialization.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-5): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn start_secondaries() {
-    // 1. Publish the boot core's live MMU state for the secondary stub.
-    // SAFETY: plain EL1 system-register reads, no side effects.
-    let (ttbr1, tcr, mair): (u64, u64, u64);
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ttbr1_el1",
-            "mrs {}, tcr_el1",
-            "mrs {}, mair_el1",
-            out(reg) ttbr1,
-            out(reg) tcr,
-            out(reg) mair,
-            options(nomem, nostack)
-        );
-    }
-    BOOT_HART_TTBR.store(ttbr1, Ordering::Release);
-    BOOT_HART_TCR.store(tcr, Ordering::Release);
-    BOOT_HART_MAIR.store(mair, Ordering::Release);
-
-    // 2. Conduit + version probe. The DTB /psci node decides hvc vs smc;
-    //    defaults (hvc, PSCI 0.2 CPU_ON id) already match QEMU virt.
-    let have_dtb = unsafe {
-        // SAFETY: FDT walker only reads the blob through the linear map.
-        detect_psci_from_dtb()
-    };
-    let ver = psci_call(PSCI_VERSION, 0, 0, 0);
-    if ver >= 0 {
-        PSCI_VERSION_REG.store(ver as u32, Ordering::Release);
-    }
-
-    // 3. Physical entry address of the secondary stub: the symbol is
-    //    linked in the high VA window; PSCI starts the core with the MMU
-    //    off, so hand it the physical address (same VA-PA delta boot.S
-    //    published in KERNEL_MAP).
-    // SAFETY: KERNEL_MAP is populated by boot.S before rust_main runs.
-    let va_kernel_pa_offset = unsafe { crate::arch::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset };
-    // Two-step cast: the fn item has type `unsafe extern "C" fn()` — cast
-    // to its own pointer type first (a safe-fn pointer cast is rejected),
-    // then fn-pointer → usize is a primitive cast.
-    let entry_pa = (secondary_start as unsafe extern "C" fn() as usize)
-        .wrapping_sub(va_kernel_pa_offset);
-
-    // 4. CPU_ON every secondary. Expected-online accounting follows the
-    //    riscv64 twin: QEMU may run fewer cores than MAX_CPUS (-smp 2
-    //    with MAX_CPUS=4); CPU_ON for an absent core returns
-    //    INVALID_PARAMS and that core can never come online.
-    let my_cpu = cpu_id();
-    let mut expected_cpus = 1usize; // the boot core itself
-    let mut failed = 0usize;
-
-    for cpu in 0..MAX_CPUS {
-        if cpu == my_cpu {
-            continue;
-        }
-        // dsb before the firmware call so the published MMU state and the
-        // .bss stacks are visible to the waking core.
-        // SAFETY: memory barrier, no side effects.
-        unsafe { core::arch::asm!("dsb sy", options(nomem, nostack)) };
-        let ret = psci_call(
-            CPU_ON_FN.load(Ordering::Acquire) as u64,
-            index_to_mpidr(cpu),
-            entry_pa as u64,
-            cpu as u64, // context_id → x0 at the secondary entry point
-        );
-        if ret == 0 || ret == PSCI_ALREADY_ON {
-            expected_cpus += 1;
-        } else if ret == PSCI_INVALID_PARAMS || ret == PSCI_NOT_SUPPORTED {
-            // Core absent on this machine (or PSCI CPU_ON missing) —
-            // folded into the online count, same policy as the twin's
-            // SBI_INVALID_PARAM.
-        } else {
-            failed += 1;
-            crate::println!("smp: cpu {} PSCI CPU_ON failed (error={})", cpu, ret);
-        }
-    }
-
-    // 5. Bounded wait for secondaries to reach secondary_cpu_entry (a
-    //    core that started but wedged must not hang boot forever).
-    for _ in 0..50_000_000 {
-        if num_started_cpus() >= expected_cpus {
-            break;
-        }
-        core::hint::spin_loop();
-    }
-
-    // 6. Structured status row.
-    // Post-bring-up affinity refresh (see Task::refresh_default_affinity_to_online).
-    crate::process::task::Task::refresh_default_affinity_to_online();
-    let count = num_started_cpus();
-    let v = PSCI_VERSION_REG.load(Ordering::Relaxed);
-    let conduit = if CONDUIT_HVC.load(Ordering::Relaxed) {
-        "hvc"
-    } else {
-        "smc"
-    };
-    if failed == 0 {
-        crate::print_status(
-            "smp",
-            &alloc::format!(
-                "{} CPU{} online (boot cpu {}, PSCI {}.{} {}, dtb-psci {})",
-                count,
-                if count > 1 { "s" } else { "" },
-                my_cpu,
-                v >> 16,
-                v & 0xFFFF,
-                conduit,
-                have_dtb
-            ),
-            count == expected_cpus,
-        );
-    } else {
-        crate::print_status(
-            "smp",
-            &alloc::format!(
-                "{} CPUs online, {} CPU_ON failure(s) (PSCI {}.{} {})",
-                count, failed, v >> 16, v & 0xFFFF, conduit
-            ),
-            false,
-        );
-    }
+    crate::arch::arch_floor::aarch64::smp::start_secondaries()
 }
 
-/// Rust entry point for secondary CPUs — called from boot.S
-/// `secondary_start` after the MMU is on, with x0 = cpu index (the PSCI
-/// context_id; TPIDR_EL1 is already set by the stub).
-#[no_mangle]
-pub extern "C" fn secondary_cpu_entry(cpu: usize) -> ! {
-    // Install the high-VA vector table BEFORE marking this CPU started:
-    // the stub parked VBAR_EL1 at the table's PHYSICAL address (fetched
-    // through the early identity map). cpu_started(n) must imply "n no
-    // longer needs any low VA" — mmu_init::teardown_early_identity_map()
-    // runs on the boot core right after start_secondaries() and relies
-    // on exactly that invariant (a started-but-late core would fault on
-    // its own bad-vector park otherwise).
-    crate::arch::trap::init();
-
-    // Mark this CPU as started so the boot CPU's start_secondaries()
-    // spin-wait can detect us and proceed.
-    mark_cpu_started(cpu);
-
-    // Configure THIS cpu's GIC bank and unmask DAIF BEFORE the
-    // boot-complete wait: the wait parks in wfi, and a halted core whose
-    // pending interrupt is masked never wakes to re-evaluate the loop
-    // condition — the secondary parked there for the whole boot
-    // (invisible while the GICD_CTLR bug kept every interrupt line
-    // deasserted). With the CPU interface up and DAIF clear, the armed
-    // vtimer (and the boot cpu's completion kick) break the wfi properly
-    // and the timer's early-boot guard makes the pre-init ticks harmless.
-    crate::arch::trap::enable_external_interrupt();
-    crate::arch::trap::enable_timer_interrupt();
-
-    // Wait for boot CPU to finish ALL single-CPU initialization.
-    // WFI yields the CPU in QEMU tcg mode.
-    while !is_boot_complete() {
-        crate::arch::cpu::wfi();
-    }
-
-    // Boot CPU has finished init — safe to call kmalloc now.
-    crate::sched::init_secondary(cpu);
-
-    // Enter scheduler idle loop (timer interrupts enabled inside the loop)
-    crate::sched::cpu_idle_loop();
-}
 
 pub fn num_started_cpus() -> usize {
     let mut count = 0;
@@ -576,7 +341,7 @@ pub const INTR_STACK_SIZE: usize = 16384;
 
 /// Aligned stack wrapper to ensure 16-byte alignment
 #[repr(C, align(16))]
-struct AlignedStack([u8; INTR_STACK_SIZE]);
+pub(crate) struct AlignedStack(pub(crate) [u8; INTR_STACK_SIZE]);
 
 impl AlignedStack {
     /// Get a pointer to the underlying stack buffer
@@ -585,39 +350,26 @@ impl AlignedStack {
     }
 }
 
-/// Per-CPU interrupt stacks (16-byte aligned for PtRegs access)
-#[link_section = ".bss"]
-#[used]
-pub static mut PER_CPU_INTR_STACKS: [AlignedStack; MAX_CPUS] =
-    [const { AlignedStack([0u8; INTR_STACK_SIZE]) }; MAX_CPUS];
-
 /// Initialize per-CPU interrupt stack base pointer for assembly code
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init_per_cpu_intr_stacks() {
-    // SAFETY: only called once during early boot before any traps occur.
-    unsafe {
-        extern "C" {
-            static mut __per_cpu_intr_stacks_base: usize;
-        }
-        __per_cpu_intr_stacks_base = PER_CPU_INTR_STACKS.as_ptr() as usize;
-    }
+    crate::arch::arch_floor::aarch64::smp::init_per_cpu_intr_stacks()
 }
 
-/// Get current CPU's interrupt stack top address
-#[no_mangle]
-#[inline(never)]
-pub extern "C" fn get_per_cpu_intr_stack_top() -> usize {
-    let cpu = cpu_id();
-    if cpu < MAX_CPUS {
-        // SAFETY: bounds-checked index into the static per-CPU array.
-        unsafe {
-            let stack_base = PER_CPU_INTR_STACKS[cpu].as_ptr() as usize;
-            stack_base + INTR_STACK_SIZE
-        }
-    } else {
-        // SAFETY: PER_CPU_INTR_STACKS[0] always exists (MAX_CPUS >= 1).
-        unsafe {
-            let stack_base = PER_CPU_INTR_STACKS[0].as_ptr() as usize;
-            stack_base + INTR_STACK_SIZE
-        }
-    }
-}
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+// INV-ARCH note: get_per_cpu_intr_stack_top moved to arch::arch_floor::aarch64::smp (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::aarch64::smp::get_per_cpu_intr_stack_top;
+pub(crate) use crate::arch::arch_floor::aarch64::smp::PER_CPU_INTR_STACKS;
+// INV-ARCH note: secondary_cpu_entry moved to arch::arch_floor::aarch64::smp (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::aarch64::smp::secondary_cpu_entry;
+pub(crate) use crate::arch::arch_floor::aarch64::smp::SECONDARY_BOOT_STACKS;
+pub(crate) use crate::arch::arch_floor::aarch64::smp::BOOT_HART_MAIR;
+pub(crate) use crate::arch::arch_floor::aarch64::smp::BOOT_HART_TCR;
+pub(crate) use crate::arch::arch_floor::aarch64::smp::BOOT_HART_TTBR;

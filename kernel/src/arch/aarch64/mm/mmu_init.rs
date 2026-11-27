@@ -17,6 +17,11 @@
 //! rust_main); init() completes the full linear map + device windows on
 //! top of the same root.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -27,9 +32,6 @@ use super::pagetable::{PageTable, PageTableEntry, Satp};
 
 // ==================== Kernel root table ====================
 
-/// The kernel's TTBR1 L0 table (static, in the image)
-#[link_section = ".bss"]
-pub static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
 /// boot.S's early TTBR1 root (kern_l0) — its L0[511] subtree carries the
 /// kernel image window that brought us into the high half. `init()`
@@ -57,39 +59,17 @@ extern "C" {
 // IRREDUCIBLE F-ROW (F-BOOT-A1): TTBR1 adoption + the boot-table
 // teardown/linear-map setup — reference kernel arch/arm64/kernel/head.S
 // + mmu.c map_mem; pre-linear-map phys addressing.
-fn adopt_boot_ttbr1() {
-    // Copy all 512 L0 entries (all-but-511 are zero on the boot
-    // root; copying verbatim keeps the two roots identical).
-    // SAFETY: single-CPU boot section; the static roots are exclusively
-    // owned here.
-    unsafe {
-        let src = (&raw const kern_l0) as *const u8;
-        let dst = (&raw mut ROOT_PAGE_TABLE) as *mut u8;
-        core::ptr::copy_nonoverlapping(src, dst, core::mem::size_of::<PageTable>());
-    }
-    let root_pa = root_page_table_ppn() << PAGE_SHIFT;
-    // SAFETY: install the freshly copied root (register write + barrier).
-    unsafe {
-        asm!(
-            "msr ttbr1_el1, {t}",
-            "isb",
-            t = in(reg) root_pa,
-            options(nostack)
-        );
-    }
-    crate::arch::cpu::local_flush_tlb_all();
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-14): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn adopt_boot_ttbr1() {
+    crate::arch::arch_floor::aarch64::mm::mmu_init::adopt_boot_ttbr1()
 }
-
 /// Get the physical page number of the kernel root table
-/// (ROOT_PAGE_TABLE lives at KERNEL_LINK_ADDR; convert via the image offset)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-13): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn root_page_table_ppn() -> u64 {
-    let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
-    // SAFETY: KERNEL_MAP is set by boot.S before rust_main; the offset
-    // never changes afterwards.
-    let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-    let root_phys = root_virt.wrapping_sub(offset);
-    root_phys / (PAGE_SIZE as u64)
+    crate::arch::arch_floor::aarch64::mm::mmu_init::root_page_table_ppn()
 }
 
 /// Kernel root PPN (alias; interface parity)
@@ -107,7 +87,7 @@ pub fn root_static_phys() -> u64 {
     root_page_table_ppn() << PAGE_SHIFT
 }
 
-static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
+pub(crate) static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 // ==================== Staged page-table allocation ====================
 //
@@ -134,7 +114,7 @@ impl AllocStage {
     }
 }
 
-static ALLOC_STAGE: AtomicU8 = AtomicU8::new(0);
+pub(crate) static ALLOC_STAGE: AtomicU8 = AtomicU8::new(0);
 
 /// Current page-table allocation stage
 pub fn get_alloc_stage() -> AllocStage {
@@ -159,86 +139,22 @@ pub fn pt_ops_set_late() {
 /// Early L1/L2/L3 table pools (static .bss).
 /// 1GB RAM linear map needs: 1 L1 (512GB→1GB entries) + 1 L2; the pools
 /// carry headroom for vmemmap/fixmap/device windows.
-const NUM_EARLY_L1: usize = 8;
-const NUM_EARLY_L2: usize = 16;
-const NUM_EARLY_L3: usize = 128;
+pub(crate) const NUM_EARLY_L1: usize = 8;
+pub(crate) const NUM_EARLY_L2: usize = 16;
+pub(crate) const NUM_EARLY_L3: usize = 128;
 
-#[link_section = ".bss"]
-static mut EARLY_L1: [PageTable; NUM_EARLY_L1] = [PageTable::new(); NUM_EARLY_L1];
-#[link_section = ".bss"]
-static mut EARLY_L2: [PageTable; NUM_EARLY_L2] = [PageTable::new(); NUM_EARLY_L2];
-#[link_section = ".bss"]
-static mut EARLY_L3: [PageTable; NUM_EARLY_L3] = [PageTable::new(); NUM_EARLY_L3];
 
-static EARLY_L1_NEXT: AtomicUsize = AtomicUsize::new(0);
-static EARLY_L2_NEXT: AtomicUsize = AtomicUsize::new(0);
-static EARLY_L3_NEXT: AtomicUsize = AtomicUsize::new(0);
 
+
+pub(crate) static EARLY_L1_NEXT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static EARLY_L2_NEXT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static EARLY_L3_NEXT: AtomicUsize = AtomicUsize::new(0);
 /// Allocate a page-table frame; returns its PHYSICAL address.
 ///
-/// Early stage: from the static pools (converted via the image offset).
-/// Later stages: stage-2 wiring (memblock / buddy) — until then the
-/// early pools serve (they cover the stage-1 mapping budget).
-///
-/// # Safety
-/// Early-boot single-threaded context, or PTE_MODIFY_LOCK held later.
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-9): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn alloc_page_table() -> Option<u64> {
-    match get_alloc_stage() {
-        AllocStage::Early | AllocStage::Fixmap => {
-            // Static pools with bump counters (see early_alloc); the
-            // claimed slot's address arithmetic is inert.
-            // SAFETY: single-CPU boot section; the fetch_add claims the
-            // slot exclusively.
-            unsafe {
-                let (ptr, i) = {
-                    // Prefer L3 pools for leaf tables; intermediate levels
-                    // have their own pools — the level distinction only
-                    // sizes the accounting, the frames are identical.
-                    let i = EARLY_L3_NEXT.fetch_add(1, Ordering::Relaxed);
-                    if i < NUM_EARLY_L3 {
-                        (&raw mut EARLY_L3[i] as u64, i)
-                    } else {
-                        let i2 = EARLY_L2_NEXT.fetch_add(1, Ordering::Relaxed);
-                        if i2 < NUM_EARLY_L2 {
-                            (&raw mut EARLY_L2[i2] as u64, i2)
-                        } else {
-                            let i1 = EARLY_L1_NEXT.fetch_add(1, Ordering::Relaxed);
-                            if i1 < NUM_EARLY_L1 {
-                                (&raw mut EARLY_L1[i1] as u64, i1)
-                            } else {
-                                return None;
-                            }
-                        }
-                    }
-                };
-                // SAFETY: KERNEL_MAP is set by boot.S before rust_main.
-                let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-                Some(ptr.wrapping_sub(offset))
-            }
-        }
-        AllocStage::Late => {
-            // Buddy-backed allocation (riscv64 twin semantics): every
-            // stage-2 user tree frame comes from the zone allocator, is
-            // ZEROED here (tables must never leak a previous owner's
-            // entries), and is stamped into the PT ledger so the teardown
-            // walk can tell Late frames (freeable) from boot-pool frames
-            // (image .bss, never freed). The old static-pool fallback
-            // exhausted after a handful of execs (128 frames, bump-only).
-            let phys = crate::mm::alloc_pages(crate::mm::GfpFlags::GFP_KERNEL, 0);
-            if phys == 0 {
-                return None;
-            }
-            // SAFETY: phys is a freshly allocated, exclusively owned
-            // order-0 frame inside the linear map.
-            unsafe {
-                let va = phys_to_virt(PhysAddr::new(phys as u64));
-                core::ptr::write_bytes(va.bits() as *mut u8, 0, PAGE_SIZE as usize);
-            }
-            PT_LEDGER.stamp((phys >> PAGE_SHIFT) as u64);
-            PT_LEDGER.live.fetch_add(1, Ordering::Relaxed);
-            Some(phys as u64)
-        }
-    }
+    crate::arch::arch_floor::aarch64::mm::mmu_init::alloc_page_table()
 }
 
 /// Free a page-table frame. Late-stage frames (ledger-stamped, buddy
@@ -260,7 +176,7 @@ pub fn free_page_table(phys_addr: u64) {
 /// frame to the buddy (exactly-one-live-stamp discipline; a double or
 /// foreign free is refused with the frame left leaked rather than wired
 /// into two live trees).
-fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
+pub(crate) fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
     if get_alloc_stage() != AllocStage::Late {
         return false; // boot-stage frames are permanent
     }
@@ -409,7 +325,7 @@ pub fn free_user_page_tables(
 /// adjudication — aarch64's fault paths create no text stamps). Foreign
 /// frames (boot-reserved, kernel-heap, framebuffer) are skipped: their
 /// owner releases them through its own path.
-fn release_user_leaf_mm(entry: PageTableEntry) {
+pub(crate) fn release_user_leaf_mm(entry: PageTableEntry) {
     use crate::mm::{page_desc, phys_to_pfn, phys_valid};
 
     if !entry.is_user() {
@@ -486,7 +402,7 @@ pub struct PtLedger {
 }
 
 /// Ledger bitmap words: 2 GB of 4 KiB frames = 524288 bits = 8192 words
-const PT_LEDGER_WORDS: usize = 8192;
+pub(crate) const PT_LEDGER_WORDS: usize = 8192;
 
 impl PtLedger {
     pub const fn new() -> Self {
@@ -503,7 +419,7 @@ impl PtLedger {
 
     /// Bitmap index for a ppn (None outside the ledger window)
     #[inline]
-    fn index(ppn: u64) -> Option<usize> {
+    pub(crate) fn index(ppn: u64) -> Option<usize> {
         let base = (PHYS_MEMORY_BASE >> PAGE_SHIFT) as u64;
         let span = PT_LEDGER_WORDS as u64 * 64;
         let idx = ppn.checked_sub(base)?;
@@ -579,16 +495,7 @@ impl PtLedger {
     }
 }
 
-/// The ledger bitmap itself (64 KiB .bss)
-#[link_section = ".bss"]
-static LEDGER_BITMAP: [AtomicUsize; PT_LEDGER_WORDS] =
-    [const { AtomicUsize::new(0) }; PT_LEDGER_WORDS];
 
-/// Quarantine bitmap (mmforensics lane): one-way marks, same window as
-/// LEDGER_BITMAP.
-#[link_section = ".bss"]
-static POISON_BITMAP: [AtomicUsize; PT_LEDGER_WORDS] =
-    [const { AtomicUsize::new(0) }; PT_LEDGER_WORDS];
 
 /// Global PT ledger
 pub static PT_LEDGER: PtLedger = PtLedger::new();
@@ -626,7 +533,7 @@ pub const KERN_DEVICE_FLAGS: u64 = PageTableEntry::V
 /// # Safety
 /// Kernel mappings are built during single-threaded boot or under
 /// PTE_MODIFY_LOCK.
-fn kernel_table_for(virt: u64, leaf_level: u8) -> Option<u64> {
+pub(crate) fn kernel_table_for(virt: u64, leaf_level: u8) -> Option<u64> {
     debug_assert!((1..=3).contains(&leaf_level));
     let mut table_phys = root_page_table_ppn() << PAGE_SHIFT;
     let mut table = PtTable::from_phys(table_phys)?;
@@ -718,7 +625,7 @@ pub fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
 ///
 /// # Safety
 /// `phys` must be 1GB-aligned; kernel mapping context.
-fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
+pub(crate) fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
     assert!(phys % (1 << 30) == 0, "phys must be 1GB aligned");
     // 1GB block descriptors live at L1, indexed by VA[38:30] —
     // descend one level from the L0 root first. (An earlier draft
@@ -748,7 +655,7 @@ pub fn map_device_page(virt: usize, phys: usize, _flags: u64) {
 }
 
 /// Best block size for a linear-map segment (1GB / 2MB / 4KB)
-fn best_map_size(phys: usize, virt: usize, remaining: usize) -> usize {
+pub(crate) fn best_map_size(phys: usize, virt: usize, remaining: usize) -> usize {
     if phys % (1 << 30) == 0 && virt % (1 << 30) == 0 && remaining >= (1 << 30) {
         1 << 30
     } else if phys % (2 << 20) == 0 && virt % (2 << 20) == 0 && remaining >= (2 << 20) {
@@ -759,198 +666,33 @@ fn best_map_size(phys: usize, virt: usize, remaining: usize) -> usize {
 }
 
 // ==================== Boot integration ====================
-
 /// MMU init — completes the kernel map on the static TTBR1 root.
 ///
-/// Called from rust_main AFTER the boot.S early tables brought us into
-/// the high half. Installs the full linear map (from the memblock
-/// regions), the device windows and the fixmap.
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-6): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init() {
-    unsafe {
-        // FIRST: adopt boot.S's early TTBR1 root so every mapping built
-        // below lands in the table the MMU actually walks.
-        adopt_boot_ttbr1();
-
-        // The boot CPU's early tables already cover the kernel image
-        // window; KERNEL_MAP was populated by boot.S.
-        KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
-        KERNEL_MAP.page_offset = PAGE_OFFSET;
-
-        // Install the fixmap (UART) so console output survives the
-        // switch off the early identity window (see
-        // teardown_early_identity_map — the consumer-side half of this
-        // comment, kept here since the fixmap is the prerequisite)
-        fixmap::init_uart_fixmap();
-
-        MMU_INITIALIZED.store(true, Ordering::Release);
-    }
+    crate::arch::arch_floor::aarch64::mm::mmu_init::init()
 }
-
 /// Tear down boot.S's early TTBR0 identity window (phys [0, 2GB)).
 ///
-/// Consumer audit (the registered leftover this closes — before it ran,
-/// a low-address kernel usercopy read flash instead of faulting):
-/// - boot.S: the post-MMU EARLY_PUTC pair ('M', 'J') writes the UART at
-///   its identity VA, both before rust_main. The secondary stub is the
-///   LAST physical-PC consumer — it fetches and stacks through the
-///   identity map until it branches to secondary_cpu_entry, and that
-///   core has called trap::init() BEFORE marking itself started (see
-///   secondary_cpu_entry), so cpu_started(n) ⇒ n needs no low VAs.
-/// - trap vector park: VBAR_EL1 was repointed at the linked high VA by
-///   trap::init() on the boot core (rust_main, before mm::init) and on
-///   every secondary (secondary_cpu_entry).
-/// - console: putchar uses the fixmap UART VA (init above); the GIC and
-///   every other MMIO consumer goes through the kernel-half alias.
-///
-/// Must therefore run AFTER `arch::smp::start_secondaries()`. A core
-/// whose PSCI CPU_ON succeeded but never reached secondary_cpu_entry
-/// within start_secondaries' bounded wait is already treated as wedged
-/// there; tearing down regardless is the documented trade.
-///
-/// Mirrors the riscv64/x86_64 state (no identity window, low user VAs
-/// unmapped): zero the idmap L0/L1 entries, park this core's TTBR0 on
-/// the kernel root (the same switch a context switch to a kernel thread
-/// performs — get_current_satp() then reports the kernel root, so the
-/// first schedule needs no extra TTBR0 write), and broadcast the TLB
-/// invalidation so cores that walked through the window as secondaries
-/// drop their cached low-VA translations too.
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-5): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn teardown_early_identity_map() {
-    // 1. Kill the table contents: L0[0] (the [0, 512GB) subtree
-    //    pointer — the whole identity window) and both L1 blocks
-    //    (phys 0 device, phys 1GB RAM). Image .bss tables, written
-    //    once here from the boot core after every consumer is gone;
-    //    volatile so the stores are not reordered away against the
-    //    barrier below.
-    // SAFETY: static boot tables, exclusive boot-core ownership.
-    unsafe {
-        let l0 = (&raw const idmap_l0) as *mut PageTable;
-        let l1 = (&raw const idmap_l1) as *mut PageTable;
-        (*l0).set(0, PageTableEntry::new());
-        (*l1).set(0, PageTableEntry::new());
-        (*l1).set(1, PageTableEntry::new());
-    }
-
-    // 2. Make the zeroing visible before anyone can observe it.
-    // SAFETY: barrier (memory-safe in any context).
-    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
-
-    // 3. Park this core's TTBR0 on the kernel root, ASID 0 — the
-    //    exact state context_switch installs for a kernel thread
-    //    (ROOT_PAGE_TABLE's low L0 slots are all zero, so user VAs
-    //    fault at level 0). The ASID lives in TTBR0[63:48]
-    //    (TCR_EL1.A1 = 0; CONTEXTIDR does not tag entries — see
-    //    context.rs switch_mm), and root_pa carries ASID 0.
-    let root_pa = root_page_table_ppn() << PAGE_SHIFT;
-    // SAFETY: install the live kernel root (register write + barrier).
-    unsafe {
-        core::arch::asm!(
-            "msr ttbr0_el1, {t}",
-            "isb",
-            t = in(reg) root_pa,
-            options(nostack)
-        );
-    }
-
-    // 4. Broadcast invalidation (inner-shareable): the boot core and
-    //    every secondary stub fetched through ASID-0 identity
-    //    translations; vmalle1is clears both halves on every PE and
-    //    they refill from the live tables (one-time boot cost).
-    // SAFETY: TLB invalidation broadcast (memory-safe in any context).
-    unsafe {
-        core::arch::asm!(
-            "tlbi vmalle1is",
-            "dsb sy",
-            "isb",
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::arch::arch_floor::aarch64::mm::mmu_init::teardown_early_identity_map()
 }
-
 /// Build the linear mapping over the memblock regions (called from the
-/// generic boot path with the DTB-parsed regions)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
-    // SAFETY: single-CPU boot section; no concurrent reader exists.
-    unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
-    {
-
-        for region in memory_regions {
-            let phys_start = region.base;
-            let phys_end = region.base + region.size;
-            let virt_start = phys_start + VA_PA_OFFSET;
-
-            let mut phys = phys_start;
-            let mut virt = virt_start;
-            while phys < phys_end {
-                let remaining = phys_end - phys;
-                let map_size = best_map_size(phys, virt, remaining);
-                match map_size {
-                    s if s == 1 << 30 => map_pud_huge_page(virt, phys, KERN_MAP_FLAGS),
-                    s if s == 2 << 20 => map_pmd_huge_page(virt, phys, KERN_MAP_FLAGS),
-                    _ => {
-                        map_kernel_page_noflush(virt as u64, phys as u64, KERN_MAP_FLAGS);
-                    }
-                }
-                phys += map_size;
-                virt += map_size;
-            }
-        }
-
-        crate::arch::cpu::local_flush_tlb_all();
-    }
+    crate::arch::arch_floor::aarch64::mm::mmu_init::setup_linear_mapping(memory_regions)
 }
-
 /// Install the permanent device windows: the kernel-half MMIO alias
-/// (phys [0, 1GB) at MMIO_ALIAS_BASE) plus the ECAM window (phys
-/// [PCIE_ECAM_BASE, +PCIE_ECAM_SIZE) at ECAM_ALIAS_BASE), with
-/// Device-nGnRE attributes.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn setup_device_mappings() {
-    {
-        // Device windows as (first phys, alias VA base, total size); both
-        // map 2MB device blocks at L2.
-        const WINDOWS: [(usize, usize, usize); 2] = [
-            (0, MMIO_ALIAS_BASE, MMIO_ALIAS_SIZE),
-            (
-                PCIE_ECAM_BASE as usize,
-                ECAM_ALIAS_BASE,
-                ECAM_ALIAS_SIZE,
-            ),
-        ];
-        for &(phys_base, va_base, size) in WINDOWS.iter() {
-            let mut pa = phys_base;
-            let mut installed = 0usize;
-            while pa < phys_base + size {
-                let va = va_base + (pa - phys_base);
-                // 2MB device blocks live at L2 — descend to it, then index
-                // by VA[29:21].
-                let l2_phys = match kernel_table_for(va as u64, 2) {
-                    Some(p) => p,
-                    None => break,
-                };
-                let Some(l2) = PtTable::from_phys(l2_phys) else { break };
-                let idx = ((va >> PMD_SHIFT) & 0x1FF) as usize;
-                let entry = PageTableEntry::new_block_device((pa >> PAGE_SHIFT) as u64);
-                l2.set(idx, entry);
-                installed += 1;
-                pa += 2 << 20;
-            }
-            // Raw console write: printk isn't wired until the console
-            // driver registers later in boot (early println! is dropped).
-            use core::fmt::Write;
-            let ttbr1: u64;
-            unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) };
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-            let _ = write!(
-                w,
-                "devmap: phys {:#x}+{:#x} -> va {:#x}: {} blocks (pools l1/l2/l3 {}/{}/{}, ttbr1={:#x})\n",
-                phys_base, size, va_base, installed,
-                EARLY_L1_NEXT.load(Ordering::Relaxed),
-                EARLY_L2_NEXT.load(Ordering::Relaxed),
-                EARLY_L3_NEXT.load(Ordering::Relaxed),
-                ttbr1
-            );
-        }
-        crate::arch::cpu::local_flush_tlb_all();
-    }
+    crate::arch::arch_floor::aarch64::mm::mmu_init::setup_device_mappings()
 }
 
 /// Enable/commit the kernel address space (parity no-op: the MMU is on
@@ -963,31 +705,19 @@ pub fn enable() {
 pub fn get_current_satp_pub() -> u64 {
     super::pagetable::get_satp().0
 }
-
 /// Identity-map helper (riscv64 parity; aarch64 kernel half only)
 ///
-/// # Safety
-/// Kernel mapping context.
-pub unsafe fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    unsafe {
-        // Identity mappings only make sense for the low half on aarch64
-        // (TTBR0); the kernel builds them in the TTBR1 view at the
-        // aliased VA instead. Stage-2 refines if a consumer appears.
-        let alias = MMIO_ALIAS_BASE as u64 + virt.bits();
-        map_kernel_page_noflush(alias, phys.bits(), flags);
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
+    crate::arch::arch_floor::aarch64::mm::mmu_init::map_identity(virt, phys, flags)
 }
-
 /// Map into a USER root (TTBR0) — stage 2 (the user walker + COW)
 ///
-/// # Safety
-/// root_ppn must be a valid user root.
-pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
-    if root_ppn == root_page_table_ppn() {
-        // Kernel-root callers route through the kernel mapping path
-        return map_kernel_page_noflush(virt.bits(), phys.bits(), flags);
-    }
-    super::mm_ops::map_user_page(root_ppn, virt, phys, flags)
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+    crate::arch::arch_floor::aarch64::mm::mmu_init::map_page(root_ppn, virt, phys, flags)
 }
 
 /// Kernel-device window PTE probe (diagnostics parity)
@@ -1001,3 +731,12 @@ pub fn kernel_device_window_pte(_va: u64) -> Option<u64> {
 pub fn read_satp_view() -> Satp {
     super::pagetable::get_satp()
 }
+
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+pub(crate) use crate::arch::arch_floor::aarch64::mm::mmu_init::POISON_BITMAP;
+pub(crate) use crate::arch::arch_floor::aarch64::mm::mmu_init::LEDGER_BITMAP;
+pub(crate) use crate::arch::arch_floor::aarch64::mm::mmu_init::EARLY_L3;
+pub(crate) use crate::arch::arch_floor::aarch64::mm::mmu_init::EARLY_L2;
+pub(crate) use crate::arch::arch_floor::aarch64::mm::mmu_init::EARLY_L1;
+pub(crate) use crate::arch::arch_floor::aarch64::mm::mmu_init::ROOT_PAGE_TABLE;

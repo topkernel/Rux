@@ -9,6 +9,11 @@
 //! (PL011) fixmap is the boot-critical one: console output switches from
 //! the early identity VA to the fixmap VA once the kernel map is live.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::memory_layout::{PAGE_SHIFT, VMEMMAP_START};
@@ -39,7 +44,7 @@ pub enum FixedAddress {
     EndOfFixedAddresses,
 }
 
-const _: () = assert!((FixedAddress::EndOfFixedAddresses as usize) <= NUM_FIXMAP_SLOTS);
+pub(crate) const _: () = assert!((FixedAddress::EndOfFixedAddresses as usize) <= NUM_FIXMAP_SLOTS);
 
 /// Convert fixmap index to virtual address (slot 0 at the top, growing down)
 #[inline]
@@ -69,17 +74,13 @@ pub const fn is_fixmap_addr(virt: usize) -> bool {
 pub const UART_PHYS: usize = 0x0900_0000;
 
 /// UART virtual address (set during init; 0 before)
-static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
-
+pub(crate) static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
 /// Initialize the UART fixmap (map PL011 into the FixEarlycon slot)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-FIXMAP-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init_uart_fixmap() -> usize {
-    let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
-    // Device mapping, kernel RW
-    // SAFETY: early single-threaded boot; the fixmap slot is exclusively
-    // ours and the kernel tables are being built.
-    unsafe { super::mmu_init::map_device_page(virt, UART_PHYS, 0) };
-    UART_VIRT_ADDR.store(virt, Ordering::Release);
-    virt
+    crate::arch::arch_floor::aarch64::mm::fixmap::init_uart_fixmap()
 }
 
 /// Get the UART virtual address (falls back to the physical address

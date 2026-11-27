@@ -17,8 +17,13 @@
 //! "save but never restore" lesson), a lazy refinement can come later
 //! with measurements.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 /// FPSIMD register image size: 32 Q registers × 16 bytes = 64 × u64
-const FPU_STATE_SIZE: usize = 64;
+pub(crate) const FPU_STATE_SIZE: usize = 64;
 
 /// User-visible FPSIMD image (trap-entry capture; see ThreadStruct docs)
 #[derive(Debug, Clone, Copy)]
@@ -155,86 +160,7 @@ impl ThreadStruct {
         self.fs
     }
 
-    /// Save the live FPSIMD state into this thread image (called by
-    /// __switch_to asm via the field offsets; the Rust twin for stage-2
-    /// FPU fault paths)
-    #[inline]
-    pub // IRREDUCIBLE F-ROW (F-AFPU-1): FPSIMD save (str q0..q31 + fpcr/fpsr) —
-    // reference kernel arch/arm64/kernel/fpsimd.S's fpsimd_save; no safe
-    // Rust shape touches the NEON register file. Target: self.fpu (typed
-    // [u64; 64] array — the one edge is the asm block).
-    fn fpu_save(&mut self) {
-        unsafe {
-            let dst = self.fpu.as_mut_ptr();
-            core::arch::asm!(
-                // Kernel codegen is general-regs-only (see
-                // .cargo/config.toml); this q-register block re-enables
-                // fp/simd for THIS asm block only.
-                ".arch armv8-a+fp+simd",
-                "stp q0, q1, [{d}], #32",
-                "stp q2, q3, [{d}], #32",
-                "stp q4, q5, [{d}], #32",
-                "stp q6, q7, [{d}], #32",
-                "stp q8, q9, [{d}], #32",
-                "stp q10, q11, [{d}], #32",
-                "stp q12, q13, [{d}], #32",
-                "stp q14, q15, [{d}], #32",
-                "stp q16, q17, [{d}], #32",
-                "stp q18, q19, [{d}], #32",
-                "stp q20, q21, [{d}], #32",
-                "stp q22, q23, [{d}], #32",
-                "stp q24, q25, [{d}], #32",
-                "stp q26, q27, [{d}], #32",
-                "stp q28, q29, [{d}], #32",
-                "stp q30, q31, [{d}]",
-                "mrs {fpcr}, fpcr",
-                "mrs {fpsr}, fpsr",
-                d = in(reg) dst,
-                fpcr = out(reg) self.fpcr,
-                fpsr = out(reg) self.fpsr,
-                options(nostack)
-            );
-        }
-        self.fs = 3; // DIRTY
-    }
 
-    /// Restore the FPSIMD state from this thread image
-    #[inline]
-    pub // IRREDUCIBLE F-ROW (F-AFPU-2): FPSIMD restore — fpsimd.S's load
-    // path. Source: self.fpu (typed array).
-    fn fpu_restore(&self) {
-        unsafe {
-            let src = self.fpu.as_ptr();
-            let fpcr = self.fpcr as u64;
-            let fpsr = self.fpsr as u64;
-            core::arch::asm!(
-                // general-regs-only override (see fpu_save)
-                ".arch armv8-a+fp+simd",
-                "ldp q0, q1, [{s}], #32",
-                "ldp q2, q3, [{s}], #32",
-                "ldp q4, q5, [{s}], #32",
-                "ldp q6, q7, [{s}], #32",
-                "ldp q8, q9, [{s}], #32",
-                "ldp q10, q11, [{s}], #32",
-                "ldp q12, q13, [{s}], #32",
-                "ldp q14, q15, [{s}], #32",
-                "ldp q16, q17, [{s}], #32",
-                "ldp q18, q19, [{s}], #32",
-                "ldp q20, q21, [{s}], #32",
-                "ldp q22, q23, [{s}], #32",
-                "ldp q24, q25, [{s}], #32",
-                "ldp q26, q27, [{s}], #32",
-                "ldp q28, q29, [{s}], #32",
-                "ldp q30, q31, [{s}]",
-                "msr fpcr, {fpcr}",
-                "msr fpsr, {fpsr}",
-                s = in(reg) src,
-                fpcr = in(reg) fpcr,
-                fpsr = in(reg) fpsr,
-                options(nostack, readonly)
-            );
-        }
-    }
 
     /// Interface parity with the riscv64 backend (no vector state on
     /// cortex-a72 — SVE arrives with a future CPU model, if ever)
