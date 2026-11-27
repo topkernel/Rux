@@ -411,6 +411,11 @@ pub fn __do_softirq() -> bool {
     // count-migration leak: a lat_fs worker observed carrying
     // preempt=0x...2 for 377 ticks, unpreemptible, un-sleepable — the
     // lock-convoy strand root). The exit releases on the BOOKED task.
+    // PER-CPU MIGRATION: the +SOFTIRQ_OFFSET books THIS cpu's word (the
+    // exit-side sub lands on the same word whatever task identity
+    // changes inside the window). The entry tp capture stays for the
+    // SOFTIRQ-BRACKET-LEAK probe (a switch inside the window is still
+    // worth naming; it can no longer split the count).
     let sirq_entry_task = crate::arch::cpu::get_thread_id() as usize;
     crate::interrupt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
@@ -513,36 +518,28 @@ pub fn __do_softirq() -> bool {
         }
     }
 
-    // Leave softirq context — release on the BOOKED task (see the
-    // entry-site comment): same-cpu fast path is the plain sub; a
-    // window that spanned a switch releases through the remote helper
-    // (refcount-checked; a freed task's count is meaningless).
+    // Leave softirq context — PER-CPU MIGRATION: the booking discipline
+    // retired; the -SOFTIRQ_OFFSET lands on THIS cpu's word, the same
+    // word the entry booked (a switch inside the window can no longer
+    // strand the bit anywhere).
     {
         let sirq_exit_task = crate::arch::cpu::get_thread_id() as usize;
-        if sirq_exit_task == sirq_entry_task {
-            crate::interrupt::preempt_count_sub(
-                crate::interrupt::preempt::SOFTIRQ_OFFSET
-            );
-        } else {
-            let released = crate::process::task::Task::release_hardirq_base_on(
-                sirq_entry_task as *mut crate::process::task::Task,
-                crate::interrupt::preempt::SOFTIRQ_OFFSET,
-                core::panic::Location::caller(),
-            );
-            if !released {
-                // Entry task exited inside the window: the base dies
-                // with its page (the safe accessor skipped it). The
-                // CURRENT task never carried this bit — do not sub it.
-                static SEXIT_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if SEXIT_N.fetch_add(1, Ordering::Relaxed) < 12 {
-                    crate::pr_err!(
-                        "SOFTIRQ-EXIT-SPANNED released=0 entry_task={:#x}",
-                        sirq_entry_task
-                    );
-                }
+        if sirq_exit_task != sirq_entry_task {
+            // Probe (was the remote-release trigger): the window spanned
+            // a switch. Migration-verification line — must be silent on
+            // healthy boots; the count itself no longer splits.
+            static SEXIT_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if SEXIT_N.fetch_add(1, Ordering::Relaxed) < 12 {
+                crate::pr_warn!(
+                    "SOFTIRQ-EXIT-SPANNED probe entry_task={:#x}",
+                    sirq_entry_task
+                );
             }
         }
+        crate::interrupt::preempt_count_sub(
+            crate::interrupt::preempt::SOFTIRQ_OFFSET
+        );
     }
     // CARRIER-HEAL (123rd): window-closed stamp, AFTER the booking sub
     // so the slot never says closed while the count still carries the

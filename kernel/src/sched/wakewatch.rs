@@ -303,7 +303,8 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 // 1 = a leaked PREEMPT_OFFSET (spinlock guard), 0x100 =
                 // a leaked bh, 0x4000000 = a leaked PREEMPT_ACTIVE.
                 ww_msg(b"/pc=");
-                ww_u64(crate::process::edges::borrow_task(cur).preempt_count() as u32 as u64);
+                // PER-CPU MIGRATION: this cpu's word.
+                ww_u64(crate::interrupt::preempt::preempt_count() as u32 as u64);
                 ww_msg(b")");
             }
             // leg-24 leakhunt v3: the slot incumbent can be a stale
@@ -323,7 +324,8 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                     {
                         ww_u64(crate::process::edges::borrow_task(tp).pid() as u64);
                         ww_msg(b"/pc=");
-                        ww_u64(crate::process::edges::borrow_task(tp).preempt_count() as u32 as u64);
+                        // PER-CPU MIGRATION: the count is per-cpu now; the task carries none.
+                            ww_u64(0);
                     }
                 }
             }

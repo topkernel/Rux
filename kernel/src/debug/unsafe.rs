@@ -66,12 +66,6 @@ pub(crate) fn t_comm(task: *const Task) -> &'static [u8; 16] {
     unsafe { (*task).comm() }
 }
 
-/// Stale task preempt-count read (INV-FOR-1).
-pub(crate) fn t_preempt_count(task: *const Task) -> i32 {
-    // SAFETY: INV-FOR-1.
-    unsafe { (*task).preempt_count() }
-}
-
 /// One volatile qword at an arbitrary address the diagnostic captured
 /// (stack scans, victim-page sampling, seed verification).
 ///

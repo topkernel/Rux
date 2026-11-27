@@ -143,7 +143,36 @@ arch/x86/include/asm/preempt.h):
   the `task_offsets::TI_PREEMPT_COUNT` const and the r83hunt offset use
   in the cleanup commit.
 
-## 4. Verification plan
+## 4. Cleanup record (commit 3)
+
+Retired with the per-task field (net -2.2k lines):
+- PREEMPT-HEAL tick adjudication + HEAL-GATE / CARRIER-HEAL refusal
+  legs + the per-field present-run counters (now per-CPU statics were
+  added and then removed with their only consumer); the leak window
+  (PREEMPT-LEAK report) stays, sampling the cpu word.
+- PARKWALK (PARKED-LEAK / PARK-WILDWRITE / PARKED-HEAL) — "a parked
+  task's count" no longer exists.
+- __schedule park adjudication (phantom IRQ-bit zeroing); replaced by
+  the schedule()-entry base-holdout gate (SCHEDULE-HOLDOUT +
+  PARK-REFUSED-ORIGIN under leakhunt) — the reference's
+  __schedule_bug boundary.
+- PICK-PC-ZERO, WAKE-HEAL (+LP-OUTCOME), context_switch
+  SWITCH-COUNT-LEAK, the wake-relink pc print, the orphan-harvest
+  count gate, Task::release_hardirq_base_on/_remote, the softirq
+  window's booked-task remote release (SOFTIRQ-EXIT-SPANNED keeps a
+  silence probe for the switch-inside-window shape), UR-PC-REPAIR's
+  zero store (the capture line stays).
+- Task::ti_preempt_count, ti_pc_zero_jif, the three present-run
+  fields, all 20 accessors, task_offsets::TI_PREEMPT_COUNT and the
+  r83hunt offset-scan entry + WatchSnap.preempt.
+- Every remote diagnostic reader re-pointed: same-cpu sites to
+  preempt_count(), per-task listings to cpu_preempt_count(ti_cpu)
+  (the task's last cpu's word) — taskdump, slowtask, softlockup,
+  wakewatch, allocwatch, binder, sysv_sem, wait.rs lostpark, rcu/timer
+  stall reports, misc syscall dump, trap noctx print, irq/softirq
+  bracket forensics, r83hunt (removed entirely from r83hunt).
+
+## 5. Verification plan (state at the cleanup commit)
 
 1. Dual-arch build rc=0 (x86_64 + riscv64; aarch64 build gate).
 2. HZ=1000 rig (the p23-p1panic repro): 300 s lmbench + 1 ms sampling

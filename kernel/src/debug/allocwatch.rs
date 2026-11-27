@@ -334,7 +334,7 @@ pub fn tick_check() {
             crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
                 if !found && t.pid() == pid {
                     state_bits = t.state().bits();
-                    preempt = t.preempt_count();
+                    preempt = crate::interrupt::preempt::cpu_preempt_count(t.ti_cpu() as usize);
                     ti_cpu = t.ti_cpu();
                     thsp = t.thread().sp;
                     let c = t.comm();

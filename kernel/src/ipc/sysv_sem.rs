@@ -1197,7 +1197,7 @@ fn semop_blocking_loop(
                                 crate::debug::lostpark::record(
                                     1,
                                     (*current).pid() as u64,
-                                    (*current).preempt_count() as u32 as u64,
+                                    crate::interrupt::preempt::preempt_count() as u32 as u64,
                                     (*current).state().bits() as u64,
                                     crate::drivers::timer::get_jiffies(),
                                 );
@@ -1207,7 +1207,7 @@ fn semop_blocking_loop(
                                 crate::debug::lostpark::record(
                                     2,
                                     (*current).pid() as u64,
-                                    (*current).preempt_count() as u32 as u64,
+                                    crate::interrupt::preempt::preempt_count() as u32 as u64,
                                     (*current).state().bits() as u64,
                                     crate::drivers::timer::get_jiffies(),
                                 );

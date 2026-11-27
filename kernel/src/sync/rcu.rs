@@ -556,7 +556,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                             tk.pid(),
                             tk.tgid(),
                             name,
-                            tk.preempt_count()
+                            crate::interrupt::preempt::cpu_preempt_count(tk.ti_cpu() as usize)
                         );
                         // rwlock-livelock: the victim's live kernel frames
                         // sit BELOW the sp saved at its last switch-in

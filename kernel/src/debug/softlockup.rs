@@ -210,7 +210,8 @@ pub fn check() {
             let stuck_task = crate::sched::sched::cpu_state(cpu).current;
             if !stuck_task.is_null() {
                 let pid = crate::debug::forensics_edges::t_pid(stuck_task);
-                let pc = crate::debug::forensics_edges::t_preempt_count(stuck_task);
+                // PER-CPU MIGRATION: the count is the stuck cpu's word.
+                let pc = crate::interrupt::preempt::cpu_preempt_count(cpu);
                 let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
             }
 

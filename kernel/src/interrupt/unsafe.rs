@@ -220,8 +220,12 @@ pub(super) fn drain_tasklet_list(local_head: &mut ListHead) {
 pub(super) fn bracket_task_fields(a_tp: usize, b_tp: usize) -> (i32, i32, i32, i32) {
     let a = a_tp as *mut crate::process::task::Task;
     let b = b_tp as *mut crate::process::task::Task;
+    // PER-CPU MIGRATION: the count fields are gone from the task; the
+    // probe now reports this cpu's word for both legs (the bracket ran
+    // on one cpu — that word is the only count there ever was).
     // SAFETY: INV-IRQ-BRACKET-LEAK-1 above (diagnostic scalar reads).
-    unsafe { ((*a).pid() as i32, (*a).preempt_count(), (*b).pid() as i32, (*b).preempt_count()) }
+    let w = crate::interrupt::preempt::preempt_count();
+    unsafe { ((*a).pid() as i32, w, (*b).pid() as i32, w) }
 }
 
 // ------------------------------------------------------------------

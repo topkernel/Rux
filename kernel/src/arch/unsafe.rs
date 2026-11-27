@@ -2955,7 +2955,8 @@ pub mod riscv64 {
                                 let _ = write!(w,
                                     "trap: noctx pid={} preempt={:#x} in_intr={} aspace={}\n",
                                     (*task).pid(),
-                                    (*task).preempt_count(),
+                                    // PER-CPU MIGRATION: this cpu's word.
+                                    crate::interrupt::preempt::preempt_count(),
                                     crate::interrupt::preempt::in_interrupt(),
                                     (*task).address_space().is_some());
                             
@@ -3642,10 +3643,13 @@ pub mod riscv64 {
                         if tp_entry != tp_exit || cs_entry != cs_exit {
                             let a = tp_entry as *mut crate::process::task::Task;
                             let b = tp_exit as *mut crate::process::task::Task;
-                            let (pa, pb) = {
-                                unsafe {
-                                ((*a).preempt_count(), (*b).preempt_count())
-                                }
+                            let (pa, pb) = unsafe {
+(
+                                    // PER-CPU MIGRATION: the count is this
+                                    // cpu's word, not a task field.
+                                    crate::interrupt::preempt::preempt_count(),
+                                    crate::interrupt::preempt::preempt_count(),
+                                )
                             };
                             let cs_pid = if cs_entry != 0 {
                                 { unsafe { (*(cs_entry as *mut crate::process::task::Task)).pid() } }
@@ -3694,10 +3698,13 @@ pub mod riscv64 {
                         if tp_entry != tp_exit || cs_entry != cs_exit {
                             let a = tp_entry as *mut crate::process::task::Task;
                             let b = tp_exit as *mut crate::process::task::Task;
-                            let (pa, pb) = {
-                                unsafe {
-                                ((*a).preempt_count(), (*b).preempt_count())
-                                }
+                            let (pa, pb) = unsafe {
+(
+                                    // PER-CPU MIGRATION: the count is this
+                                    // cpu's word, not a task field.
+                                    crate::interrupt::preempt::preempt_count(),
+                                    crate::interrupt::preempt::preempt_count(),
+                                )
                             };
                             use core::fmt::Write;
                             let mut w = crate::debug::backtrace::ConsoleWriter::new();
@@ -3726,10 +3733,13 @@ pub mod riscv64 {
                         if tp_entry != tp_exit || cs_entry != cs_exit {
                             let a = tp_entry as *mut crate::process::task::Task;
                             let b = tp_exit as *mut crate::process::task::Task;
-                            let (pa, pb) = {
-                                unsafe {
-                                ((*a).preempt_count(), (*b).preempt_count())
-                                }
+                            let (pa, pb) = unsafe {
+(
+                                    // PER-CPU MIGRATION: the count is this
+                                    // cpu's word, not a task field.
+                                    crate::interrupt::preempt::preempt_count(),
+                                    crate::interrupt::preempt::preempt_count(),
+                                )
                             };
                             use core::fmt::Write;
                             let mut w = crate::debug::backtrace::ConsoleWriter::new();
@@ -14610,8 +14620,12 @@ pub mod x86_64 {
                         Some(t) => (&**t) as *const _ as usize,
                         None => 0,
                     };
+                    // PER-CPU MIGRATION: the count is this cpu's word.
                     let (pid, pc) = match &cur {
-                        Some(t) => (t.pid() as u64, t.preempt_count() as u64),
+                        Some(t) => (
+                            t.pid() as u64,
+                            crate::interrupt::preempt::preempt_count() as u64,
+                        ),
                         None => (0, 0),
                     };
                     // pa16 calibration (perf line, 2026-10-24): age is a WALL-CLOCK
@@ -15042,7 +15056,9 @@ pub mod x86_64 {
                             );
                             crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id].store(
                                 crate::sched::current()
-                                    .map(|t| t.preempt_count())
+                                    .map(
+                                        |_| crate::interrupt::preempt::preempt_count(),
+                                    )
                                     .unwrap_or(0) as u32,
                                 core::sync::atomic::Ordering::Relaxed,
                             );
@@ -15065,7 +15081,11 @@ pub mod x86_64 {
                                 if let Some(t) = crate::sched::current() {
                                     // SAFETY: read-only diagnostic access to the
                                     // interrupted current task.
-                                    let (pc, pid) =  ((*t).preempt_count(), (*t).pid()) ;
+                                    // PER-CPU MIGRATION: cpu word.
+                                    let (pc, pid) = (
+                                        crate::interrupt::preempt::preempt_count(),
+                                        unsafe { (*t).pid() },
+                                    );
                                     if pc >= 2 {
                                         let prev_pid =
                                             MONO_PID[ci].load(core::sync::atomic::Ordering::Relaxed);
