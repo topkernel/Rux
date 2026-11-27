@@ -104,7 +104,7 @@ pub fn load() -> Result<CpioStats, &'static str> {
     // INV-INITRD-1 (the audited edge): [start, end) is reserved RAM
     // owned by the initrd; the range was validated (end > start, inside
     // RAM) by the FDT parse.
-    let raw: &[u8] = crate::boot_edges::initrd_raw_slice(virt, end - start);
+    let raw: &[u8] = crate::boot_edges::initrd_raw_slice(virt as usize, end - start);
 
     let cpio: CpioSource = if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
         CpioSource::Owned(gunzip(raw)?)
