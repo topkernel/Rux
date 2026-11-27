@@ -57,6 +57,12 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// The tracefs files (the filesystem side of the tracing subsystem).
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub mod edges;
+
 pub mod files;
 
 /// The number of argument slots carried by a trace record.
@@ -91,10 +97,8 @@ pub struct TraceEvent {
     pub fmt_args: ArgFormatter,
 }
 
-// SAFETY: the event table is read-only after boot except for the
-// per-event `enabled` flag, which is an atomic.
-unsafe impl Send for TraceEvent {}
-unsafe impl Sync for TraceEvent {}
+// Send/Sync commitments for TraceEvent live in unsafe.rs (the
+// subsystem's one audited unsafe file).
 
 impl TraceEvent {
     /// Is this event armed (its own switch)?
@@ -2988,33 +2992,9 @@ pub struct TraceRing {
     pub dropped_events: AtomicU64,
 }
 
-// SAFETY: the ring's mutable state is behind atomics; the slot array's
-// interior mutability is behind the slot protocol (INV-TRACERING-1).
-unsafe impl Send for TraceRing {}
-unsafe impl Sync for TraceRing {}
-
-impl TraceRing {
-    /// Shared slot view (INV-TRACERING-1): a reader may trust the slot
-    /// only for slots below the published `count` — the same contract
-    /// printk's RecordsArray documents for its ring.
-    #[inline]
-    fn slot(&self, idx: usize) -> &TraceRecord {
-        // SAFETY: INV-TRACERING-1 — idx is masked into range by the
-        // caller's modulo; the array is machine-lifetime static storage.
-        unsafe { &(*self.records.get())[idx] }
-    }
-
-    /// Exclusive slot view for the writer that owns the slot between
-    /// the head hand-out and the count publication (INV-TRACERING-1).
-    #[inline]
-    fn slot_mut(&self, idx: usize) -> &mut TraceRecord {
-        // SAFETY: INV-TRACERING-1 — the head counter hands out distinct
-        // slots to concurrent writers; the record is written before the
-        // count is published. A reader may race with the write and
-        // observe a torn record — the documented debug-facility trade.
-        unsafe { &mut (*self.records.get())[idx] }
-    }
-}
+// Send/Sync commitments and the slot-protocol edges (slot/slot_mut)
+// for TraceRing live in unsafe.rs (the subsystem's one audited unsafe
+// file, INV-TRACERING-1).
 
 impl TraceRing {
     const fn new() -> Self {
