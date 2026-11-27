@@ -560,7 +560,7 @@ impl Page {
         let r = self._refcount.fetch_add(1, Ordering::AcqRel) + 1;
         // mmforensics (early-put hunt): record the take on cache frames —
         // a no-op (one relaxed load) unless the switch is armed.
-        crate::dfx::mmforensics::note_ref(self as *const Page, 0, 0, r - 1);
+        crate::debug::mmforensics::note_ref(self as *const Page, 0, 0, r - 1);
         r
     }
 
@@ -575,7 +575,7 @@ impl Page {
                 // Would underflow — refuse to decrement
                 // Note: intentionally no log here to avoid printk during page table
                 // teardown, which can deadlock on mm/ring buffer/ext4 locks.
-                crate::dfx::driftwatch::PUT_UNDERFLOW
+                crate::debug::driftwatch::PUT_UNDERFLOW
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return -1;
             }
@@ -593,17 +593,17 @@ impl Page {
 
     /// `put_page()` with drift attribution: a transition to 0 is the exact
     /// moment a frame becomes orphan-able — count it per call site
-    /// (dfx::driftwatch) so the MEMLEDGER census can attribute drift to the
+    /// (debug::driftwatch) so the MEMLEDGER census can attribute drift to the
     /// release path that dropped it. Same return contract as `put_page`.
     #[inline]
     pub fn put_page_site(&self, site: usize) -> i32 {
         let r = self.put_page();
         if r == 0 {
-            crate::dfx::driftwatch::note_zero_put(site);
+            crate::debug::driftwatch::note_zero_put(site);
         }
         // mmforensics (early-put hunt): record the drop on cache frames —
         // a no-op (one relaxed load) unless the switch is armed.
-        crate::dfx::mmforensics::note_ref(self as *const Page, 1, site as u8, r + 1);
+        crate::debug::mmforensics::note_ref(self as *const Page, 1, site as u8, r + 1);
         r
     }
 

@@ -274,7 +274,7 @@ pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
                     a.bits(),
                     root_ppn,
                     crate::sched::get_current_pid(),
-                    crate::dfx::backtrace::caller_return_address()
+                    crate::debug::backtrace::caller_return_address()
                 );
             }
         }

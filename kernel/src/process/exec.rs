@@ -112,9 +112,9 @@ pub(crate) fn do_execve_elf(
         // create/inherit discipline lives here.
         crate::ipc::keys::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
-        // OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated (dfx/reaper.rs).
-        if crate::dfx::reaper::on() {
-            crate::dfx::reaper::note_nameset(task.pid(), &name);
+        // OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated (debug/reaper.rs).
+        if crate::debug::reaper::on() {
+            crate::debug::reaper::note_nameset(task.pid(), &name);
         }
         // perf COMM sideband (hiperf process tracking; no-op when no
         // perf event asks for comm records).

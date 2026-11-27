@@ -491,7 +491,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
                 while kk > 0 { kk -= 1; putchar(dd[kk]); }
                 // frame walk naming the deepest live frames
-                crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                crate::debug::backtrace::walk_stack_trace(&mut |pc, _fp| {
                     let _ = pc;
                 });
             }
@@ -2164,7 +2164,7 @@ impl Task {
         // Scribble hunter (rux:scribble (retired dfx=scribble)): track this Task's scheduling
         // fields from birth. No-op unless the runtime switch is on.
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::register(ptr);
+        crate::debug::scribble::register(ptr);
         true
     }
 
@@ -2449,7 +2449,7 @@ impl Task {
                 static WUG: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if WUG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
+                    use crate::debug::taskdump::putc_brief as putchar;
                     fn ph(mut v: u64) {
                         for _ in 0..16 {
                             let n = (v >> 60) as u8;
@@ -2474,19 +2474,19 @@ impl Task {
             if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
                 // forkprof (cmdline forkprof=1): waker-side body cost and
                 // the stamp consumed at the wakee's switch-in.
-                let fp = crate::dfx::forkprof::on();
-                let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
+                let fp = crate::debug::forkprof::on();
+                let fp_t_wake = if fp { crate::debug::forkprof::now() } else { 0 };
                 // cctx probe (closegap lane): select / enqueue / dispatch
                 // phase sums for the sleeping-target wake path.
-                let cc = crate::dfx::cctx::on();
-                let cc_t_sel = if cc { crate::dfx::cctx::now() } else { 0 };
-                crate::dfx::cctx::bump(&crate::dfx::cctx::WK_N);
+                let cc = crate::debug::cctx::on();
+                let cc_t_sel = if cc { crate::debug::cctx::now() } else { 0 };
+                crate::debug::cctx::bump(&crate::debug::cctx::WK_N);
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(t);
                 let prev_cpu = t.ti_cpu();
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_SEL_NS, cc_t_sel);
-                let cc_t_enq = crate::dfx::cctx::now();
+                crate::debug::cctx::add(&crate::debug::cctx::WK_SEL_NS, cc_t_sel);
+                let cc_t_enq = crate::debug::cctx::now();
 
                 // Update task's CPU if it changed.
                 // R13-5: never steer a task that is still executing (on_cpu
@@ -2711,8 +2711,8 @@ impl Task {
                 // (pipe echo, futex handoff) still gets the in-place
                 // handoff from its own schedule().
                 let allowed = t.cpus_allowed();
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_ENQ_NS, cc_t_enq);
-                let cc_t_disp = crate::dfx::cctx::now();
+                crate::debug::cctx::add(&crate::debug::cctx::WK_ENQ_NS, cc_t_enq);
+                let cc_t_disp = crate::debug::cctx::now();
                 // 105th wake-dispatch census (see sched::WAKE_DISP): the
                 // dispatch outcome + idle mask at wake entry, read back by
                 // the binder QPICK hunt. Relaxed stores; diagnostic only.
@@ -2770,7 +2770,7 @@ impl Task {
                         }
                     }
                 }
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_DISP_NS, cc_t_disp);
+                crate::debug::cctx::add(&crate::debug::cctx::WK_DISP_NS, cc_t_disp);
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue
@@ -2795,8 +2795,8 @@ impl Task {
                 }
 
                 if fp {
-                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WAKE_BODY, fp_t_wake);
-                    crate::dfx::forkprof::stamp_wake(pid as u32);
+                    crate::debug::forkprof::add(crate::debug::forkprof::P_WAKE_BODY, fp_t_wake);
+                    crate::debug::forkprof::stamp_wake(pid as u32);
                 }
                 true
             } else {
@@ -3525,7 +3525,7 @@ fn preempt_underflow_report(
     // the phantom's home site. Rate-gate already passed above.
     if crate::trace::EVENT_LEAKHUNT.armed() {
         if let Some(task) = crate::sched::current() {
-            crate::dfx::leakorigin::report_outermost(
+            crate::debug::leakorigin::report_outermost(
                 b"UNDERFLOW-ORIGIN",
                 task as *mut Task,
             );
@@ -3670,7 +3670,7 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: a LIVE outermost pair just
             // completed — re-arm the run counter the tick-side heal
             // actually gates on. (The pb3 re-arm stored the superseded
@@ -3689,7 +3689,7 @@ impl Task {
         if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
             && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
         {
-            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_softirq_release(self as *const Task as *mut Task);
             self.ti_pc_sirq_present_run.store(
                 0,
                 core::sync::atomic::Ordering::Relaxed,
@@ -3773,7 +3773,7 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: live pair completed — re-arm
             // the run counter the heal gates on (see sub_preempt_count_at;
             // the old store hit the superseded ti_pc_zero_jif field).
@@ -4457,25 +4457,25 @@ impl Task {
                         let n = RSP0_SEEN
                             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if n < 64 {
-                            crate::dfx::taskdump::taskdump_raw_line(
+                            crate::debug::taskdump::taskdump_raw_line(
                                 b"STACKFREE-LIVE-RSP0 cpu=",
                             );
-                            crate::dfx::taskdump::taskdump_dec(stale_cpu as u64);
-                            crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                            crate::debug::taskdump::taskdump_dec(stale_cpu as u64);
+                            crate::debug::taskdump::taskdump_raw_line(b" top=0x");
                             let mut v = stack_top as u64;
                             let mut sh: i32 = 64;
                             while sh > 0 {
                                 sh -= 4;
                                 let nb = ((v >> sh) & 0xF) as u8;
-                                crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                                crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 {
                                     b'0' + nb
                                 } else {
                                     b'a' + nb - 10
                                 })]);
                             }
-                            crate::dfx::taskdump::taskdump_raw_line(b" freeing_pid=");
-                            crate::dfx::taskdump::taskdump_dec(self.pid() as u64);
-                            crate::dfx::taskdump::taskdump_raw_line(
+                            crate::debug::taskdump::taskdump_raw_line(b" freeing_pid=");
+                            crate::debug::taskdump::taskdump_dec(self.pid() as u64);
+                            crate::debug::taskdump::taskdump_raw_line(
                                 b" (recycle WITHHELD - leaked, never re-carved)\n",
                             );
                         }

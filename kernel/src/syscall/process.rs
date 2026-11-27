@@ -247,7 +247,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         // rides the ohhunt gate — ~120 lines per perf boot; the
         // fall-through below does the identical do_clone + parent-ns
         // translation.
-        if (is_app || is_spawn) && crate::dfx::switches::oh_hunt_prints_on() {
+        if (is_app || is_spawn) && crate::debug::switches::oh_hunt_prints_on() {
             static N3: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
@@ -1356,8 +1356,8 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
 
     // forkprof (cmdline forkprof=1): whole-exec wall (exec's own mm
     // teardown + ELF load is the other half of lat_proc,exec).
-    let fp_t_exec = if crate::dfx::forkprof::on() {
-        crate::dfx::forkprof::now()
+    let fp_t_exec = if crate::debug::forkprof::on() {
+        crate::debug::forkprof::now()
     } else {
         0
     };
@@ -1368,7 +1368,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     //
     // RETIRED (probe-retire): unconditional (26 lines per ub2404 boot);
     // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::dfx::switches::oh_hunt_prints_on() {
+    if crate::debug::switches::oh_hunt_prints_on() {
         static UEEX_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
@@ -1397,7 +1397,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     }
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
     if fp_t_exec != 0 {
-        crate::dfx::forkprof::add(crate::dfx::forkprof::P_EXEC_TOTAL, fp_t_exec);
+        crate::debug::forkprof::add(crate::debug::forkprof::P_EXEC_TOTAL, fp_t_exec);
     }
     // sc39 gate: the launcher spawn child completes every sandbox hook
     // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
@@ -1647,8 +1647,8 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
             Ok(child_pid) => {
                 // 125th waitid leg: the WNOHANG reap path the first wait4
                 // arm missed (glib-style reaper threads poll WNOHANG) —
-                // same rux:schedtrace (retired dfx=schedtrace) gate, dfx/reaper.rs.
-                if crate::dfx::reaper::on() {
+                // same rux:schedtrace (retired dfx=schedtrace) gate, debug/reaper.rs.
+                if crate::debug::reaper::on() {
                     let st = if wstatus.is_null() {
                         0
                     } else {
@@ -1656,7 +1656,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
                         crate::arch::uaccess_safe::UserPtr::<i32>::new(wstatus as usize).read()
                             .unwrap_or(0)
                     };
-                    crate::dfx::reaper::on_reap_wait4(
+                    crate::debug::reaper::on_reap_wait4(
                         crate::process::current_pid(),
                         child_pid,
                         st,
@@ -1672,12 +1672,12 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     } else {
         // Blocking wait for child process to exit
         // forkprof (cmdline forkprof=1): wait4 wall incl. sleep.
-        let fp_t_wt = if crate::dfx::forkprof::on() {
-            crate::dfx::forkprof::trace(
-                crate::dfx::forkprof::T_WAIT_ENTRY,
+        let fp_t_wt = if crate::debug::forkprof::on() {
+            crate::debug::forkprof::trace(
+                crate::debug::forkprof::T_WAIT_ENTRY,
                 crate::sched::get_current_pid(),
             );
-            crate::dfx::forkprof::now()
+            crate::debug::forkprof::now()
         } else {
             0
         };
@@ -1686,8 +1686,8 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
                 // 125th: the app death reason at the reaper — the launcher
                 // cycle dies young with no init-side exit line (appspawn
                 // reaps it); this names code-vs-signal per reap. Now routed
-                // through dfx/reaper.rs (SPAWN/ZEXIT join + status decode).
-                if crate::dfx::reaper::on() {
+                // through debug/reaper.rs (SPAWN/ZEXIT join + status decode).
+                if crate::debug::reaper::on() {
                     let st = if wstatus.is_null() {
                         0
                     } else {
@@ -1695,7 +1695,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
                         crate::arch::uaccess_safe::read_user::<i32>(wstatus as usize)
                             .unwrap_or(0)
                     };
-                    crate::dfx::reaper::on_reap_wait4(
+                    crate::debug::reaper::on_reap_wait4(
                         crate::process::current_pid(),
                         child_pid,
                         st,
@@ -1708,7 +1708,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
             Err(e) => Err(e as i32 as i64),
         };
         if fp_t_wt != 0 {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_BODY, fp_t_wt);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_WT_BODY, fp_t_wt);
         }
         return match r {
             Ok(v) => v,
@@ -1725,11 +1725,11 @@ fn report_wait_pid(global_pid: u32) -> i64 {
 }
 
 /// 125th waitid leg: the reaper forensics print for a SUCCESSFUL waitid
-/// event (rux:schedtrace (retired dfx=schedtrace), dfx/reaper.rs). Reads back the siginfo waitid
+/// event (rux:schedtrace (retired dfx=schedtrace), debug/reaper.rs). Reads back the siginfo waitid
 /// just wrote (si_code at offset 8, si_pid at 16, si_status at 24 — the
 /// write_siginfo layout); infop was access_ok-validated above.
 fn reaper_note_waitid(idtype: i32, id: i32, options: i32, infop: *mut u8, via_pidfd: bool) {
-    if !crate::dfx::reaper::on() {
+    if !crate::debug::reaper::on() {
         return;
     }
     // SAFETY: infop points at a validated 128-byte user buffer that
@@ -1740,7 +1740,7 @@ fn reaper_note_waitid(idtype: i32, id: i32, options: i32, infop: *mut u8, via_pi
         .unwrap_or(0);
     let si_status = crate::arch::uaccess_safe::UserPtr::<i32>::new(infop as usize + 24).read()
         .unwrap_or(0);
-    crate::dfx::reaper::on_reap_waitid(
+    crate::debug::reaper::on_reap_waitid(
         crate::process::current_pid(),
         si_pid,
         si_code,
@@ -1819,14 +1819,14 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
             options,
         ) {
             Ok(true) => {
-                // 125th waitid leg: reaper forensics (dfx/reaper.rs).
+                // 125th waitid leg: reaper forensics (debug/reaper.rs).
                 reaper_note_waitid(1, data.pid as i32, options, infop, true);
                 0
             }
             Ok(false) if nonblock => -(errno::EAGAIN as i64),
             Ok(false) => {
-                if crate::dfx::reaper::on() {
-                    crate::dfx::reaper::poll_note(
+                if crate::debug::reaper::on() {
+                    crate::debug::reaper::poll_note(
                         crate::process::current_pid(),
                         3,
                         id,
@@ -1880,13 +1880,13 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         Ok(true) => {
             // 125th waitid leg: the launcher/systemui reap path hunt —
             // log who reaped which child with what status (incl. WNOWAIT
-            // peeks, marked -nw by dfx/reaper.rs). rux:schedtrace (retired dfx=schedtrace)-gated.
+            // peeks, marked -nw by debug/reaper.rs). rux:schedtrace (retired dfx=schedtrace)-gated.
             reaper_note_waitid(idtype, id, options, infop, false);
             0
         }
         Ok(false) => {
-            if crate::dfx::reaper::on() {
-                crate::dfx::reaper::poll_note(crate::process::current_pid(), idtype, id, options);
+            if crate::debug::reaper::on() {
+                crate::debug::reaper::poll_note(crate::process::current_pid(), idtype, id, options);
             }
             0
         }
@@ -3188,9 +3188,9 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                     current.set_comm(&buf);
                     // 125th waitid leg: SPAWN clock for com.*-named tasks
                     // (the OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated
-                    // (dfx/reaper.rs).
-                    if crate::dfx::reaper::on() {
-                        crate::dfx::reaper::note_nameset(current.pid(), &buf);
+                    // (debug/reaper.rs).
+                    if crate::debug::reaper::on() {
+                        crate::debug::reaper::note_nameset(current.pid(), &buf);
                     }
                 },
                 Err(_) => return -(errno::EFAULT as i64),
@@ -5562,7 +5562,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // RETIRED (probe-retire): the hunt print was unconditional (22 lines
     // per ub2404 boot); behind the existing OH hunt-print master gate
     // (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::dfx::switches::oh_hunt_prints_on() {
+    if crate::debug::switches::oh_hunt_prints_on() {
         if let Some(rd) = root_dentry.as_ref() {
             crate::pr_info!(
                 "pivot_root: arg='{}' resolved dentry global='{}'",
@@ -5659,7 +5659,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // unconditional (22 lines per ub2404 boot across the 11 pivots
     // systemd performs); behind the existing OH hunt-print master gate
     // (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::dfx::switches::oh_hunt_prints_on() {
+    if crate::debug::switches::oh_hunt_prints_on() {
         crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
     }
     0
@@ -6696,7 +6696,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             || comm.contains("dataability");
         let is_spawn = comm == "appspawn";
         // 110th: rides the ohhunt gate with the sys_clone census above.
-        if (is_app || is_spawn) && crate::dfx::switches::oh_hunt_prints_on() {
+        if (is_app || is_spawn) && crate::debug::switches::oh_hunt_prints_on() {
             static N4: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {

@@ -116,7 +116,7 @@ fn may_report(addr: u64) -> bool {
 /// forensics raw-word edge — INV-FOR-2).
 #[inline]
 fn rq64(task: *mut Task, off: usize) -> u64 {
-    crate::dfx::forensics_edges::raw_qword(task as u64 + off as u64)
+    crate::debug::forensics_edges::raw_qword(task as u64 + off as u64)
 }
 #[inline]
 fn rq32(task: *mut Task, off: usize) -> u32 {
@@ -124,7 +124,7 @@ fn rq32(task: *mut Task, off: usize) -> u32 {
     // TI_PREEMPT_COUNT, ...) sit at 4-mod-8 offsets after the layout
     // drift — a qword read there is a MISALIGNED volatile read (UB,
     // panics the alignment check in debug builds).
-    crate::dfx::forensics_edges::raw_u32(task as u64 + off as u64)
+    crate::debug::forensics_edges::raw_u32(task as u64 + off as u64)
 }
 
 /// The single reporting path: gates on the dedup ring, prints the victim
@@ -154,7 +154,7 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
     pdec(rq32(task, offs::TASK_PID) as u64);
     pmsg(b" comm=");
     // INV-FOR-1 comm edge (stable field; a racing writer tears at worst).
-    for &c in crate::dfx::forensics_edges::t_comm(task).iter() {
+    for &c in crate::debug::forensics_edges::t_comm(task).iter() {
         if c == 0 {
             break;
         }
@@ -162,7 +162,7 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
     }
     pmsg(b" kstack=0x");
     // INV-FOR-1 stack-pointer edge (best-effort diagnostic read).
-    match crate::dfx::forensics_edges::t_get_kernel_stack(task) {
+    match crate::debug::forensics_edges::t_get_kernel_stack(task) {
         Some(bottom) => {
             phex(bottom as u64);
             pmsg(b"-0x");
@@ -203,7 +203,7 @@ pub fn dump_victim(tag: &[u8], task: *mut Task) {
 fn text_range() -> (u64, u64) {
     // _stext/_etext: same linker symbols the R74 sp-gate compares
     // against (the address-taking is the audited INV-FOR-2 edge).
-    crate::dfx::forensics_edges::kernel_text_range_raw()
+    crate::debug::forensics_edges::kernel_text_range_raw()
 }
 
 /// Field validation: returns up to four implausible (name, value) pairs.
@@ -506,7 +506,7 @@ fn magic_scan(next_off: &AtomicU64) {
     // linear-mapped kernel heap.
     let mut p = start;
     while p < end {
-        let v = crate::dfx::forensics_edges::diag_read_qword(p);
+        let v = crate::debug::forensics_edges::diag_read_qword(p);
         if (v >> 32) as u32 == R84_MAGIC_HI {
             magic_report(p as u64, v);
         }
@@ -543,7 +543,7 @@ fn magic_report(addr: u64, v: u64) {
         for col in 0..4 {
             let p = base + row * 0x20 + col * 8;
             // INV-FOR-2 volatile-read edge: kernel heap neighborhood.
-            phex(crate::dfx::forensics_edges::diag_read_qword(p));
+            phex(crate::debug::forensics_edges::diag_read_qword(p));
             putchar(b' ');
         }
         putchar(b'\n');
@@ -619,7 +619,7 @@ fn word_is_ascii(v: u64) -> bool {
 fn word_in_cmdline(v: u64) -> bool {
     // INV-FOR-12 edge: the blob scan (the blob is [ptr, ptr+len) for
     // the whole boot; read-only).
-    crate::dfx::forensics_edges::cmdline_contains_qword(v)
+    crate::debug::forensics_edges::cmdline_contains_qword(v)
 }
 
 /// Scan one live task's kernel stack for foreign shapes. Reports at
@@ -630,7 +630,7 @@ pub fn stack_foreign_scan(task: *mut Task) {
     }
     // INV-FOR-3 raw-ref edge (the caller's SCRIBBLE gate proves the
     // task pointer came from the slot table).
-    let t = crate::dfx::forensics_edges::raw_ref(task);
+    let t = crate::debug::forensics_edges::raw_ref(task);
     let bottom = t.kernel_stack_bottom();
     if bottom == 0 {
         return;
@@ -646,7 +646,7 @@ pub fn stack_foreign_scan(task: *mut Task) {
     for off in (0..depth).step_by(8) {
         // INV-FOR-2 volatile-read edge: within the task's own kernel
         // stack allocation.
-        let v = crate::dfx::forensics_edges::diag_read_qword(bottom + off);
+        let v = crate::debug::forensics_edges::diag_read_qword(bottom + off);
         if word_is_ascii(v) {
             dense_run += 1;
             if dense_run > dense_best {

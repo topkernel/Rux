@@ -113,7 +113,7 @@ pub fn jbd2_journal_commit_transaction(
     // post-exec "hang" family: every test writing a few KB of setup data
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
     if commit_transaction.t_revoke_records.lock().is_empty() {
-        crate::dfx::fsw::note_j_commit_fast(dirty_buffers.len());
+        crate::debug::fsw::note_j_commit_fast(dirty_buffers.len());
         // BATCHED WRITE-THROUGH (paired-test item 3): the old loop paid
         // ONE SYNCHRONOUS device round trip per registered buffer — the
         // measured 3.8 ms/fsync class (five-plus serialized 4 KiB writes
@@ -171,7 +171,7 @@ pub fn jbd2_journal_commit_transaction(
 
     // Phase 2: Write to journal
     {
-        crate::dfx::fsw::note_j_commit_slow();
+        crate::debug::fsw::note_j_commit_slow();
         let mut state = commit_transaction.t_state.lock();
         *state = TransactionState::Flush;
     }

@@ -2218,7 +2218,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     // RETIRED (probe-retire): unconditional (3 lines per ub2404 boot);
     // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) like the
     // rest of the uevent-hunt family.
-    if crate::dfx::switches::oh_hunt_prints_on() {
+    if crate::debug::switches::oh_hunt_prints_on() {
         static UEC_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
@@ -2802,7 +2802,7 @@ pub fn param_stall_dump() {
     }
     // …and the last 48 syscalls of pid 1 — the userspace loop's actual
     // behavior at the stall (needs rux:sysforensic (retired dfx=sysforensic) to be recording).
-    crate::dfx::taskdump::dump_syscall_ring_for(1);
+    crate::debug::taskdump::dump_syscall_ring_for(1);
     // SAFETY: read-only diagnostic walk of pid 1's fdtable.
     let tk = crate::process::edges::borrow_task(task);
     let fdtable = match tk.try_fdtable_mut() {
@@ -3257,7 +3257,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
 
 /// spinwatch: dump this epoll's interest set with each fd's CURRENT
 /// poll verdict — the stuck-ready fd inside a spinner's wait set shows
-/// itself. Rate-limited by dfx::spinwatch::record() (armed by the
+/// itself. Rate-limited by debug::spinwatch::record() (armed by the
 /// unified-framework event rux:spinwatch; the per-fd rows record into
 /// rux:spinwatch_fd when that event is armed too). The old
 /// `spinwatch=1` cmdline token survives as a boot alias for both.
@@ -3294,7 +3294,7 @@ fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
         pid as i32,
         &comm16,
         epfd,
-        crate::dfx::spinwatch::last_report_n(),
+        crate::debug::spinwatch::last_report_n(),
     );
     let mut entries = epoll.entries.lock();
     let head = entries.init_once();
@@ -3808,7 +3808,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             let count = ready_events.len().min(maxevents as usize);
             // spinwatch: a fast EVENT-carrying return round (a permanently
             // ready fd spins the waiter just as hard as a broken timeout).
-            if crate::dfx::spinwatch::record() {
+            if crate::debug::spinwatch::record() {
                 spinwatch_dump_interest(epoll, epfd);
             }
             // events_ptr validated with access_ok; copy_out is the
@@ -3836,7 +3836,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
                 .unwrap_or(true);
             if expired {
-                if crate::dfx::spinwatch::record() {
+                if crate::debug::spinwatch::record() {
                     spinwatch_dump_interest(epoll, epfd);
                 }
                 return 0;

@@ -153,7 +153,7 @@ impl<T, const N: usize> CpuLocal<T, N> {
             // count + taint: this is a call-site bug of the r8final
             // class, and the taint names it instead of absorbing it.
             REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             crate::arch::cpu::restore_irq(flags);
             return None;
         }
@@ -216,7 +216,7 @@ impl<T, const N: usize> CpuLocal<T, N> {
         if crate::sync::edges::cpu_local_in_use(in_use) {
             // Same refusal semantics as `with` (see there).
             REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
             return None;
         }

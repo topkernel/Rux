@@ -40,7 +40,7 @@
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::dfx::backtrace::ConsoleWriter;
+use crate::debug::backtrace::ConsoleWriter;
 
 extern crate alloc;
 
@@ -183,7 +183,7 @@ fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
 /// regardless of dfx switches (NET_PAGES is always live; the kstack
 /// high-water needs rux:schb (retired dfx=schb) to have armed its probe).
 pub fn oom_anat_dump() {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Ordering::AcqRel) {
         return;
@@ -219,8 +219,8 @@ pub fn oom_anat_dump() {
     // >> live procs at the census moment, every spawn strands its
     // AddressSpace (and its VMA tree + vma_files pins ride along).
     {
-        let mn = crate::dfx::memwatch::MM_NEWS.load(Ordering::Relaxed) as u64;
-        let md = crate::dfx::memwatch::MM_DROPS.load(Ordering::Relaxed) as u64;
+        let mn = crate::debug::memwatch::MM_NEWS.load(Ordering::Relaxed) as u64;
+        let md = crate::debug::memwatch::MM_DROPS.load(Ordering::Relaxed) as u64;
         taskdump_raw_line(b"OOM-ANAT mm: new=");
         taskdump_dec(mn);
         taskdump_raw_line(b" drop=");

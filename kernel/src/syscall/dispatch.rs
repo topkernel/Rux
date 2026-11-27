@@ -177,7 +177,7 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 ///
 /// Called by trap.rs, dispatches to specific system call handlers.
 /// perf-audit wrapper: whole-syscall wall-time accounting
-/// (dfx/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
+/// (debug/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
 /// Diverging paths (do_exit on exit_group / fatal signals) skip the
 /// exit hook, so those calls are undercounted — acceptable for a
 /// ranking probe.
@@ -200,7 +200,7 @@ pub fn lastsys_latch_arm() {
 
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
-    let sc_t0 = crate::dfx::syscost::enter();
+    let sc_t0 = crate::debug::syscost::enter();
     // The raw_syscalls:sys_enter / sys_exit tracepoints, recorded
     // through the generated typed call functions. (gap-net) The six-word
     // argument marshal is guarded by the armed check itself — the typed
@@ -240,10 +240,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // per-(nr, errno) census. Two compares when syscost is off.
         if rv < 0 && rv != -11 {
             let sc_args = syscall_get_arguments(regs);
-            crate::dfx::syscost::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
+            crate::debug::syscost::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
         }
     }
-    crate::dfx::syscost::exit(sc_nr, sc_t0);
+    crate::debug::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when
     // syscost off). x86_64 native nrs 47=recvmsg 45=recvfrom.
@@ -253,7 +253,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // recvmsg(fd, msg, flags) -> flags at a[2]; recvfrom(fd, buf,
         // len, flags, ...) -> flags at a[3].
         let flags = if sc_nr == 47 { a[2] } else { a[3] } as i32;
-        crate::dfx::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
+        crate::debug::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
     }
 }
 
@@ -938,7 +938,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // master gate (rux:ohhunt (retired dfx=ohhunt)); the switch is checked only on the
     // EFAULT return path, so the hot path is untouched.
     if result == -(errno::EFAULT as i64)
-        && crate::dfx::switches::oh_hunt_prints_on()
+        && crate::debug::switches::oh_hunt_prints_on()
     {
         static EFT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -964,7 +964,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
     if result == -(38i64)
         && !unknown_nr
-        && crate::dfx::switches::oh_hunt_prints_on()
+        && crate::debug::switches::oh_hunt_prints_on()
     {
         static ENOSYS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -995,7 +995,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // STEPTRACE (rux:steptrace (retired dfx=steptrace)): one line per syscall return. Left
     // ungated this flooded the emulated UART (2.7GB per OH boot) and the
     // printing alone slowed services enough to lose races — see the
-    // switch catalog note in dfx/switches.rs.
+    // switch catalog note in debug/switches.rs.
     if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
             crate::process::current_pid(), syscall_no, result,

@@ -101,7 +101,7 @@ pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old
     }
     // INV-FOR-9 raw-ref edge: the caller passes a valid page
     // descriptor it is operating on.
-    let p = crate::dfx::forensics_edges::raw_ref(page);
+    let p = crate::debug::forensics_edges::raw_ref(page);
     use crate::mm::page_desc::PageType;
     if p.page_type() != PageType::PageCache {
         return;
@@ -334,8 +334,8 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
         // INV-FOR-9 diagnostic edges: read-only descriptor access on
         // the diagnostic path.
         let (rc, mc, order, mapped, ptype, mapping, idx) =
-            crate::dfx::forensics_edges::page_diag_words(page);
-        let flags = crate::dfx::forensics_edges::page_diag_flags(page);
+            crate::debug::forensics_edges::page_diag_words(page);
+        let flags = crate::debug::forensics_edges::page_diag_flags(page);
         let bit = |on: bool, n: &'static str| -> &'static str {
             if on {
                 n

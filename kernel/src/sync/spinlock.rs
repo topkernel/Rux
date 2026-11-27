@@ -772,7 +772,7 @@ impl RawSpinlock {
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::trace::EVENT_TASKDUMP.armed() {
             crate::trace::trace_taskdump(2, 0);
-            crate::dfx::taskdump::dump_all_tasks("deadlock-watchdog");
+            crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
         }
     }
 

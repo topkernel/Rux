@@ -237,7 +237,7 @@ pub fn free_user_page_tables(
 ) {
     use crate::mm::phys_valid;
 
-    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, Ordering::Relaxed);
+    crate::debug::memwatch::FUT_CALLS.fetch_add(1, Ordering::Relaxed);
     // Serialize against fork's copy walk and COW/demand faults on any mm
     // (PTE lock; the freed frames are immediately reusable).
     let _pte_guard = lock.lock_irqsave();
@@ -348,7 +348,7 @@ pub(crate) fn release_user_leaf_mm(entry: PageTableEntry) {
         if page.is_mapped() {
             crate::mm::rmap::page_remove_rmap(page);
         }
-        page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
+        page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
     }
 }
 

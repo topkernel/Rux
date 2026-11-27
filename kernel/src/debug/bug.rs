@@ -11,9 +11,9 @@
 
 #![forbid(unsafe_code)]
 use core::fmt::Write;
-use crate::dfx::backtrace::ConsoleWriter;
-use crate::dfx::taint;
-use crate::dfx::backtrace;
+use crate::debug::backtrace::ConsoleWriter;
+use crate::debug::taint;
+use crate::debug::backtrace;
 
 /// Non-fatal warning.
 ///

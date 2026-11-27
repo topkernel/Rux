@@ -621,15 +621,15 @@ impl BuddyAllocator {
                     // x86_64 — the dfx scribble module is x86-only).
                     #[cfg(feature = "x86_64")]
                     if crate::trace::EVENT_SCRIBBLE.armed() {
-                        let frames = crate::dfx::scribble::audit_frames();
-                        crate::dfx::scribble::audit_record(
-                            crate::dfx::scribble::AUDIT_KIND_HANDOFF,
+                        let frames = crate::debug::scribble::audit_frames();
+                        crate::debug::scribble::audit_record(
+                            crate::debug::scribble::AUDIT_KIND_HANDOFF,
                             addr as u64,
                             order as u32,
                             &frames,
                         );
                     }
-                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R18-1 double-handoff
+                    crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R18-1 double-handoff
                 }
                 return addr as *mut u8;
             }
@@ -666,15 +666,15 @@ impl BuddyAllocator {
                 // the deferred audit printer (rux:scribble (retired dfx=scribble), x86_64).
                 #[cfg(feature = "x86_64")]
                 if crate::trace::EVENT_SCRIBBLE.armed() {
-                    let frames = crate::dfx::scribble::audit_frames();
-                    crate::dfx::scribble::audit_record(
-                        crate::dfx::scribble::AUDIT_KIND_DOUBLE_FREE,
+                    let frames = crate::debug::scribble::audit_frames();
+                    crate::debug::scribble::audit_record(
+                        crate::debug::scribble::AUDIT_KIND_DOUBLE_FREE,
                         addr as u64,
                         order as u32,
                         &frames,
                     );
                 }
-                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
+                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
                 // R17-A3: kind follows the bitmap (the authoritative free
                 // state), not the leader-only `free` byte.
                 let kind = if self.page_is_free(page_idx) { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
@@ -745,7 +745,7 @@ impl BuddyAllocator {
         // before the note call (see below). -O0 riscv64 frames keep
         // s0 = frame TOP: [s0-8] = own saved ra, [s0-0x10] = caller's s0,
         // so walking from s0 yields [ra-into-__rust_alloc, callers...].
-        let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
+        let mw_s0: u64 = crate::debug::backtrace::current_frame_pointer();
 
         // Opportunistic reclamation of time-deferred frees (see
         // mm/deferred_free.rs): one relaxed load on the fast path; the
@@ -798,11 +798,11 @@ impl BuddyAllocator {
         }
 
         let _guard = self.lock.lock_irqsave();
-        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
         // The GlobalAlloc main path — RawVec finish_grow lands here for
         // sizes above the small_alloc classes.
-        let _aw = crate::dfx::allocwatch::guard(
-            crate::dfx::allocwatch::SITE_BUDDY,
+        let _aw = crate::debug::allocwatch::guard(
+            crate::debug::allocwatch::SITE_BUDDY,
             0,
         );
         let ptr = self.alloc_blocks(order);
@@ -816,15 +816,15 @@ impl BuddyAllocator {
         if !ptr.is_null() {
             trace_kmalloc_at(mw_s0, ptr as u64, size, PAGE_SIZE << order);
         }
-        if !ptr.is_null() && crate::dfx::memwatch::armed() {
-            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                [0; crate::dfx::memwatch::SITE_FRAMES];
+        if !ptr.is_null() && crate::debug::memwatch::armed() {
+            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                [0; crate::debug::memwatch::SITE_FRAMES];
             // f[0] = own saved ra (== the ra at entry, before any helper
             // could clobber the register), f[1..] = the s0 chain above.
             // s0 is callee-saved, so the walk stays valid even here, after
             // alloc_blocks().
             crate::mm::edges::walk_fp_chain(mw_s0, &mut mw_frames);
-            crate::dfx::memwatch::note_alloc(
+            crate::debug::memwatch::note_alloc(
                 ptr,
                 self.heap_start.load(Ordering::Relaxed),
                 size,
@@ -850,14 +850,14 @@ impl BuddyAllocator {
         // the chain shape). The walk is gated: disabled = zero added work
         // on the realloc hot path; enabled = 12-frame pointer chase per
         // realloc.
-        let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-            [0; crate::dfx::memwatch::SITE_FRAMES];
-        if crate::dfx::memwatch::armed() {
-            let mut fp: u64 = crate::dfx::backtrace::current_frame_pointer();
+        let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+            [0; crate::debug::memwatch::SITE_FRAMES];
+        if crate::debug::memwatch::armed() {
+            let mut fp: u64 = crate::debug::backtrace::current_frame_pointer();
             // f[0] = return address out of this method (into __rust_realloc);
             // f[1..] ascend the caller chain through the growth machinery.
             crate::mm::edges::walk_fp_chain(fp, &mut mw_frames);
-            crate::dfx::memwatch::note_realloc(new_size, &mw_frames);
+            crate::debug::memwatch::note_realloc(new_size, &mw_frames);
         }
 
         // Default GlobalAlloc::realloc behavior.
@@ -938,7 +938,7 @@ fn trace_kfree_at(ptr: u64) {
     if !crate::trace::EVENT_KFREE.armed() {
         return;
     }
-    let s0 = crate::dfx::backtrace::current_frame_pointer();
+    let s0 = crate::debug::backtrace::current_frame_pointer();
     let mut frames = [0u64; 8];
     // s0 is current_frame_pointer() read in THIS frame, the dealloc twin
     // of the alloc capture — the audited edge's INV-MM-2 diag arm.
@@ -965,11 +965,11 @@ impl BuddyAllocator {
             return core::ptr::null_mut();
         }
         let _guard = self.lock.lock_irqsave();
-        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
         // Runs NESTED under the small_alloc class lock (class -> buddy
         // order) — a stamp pair names the whole frozen chain.
-        let _aw = crate::dfx::allocwatch::guard(
-            crate::dfx::allocwatch::SITE_BUDDY,
+        let _aw = crate::debug::allocwatch::guard(
+            crate::debug::allocwatch::SITE_BUDDY,
             0,
         );
         let ptr = self.alloc_blocks(0);
@@ -990,9 +990,9 @@ impl BuddyAllocator {
             return;
         }
         let _guard = self.lock.lock_irqsave();
-        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
-        let _aw = crate::dfx::allocwatch::guard(
-            crate::dfx::allocwatch::SITE_BUDDY,
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
+        let _aw = crate::debug::allocwatch::guard(
+            crate::debug::allocwatch::SITE_BUDDY,
             0,
         );
         self.free_blocks(ptr, 0);
@@ -1030,7 +1030,7 @@ impl BuddyAllocator {
         let heap_end = self.heap_end.load(Ordering::Acquire);
 
         if ptr_addr < heap_start || ptr_addr >= heap_end {
-            crate::dfx::memwatch::DEALLOC_OUTSIDE.fetch_add(1, Ordering::Relaxed);
+            crate::debug::memwatch::DEALLOC_OUTSIDE.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_OUT_OF_WINDOW, ptr_addr, self.size_to_order(size.max(align)), 0, 0);
             return;
         }
@@ -1051,21 +1051,21 @@ impl BuddyAllocator {
             && !crate::sched::sched::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
             && crate::sched::sched::task_page_is_owned(ptr)
         {
-            let frames = crate::dfx::scribble::audit_frames();
-            crate::dfx::scribble::audit_record(
-                crate::dfx::scribble::AUDIT_KIND_FREE_LIVE,
+            let frames = crate::debug::scribble::audit_frames();
+            crate::debug::scribble::audit_record(
+                crate::debug::scribble::AUDIT_KIND_FREE_LIVE,
                 ptr_addr as u64,
                 order as u32,
                 &frames,
             );
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
             refused_free_note(FR_TASK_LIVE, ptr_addr, order, 0, 0);
             return;
         }
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {
-            crate::dfx::memwatch::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
+            crate::debug::memwatch::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_ORDER_TOO_BIG, ptr_addr, order, 0, 0);
             return;
         }
@@ -1076,20 +1076,20 @@ impl BuddyAllocator {
         // carry consistent metadata, splicing bogus blocks into the
         // doubly-linked freelist.
         if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
-            crate::dfx::memwatch::DEALLOC_MISALIGNED.fetch_add(1, Ordering::Relaxed);
+            crate::debug::memwatch::DEALLOC_MISALIGNED.fetch_add(1, Ordering::Relaxed);
             refused_free_note(FR_UNALIGNED, ptr_addr, order, 0, 0);
             return;
         }
 
         let _guard = self.lock.lock_irqsave();
-        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
-        let _aw = crate::dfx::allocwatch::guard(
-            crate::dfx::allocwatch::SITE_BUDDY,
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
+        let _aw = crate::debug::allocwatch::guard(
+            crate::debug::allocwatch::SITE_BUDDY,
             0,
         );
         self.free_blocks(ptr, order);
         drop(_guard);
-        crate::dfx::memwatch::note_free(
+        crate::debug::memwatch::note_free(
             ptr,
             self.heap_start.load(Ordering::Relaxed),
             size,
@@ -1102,7 +1102,7 @@ impl BuddyAllocator {
 pub static GLOBAL_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 
 /// rux:allocwatch (retired dfx=allocwatch) probe: main buddy lock word state at sample time;
-/// see dfx/allocwatch.rs (STUCK detection).
+/// see debug/allocwatch.rs (STUCK detection).
 pub fn audit_lock_held() -> bool {
     GLOBAL_ALLOCATOR.lock.is_locked()
 }

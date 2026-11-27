@@ -194,7 +194,7 @@ pub fn plausible_fp(fp: u64) -> bool {
 // [fp+8] — the x86_64 walk shape.
 #[inline(never)]
 pub fn walk_fp_chain(fp: u64, out: &mut [u64]) {
-    crate::dfx::forensics_edges::walk_fp_chain_raw(fp, out)
+    crate::debug::forensics_edges::walk_fp_chain_raw(fp, out)
 }
 /// x86_64 twin. The riscv64 walk above reads the RISC-V frame layout
 /// (s0 at the TOP of the frame: saved ra at [fp-8], saved s0 at
@@ -658,7 +658,7 @@ pub fn note_page_alloc(phys: usize, order: usize, frames: &[u64; SITE_FRAMES]) {
     let mut i = first;
     while i < first + pages && i < PPAGE_TABLE_ENTRIES {
         // INV-FOR-2 ppage edge (memwatch's own table, in-bounds idx).
-        crate::dfx::forensics_edges::ppage_site_store(table, i, sid as u8);
+        crate::debug::forensics_edges::ppage_site_store(table, i, sid as u8);
         i += 1;
     }
 }
@@ -679,7 +679,7 @@ pub fn note_page_free(phys: usize, order: usize) {
         return;
     }
     // INV-FOR-2 ppage edge (memwatch's own table, in-bounds idx).
-    let sid = crate::dfx::forensics_edges::ppage_site_load(table, first);
+    let sid = crate::debug::forensics_edges::ppage_site_load(table, first);
     if sid == 0 || sid as usize > PSITE_SLOTS {
         return;
     }
@@ -687,7 +687,7 @@ pub fn note_page_free(phys: usize, order: usize) {
     let mut i = first;
     while i < first + pages && i < PPAGE_TABLE_ENTRIES {
         // INV-FOR-2 ppage edge (memwatch's own table, in-bounds idx).
-        crate::dfx::forensics_edges::ppage_site_store(table, i, 0);
+        crate::debug::forensics_edges::ppage_site_store(table, i, 0);
         i += 1;
     }
     PSITES[sid as usize - 1].frees.fetch_add(1, Ordering::Relaxed);
@@ -731,7 +731,7 @@ fn kroot_pollution() {
     // INV-FOR-2 pgtable-walk edge: the read-only root/sub-table walk
     // lives in the audited unsafe file; this fn only formats.
     let (l1n, l0n, user_leaves, min_va, max_va) =
-        crate::dfx::forensics_edges::kroot_pollution_scan();
+        crate::debug::forensics_edges::kroot_pollution_scan();
     put_dec(l1n);
     taskdump_raw_line(b" l0=");
     put_dec(l0n);

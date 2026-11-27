@@ -123,18 +123,18 @@ pub fn panic_hex(v: u64) -> &'static str {
 /// kernel memory) before the volatile load; a stale slot terminates
 /// the walk instead of faulting.
 pub fn rawframes_line() {
-    use crate::dfx::taskdump::taskdump_raw_line;
+    use crate::debug::taskdump::taskdump_raw_line;
     // SAFETY: INV-BOOT-RAWFRAMES-1 — screened, volatile, kernel-stack
     // reads only.
     unsafe {
-        let mut fp = crate::dfx::backtrace::current_frame_pointer();
+        let mut fp = crate::debug::backtrace::current_frame_pointer();
         for _ in 0..16 {
             // plausible_fp: readable-kernel-memory only — a stale slot
             // holding a canonical-but-unmapped value (guard region) must
             // terminate the walk, not fault it.
             if !(fp >= 0x8000_0000_0000_0000
                 && fp & 7 == 0
-                && crate::dfx::memwatch::plausible_fp(fp))
+                && crate::debug::memwatch::plausible_fp(fp))
             {
                 break;
             }
@@ -150,7 +150,7 @@ pub fn rawframes_line() {
             if !(next & 7 == 0
                 && next > fp
                 && next < 0xffff_ffff_ffff_f000
-                && crate::dfx::memwatch::plausible_fp(next))
+                && crate::debug::memwatch::plausible_fp(next))
             {
                 break;
             }

@@ -8,7 +8,7 @@
 //! 27-32s SA init rides this family).
 //!
 //! Armed by the kernel cmdline `mmprof=1` (own key, forkprof pattern; no
-//! dfx/switches.rs bit consumed). Cost when off: one relaxed load per
+//! debug/switches.rs bit consumed). Cost when off: one relaxed load per
 //! hook. Cost when on: ~6 rdtsc+fetch_add brackets per mmap/mprotect —
 //! noise against a 72us syscall.
 //!
@@ -250,7 +250,7 @@ pub fn tick(now_jiffies: u64) {
 static DUMP_THREAD_ON: AtomicBool = AtomicBool::new(false);
 
 /// Spawn the task-context dump thread (once; called from the timer
-/// softirq tick and from dfx::init — either way the thread starts once).
+/// softirq tick and from debug::init — either way the thread starts once).
 pub fn ensure_dump_thread() {
     if DUMP_THREAD_ON.swap(true, Ordering::AcqRel) {
         return;

@@ -597,14 +597,14 @@ pub(crate) fn scribble_report_buf_mut() -> &'static mut [u8; 4096] {
     // SAFETY: INV-FOR-6 — bounded diagnostic writes to the fixed
     /// static buffer; readers are post-mortem (gdb) or under the
     /// REPORT_LOCK.
-    unsafe { &mut *crate::dfx::scribble::REPORT_BUF.0.get() }
+    unsafe { &mut *crate::debug::scribble::REPORT_BUF.0.get() }
 }
 
 // SAFETY: ReportBuf is written only under the REPORT_LOCK claim (one
 // reporter at a time) with a bounds-checked index, and read post-mortem
 // by gdb or after the lock releases; the content is diagnostic bytes.
 #[cfg(feature = "x86_64")]
-unsafe impl Sync for crate::dfx::scribble::ReportBuf {}
+unsafe impl Sync for crate::debug::scribble::ReportBuf {}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-7: the memwatch frame-walk family (the walk_fp_chain bodies —
@@ -781,7 +781,7 @@ pub(crate) fn get_page_table_virt_raw(
 
 /// Clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf if
 /// needed. Returns true when the leaf reads back read-only (INV-FOR-8:
-/// the caller runs pre-SMP from dfx::init on the BSP; the linking store
+/// the caller runs pre-SMP from debug::init on the BSP; the linking store
 /// is one aligned 8-byte store, so the old and new translations are
 /// both consistent for concurrent readers).
 #[cfg(feature = "x86_64")]
@@ -1001,7 +1001,7 @@ pub(crate) fn page_diag_flags(
 
 // ---------------------------------------------------------------------------
 // INV-FOR-10: the dfx page-table diagnostic read (the ONE audited
-// PageTableWalker edge for the dfx family — moved from dfx/mod.rs's
+// PageTableWalker edge for the dfx family — moved from debug/mod.rs's
 // walk_read; INV-DFXWALK-1: `root` is the diagnosed task's own mm root
 // and the read is read-only through the linear map).
 // ---------------------------------------------------------------------------

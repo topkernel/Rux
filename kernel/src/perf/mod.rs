@@ -880,7 +880,7 @@ fn user_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
 /// oh-crash 91st: kernel-side frame-pointer callchain walk. The old
 /// comment claimed kernel chains were "not walkable (no kernel frame
 /// pointers)" — false: this kernel is built with
-/// force-frame-pointers=yes (see dfx::backtrace). The tick stash now
+/// force-frame-pointers=yes (see debug::backtrace). The tick stash now
 /// captures the interrupted rbp for KERNEL-mode ticks too (trap.rs),
 /// so kernel samples can carry their caller chain — the enable_irq /
 /// atomic-cloud ownership question from the 90th's tail window needs
@@ -900,7 +900,7 @@ fn kernel_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
         // Stack-walk edge lives in the audited unsafe.rs
         // (INV-PERF-STACKWALK-1).
         let (ret, next) = edges::frame_words(bp);
-        if crate::dfx::ksyms::lookup(ret).is_none() {
+        if crate::debug::ksyms::lookup(ret).is_none() {
             break; // not a kernel-text return address
         }
         out[n] = ret;

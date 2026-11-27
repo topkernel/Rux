@@ -173,7 +173,7 @@ pub fn early_scan() {
     // INV-FOR-3 raw-ref edge: the region is reserved RAM, mapped by
     // the linear map; the header reads are plain loads of memory no
     // writer touches (the previous boot is gone).
-    let hdr = crate::dfx::forensics_edges::raw_ref(virt as *const RecordHeader);
+    let hdr = crate::debug::forensics_edges::raw_ref(virt as *const RecordHeader);
     if hdr.magic != MAGIC || hdr.version != VERSION {
         return;
     }
@@ -187,7 +187,7 @@ pub fn early_scan() {
     RECORD_KIND.store(kind, Ordering::Release);
     // INV-FOR-2 volatile-write edge: same region; this boot now owns
     // it. Clear only the magic.
-    crate::dfx::forensics_edges::diag_write_qword(virt as *mut u64, 0);
+    crate::debug::forensics_edges::diag_write_qword(virt as *mut u64, 0);
     crate::pr_info!(
         "pstore: previous boot's {} record found ({} bytes) — /sys/fs/pstore/{}, jiffies {}",
         if kind == KIND_DMESG { "dmesg" } else { "console" },
@@ -225,9 +225,9 @@ pub fn read_record() -> alloc::vec::Vec<u8> {
     // boot since early_scan cleared the magic; no writer exists until
     // the next panic (and a next panic would overwrite with a full new
     // header first).
-    let hdr = crate::dfx::forensics_edges::raw_ref(virt as *const RecordHeader);
+    let hdr = crate::debug::forensics_edges::raw_ref(virt as *const RecordHeader);
     let length = (hdr.length as usize).min(PSTORE_RAM_SIZE - size_of::<RecordHeader>());
-    let bytes = crate::dfx::forensics_edges::diag_bytes(
+    let bytes = crate::debug::forensics_edges::diag_bytes(
         (virt.addr() + size_of::<RecordHeader>()) as *const u8,
         length,
     );
@@ -274,7 +274,7 @@ pub fn panic_capture(info: &core::panic::PanicInfo<'_>) {
 }
 
 /// Write the oops record into the region (the dmesg flavor). Called
-/// from `dfx::oops` after the report printed and the policy decided
+/// from `debug::oops` after the report printed and the policy decided
 /// the oops is recoverable — the record then survives a reboot the
 /// task death would otherwise hide. Same allocation-free construction
 /// as the panic capture.
@@ -308,7 +308,7 @@ fn write_record(kind: u32, hw: &HeadWriter) {
     for s in first..at {
         sink.push(SINK[s % SINK_SIZE].0.load(Ordering::Relaxed));
     }
-    let _head_len = crate::dfx::forensics_edges::pstore_capture_write(
+    let _head_len = crate::debug::forensics_edges::pstore_capture_write(
         virt,
         kind,
         &hw.buf[..hw.len],

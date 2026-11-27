@@ -6,7 +6,7 @@
 //! process-lifecycle perf lane (`feature/perf-fork`).
 //!
 //! Armed by the kernel cmdline `forkprof=1` (own key, syscost-style;
-//! no dfx/switches.rs bit is consumed). Costs nothing when off: every
+//! no debug/switches.rs bit is consumed). Costs nothing when off: every
 //! hook is one relaxed load of the cached armed word, and the phase
 //! adds are plain fetch_adds into static arrays.
 //!

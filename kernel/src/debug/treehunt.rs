@@ -77,7 +77,7 @@ pub fn tick() {
         // task's own fields and diagnostic reads of plausible peer
         // pointers only; no writes except the diagnostic counters.
         // The adoptions are the audited edges' INV-FOR-1/INV-FOR-3 arms.
-        let t = crate::dfx::forensics_edges::raw_ref(task);
+        let t = crate::debug::forensics_edges::raw_ref(task);
         let pid = t.pid();
         if pid == 0 {
             return;
@@ -99,7 +99,7 @@ pub fn tick() {
                 // from never-a-task addresses (pointer corruption).
                 let member = is_member as u64;
                 let lpid = if is_member {
-                    crate::dfx::forensics_edges::t_pid(leader) as u64
+                    crate::debug::forensics_edges::t_pid(leader) as u64
                 } else {
                     0
                 };
@@ -114,7 +114,7 @@ pub fn tick() {
                     // INV-FOR-2 volatile-read edge: one word from a
                     // kernel-linear-map address — mapped for the
                     // machine's whole RAM, cannot fault.
-                    crate::dfx::forensics_edges::diag_read_qword(pa)
+                    crate::debug::forensics_edges::diag_read_qword(pa)
                 } else {
                     0xBAD_BAD_BAD_BAD_BAD
                 };
@@ -127,7 +127,7 @@ pub fn tick() {
         if is_member
             && crate::process::task::Task::is_plausible_task_ptr(leader)
         {
-            let l = crate::dfx::forensics_edges::raw_ref(leader);
+            let l = crate::debug::forensics_edges::raw_ref(leader);
             let lst = l.state();
             if !lst.is_dead() && !lst.contains(crate::process::task::TaskState::ZOMBIE) {
                 let lp = l.parent_ptr();
@@ -173,7 +173,7 @@ fn hit3(pid: u32, ptr: usize, member: u64, lpid: u64, w0: u64, state: u64) {
         return;
     }
     use core::fmt::Write;
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     let _ = writeln!(
         w,
         "TREE-PARENT-DEAD pid={} member={} leader-pid={} state={:#x} parent={:#x} target-w0={:#x}",
@@ -195,7 +195,7 @@ fn hit2(pid: u32, stale: usize, leader_pid: u32, leader_parent: usize) {
         return;
     }
     use core::fmt::Write;
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     let _ = writeln!(
         w,
         "TREE-SNAP-STALE pid={} stale-parent={:#x} leader-pid={} leader-parent={:#x}",
@@ -217,7 +217,7 @@ fn hit(pid: u32, kind: u32, ptr: usize, aux: u32) {
     }
     crate::trace::trace_treehunt(kind, pid, ptr as u64, aux as u64);
     use core::fmt::Write;
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     let name = match kind {
         1 => "TREE-PARENT-DEAD",
         2 => "TREE-SNAP-STALE",

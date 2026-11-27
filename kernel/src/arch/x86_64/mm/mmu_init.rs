@@ -210,7 +210,7 @@ pub(crate) fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_pp
                     // rather than wired into two live trees
         }
     }
-    crate::dfx::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // 0xb9 canary (oh-launch round 7): scan the table's content BEFORE
     // the free for flags-only entries — PRESENT with zero address bits
     // (phys page 0 is never a legal target; the x86 boot reserves
@@ -822,7 +822,7 @@ pub fn free_user_page_tables(
     vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::{page_desc, phys_to_pfn, phys_valid, free_pages};
-    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // hp89 hunt: dying-mm teardown is a whole-domain PTE-clearing pass
     // (the fork-child-exit face) — record it for post-hoc #GP attribution.
     crate::mm::unwatch::note(
@@ -966,7 +966,7 @@ pub fn free_user_page_tables(
                         if page.is_mapped() {
                             crate::mm::rmap::page_remove_rmap(page);
                         }
-                        let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L3);
+                        let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L3);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -976,7 +976,7 @@ pub fn free_user_page_tables(
                                     "teardown-l3",
                                 );
                             } else {
-                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                 free_pages(phys_addr as usize, 0);
                             }
                         }
@@ -1042,7 +1042,7 @@ pub fn free_user_page_tables(
                         if page.is_mapped() {
                             crate::mm::rmap::page_remove_rmap(page);
                         }
-                        let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L2);
+                        let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L2);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -1052,7 +1052,7 @@ pub fn free_user_page_tables(
                                     "teardown-l2",
                                 );
                             } else {
-                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                 free_pages(phys_addr as usize, 0);
                             }
                         }
@@ -1155,7 +1155,7 @@ pub fn free_user_page_tables(
                     // page_remove_rmap above (mapcount dec) is its whole
                     // teardown.
                     if pte1.bits() & super::mm_ops::cow_flags::PCACHE_RO == 0 {
-                        let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
+                        let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L1);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -1165,7 +1165,7 @@ pub fn free_user_page_tables(
                                     "teardown-l1",
                                 );
                             } else {
-                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                 free_pages(phys_addr as usize, 0);
                             }
                         }
@@ -1338,7 +1338,7 @@ pub fn free_user_page_tables(
     // stale-tree census witness — bounded reverse scan answers who else
     // still references it).
     if stale_count > 0 {
-        crate::dfx::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
+        crate::debug::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
     }
 
     // Free root table (PML4)
@@ -1846,7 +1846,7 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-44): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn forensics_scan_trees( target_ppn: u64, out: &mut [crate::dfx::mmforensics::TreeHit], ) -> (usize, usize, usize, usize) {
+pub fn forensics_scan_trees( target_ppn: u64, out: &mut [crate::debug::mmforensics::TreeHit], ) -> (usize, usize, usize, usize) {
     crate::arch::arch_floor::x86_64::mm::mmu_init::forensics_scan_trees(target_ppn, out)
 }
 
