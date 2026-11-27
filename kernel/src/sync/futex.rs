@@ -6739,44 +6739,6 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         // and goes back to sleep — the later `woken = true` is a plain
         // store that schedules no one, and with no second FUTEX_WAKE the
         // waiter sleeps forever despite having been woken once.
-    // timer-gap lane: every WAKE's walk outcome (rt2xdbg=1, 128 lines) —
-    // uaddr, requested nr, matched/consumed ret, and the bucket chain
-    // length at walk time. The pi_min wedge: did the gow WAKE even SEE
-    // the parked waiters?
-    if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-        static FWW: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        if FWW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 128 {
-            use crate::debug::taskdump::putc_brief as putchar;
-            fn ph(mut v: u64) {
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-            }
-            let mut chain = 0u64;
-            let mut idx = head.head;
-            while let Some(i) = idx {
-                chain += 1;
-                if chain > 64 {
-                    break;
-                }
-                let s = WAITER_POOL[i].lock_irqsave();
-                idx = s.as_ref().map(|w| w.next).flatten();
-            }
-            for &b in b"FWW uaddr=0x" { putchar(b); }
-            ph(uaddr as u64);
-            for &b in b" nr=" { putchar(b); }
-            ph(nr_wake as u64);
-            for &b in b" ret=" { putchar(b); }
-            ph(ret as u64);
-            for &b in b" chain=" { putchar(b); }
-            ph(chain);
-            putchar(b'\n');
-        }
-    }
-
         let woken_n = wake_list.len();
     // oh67: for the watched lock words, name WHO the wake consumed —
     // a wake returning ret=1 that consumes a task which never proceeds
@@ -7113,32 +7075,6 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             // INV-SCE-2: current is the parking task itself; the bucket
             // lock holds the chain stable (see the comment above).
             let current_t = crate::sched::edges::task_shared(current);
-            // timer-gap lane: the park edge for cpu0-pinned FIFO tasks
-            // (rt2xdbg=1, 64 lines) — the pi_min wedge question is
-            // whether the waiter ever parks on the word the waker walks.
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                && current_t.cpus_allowed() == 1
-            {
-                static FWT: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if FWT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    for &b in b"FWT-PARK pid=0x" { putchar(b); }
-                    ph(current_t.pid() as u64);
-                    for &b in b" uaddr=0x" { putchar(b); }
-                    ph(uaddr as u64);
-                    for &b in b" val=0x" { putchar(b); }
-                    ph(uval as u64);
-                    putchar(b'\n');
-                }
-            }
             current_t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         }
 

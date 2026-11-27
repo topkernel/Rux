@@ -2380,39 +2380,6 @@ impl Task {
             let old_state = t.state();
             let pid = t.pid();
 
-            // timer-gap lane: name the wake decision for pinned-FIFO
-            // targets (rt2xdbg=1, 64-line budget) — the pi_min wedge
-            // needs the state-gate verdict and the enqueue outcome.
-            // cpu0-pinned only (mask==1): the driver thread's 50 us
-            // nanosleep polls otherwise eat the whole budget.
-            if matches!(
-                t.policy(),
-                crate::process::task::SchedPolicy::Fifo
-                    | crate::process::task::SchedPolicy::Rr
-            ) && t.cpus_allowed() == 1
-                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-            {
-                static WUG: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if WUG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    for &b in b"WUG pid=0x" { putchar(b); }
-                    ph(pid as u64);
-                    for &b in b" st=0x" { putchar(b); }
-                    ph(old_state.bits() as u64);
-                    for &b in b" jif=" { putchar(b); }
-                    ph(crate::drivers::timer::get_jiffies());
-                    putchar(b'\n');
-                }
-            }
-
             // Wake if sleeping OR stopped (R7-3): stopped tasks were
             // dequeued when they scheduled away; SIGCONT/SIGKILL reach them
             // through here — filtering only is_sleeping() made them

@@ -404,101 +404,6 @@ fn rt_throttled(cpu: usize) -> bool {
     cpu < MAX_CPUS && RT_THROTTLED[cpu].load(core::sync::atomic::Ordering::Acquire)
 }
 
-/// timer-gap lane: periodic pinned-RT wedge-state dump (rt2xdbg=1,
-/// cpu-0's tick only, every 32 jiffies): the slot, idle bit,
-/// need_resched, the global/class counters, the RT bitmap words, and the
-/// per-prio linked pids with their ownership bits — decides between
-/// "linked but never walked", "unlinked while runnable", and
-/// "counter desync" in one read.
-fn rt_wedge_dump_tick(cpu: usize) {
-    if cpu != 0 || crate::cmdline::get_param("rt2xdbg").as_deref() != Some("1") {
-        return;
-    }
-    use crate::debug::taskdump::putc_brief as putchar;
-    fn ph(mut v: u64) {
-        for _ in 0..16 {
-            let n = (v >> 60) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-            v <<= 4;
-        }
-    }
-    static LASTJ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
-    let last = LASTJ.load(core::sync::atomic::Ordering::Acquire);
-    if now.wrapping_sub(last) < 32
-        && LASTJ
-            .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
-            .is_err()
-    {
-        return;
-    }
-    // SAFETY: read-only diagnostics under the GRQ lock; all task
-    // pointers come from the RT lists (linked tasks cannot be freed).
-    {
-        let g = grq().lock_irqsave();
-        let slot = cpu_state(0).current;
-        let slot_pid = if slot.is_null() {
-                u32::MAX
-            } else {
-                crate::sched::edges::task_shared(slot).pid()
-            };
-        let idle_bit = (grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire) & 1) != 0;
-        let nr = g.nr_running.load(core::sync::atomic::Ordering::Acquire);
-        let rt_nr = g.rt_rq.nr_running();
-        let w0 = g.rt_rq.bitmap_word(0);
-        let w1 = g.rt_rq.bitmap_word(1);
-        for &b in b"WEDGE jif=" { putchar(b); }
-        ph(now);
-        for &b in b" slot_pid=" { putchar(b); }
-        ph(slot_pid as u64);
-        for &b in b" idlebit=" { putchar(b); }
-        ph(idle_bit as u64);
-        for &b in b" nrsched=" { putchar(b); }
-        ph(need_resched() as u64);
-        for &b in b" nr=" { putchar(b); }
-        ph(nr as u64);
-        for &b in b" rt_nr=" { putchar(b); }
-        ph(rt_nr as u64);
-        for &b in b" bm0=" { putchar(b); }
-        ph(w0);
-        for &b in b" bm1=" { putchar(b); }
-        ph(w1);
-        putchar(b'\n');
-        // Walk every set prio's list (max 6 tasks printed).
-        let mut printed = 0;
-        for word_idx in 0..2usize {
-            let word = if word_idx == 0 { w0 } else { w1 };
-            let mut remaining = word;
-            while remaining != 0 && printed < 6 {
-                let bit = remaining.trailing_zeros() as usize;
-                remaining &= remaining - 1;
-                let prio = 99 - (word_idx * 64 + bit);
-                g.rt_rq.walk_prio(prio as usize, &mut |t: *mut Task| {
-                    if printed >= 6 || t.is_null() {
-                        return;
-                    }
-                    printed += 1;
-                    for &b in b"  RTQ pid=0x" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).pid() as u64);
-                    for &b in b" p=" { putchar(b); }
-                    ph(prio as u64);
-                    for &b in b" mask=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).cpus_allowed() as u64);
-                    for &b in b" st=0x" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).state().bits() as u64);
-                    for &b in b" oncpu=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).on_cpu() as u64);
-                    for &b in b" claim=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed) as u64);
-                    for &b in b" pk=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).pick_state() as u64);
-                    putchar(b'\n');
-                });
-            }
-        }
-    }
-}
-
 /// Per-tick RT bandwidth accounting. Called from scheduler_tick with the
 /// ticking CPU's current task (no locks — plain atomics).
 fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
@@ -517,15 +422,6 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
         RT_PERIOD_START[cpu].store(now, core::sync::atomic::Ordering::Release);
         RT_TIME_USED[cpu].store(0, core::sync::atomic::Ordering::Release);
         if RT_THROTTLED[cpu].swap(false, core::sync::atomic::Ordering::AcqRel) {
-            // timer-gap lane: throttle LIFT (rt2xdbg=1, cpu-0, 32 lines)
-            if cpu == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static TLN: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if TLN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    for &b in b"RT-THROTTLE-LIFT cpu=0\n" { putchar(b); }
-                }
-            }
             set_need_resched();
         }
         return;
@@ -539,15 +435,6 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
             if used >= RT_RUNTIME_JIFFIES
                 && !RT_THROTTLED[cpu].swap(true, core::sync::atomic::Ordering::AcqRel)
             {
-                // timer-gap lane: throttle SET (rt2xdbg=1, cpu-0, 32 lines)
-                if cpu == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                    static TSN: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    if TSN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                        use crate::debug::taskdump::putc_brief as putchar;
-                        for &b in b"RT-THROTTLE-SET cpu=0\n" { putchar(b); }
-                    }
-                }
                 set_need_resched();
             }
         }
@@ -2278,45 +2165,6 @@ pub fn resched_cpu(cpu: usize) {
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 if !POLLING_IDLE[cpu].load(core::sync::atomic::Ordering::Acquire) {
                     crate::arch::ipi::send_reschedule_ipi(cpu);
-                }
-            }
-            // RT-2X item-7 hunt: name every poke decision for the wedge
-            // boot (cmdline rt2xdbg=1; cpu-0-targeted only, 200-line
-            // budget — self-pokes flood the log): target, sender,
-            // polling flag, and the target's current task (pid/policy).
-            if cpu == 0
-                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-            {
-                static RSP: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if RSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    let cur = cpu_state(cpu).current;
-                    let (cpid, cpolicy) = if cur.is_null() {
-                        (0xDEADu64, 9u64)
-                    } else {
-                        (crate::sched::edges::task_shared(cur).pid() as u64,
-                         crate::sched::edges::task_shared(cur).policy() as u64)
-                    };
-                    let poll = POLLING_IDLE[cpu].load(core::sync::atomic::Ordering::Acquire);
-                    for &b in b"RESCHED-CPU tgt=" { putchar(b); }
-                    ph(cpu as u64);
-                    for &b in b" from=" { putchar(b); }
-                    ph(this_cpu as u64);
-                    for &b in b" cur=0x" { putchar(b); }
-                    ph(cpid);
-                    for &b in b" pol=" { putchar(b); }
-                    ph(cpolicy);
-                    for &b in b" polling=" { putchar(b); }
-                    ph(poll as u64);
-                    putchar(b'\n');
                 }
             }
         }
@@ -4336,32 +4184,6 @@ fn __schedule() {
     if prev_pid == 0 {
         let nr = GlobalRunQueue::grq_nr_running();
         if nr == 0 {
-            // RT-2X item-7 hunt: the pinned-RT wedge shape — cpu0 idle
-            // forever with runnable RT tasks — convicts this branch when
-            // the counter desyncs from actual class linkage. Tripwire
-            // (cmdline rt2xdbg=1, 32-line budget): names the gap live.
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                let grq = grq();
-                let rt_nr = grq.rt_rq.nr_running() as u64;
-                let rr_nr = grq.rt_rq.rr_nr_running.load(core::sync::atomic::Ordering::Relaxed) as u64;
-                let cfs_linked = {
-                    // count() requires the lock; approximate via the
-                    // timeline's own atomic size if exposed — otherwise
-                    // report -1 (the RT rows alone decide the wedge).
-                    u64::MAX
-                };
-                if rt_nr != 0 || rr_nr != 0 {
-                    // Rule 1 (grq-lock-1st): event ring, not the
-                    // console (pid = cpu, a packs rt|rr counts, b = the
-                    // CFS linked bitmap witness).
-                    crate::sched::sched_ev::sched_ev(
-                        crate::sched::sched_ev::EV_NR_RUNNING_DESYNC,
-                        crate::arch::cpu_id() as u32,
-                        ((rt_nr as u64) << 32) | rr_nr as u64,
-                        cfs_linked,
-                    );
-                }
-            }
             return;
         }
     }
@@ -4630,17 +4452,6 @@ fn __schedule() {
         // enqueue_task's check_rt_preempt).
         let prev_mask = prev_t.cpus_allowed();
         if prev_mask & (1u32 << cpu_id) == 0 {
-            // Rule 1 (grq-lock-1st): the opt-in rt2xdbg census — event
-            // ring, not the console (a = the affinity mask driving the
-            // migration dispatch).
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                crate::sched::sched_ev::sched_ev(
-                    crate::sched::sched_ev::EV_RQD_MIGRATE,
-                    prev_pid,
-                    prev_mask as u64,
-                    0,
-                );
-            }
             match crate::sched::claim_idle_cpu_for(prev_mask) {
                 Some(idle_cpu) => resched_cpu(idle_cpu),
                 None => match prev_t.policy() {
@@ -5100,31 +4911,11 @@ fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *
     //    Skipped while the RT bandwidth is throttled ON THIS CPU (the
     //    70th's per-cpu rt_rq parity; a throttled cpu falls through to
     //    CFS while other cpus may still pick RT).
-    // timer-gap lane: the pinned-RT wedge's prime silent skip — a cpu
-    // whose RT class stays throttled picks idle forever while linked RT
-    // tasks wait. Name the skip live (rt2xdbg=1, cpu-0-targeted, 32-line
-    // budget): the accounting triple (used/period_start/now jiffies)
-    // decides between "throttle never lifts" and "lifts but re-arms".
     // grq-hold-slim Cut 2: the class bit gates the whole arm (mask
     // load above); rt_throttled is now evaluated ONCE per RT-nonempty
     // pick instead of twice.
     if class_mask & CLASS_RT_BIT != 0 {
         let rt_is_throttled = rt_throttled(cpu_id);
-        if rt_is_throttled {
-        // Rule 1 (grq-lock-1st): the opt-in rt2xdbg census — event
-        // ring, not the console (a packs used|period_start, b packs
-        // now|rt_nr).
-        if cpu_id == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-            crate::sched::sched_ev::sched_ev(
-                crate::sched::sched_ev::EV_RT_THROTTLED,
-                cpu_id as u32,
-                (RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed) << 32)
-                    | RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
-                (crate::drivers::timer::get_jiffies() << 32)
-                    | grq.rt_rq.nr_running() as u64,
-            );
-        }
-    }
         if !rt_is_throttled {
         // timer-gap lane (self-migration handoff retry): the walk names
         // an affinity-allowed task it refused only because its owner is
@@ -5144,21 +4935,6 @@ fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *
         if skip_owner < MAX_CPUS
             && SWITCHING_OUT[skip_owner].load(core::sync::atomic::Ordering::Acquire) != 0
         {
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static SOR: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if SOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    for &b in b"SOR-REARM-RISK-RETRY owner=" { putchar(b); }
-                    let mut v = skip_owner as u64;
-                    for _ in 0..4 {
-                        let n = (v >> 28) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    putchar(b'\n');
-                }
-            }
             set_need_resched();
         }
         if let Some(task) = rt_picked {
@@ -7034,28 +6810,6 @@ pub fn wake_up_enqueue_opt(
                     // name". One remote bt per boot, gated to SMP2+ boots
                     // (the reporter would deadlock self-IPI'ing its own
                     // cpu on a UP box).
-                    #[cfg(feature = "x86_64")]
-                    {
-                        static W3BT: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        let me = crate::arch::cpu_id() as usize;
-                        // timer-gap: bt the naming cpu AND the sibling
-                        //(SMP2 diagnostic — the g2 wedge needs both sides;
-                        //rt2xdbg=1-gated: it fires remote IPIs).
-                        if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                            for tgt in [w3_fz_naming, w3_fz_naming ^ 1] {
-                                if tgt != me
-                                    && tgt < crate::config::MAX_CPUS
-                                    && W3BT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2
-                                {
-                                    let _ = crate::arch::ipi::remote_backtrace(
-                                        tgt,
-                                        "w3-frozen-exec",
-                                    );
-                                }
-                            }
-                        }
-                    }
                 }
                 return false;
             }
@@ -8410,29 +8164,6 @@ fn rt_try_poke_cpu(task: &Task, task_prio: u32, cpu: usize) -> bool {
             & (1u32 << cpu)
             != 0;
         if !running.is_null() && !idle_bit_set {
-            // RT-2X item-7 hunt print kept (rt2xdbg=1,
-            // 200-line budget): the poke decision, live.
-            if task_prio > 85 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static CSP: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if CSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    for &b in b"CRP-POKE-IDLE-SLOT cpu=" { putchar(b); }
-                    ph(cpu as u64);
-                    for &b in b" wakee=0x" { putchar(b); }
-                    ph(task.pid() as u64);
-                    for &b in b" prio=" { putchar(b); }
-                    ph(task_prio as u64);
-                    putchar(b'\n');
-                }
-            }
             resched_cpu(cpu);
             return true;
         }
@@ -10221,9 +9952,6 @@ pub fn scheduler_tick() {
     // every CPU, before the class-specific work. Per-CPU (the 70th): the
     // ticking cpu charges ITS OWN rt_rq budget.
     rt_bandwidth_tick(crate::arch::cpu_id() as u64 as usize, current);
-
-    // timer-gap lane: pinned-RT wedge-state dump (rt2xdbg=1-gated).
-    rt_wedge_dump_tick(crate::arch::cpu_id() as u64 as usize);
 
     // cgroup v2 cpu controller (U1b): charge this tick into the current
     // task's cgroup chain, roll quota periods over / unthrottle, and

@@ -582,60 +582,6 @@ impl RtRunQueue {
                         return Some(task);
                     }
 
-                    // RT-2X item-7 hunt: a pinned-RT wake wedge shows the
-                    // owning CPU spinning in its idle loop with runnable RT
-                    // tasks — name the refusing guard live (cmdline
-                    // rt2xdbg=1, 48-line PER-CPU budget — timer-gap lane:
-                    // the single global budget let cpu1's affinity skips
-                    // eat every line, hiding cpu0's ownership skips).
-                    if !allowed
-                        && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                    {
-                        static SKP: [AtomicU32; crate::config::MAX_CPUS] =
-                            [const { AtomicU32::new(0) }; crate::config::MAX_CPUS];
-                        if cpu_id < crate::config::MAX_CPUS
-                            && SKP[cpu_id].fetch_add(1, Ordering::Relaxed) < 48
-                        {
-                            use crate::debug::taskdump::putc_brief as putchar;
-                            fn ph(mut v: u64) {
-                                for _ in 0..16 {
-                                    let n = (v >> 60) as u8;
-                                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                                    v <<= 4;
-                                }
-                            }
-                            {
-                                let tr = crate::sched::edges::task_shared(task);
-                                let pid = tr.pid() as u64;
-                                let mask = tr.cpus_allowed() as u64;
-                                let oncpu = tr.on_cpu() as u64;
-                                let claim = tr
-                                    .running_on_cpu
-                                    .load(Ordering::Relaxed) as u64;
-                                let pk = crate::sched::edges::task_shared(task).pick_state() as u64;
-                                let throt =
-                                    crate::sched::cgroup::task_cgroup_throttled(task) as u64;
-                                for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }
-                                ph(pid);
-                                for &b in b" jif=" { putchar(b); }
-                                ph(crate::drivers::timer::get_jiffies());
-                                for &b in b" cpu=" { putchar(b); }
-                                ph(cpu_id as u64);
-                                for &b in b" mask=0x" { putchar(b); }
-                                ph(mask);
-                                for &b in b" oncpu=" { putchar(b); }
-                                ph(oncpu);
-                                for &b in b" claim=" { putchar(b); }
-                                ph(claim);
-                                for &b in b" pk=" { putchar(b); }
-                                ph(pk);
-                                for &b in b" throttled=" { putchar(b); }
-                                ph(throt);
-                                putchar(b'\n');
-                            }
-                        }
-                    }
-
                     pos = next_pos;
                 }
 
