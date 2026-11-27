@@ -1635,12 +1635,18 @@ pub fn switching_out_names(task: *mut Task) -> bool {
 /// close on its own; 30 s bounds the recovery of a genuinely lost
 /// switch instead of the old forever).
 ///
-/// DELIBERATELY NOT gated on the qword CLAIM's cpu liveness: a claim
-/// on a ticking cpu with no slot naming the task is a corpse (the
-/// picker's slot names the task for its whole pick — the curr_on
-/// screens exclude every live-pending-pick shape), and gating on it
-/// would strand the CRASH3 ENQ-CLAIMED shape {on_cpu=1, claim=3, no
-/// slot, no marker} forever behind a healthy cpu (the W3 strand face).
+/// The qword CLAIM half stays GATED on flat cpu liveness (30 s): a
+/// markerless {on_cpu=1, claim=X, slotless} shape released on a ticking
+/// cpu is the one release whose "provably a corpse" proof is weakest —
+/// the claim's own producer (a lost release whose slot was rewritten by
+/// an idle-heal/abort repair while the task identity remained live) has
+/// no on-CPU discriminator, and the A/B boots split on exactly this
+/// half: the flat-gated build completed Geekbench (the gate deferring
+/// {pid=310/311/312, claim=2/3/1, no marker} up to 30 s without
+/// harm), the claim-ungated build wedged once in the same family with
+/// ZERO marker-gate fires. Recovery is bounded by the same 30 s bar
+/// (the W3 forever-strand face is still closed: a markerless claim on
+/// a dead cpu heals immediately, and on a live one after the bar).
 pub const PICK_RELEASE_DEAD_MS: u64 = 30_000;
 
 /// True when cpu `c`'s SWITCHING_OUT marker for a task may still be an
@@ -1671,6 +1677,18 @@ pub fn switch_owner_maybe_live(task: *mut Task) -> bool {
         {
             return true;
         }
+    }
+    // The claim half (flat 30 s bar — see the block comment above): a
+    // pending-claim look on a cpu that still services ticks defers the
+    // release even with no marker and no slot naming the task.
+    let claim = crate::sched::edges::task_shared(task)
+        .running_on_cpu
+        .load(core::sync::atomic::Ordering::Acquire);
+    if claim >= 0
+        && (claim as usize) < MAX_CPUS
+        && crate::debug::softlockup::cpu_irq_frozen_ms(claim as usize) < PICK_RELEASE_DEAD_MS
+    {
+        return true;
     }
     false
 }
