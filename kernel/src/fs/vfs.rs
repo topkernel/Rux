@@ -7155,7 +7155,7 @@ fn mem_file_content_mut(file: &File) -> Option<&mut MemFileContent> {
 fn mem_file_take_owned(file: &File) -> Option<alloc::boxed::Box<MemFileContent>> {
     // SAFETY: INV-MEMFILE-1 — take() hands the unique ownership to us.
     let ptr = unsafe { &mut *file.private_data.get() }.take()?;
-    Some(unsafe { alloc::boxed::Box::from_raw(ptr as *mut MemFileContent) })
+    Some(crate::fs::edges::box_take(ptr as *mut MemFileContent))
 }
 
 /// Read operation for memory files

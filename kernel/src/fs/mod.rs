@@ -5,6 +5,7 @@
 
 //! Virtual File System (VFS)
 
+#![forbid(unsafe_code)]
 pub mod file;
 // The subsystem's ONE audited unsafe file (mainline minimal-first
 // consolidation, 2026-11-27): the former `unsafe_edges` collection
@@ -80,7 +81,7 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
 
     // SAFETY: rootfs is non-null (checked above) and points to the global RootFS
     // instance which is valid for the lifetime of the kernel.
-    let node = unsafe { (*rootfs).lookup(filename) };
+    let node = crate::fs::edges::raw_ref(rootfs).lookup(filename);
     let node = match node {
         Some(n) => n,
         None => {

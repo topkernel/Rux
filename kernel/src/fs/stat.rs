@@ -28,6 +28,7 @@
 /// - st_ctime: i64 @ 104
 /// - st_ctime_nsec: u64 @ 112
 /// - __unused: [u64; 2] @ 120 (padding to 128 bytes)
+#![forbid(unsafe_code)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Stat {
@@ -276,23 +277,11 @@ pub fn copy_stat_to_user(buf: *mut u8, stat: &Stat) -> usize {
         let x = X86Stat::from(stat);
         // SAFETY: caller validated buf with access_ok over
         // user_stat_size() bytes; exception-table copy faults safely.
-        unsafe {
-            crate::arch::uaccess::copy_to_user(
-                buf,
-                &x as *const X86Stat as *const u8,
-                core::mem::size_of::<X86Stat>(),
-            )
-        }
+        crate::fs::edges::copy_to_user_bytes(buf, crate::safety::bytes::bytes_of(&x))
     }
     #[cfg(not(feature = "x86_64"))]
     // SAFETY: see above.
-    unsafe {
-        crate::arch::uaccess::copy_to_user(
-            buf,
-            stat as *const Stat as *const u8,
-            core::mem::size_of::<Stat>(),
-        )
-    }
+    crate::fs::edges::copy_to_user_bytes(buf, crate::safety::bytes::bytes_of(stat))
 }
 
 /// Extended file status information (statx)

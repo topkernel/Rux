@@ -77,7 +77,7 @@ impl Default for Ext4InodeOnDisk {
     fn default() -> Self {
         // SAFETY: Ext4InodeOnDisk is #[repr(C)] with all fields being integer types;
         // zeroed memory is a valid representation for a default inode.
-        unsafe { mem::zeroed() }
+        crate::fs::edges::zeroed_repr_c()
     }
 }
 

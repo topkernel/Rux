@@ -407,7 +407,7 @@ fn fsctx_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data holds a Box<FsContext> installed by sys_fsopen
     // (single owner, identity-checked via FSCTX_OPS).
     if let Some(p) = unsafe { *file.private_data.get() } {
-        drop(unsafe { Box::from_raw(p as *mut FsContext) });
+        drop(crate::fs::edges::box_take(p as *mut FsContext));
         unsafe { *file.private_data.get() = None };
     }
     0
@@ -451,7 +451,7 @@ fn mountfd_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data holds a Box<MountFd> installed by
     // fsmount/open_tree (single owner, identity-checked via MOUNTFD_OPS).
     if let Some(p) = unsafe { *file.private_data.get() } {
-        drop(unsafe { Box::from_raw(p as *mut MountFd) });
+        drop(crate::fs::edges::box_take(p as *mut MountFd));
         unsafe { *file.private_data.get() = None };
     }
     0

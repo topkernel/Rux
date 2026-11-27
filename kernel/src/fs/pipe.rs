@@ -1349,7 +1349,7 @@ fn pipe_file_close(file: &File) -> i32 {
         file.clear_private_data();
         // Reconstruct the Arc from the raw pointer. This consumes one Arc refcount.
         // When the last close drops the last Arc, the Pipe is freed.
-        let pipe = unsafe { Arc::from_raw(pipe_ptr as *const Pipe) };
+        let pipe = crate::fs::edges::arc_take(pipe_ptr as *const Pipe);
 
         // Check file flags to determine whether to close read or write end
         if file.flags().is_readonly() || file.flags().is_rdwr() {

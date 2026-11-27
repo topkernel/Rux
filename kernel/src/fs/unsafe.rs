@@ -373,3 +373,261 @@ unsafe impl Sync for crate::fs::tty::TtyDevice {}
 
 unsafe impl Send for crate::fs::tty::TtyDevice {}
 
+
+
+// ===========================================================================
+// Generic reclaim / construction primitives (2026-11-27 mainline toolkit).
+// One INV each; call sites restate the caller obligation in their local
+// SAFETY comment.
+// ===========================================================================
+
+/// INV-FS-RAWTAKE-1: reclaim twin of `Box::into_raw` / `Box::leak`.
+/// Pointer provenance: `p` is the exact pointer one `Box::into_raw`
+/// produced for a `Box<T>` (including the `*mut SuperBlock`
+/// type-erasures the mount/kill_sb callbacks do). Caller obligations:
+/// (a) this is the object's SINGLE reclaim (run at most once — a second
+/// call double-frees); (b) no borrow of the object outlives the call
+/// (the returned Box owns it exclusively from here); (c) the type T is
+/// the exact install-time type.
+pub(crate) fn box_take<T>(p: *mut T) -> alloc::boxed::Box<T> {
+    // SAFETY: INV-FS-RAWTAKE-1 above.
+    unsafe { alloc::boxed::Box::from_raw(p) }
+}
+
+/// INV-FS-RAWTAKE-2: reclaim twin of `Arc::into_raw`. The stashed
+/// pointer owns one strong count (the install site transferred it);
+/// from_raw reconstructs the owning Arc so the caller's drop releases
+/// it. Exactly-once for the same reason as RAWTAKE-1; type claim is the
+/// caller's (the ops-table dispatch match).
+pub(crate) fn arc_take<T>(p: *const T) -> alloc::sync::Arc<T> {
+    // SAFETY: INV-FS-RAWTAKE-2 above.
+    unsafe { alloc::sync::Arc::from_raw(p) }
+}
+
+/// INV-FS-ZEROPOD-1: all-zero-bytes constructor for `#[repr(C)]` POD
+/// types. Caller obligation: T is repr(C) and composed only of integer
+/// / bool / float / array-of-those fields (no references, no NonNull,
+/// no niche enums) — the zeroed byte pattern is a valid `T`.
+pub(crate) fn zeroed_repr_c<T>() -> T {
+    // SAFETY: INV-FS-ZEROPOD-1 (caller asserts the POD shape).
+    unsafe { core::mem::zeroed() }
+}
+
+
+// ---------------------------------------------------------------------------
+// 2026-11-27 consolidation wave 2: generic view/access primitives + the
+// buffer-head data family + File cell twins.
+// ---------------------------------------------------------------------------
+
+/// INV-FS-RAWVIEW-3: generic raw-pointer view. Provenance: the pointer
+/// comes from an install site documented at its storage (private_data
+/// cells, leaked statics, per-CPU slots, published snapshots). Caller
+/// obligations: non-null, valid for the returned borrow's whole
+/// lifetime, no concurrent writer through the same memory for the
+/// &'a T claimed, and the type claim (what the install site stored).
+pub(crate) fn raw_ref<'a, T>(p: *const T) -> &'a T {
+    // SAFETY: INV-FS-RAWVIEW-3 (caller proves the obligations above).
+    unsafe { &*p }
+}
+
+/// The exclusive twin of [`raw_ref`] (INV-FS-RAWVIEW-3): caller must in
+/// addition hold exclusive logical ownership of the object for the
+/// borrow's lifetime.
+pub(crate) fn raw_mut<'a, T>(p: *mut T) -> &'a mut T {
+    // SAFETY: INV-FS-RAWVIEW-3 + the caller's exclusivity.
+    unsafe { &mut *p }
+}
+
+/// INV-FS-VOLATILE-1: volatile access to an address the caller proves
+/// is mapped and intended for volatile access (per-CPU areas, device
+/// pages, stack walks). Volatile semantics preserved verbatim.
+pub(crate) fn volatile_read<T: Copy>(p: *const T) -> T {
+    // SAFETY: INV-FS-VOLATILE-1.
+    unsafe { core::ptr::read_volatile(p) }
+}
+
+/// Indexed u8 twin of [`volatile_read`] (INV-FS-VOLATILE-1): the
+/// pointer arithmetic happens inside the edge so no raw `add` leaks
+/// into safe files. base+k must be mapped (stack-walk bounds are the
+/// caller's check).
+pub(crate) fn volatile_read_at<T: Copy>(base: *const T, k: usize) -> T {
+    // SAFETY: INV-FS-VOLATILE-1 (indexed form; base+k mapped per the
+    // caller's bounds check).
+    unsafe { core::ptr::read_volatile(base.add(k)) }
+}
+
+/// The write twin of [`volatile_read`] (INV-FS-VOLATILE-1).
+pub(crate) fn volatile_write<T: Copy>(p: *mut T, v: T) {
+    // SAFETY: INV-FS-VOLATILE-1.
+    unsafe { core::ptr::write_volatile(p, v) }
+}
+
+/// INV-FS-UACCESS-1: user-memory copy. `dst` comes from the syscall
+/// layer after access_ok validation over at least `src.len()` bytes;
+/// faults are taken safely through the exception table.
+pub(crate) fn copy_to_user_bytes(dst: *mut u8, src: &[u8]) -> usize {
+    // SAFETY: INV-FS-UACCESS-1.
+    unsafe { crate::arch::uaccess::copy_to_user(dst, src.as_ptr(), src.len()) }
+}
+
+/// INV-FS-CELL-1: borrow through an `UnsafeCell` whose discipline is
+/// write-once-then-read or externally serialized (name cells, dentry
+/// cells — see the type's own docs). Caller holds that serialization.
+pub(crate) fn cell_ref<'a, T: ?Sized>(c: &core::cell::UnsafeCell<T>) -> &'a T {
+    // SAFETY: INV-FS-CELL-1.
+    unsafe { &*c.get() }
+}
+
+/// The assign twin of [`cell_ref`] (INV-FS-CELL-1): caller holds the
+/// exclusive side of the cell's discipline for the assignment.
+pub(crate) fn cell_assign<T>(c: &core::cell::UnsafeCell<T>, v: T) {
+    // SAFETY: INV-FS-CELL-1 (exclusivity per the caller).
+    unsafe { *c.get() = v }
+}
+
+/// INV-FS-BHDATA-1: the buffer-head data family. The bh is CHECKED OUT
+/// by the caller (`bio::bread` ... `bio::brelse` pair); every borrow
+/// returned here must end before the brelse. The b_data Vec is sized
+/// to the block at bh creation, so `bh_view::<T>` obligations are: T
+/// fits in one block (size_of::<T>() <= b_data.len()), repr(C) POD,
+/// and the block really holds that layout (the read path's contract).
+pub(crate) fn bh_data<'a>(bh: *mut crate::fs::bio::BufferHead) -> &'a alloc::vec::Vec<u8> {
+    // SAFETY: INV-FS-BHDATA-1 (checked-out bh, borrow ends by brelse).
+    unsafe { &(*bh).b_data }
+}
+
+/// The typed-view twin of [`bh_data`] (INV-FS-BHDATA-1).
+pub(crate) fn bh_view<'a, T>(bh: *mut crate::fs::bio::BufferHead) -> &'a T {
+    // SAFETY: INV-FS-BHDATA-1 (T fits the block, caller proves layout).
+    unsafe { &*((*bh).b_data.as_ptr() as *const T) }
+}
+
+/// The byte-slice twin of [`bh_data`] (INV-FS-BHDATA-1): len must not
+/// exceed the block size.
+pub(crate) fn bh_bytes<'a>(bh: *mut crate::fs::bio::BufferHead, len: usize) -> &'a [u8] {
+    // SAFETY: INV-FS-BHDATA-1 (len <= block size per caller).
+    unsafe { core::slice::from_raw_parts((*bh).b_data.as_ptr(), len) }
+}
+
+/// INV-FS-FILEPRIV-3: clone a strong reference out of the file-private
+/// Arc cell WITHOUT taking it — the close path's take stays the single
+/// reclaim. from_raw + clone + forget is the documented inc-ref recipe
+/// (the clone raises the count; forget neutralizes the reconstructed
+/// phantom ownership). Same write-once cell as INV-FS-FILEPRIV-1.
+pub(crate) fn file_privdata_arc_clone<T>(file: &File) -> Option<alloc::sync::Arc<T>> {
+    // SAFETY: INV-FS-FILEPRIV-1 (write-once cell, read shared).
+    let p = unsafe { *file.private_data.get() }?;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: INV-FS-FILEPRIV-3 above (clone+forget inc-ref recipe).
+    let arc = unsafe { alloc::sync::Arc::from_raw(p as *const T) };
+    let cloned = arc.clone();
+    core::mem::forget(arc);
+    Some(cloned)
+}
+
+/// INV-FS-FILEPRIV-4: take the RAW private-data pointer out of the
+/// cell (emptying it, exactly-once) for the caller to reclaim with the
+/// matching typed edge (arc_take / box_take). Close-path only.
+pub(crate) fn file_privdata_ptr_take(file: &File) -> Option<*mut u8> {
+    // SAFETY: INV-FS-FILEPRIV-1 (close-path exclusive take).
+    unsafe { (*file.private_data.get()).take() }
+}
+
+/// INV-FS-KCOPY-1: kernel-side page copies. `kva` is a live, mapped
+/// kernel page (sharedmem/shared-fault backing); the slice side is
+/// caller-valid over the same length. Copies stay within one page per
+/// call (the callers' in-page chunking).
+pub(crate) fn page_copy_to_slice(kva: *const u8, dst: &mut [u8]) {
+    // SAFETY: INV-FS-KCOPY-1.
+    unsafe { core::ptr::copy_nonoverlapping(kva, dst.as_mut_ptr(), dst.len()) }
+}
+
+/// The write twin of [`page_copy_to_slice`] (INV-FS-KCOPY-1).
+pub(crate) fn page_copy_from_slice(kva: *mut u8, src: &[u8]) {
+    // SAFETY: INV-FS-KCOPY-1.
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), kva, src.len()) }
+}
+
+/// INV-FS-ZERO-1: byte-fill of a mapped kernel span (device/shared
+/// pages, segment BSS). `dst` mapped+writable over `n` bytes.
+pub(crate) fn fill_bytes(dst: *mut u8, byte: u8, n: usize) {
+    // SAFETY: INV-FS-ZERO-1.
+    unsafe { core::ptr::write_bytes(dst, byte, n) }
+}
+
+/// INV-FS-SEGMENT-1: ELF segment fill — copy `filesz` bytes of file
+/// image then zero the BSS tail up to `memsz`, both into the freshly
+/// mapped exec page range `vaddr` (the exec path mapped and
+/// bounds-checked the span before loading; see elf.rs load_segment).
+pub(crate) fn load_segment_fill(
+    vaddr: u64,
+    data: &[u8],
+    offset: usize,
+    filesz: usize,
+    memsz: usize,
+) -> Result<(), crate::fs::elf::ElfError> {
+    // SAFETY: INV-FS-SEGMENT-1 (exec-path-mapped destination span).
+    unsafe {
+        if filesz > 0 {
+            let src = data.as_ptr().add(offset);
+            let dst = vaddr as *mut u8;
+            core::ptr::copy_nonoverlapping(src, dst, filesz);
+        }
+        if memsz > filesz {
+            let bss_start = vaddr.checked_add(filesz as u64).ok_or(crate::fs::elf::ElfError::InvalidSegment)?;
+            let bss_size = memsz - filesz;
+            core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
+        }
+    }
+    Ok(())
+}
+
+/// INV-FS-LISTHEAD-1: intrusive ListHead splice/remove primitives.
+/// Caller obligations: the node is a live, properly linked ListHead of
+/// some list (splice: `new` is NOT currently linked; remove: `entry`
+/// IS linked); the list is protected against concurrent mutation by
+/// the owner's lock (jbd2 journal state lock).
+pub(crate) fn lh_insert_after(
+    self_: *mut crate::fs::jbd2::journal::ListHead,
+    new_: *mut crate::fs::jbd2::journal::ListHead,
+) {
+    // SAFETY: INV-FS-LISTHEAD-1.
+    unsafe {
+        (*new_).next = (*self_).next;
+        (*new_).prev = self_;
+        if !(*self_).next.is_null() {
+            (*(*self_).next).prev = new_;
+        }
+        (*self_).next = new_;
+    }
+}
+
+/// The before-twin of [`lh_insert_after`] (INV-FS-LISTHEAD-1).
+pub(crate) fn lh_insert_before(
+    self_: *mut crate::fs::jbd2::journal::ListHead,
+    new_: *mut crate::fs::jbd2::journal::ListHead,
+) {
+    // SAFETY: INV-FS-LISTHEAD-1.
+    unsafe {
+        (*new_).next = self_;
+        (*new_).prev = (*self_).prev;
+        if !(*self_).prev.is_null() {
+            (*(*self_).prev).next = new_;
+        }
+        (*self_).prev = new_;
+    }
+}
+
+/// The unlink primitive of the [`lh_insert_after`] family
+/// (INV-FS-LISTHEAD-1): no-op on null-sentinel ends.
+pub(crate) fn lh_remove(entry: *mut crate::fs::jbd2::journal::ListHead) {
+    // SAFETY: INV-FS-LISTHEAD-1.
+    unsafe {
+        if !(*entry).next.is_null() && !(*entry).prev.is_null() {
+            (*(*entry).next).prev = (*entry).prev;
+            (*(*entry).prev).next = (*entry).next;
+        }
+    }
+}

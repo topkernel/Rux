@@ -385,7 +385,7 @@ fn take_pair_arc(file: &File) -> Option<()> {
         return None;
     }
     // SAFETY: consuming the slot's sole Arc reference.
-    unsafe { drop(Arc::from_raw(ptr)) };
+    drop(crate::fs::edges::arc_take(ptr));
     file.clear_private_data();
     Some(())
 }
@@ -963,7 +963,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     // SAFETY: we exclusively own `file`; private_data
                     // holds the Arc::into_raw pointer we just installed.
                     if let Some(ptr) = unsafe { (*file.private_data.get()).take() } {
-                        drop(unsafe { Arc::from_raw(ptr as *const PtyPair) });
+                        drop(crate::fs::edges::arc_take(ptr as *const PtyPair));
                     }
                     if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
                         pair.slave_closed.store(true, Ordering::Release);

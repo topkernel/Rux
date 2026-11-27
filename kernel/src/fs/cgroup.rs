@@ -503,7 +503,7 @@ fn cgroup2_kill_sb(sb: *mut SuperBlock) {
         let current = GLOBAL_CGROUP2_SB.load(Ordering::Acquire);
         if current != sb {
             // SAFETY: the Box the mount callback stored (unmount path).
-            drop(unsafe { alloc::boxed::Box::from_raw(sb) });
+            drop(crate::fs::edges::box_take(sb));
         }
     }
 }

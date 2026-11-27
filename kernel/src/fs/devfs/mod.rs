@@ -1556,7 +1556,7 @@ fn devfs_destroy_inode(inode: &mut Inode) {
         // decrementing the DevfsEntry's reference count.
         // SAFETY: private_data holds the Arc leaked by into_raw at inode
         // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        let _ = unsafe { Arc::from_raw(ptr as *const DevfsEntry) };
+        let _ = crate::fs::edges::arc_take(ptr as *const DevfsEntry);
     }
 }
 

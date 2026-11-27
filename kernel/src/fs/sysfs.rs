@@ -1948,7 +1948,7 @@ fn sysfs_mount_cb(
 fn sysfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         // SAFETY: the Box the mount callback stored (unmount path).
-        drop(unsafe { alloc::boxed::Box::from_raw(sb as *mut SysfsSuperBlock) });
+        drop(crate::fs::edges::box_take(sb as *mut SysfsSuperBlock));
     }
 }
 
@@ -2322,7 +2322,7 @@ fn sysfs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
         // SAFETY: the Box was leaked by into_raw at inode creation
         // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut SysfsEntryData) });
+        drop(crate::fs::edges::box_take(ptr as *mut SysfsEntryData));
     }
 }
 

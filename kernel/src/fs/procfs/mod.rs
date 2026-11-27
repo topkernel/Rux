@@ -1230,7 +1230,7 @@ fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext<'_>) -> Result<*m
 fn procfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         // SAFETY: the Box the mount callback stored (unmount path).
-        let _ = unsafe { alloc::boxed::Box::from_raw(sb as *mut ProcFSSuperBlock) };
+        let _ = crate::fs::edges::box_take(sb as *mut ProcFSSuperBlock);
     }
 }
 

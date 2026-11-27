@@ -102,7 +102,7 @@ pub fn free_pidfd_data(data: *mut PidFdData) {
     }
     // SAFETY: the box was created by make_pidfd_data and is owned by the
     // caller (the file's private_data slot, single-owner).
-    let boxed = unsafe { alloc::boxed::Box::from_raw(data) };
+    let boxed = crate::fs::edges::box_take(data);
     Task::task_put(boxed.task);
 }
 

@@ -1358,7 +1358,7 @@ fn tmpfs_destroy_inode(inode: &mut Inode) {
         // Reclaim the leaked Arc reference (idempotent via Option::take).
         // SAFETY: private_data holds an Arc leaked by into_raw at inode
         // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        let _ = unsafe { Arc::from_raw(ptr as *const TmpfsNode) };
+        let _ = crate::fs::edges::arc_take(ptr as *const TmpfsNode);
     }
 }
 

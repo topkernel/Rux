@@ -668,7 +668,7 @@ impl BlockCache {
             }
             // SAFETY: victim is unhashed + unlinked + unpinnable; the
             // Box::into_raw from insertion is reclaimed exactly once.
-            let _ = unsafe { Box::from_raw(victim) };
+            let _ = crate::fs::edges::box_take(victim);
         }
         self.count.fetch_sub(1, Ordering::Release);
         true
@@ -969,7 +969,7 @@ impl BlockCache {
                         Self::move_to_lru_head(&mut lru, cp);
                         // SAFETY: entry_ptr was created by Box::into_raw
                         // above; never published, dropped on the dup path.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::edges::box_take(entry_ptr);
                         return Some(ce.bh);
                     }
                     current = ce.hash_next;
@@ -1117,7 +1117,7 @@ impl BlockCache {
                         }
                         ce.bh().unwrap().get();
                         // SAFETY: our never-published entry, dropped.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::edges::box_take(entry_ptr);
                         return Some(ce.bh);
                     }
                     current = ce.hash_next;
@@ -1334,7 +1334,7 @@ impl BlockCache {
                         // skips evicting entries).
                         // SAFETY: unhashed + evicting-marked + LRU-
                         // unlinked; the Box::into_raw reclaim.
-                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        let _ = crate::fs::edges::box_take(entry_ptr);
                         self.count.fetch_sub(1, Ordering::Release);
                     } else {
                         // Pinned: keep the buffer for its holder, but
@@ -1784,7 +1784,7 @@ pub fn bread_async(
                 } else {
                     // SAFETY: entry_ptr was created by Box::into_raw above;
                     // our I/O has finished and the entry was never published.
-                    let _ = unsafe { Box::from_raw(entry_ptr) };
+                    let _ = crate::fs::edges::box_take(entry_ptr);
                 }
                 // SAFETY: existing_bh was pinned in the dup walk above.
                 let settle = wait_buffer_io_done(existing_bh);

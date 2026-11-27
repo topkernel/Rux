@@ -841,7 +841,7 @@ impl PageCache {
                 // caller via an increment + from_raw pair.
                 unsafe { Arc::increment_strong_count(ptr) };
                 self.slots[slot].0.store(ptr, Ordering::Release);
-                return Some(unsafe { Arc::from_raw(ptr) });
+                return Some(crate::fs::edges::arc_take(ptr));
             }
             if p as usize == PC_TOMBSTONE_BITS {
                 if first_tomb.is_none() {
@@ -854,7 +854,7 @@ impl PageCache {
                 // SAFETY: the slot keeps its reference; ours is a new
                 // owning claim established while wlock blocks removal.
                 unsafe { Arc::increment_strong_count(p) };
-                return Some(unsafe { Arc::from_raw(p) });
+                return Some(crate::fs::edges::arc_take(p));
             }
         }
         PC_TABLE_FULL.fetch_add(1, Ordering::Relaxed);
@@ -3745,7 +3745,7 @@ impl PageCache {
                                                     // SAFETY: the slot's
                                                     // reference is handed over
                                                     // here (see remove_entry).
-                                                    *slot = Some(unsafe { Arc::from_raw(ptr) });
+                                                    *slot = Some(crate::fs::edges::arc_take(ptr));
                                                 }
                                             }
                                             Victim::Evict
@@ -3853,7 +3853,7 @@ impl PageCache {
                         .store(PC_TOMBSTONE_BITS as *mut InodePageCache, Ordering::Release);
                     if let Some(slot) = parked.iter_mut().find(|p| p.is_none()) {
                         // SAFETY: the slot's reference is handed over here.
-                        *slot = Some(unsafe { Arc::from_raw(ptr) });
+                        *slot = Some(crate::fs::edges::arc_take(ptr));
                     }
                 }
                 drop(g);

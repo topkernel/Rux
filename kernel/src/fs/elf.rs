@@ -12,6 +12,7 @@
 //! - Executable files (ET_EXEC)
 //! - Dynamic linker support (future)
 
+#![forbid(unsafe_code)]
 use core::mem::size_of;
 use core::ptr;
 extern crate alloc;
@@ -635,21 +636,7 @@ impl ElfLoader {
         // the caller's address-space setup mapped for this PT_LOAD (the
         // exec path maps before loading); the file span was bounds-checked
         // above.
-        unsafe {
-            // Copy segment data to memory
-            if filesz > 0 {
-                let src = data.as_ptr().add(offset);
-                let dst = vaddr as *mut u8;
-                core::ptr::copy_nonoverlapping(src, dst, filesz);
-            }
-
-            // Zero BSS segment (p_memsz > p_filesz portion)
-            if memsz > filesz {
-                let bss_start = vaddr.checked_add(filesz as u64).ok_or(ElfError::InvalidSegment)?;
-                let bss_size = memsz - filesz;
-                core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
-            }
-        }
+        crate::fs::edges::load_segment_fill(vaddr, data, offset, filesz, memsz)?;
 
         Ok(())
     }

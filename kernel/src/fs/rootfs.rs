@@ -15,6 +15,7 @@
 //! - Does not support block devices
 //! - Does not require disk
 
+#![forbid(unsafe_code)]
 use crate::errno;
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
 use crate::fs::mount::VfsMount;
@@ -322,7 +323,7 @@ impl RootFSNode {
     pub fn name(&self) -> &[u8] {
         // SAFETY: Name is only mutated via set_name(), which requires exclusive
         // access (parent's children lock held). Reads are safe under that invariant.
-        unsafe { &*self.name.get() }
+        crate::fs::edges::cell_ref::<Vec<u8>>(&self.name)
     }
 
     /// Create directory node
@@ -385,7 +386,7 @@ impl RootFSNode {
     /// directory's children lock). No other thread may read the name field.
     pub fn set_name(&self, new_name: Vec<u8>) {
         // SAFETY: Caller guarantees exclusive access (parent lock held).
-        unsafe { *self.name.get() = new_name; }
+        crate::fs::edges::cell_assign(&self.name, new_name);
     }
 
     /// Rename child node
@@ -1273,9 +1274,7 @@ pub fn init_rootfs() -> Result<(), i32> {
 
     // Set mount point ID to 1 (root mount point)
     // SAFETY: global pointer is valid once initialized during init
-    unsafe {
-        (*mount_ptr).mnt_id = 1;
-    }
+    crate::fs::edges::raw_mut(mount_ptr).mnt_id = 1;
 
     // Create essential directories on rootfs (fallback when ext4 is unavailable)
     // INV-FS-GLOBALSB-1: rootfs_sb_ptr was installed at mount init.
@@ -1893,7 +1892,7 @@ fn rootfs_destroy_inode(inode: &mut Inode) {
         // decrementing the RootFSNode's reference count.
         // SAFETY: private_data holds an Arc leaked by into_raw at inode
         // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        let _ = unsafe { alloc::sync::Arc::from_raw(ptr as *const RootFSNode) };
+        let _ = crate::fs::edges::arc_take(ptr as *const RootFSNode);
     }
 }
 

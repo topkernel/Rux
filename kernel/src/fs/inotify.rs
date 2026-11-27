@@ -506,7 +506,7 @@ fn instance_of(file: &File) -> Option<Arc<InotifyInstance>> {    let ops = file.
     // Arc::into_raw and stays valid while the File exists; the recovered
     // Arc reference is cloned and re-forgotten, never dropped.
     let ptr = unsafe { *file.private_data.get() }?;
-    let arc = unsafe { Arc::from_raw(ptr as *const InotifyInstance) };
+    let arc = crate::fs::edges::arc_take(ptr as *const InotifyInstance);
     let cloned = Arc::clone(&arc);
     core::mem::forget(arc);
     Some(cloned)
@@ -766,7 +766,7 @@ fn inotify_close(file: &File) -> i32 {
     // exactly once (close runs once, at last reference).
     let ptr = unsafe { file.private_data.get().replace(None) };
     if let Some(ptr) = ptr {
-        let instance = unsafe { Arc::from_raw(ptr as *const InotifyInstance) };
+        let instance = crate::fs::edges::arc_take(ptr as *const InotifyInstance);
         // Watches die with the fd: drop every registry entry of this
         // instance (retain matches on Arc identity — no inner lock
         // needed, so no registry -> inner nesting here).

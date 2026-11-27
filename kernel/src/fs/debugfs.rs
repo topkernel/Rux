@@ -477,7 +477,7 @@ fn debugfs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
         // SAFETY: the Box was leaked by into_raw at inode creation
         // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { Box::from_raw(ptr as *mut DebugFsEntryData) });
+        drop(crate::fs::edges::box_take(ptr as *mut DebugFsEntryData));
     }
 }
 

@@ -297,7 +297,7 @@ unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
                 Ordering::Relaxed,
             )
         } {
-            Ok(_) => return Some(unsafe { Arc::from_raw(p) }),
+            Ok(_) => return Some(crate::fs::edges::arc_take(p)),
             Err(c) => cur = c,
         }
     }
@@ -1437,7 +1437,7 @@ impl FdTable {
                 entry.next_fd = fd;
             }
             entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
-            Some(unsafe { Arc::from_raw(p) })
+            Some(crate::fs::edges::arc_take(p))
         };
         if let Some(file) = removed {
             // Complete the close decisions and park the allocation for
@@ -1482,7 +1482,7 @@ impl FdTable {
                 entry.next_fd = fd;
             }
             entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
-            Some(unsafe { Arc::from_raw(p) })
+            Some(crate::fs::edges::arc_take(p))
         };
         match removed {
             Some(file) => {
@@ -1570,7 +1570,7 @@ impl FdTable {
             // so the table's reference keeps it alive through our own
             // clone (the dup'd descriptor's reference).
             unsafe { Arc::increment_strong_count(src) };
-            let dup_arc = unsafe { Arc::from_raw(src) };
+            let dup_arc = crate::fs::edges::arc_take(src);
             // SAFETY: the swap takes the previous occupant's reference out
             // atomically (single-word, no torn window for readers).
             let prev = self.slots[newfd].0.swap(Arc::into_raw(dup_arc) as *mut File, Ordering::Release);
@@ -1581,7 +1581,7 @@ impl FdTable {
             entry.open_bits[newfd / 64] |= 1u64 << (newfd % 64);
             entry.count = entry.count.saturating_sub(if prev.is_null() { 0 } else { 1 });
             entry.count += 1;
-            if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
+            if prev.is_null() { None } else { Some(crate::fs::edges::arc_take(prev)) }
         };
 
         // Run the displaced file's close decision in the retire reaper, outside
@@ -1662,7 +1662,7 @@ impl Drop for FdTable {
                 let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Relaxed);
                 if !p.is_null() {
                     entry.count = entry.count.saturating_sub(1);
-                    to_close.push(unsafe { Arc::from_raw(p) });
+                    to_close.push(crate::fs::edges::arc_take(p));
                 }
             }
         }

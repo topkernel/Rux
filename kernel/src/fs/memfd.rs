@@ -210,7 +210,7 @@ fn memfd_destroy_inode(inode: &mut Inode) {
         // owned by this inode; the last Arc<Inode> is dropping now.
         // SAFETY: private_data holds the Box leaked by into_raw at inode
         // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
-        drop(unsafe { alloc::boxed::Box::from_raw(p as *mut MemfdState) });
+        drop(crate::fs::edges::box_take(p as *mut MemfdState));
     }
 }
 

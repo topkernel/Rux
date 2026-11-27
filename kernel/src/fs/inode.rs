@@ -15,6 +15,7 @@
 // anonymous device numbers live in a locked map (stat_dev_for_fs
 // rows); update_cached_mode's volatile store is the advisory-field
 // discipline (same shape as INV-EXT4-ATIME).)
+#![forbid(unsafe_code)]
 use alloc::sync::Arc;
 use crate::errno::Errno;
 use crate::sync::spinlock::Spinlock;
@@ -607,7 +608,7 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
     if !p.is_null() {
         // SAFETY: snapshots are immutable once published; the pointer is
         // only ever replaced (never freed), so this reference stays valid.
-        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
+        if let Some(&d) = crate::fs::edges::raw_ref(p).0.get(&fs_id) {
             return d;
         }
     }
@@ -616,7 +617,7 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
     let p = ANON_DEV_MAP.load(Ordering::Acquire);
     if !p.is_null() {
         // SAFETY: see above.
-        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
+        if let Some(&d) = crate::fs::edges::raw_ref(p).0.get(&fs_id) {
             return d;
         }
     }
@@ -624,7 +625,7 @@ pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
     let mut next = alloc::collections::BTreeMap::new();
     if !p.is_null() {
         // SAFETY: see above; clone under the write lock.
-        next.clone_from(unsafe { &(*p).0 });
+        next.clone_from(&crate::fs::edges::raw_ref(p).0);
     }
     next.insert(fs_id, dev);
     let fresh = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(AnonDevMap(next)));
@@ -786,7 +787,7 @@ impl Inode {
         // SAFETY: self is a live shared Inode; the store is aligned and
         // u32-sized (see comment) — concurrent readers observe either the
         // old or the new full word.
-        unsafe { ptr.write_volatile(mode); }
+        crate::fs::edges::volatile_write(ptr, mode);
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     }
 

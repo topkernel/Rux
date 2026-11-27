@@ -3140,7 +3140,7 @@ fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
         // ptr was created by Box::into_raw(Box::new(ext4_inode.clone()))
         // SAFETY: sb holds the Box leaked by into_raw in create_vfs_inode
         // (INV-EXT4-SBRES-1); this Drop is the single reclaim.
-        let _ = unsafe { alloc::boxed::Box::from_raw(ptr as *mut inode::Ext4Inode) };
+        let _ = crate::fs::edges::box_take(ptr as *mut inode::Ext4Inode);
         inode.sb = None;
     }
     if let Ok(fs) = get_ext4_fs_from_inode(inode) {

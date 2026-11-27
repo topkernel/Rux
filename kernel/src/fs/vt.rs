@@ -194,7 +194,7 @@ fn vtdev_close(file: &crate::fs::file::File) -> i32 {
         Some(p) => p,
         None => return 0,
     };
-    let devno = unsafe { alloc::boxed::Box::from_raw(ptr as *mut crate::fs::dev_t::DevNo) };
+    let devno = crate::fs::edges::box_take(ptr as *mut crate::fs::dev_t::DevNo);
     vt_closed(&devno);
     unsafe { *file.private_data.get() = None };
     0
