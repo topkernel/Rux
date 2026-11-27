@@ -43,11 +43,6 @@
 //!   external gdb session can arm watchpoints — an action taken on
 //!   the machine, not an observation of it. They arm the `rux:scribble`
 //!   detection engine as a side effect.
-//! - ACTIVE DETECTOR (`wildwatch`): its detection mechanism IS state
-//!   mutation — arming write-protects kernel page-table regions and
-//!   sets CR0.WP. The #PF hit dump rides the existing kernel fault
-//!   printer; arming must stay a boot-time switch.
-//!
 //! Per the observability policy the table must not grow — new
 //! observability goes through tracepoints.
 
@@ -75,7 +70,6 @@ macro_rules! dfx_switch_table {
             ScribblePark => "scribblepark",
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
-            WildWatch => "wildwatch",
         }
     };
 }
@@ -123,22 +117,9 @@ pub enum DfxSwitch {
     /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
     /// `rux:scribble` as a side effect.
     ScribbleSweep,
-    /// Wild-write attribution tripwire (wildwrite-hunt line): the hpet
-    /// quiet-statics guard cluster (plus its canary page) goes READ-ONLY
-    /// in the kernel page tables after init, in every alias (kernel-half
-    /// link VAs, linear map, low identity). The b77/wt1 wild-write
-    /// engine's smash then page-faults AT THE WRITER — the existing
-    /// kernel-#PF printer hands over rip + rbp walk + KERNPANIC dump.
-    /// The canary page is also checksum-verified from the timer cadence
-    /// (DMA-class writers bypass PTEs). One arming print per boot; zero
-    /// traffic until a hit. See debug/wildwatch.rs. PERMANENT SWITCH
-    /// (dfx-migrate round 5): the detection mechanism itself mutates
-    /// kernel state (PTE write-bits + CR0.WP), so arming cannot be a
-    /// runtime-safe trace-event enable.
-    WildWatch,
 }
 
-const SWITCH_COUNT: usize = 6;
+const SWITCH_COUNT: usize = 5;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -176,7 +157,7 @@ impl DfxSwitch {
             // 4 dead tokens thpark/syncguard/syncwatch/pctlmon whose
             // probe bodies no longer exist) left the table, so the six
             // permanent switches (injection + gdb-park + the PTE-mutating
-            // wildwatch) compact to 0..5 in table order. Cmdline lookup
+            // detector) compacted to 0..4 in table order. Cmdline lookup
             // is by name, so the shift is invisible to users; indices
             // only key the SWITCHES array.
             DfxSwitch::ClaimInject => 0,
@@ -184,7 +165,6 @@ impl DfxSwitch {
             DfxSwitch::ScribblePark => 2,
             DfxSwitch::ScribblePid1 => 3,
             DfxSwitch::ScribbleSweep => 4,
-            DfxSwitch::WildWatch => 5,
         }
     }
 

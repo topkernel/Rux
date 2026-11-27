@@ -79,7 +79,6 @@ STATUS = {
     "kernel/src/debug/syscost.rs": ("part", "per-syscall cost table"),
     "kernel/src/debug/taint.rs": ("done", "the reference kernel taint letters"),
     "kernel/src/debug/taskdump.rs": ("part", "task dump format"),
-    "kernel/src/debug/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),
     "kernel/src/drivers/drm/mod.rs": ("fixed", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated; r3b: gem_close re-read — BUG FIXED: shared-object GEM_CLOSE returned -EINVAL (None conflated keep-with-not-found; reference close never fails because another file shares the OBJECT) — outcome split, drop still outside the state lock (2b2a4a52)"),

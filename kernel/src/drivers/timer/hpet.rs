@@ -55,29 +55,24 @@ const CFG_ENABLE: u32 = 1;
 
 /// MMIO base (identity-mapped VA) once initialized; 0 = not present.
 static BASE: AtomicU64 = AtomicU64::new(0);
-/// wildwrite-hunt guard cluster: the QUIET-after-init timekeeper
-/// statics live in a page-exclusive 2-page region (page 0 = canary
-/// fill, page 1 = the members) so rux:wildwatch (retired dfx=wildwatch) can clear RW on their
-/// PTEs after init — a wild store then page-faults at the writer's RIP
-/// instead of silently landing (b77/wt1 smashed BASE/BASE_LOCKED here;
-/// read-side healing survives, attribution did not exist). The hot
-/// per-read statics (BASE ready flag, LAST_GOOD) stay OUTSIDE the
-/// cluster: they are legitimately written on every clock read.
+/// Redundant-encoded timekeeper statics (the b77/wt1 wild-write
+/// defense): each value is stored beside its bitwise complement, and
+/// every read cross-checks the pair — a wild store corrupts the
+/// invariant and the read path heals from the copy instead of
+/// dereferencing a smashed address. The hot per-read statics (BASE
+/// ready flag, LAST_GOOD) stay OUTSIDE the cluster: they are
+/// legitimately written on every clock read.
 #[repr(C, align(4096))]
 struct WildGuardCluster {
-    /// Pattern-filled by wildwatch::arm, verified from the timer cadence
-    /// (catches PTE-invisible, DMA-class writers). No legitimate access.
-    canary: [u64; 512],
     base_locked: AtomicU64,
     base_locked_inv: AtomicU64,
     div: AtomicU64,
     div_inv: AtomicU64,
     boot_offset: AtomicU64,
     boot_offset_inv: AtomicU64,
-    _pad: [u64; 512 - 6],
+    _pad: [u64; 506],
 }
 static GUARD: WildGuardCluster = WildGuardCluster {
-    canary: [0; 512],
     base_locked: AtomicU64::new(0),
     base_locked_inv: AtomicU64::new(u64::MAX),
     div: AtomicU64::new(0),
@@ -86,12 +81,6 @@ static GUARD: WildGuardCluster = WildGuardCluster {
     boot_offset_inv: AtomicU64::new(u64::MAX),
     _pad: [0; 512 - 6],
 };
-
-/// The guard cluster's VA range (for wildwatch arming/registration).
-pub fn wild_guard_range() -> (usize, usize) {
-    let s = &GUARD as *const WildGuardCluster as usize;
-    (s, core::mem::size_of::<WildGuardCluster>())
-}
 
 /// The value BASE held at successful init. The HPET is a FIXED MMIO
 /// block — this value can never legitimately change after init. b77
@@ -212,32 +201,12 @@ fn validated_read_base() -> usize {
         fallback as u64
     };
     heal_report(b"hpet: clock base healed ", locked, good);
-    // wildwatch: the guard cluster is RO while the tripwire is armed.
-    // Under RO the pair cannot have been scribbled through any
-    // PTE-visible path, so this branch means a PTE-invisible writer
-    // (see WILDWATCH-CANARY) — re-writing the pair would fault on the
-    // RO page and masquerade as the wild writer. Skip the stores; the
-    // fast path re-validates every read and the fallback above already
-    // returns a good address.
-    if !guard_armed() {
-        BASE_LOCKED().store(good, Ordering::Release);
-        BASE_LOCKED_INV().store(!good, Ordering::Release);
-    }
+    BASE_LOCKED().store(good, Ordering::Release);
+    BASE_LOCKED_INV().store(!good, Ordering::Release);
     BASE.store(good, Ordering::Release);
     good as usize
 }
 
-/// True while rux:wildwatch (retired dfx=wildwatch) holds the guard cluster read-only.
-fn guard_armed() -> bool {
-    #[cfg(feature = "x86_64")]
-    {
-        crate::debug::wildwatch::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
-    }
-    #[cfg(not(feature = "x86_64"))]
-    {
-        false
-    }
-}
 
 /// True once the HPET is the active timekeeper.
 #[inline]
@@ -318,11 +287,8 @@ pub fn read_time_nominal() -> u64 {
             // domain, and this kernel targets QEMU q35/virt).
             const QEMU_DIV: u64 = 10; // 100 MHz HPET / 10 MHz nominal
             heal_report(b"hpet: clock div healed ", d, QEMU_DIV);
-            if !guard_armed() {
-                // (see validated_read_base: no stores onto the RO guard)
-                DIV().store(QEMU_DIV, Ordering::Release);
-                DIV_INV().store(!QEMU_DIV, Ordering::Release);
-            }
+            DIV().store(QEMU_DIV, Ordering::Release);
+            DIV_INV().store(!QEMU_DIV, Ordering::Release);
             QEMU_DIV
         }
     };
@@ -337,9 +303,7 @@ pub fn read_time_nominal() -> u64 {
             // early-boot offset; the monotonic clamp below catches any
             // residual poison anyway). Heal the pair.
             heal_report(b"hpet: clock offset healed ", oinv, o);
-            if !guard_armed() {
-                BOOT_OFFSET_INV().store(!o, Ordering::Release);
-            }
+            BOOT_OFFSET_INV().store(!o, Ordering::Release);
             o
         }
     };

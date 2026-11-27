@@ -932,7 +932,7 @@ pub fn timer_softirq_handler(_nr: usize) {
 /// reference's hrtimer_interrupt shape. Called at the TOP of the timer
 /// IRQ (before the tick body) whenever a high-resolution deadline is
 /// due: the precise-sleep wake then happens before the per-tick
-/// accounting/scheduler_tick/scribble/softlockup body instead of after
+/// accounting/scheduler_tick/softlockup body instead of after
 /// it — measured 30-70 us of body between the LAPIC fire and the wake
 /// on the debug kernel (run/RT-2X.md). Delivery context is the same
 /// no-sleep contract as the softirq sweep (R12-3: tokens delivered
@@ -1139,14 +1139,6 @@ fn softirq_diagnostics(current: u64) {
         crate::debug::monowatch::tick(current);
     }
 
-    // rux:wildwatch (retired dfx=wildwatch): canary re-verify on a 1 s cadence (DMA-class
-    // writers bypass PTEs; the RO trap cannot see them).
-    if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::WildWatch)
-        && current.saturating_sub(LAST_WILDWATCH_VERIFY.load(Ordering::Relaxed)) >= 100
-    {
-        LAST_WILDWATCH_VERIFY.store(current, Ordering::Relaxed);
-        crate::debug::wildwatch::verify();
-    }
 
     // rux:metawatch (retired dfx=metawatch): buddy-meta shadow audit on a 10 s cadence (the
     // buddy face of the wild writer — see debug/metawatch.rs). Throttle
@@ -1334,8 +1326,6 @@ static LAST_PHANTOM_RELINK: core::sync::atomic::AtomicU64 = core::sync::atomic::
 
 /// Jiffies of the last reaper zombie-linger scan (rux:schedtrace (retired dfx=schedtrace)).
 
-/// Jiffies of the last wildwatch canary verify (rux:wildwatch (retired dfx=wildwatch)).
-static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ==================== Wakewatch forensics (vsync-starvation hunt) ====
 //

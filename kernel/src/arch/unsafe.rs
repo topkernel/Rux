@@ -10535,7 +10535,7 @@ pub mod x86_64 {
             // see cpu::enable_write_protect). Everything reachable here is
             // mapped RW, so arming WP this early is inert for boot itself; it
             // only starts biting once RO mappings appear (user COW pages,
-            // wildwatch guards). CR0 survives the later CR3 switch.
+            // guards). CR0 survives the later CR3 switch.
             crate::arch::cpu::enable_write_protect();
 
             let mbi: &MultibootInfo = unsafe {
@@ -11901,7 +11901,7 @@ pub mod x86_64 {
         /// linear map, and device windows are all mapped P|RW — WP only ever
         /// bites user-side COW/RO pages (the trap path resolves those: see
         /// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
-        /// kernel statics (rux:wildwatch (retired dfx=wildwatch)).
+        /// kernel statics.
         pub fn enable_write_protect()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
             // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
@@ -17859,21 +17859,6 @@ pub mod x86_64 {
                         regs.rip,
                         crate::sched::get_current_pid()
                     );
-                    // rux:wildwatch (retired dfx=wildwatch) (wildwrite-hunt): a write fault inside a guarded
-                    // region IS the wild writer caught in the act — banner it so the
-                    // serial line is unmissable, then let the normal printer below
-                    // carry rip + the rbp walk into the KERNPANIC dump.
-                    #[cfg(feature = "x86_64")]
-                    if (access_type & FaultFlags::WRITE) != 0
-                        && crate::debug::wildwatch::is_armed(fault_addr.bits() as usize)
-                    {
-                        println!(
-                            "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
-                            fault_addr.bits(),
-                            regs.rip,
-                            crate::sched::get_current_pid()
-                        );
-                    }
                     // OH bring-up forensics: walk the frame-pointer chain so the
                     // faulting CALLER is visible (write_volatile-style leaf frames
                     // otherwise hide the driver that computed the bad address).

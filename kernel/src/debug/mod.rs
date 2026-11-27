@@ -76,10 +76,6 @@ pub mod scribble;
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.
 pub mod monowatch;
-/// Wild-write attribution tripwire (rux:wildwatch (retired dfx=wildwatch), x86_64): RO-guards
-/// the hpet quiet-statics cluster in every page-table alias; see
-/// debug/wildwatch.rs (wildwrite-hunt line).
-pub mod wildwatch;
 /// Buddy-meta shadow scan (rux:metawatch (retired dfx=metawatch)): periodic lock-confirmed
 /// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
 /// debug/metawatch.rs (wildwrite-hunt line).
@@ -134,9 +130,6 @@ pub fn init() {
     mmprof::ensure_dump_thread();
     // oops=panic seeds panic_on_oops (the sysctl can flip it later).
     oops::init_from_cmdline();
-    // Wild-write tripwire arms between the timekeeper's init and
-    // start_secondaries (no TLB shootdown needed; see wildwatch.rs).
-    wildwatch::arm();
     softlockup::init();
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.
