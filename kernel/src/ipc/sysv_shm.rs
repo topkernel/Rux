@@ -6,6 +6,7 @@
 //!
 //! Implements shmget, shmctl, shmat, shmdt following the Linux kernel design.
 
+#![forbid(unsafe_code)]
 use crate::arch::uaccess::{access_ok, clear_user, copy_to_user, put_user};
 use crate::arch::mm::map_user_page;
 use crate::arch::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
@@ -95,8 +96,9 @@ impl Drop for ShmPages {
             let freed_by_us = if page.is_null() {
                 true
             } else {
-                // SAFETY: descriptor exists for this in-RAM page.
-                unsafe { (*page).put_page() == 0 }
+                // descriptor exists for this in-RAM page (audited
+                // raw-ref edge performs the access).
+                crate::ipc::edges::raw_ref(page).put_page() == 0
             };
             if freed_by_us {
                 free_pages(*p, 0);
@@ -1031,33 +1033,16 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             }
             return -(errno::ENOMEM as i64);
         }
-        // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
-        // newly allocated VMA range; phys is a valid page from get_zeroed_page;
-        // root_ppn is the current process's page table root.
-        unsafe {
-            // R7-A5: map+refcount under the PTE lock (same discipline as
-            // the demand-fault paths).
-            crate::arch::mm::mm_ops::MM_CTX.store(1, core::sync::atomic::Ordering::Relaxed);
-        #[cfg(feature = "x86_64")]
-        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-        #[cfg(not(feature = "x86_64"))]
-        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
-            map_user_page(
-                root_ppn,
-                MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),
-                MmPhysAddr::new(phys as u64),
-                pte_flags,
-            );
-            // The new PTE references the segment page: take a
-            // per-attachment reference so shmdt/exit's put_page cannot free
-            // a page the segment still owns (review 2R.6). Segments free
-            // their pages only when every attachment is gone.
-            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(phys));
-            if !page.is_null() {
-                (*page).get_page();
-            }
-            drop(_pte_guard);
-        }
+        // INV-SHM-ATTACH-1 — attach_addr + i*PAGE_SIZE is page-aligned
+        // and within the newly allocated VMA range; phys is a valid page
+        // from get_zeroed_page; root_ppn is the current process's page
+        // table root (audited edge performs lock+map+refcount).
+        crate::ipc::edges::shm_map_page_take_ref(
+            root_ppn,
+            (attach_addr + i * PAGE_SIZE) as u64,
+            phys as u64,
+            pte_flags,
+        );
     }
 
     // Flush TLB after modifying page table entries for the mapping.

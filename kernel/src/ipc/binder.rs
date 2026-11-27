@@ -50,6 +50,7 @@
 //! down the mm before fds, so the region's last page reference is dropped
 //! by binder_close — the io_uring ring lifetime model.
 
+#![forbid(unsafe_code)]
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -453,11 +454,9 @@ impl TxnBlock {
         if !self.span_ok(abs, len) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — [abs, abs+len) is inside the
-        // exclusively-owned in-flight block (span_ok checked both the
-        // layout and the allocation bounds), and the slice aliases no
-        // other live reference: the TxnBlock is the sole window.
-        Some(unsafe { core::slice::from_raw_parts_mut(self.base.add(abs), len) })
+        // INV-BINDER-BLOCKVIEW — span_ok checked; sole window (the
+        // audited edge performs the view).
+        Some(crate::ipc::edges::block_window(self.base, abs, len))
     }
 
     /// Volatile-read one u32 at data-area offset `at`.
@@ -466,8 +465,8 @@ impl TxnBlock {
         if !self.span_ok(abs, 4) || !self.aligned(abs, 4) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + 4-alignment checked.
-        Some(unsafe { core::ptr::read_volatile((self.base.add(abs)) as *const u32) })
+        // INV-BINDER-BLOCKVIEW — span_ok + 4-alignment checked.
+        Some(crate::ipc::edges::block_read_u32(self.base, abs))
     }
 
     /// Volatile-write one u32 at data-area offset `at`.
@@ -476,8 +475,8 @@ impl TxnBlock {
         if !self.span_ok(abs, 4) || !self.aligned(abs, 4) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + 4-alignment checked.
-        unsafe { core::ptr::write_volatile((self.base.add(abs)) as *mut u32, v) };
+        // INV-BINDER-BLOCKVIEW — span_ok + 4-alignment checked.
+        crate::ipc::edges::block_write_u32(self.base, abs, v);
         Some(())
     }
 
@@ -491,10 +490,9 @@ impl TxnBlock {
         {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok (bounds) + native
-        // alignment checked; T is Copy so a by-value volatile read has
-        // no drop glue half-value hazard.
-        Some(unsafe { core::ptr::read_volatile((self.base.add(abs)) as *const T) })
+        // INV-BINDER-BLOCKVIEW — span_ok (bounds) + native alignment
+        // checked; T is Copy (no drop glue hazard on the volatile read).
+        Some(crate::ipc::edges::block_read_obj(self.base, abs))
     }
 
     /// Volatile-write one `Copy` POD back at data-area offset `at`.
@@ -505,9 +503,9 @@ impl TxnBlock {
         {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + native alignment
-        // checked; exclusive block ownership (see struct doc).
-        unsafe { core::ptr::write_volatile((self.base.add(abs)) as *mut T, v) };
+        // INV-BINDER-BLOCKVIEW — span_ok + native alignment checked;
+        // exclusive block ownership (see struct doc).
+        crate::ipc::edges::block_write_obj(self.base, abs, v);
         Some(())
     }
 
@@ -521,10 +519,9 @@ impl TxnBlock {
         {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + native alignment
-        // checked; no other reference into the block exists (struct
-        // doc); T is a plain repr(C) struct (any bit pattern valid).
-        Some(unsafe { &mut *(self.base.add(abs) as *mut T) })
+        // INV-BINDER-BLOCKVIEW — span_ok + native alignment checked;
+        // no other reference into the block exists (struct doc).
+        Some(crate::ipc::edges::block_ref_mut(self.base, abs))
     }
 
     /// Volatile-read the i-th entry of the offsets array (sender-
@@ -534,10 +531,8 @@ impl TxnBlock {
         if !self.span_ok(abs, 8) || !self.aligned(abs, 8) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok + 8-alignment checked.
-        Some(unsafe {
-            core::ptr::read_volatile((self.base.add(abs)) as *const u64) as usize
-        })
+        // INV-BINDER-BLOCKVIEW — span_ok + 8-alignment checked.
+        Some(crate::ipc::edges::block_read_u64(self.base, abs) as usize)
     }
 
     /// Write the secctx string (+ NUL) at extra-area offset `at`.
@@ -548,12 +543,9 @@ impl TxnBlock {
         if !self.span_ok(abs, total) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok checked; dst is inside
-        // the exclusively-owned block, src is a shared slice.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(abs), bytes.len());
-            core::ptr::write_volatile(self.base.add(abs + bytes.len()), 0u8);
-        }
+        // INV-BINDER-BLOCKVIEW — span_ok checked; dst inside the
+        // exclusive block, src a shared slice.
+        crate::ipc::edges::block_copy_bytes_nul(self.base, abs, bytes);
         Some(())
     }
 
@@ -564,8 +556,8 @@ impl TxnBlock {
         if !self.span_ok(abs, len) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — span_ok checked; sole window.
-        Some(unsafe { core::slice::from_raw_parts_mut(self.base.add(abs), len) })
+        // INV-BINDER-BLOCKVIEW — span_ok checked; sole window.
+        Some(crate::ipc::edges::block_window(self.base, abs, len))
     }
 
     /// Copy `len` bytes from user `src_user` into the extra (sg) area at
@@ -638,17 +630,7 @@ struct ParentWindow<'a> {
     len: usize,
 }
 
-/// INV-BINDER-STAGE-POD (unsafe-slim r3c): bytewise view of a `Copy`
-/// repr(C) struct for staging into the read buffer (BinderTransactionData
-/// payloads). One audited span replaces the inline from_raw_parts cast.
-#[inline]
-fn pod_bytes<T: Copy>(v: &T) -> &[u8] {
-    // SAFETY: T is Copy (no drop glue) and a plain POD payload struct;
-    // reading size_of::<T>() bytes through a valid &T reference is a
-    // view of the object's own representation. (Call sites assert the
-    // layout with `const _: () = assert!(size_of::<T>() == N)`.)
-    unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) }
-}
+use crate::ipc::edges::pod_bytes;
 
 impl ParentWindow<'_> {
     /// Volatile-read one u32 at window offset `at`.
@@ -657,9 +639,9 @@ impl ParentWindow<'_> {
         if !self.block.span_ok(a, 4) || !self.block.aligned(a, 4) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — the window was resolved against
-        // the extra-area bounds and this access re-checks both bounds.
-        Some(unsafe { core::ptr::read_volatile(self.block.base.add(a) as *const u32) })
+        // INV-BINDER-BLOCKVIEW — the window was resolved against the
+        // extra-area bounds and this access re-checks both bounds.
+        Some(crate::ipc::edges::block_read_u32(self.block.base, a))
     }
 
     /// Volatile-write one u32 at window offset `at`.
@@ -668,8 +650,8 @@ impl ParentWindow<'_> {
         if !self.block.span_ok(a, 4) || !self.block.aligned(a, 4) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — same contract as u32_at.
-        unsafe { core::ptr::write_volatile(self.block.base.add(a) as *mut u32, v) };
+        // INV-BINDER-BLOCKVIEW — same contract as u32_at.
+        crate::ipc::edges::block_write_u32(self.block.base, a, v);
         Some(())
     }
 
@@ -680,8 +662,8 @@ impl ParentWindow<'_> {
         if !self.block.span_ok(a, 8) || !self.block.aligned(a, 8) {
             return None;
         }
-        // SAFETY: INV-BINDER-BLOCKVIEW — same contract as u32_at.
-        unsafe { core::ptr::write_volatile(self.block.base.add(a) as *mut u64, v) };
+        // INV-BINDER-BLOCKVIEW — same contract as u32_at.
+        crate::ipc::edges::block_write_u64(self.block.base, a, v);
         Some(())
     }
 }
@@ -708,7 +690,7 @@ struct NodeState {
     async_todo: VecDeque<Arc<BinderTxn>>,
 }
 
-struct BinderNode {
+pub(super) struct BinderNode {
     id: u64,
     ptr: u64,
     cookie: u64,
@@ -760,8 +742,9 @@ impl BinderNode {
     /// proof that WORLD is held — NodeState is mutated only under WORLD.
     #[allow(clippy::mut_from_ref)]
     fn st(&self, _held: &World) -> &mut NodeState {
-        // SAFETY: WORLD held (token proof); single mutator at a time.
-        unsafe { &mut *self.st.get() }
+        // INV-BINDER-HELD — WORLD held (token proof); the audited edge
+        // performs the access.
+        crate::ipc::edges::cell_mut(&self.st)
     }
 }
 
@@ -835,7 +818,7 @@ pub(crate) struct BufBlock {
     pub(crate) reply_done: bool,
 }
 
-pub(crate) struct BinderAlloc {
+pub(super) struct BinderAlloc {
     pub(crate) kvirt: *mut u8,
     pub(crate) phys: usize,
     pub(crate) npages: usize,
@@ -1894,7 +1877,7 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     }
 }
 
-pub(crate) struct BinderTxn {
+pub(super) struct BinderTxn {
     id: u64,
     from_proc: Option<Arc<BinderProc>>,
     from_tid: Option<u32>,
@@ -2166,7 +2149,7 @@ struct ThreadState {
     live_bwr: Option<(u64, u64, u64, u32)>,
 }
 
-struct BinderThread {
+pub(super) struct BinderThread {
     tid: u32,
     /// Owning task's TGID (sc161 child-tgid routing): several appspawn
     /// children share ONE binder proc (the daemon's inherited fd), so the
@@ -2257,8 +2240,9 @@ impl BinderThread {
     /// INV-BINDER-HELD: token proof that WORLD is held (see BinderNode::st).
     #[allow(clippy::mut_from_ref)]
     fn st(&self, _held: &World) -> &mut ThreadState {
-        // SAFETY: WORLD held (token proof); single mutator at a time.
-        unsafe { &mut *self.st.get() }
+        // INV-BINDER-HELD — WORLD held (token proof); the audited edge
+        // performs the access.
+        crate::ipc::edges::cell_mut(&self.st)
     }
 
     /// Append one transition to the ring. INV-BINDER-HELD: token proof.
@@ -2319,8 +2303,9 @@ impl BinderProc {
     /// INV-BINDER-HELD: token proof that WORLD is held (see BinderNode::st).
     #[allow(clippy::mut_from_ref)]
     fn im(&self, _held: &World) -> &mut ProcInner {
-        // SAFETY: WORLD held (token proof); single mutator at a time.
-        unsafe { &mut *self.inner.get() }
+        // INV-BINDER-HELD — WORLD held (token proof); the audited edge
+        // performs the access.
+        crate::ipc::edges::cell_mut(&self.inner)
     }
 }
 
@@ -2447,19 +2432,10 @@ fn wait_for_context_manager(ctx: BinderCtx) {
     }
 }
 
-// SAFETY: binder state is shared across CPUs strictly under the WORLD
-// spinlock; the wait queues are internally synchronized; the kvirt raw
-// pointer is only dereferenced under WORLD while the mmap is alive.
-unsafe impl Send for BinderAlloc {}
-unsafe impl Sync for BinderAlloc {}
-unsafe impl Send for BinderNode {}
-unsafe impl Sync for BinderNode {}
-unsafe impl Send for BinderThread {}
-unsafe impl Sync for BinderThread {}
-unsafe impl Send for BinderTxn {}
-unsafe impl Sync for BinderTxn {}
-unsafe impl Send for BinderProc {}
-unsafe impl Sync for BinderProc {}
+// The five binder shared types' Send/Sync commitments moved to the
+// audited ipc edges file (ipc/unsafe.rs, 2026-11-27 consolidation),
+// SAFETY notes intact; the structs are pub(super) so the audited file
+// can name them.
 
 /// RT-R4 (WORLD per-caller attribution): world_lock's sections all
 /// charge to ONE REST_SITES row (binder.rs:2092) — the 6–8 ms max could
@@ -2615,10 +2591,11 @@ pub fn world_section_report() -> alloc::string::String {
             continue;
         }
         let mx = r.max.load(core::sync::atomic::Ordering::Relaxed);
-        // SAFETY: keys are &'static Location refs stored at open time
-        // (INV-BINDER-WORLDSEC: the table only ever holds those keys).
+        // INV-BINDER-WORLDSEC — the table only ever holds &'static
+        // Location keys stored at open time; the audited edge rebuilds
+        // the reference.
         let l: &'static core::panic::Location<'static> =
-            unsafe { &*(key as *const core::panic::Location<'static>) };
+            crate::ipc::edges::location_from_key(key as usize);
         for t in 0..rows.len() {
             if mx > rows[t].0 {
                 let mut j = rows.len() - 1;
@@ -2718,9 +2695,9 @@ fn pm<'a>(_held: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
             }
         }
     }
-    // SAFETY: WORLD held (token proof); single mutator at a time; the Arc
-    // pins the object.
-    unsafe { &mut *(ptr as *mut BinderProc) }
+    // INV-BINDER-HELD — WORLD held (token proof); single mutator at a
+    // time; the Arc pins the object (audited edge).
+    crate::ipc::edges::raw_mut(ptr as *mut BinderProc)
 }
 
 fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
@@ -3132,22 +3109,24 @@ fn node_is_dead(world: &World, node: &Arc<BinderNode>) -> bool {
 /// per-call-site derefs this file carried. The borrow is pinned by the
 /// fd owning the Arc (same contract as fs/pipe.rs's INV-PIPE-PRIV).
 fn proc_of_file(file: &crate::fs::File) -> Option<&'static BinderProc> {
-    // SAFETY: INV-BINDER-PRIV above.
-    let ptr = unsafe { *file.private_data.get() }? as *const BinderProc;
+    // INV-BINDER-PRIV above; the audited cell/raw edges perform both
+    // steps.
+    let ptr = crate::ipc::edges::cell_copy(&file.private_data)? as *const BinderProc;
     if ptr.is_null() {
         return None;
     }
-    Some(unsafe { &*ptr })
+    Some(crate::ipc::edges::raw_ref(ptr))
 }
 
 /// Owned twin of [`proc_of_file`]: ioctl paths hold the proc across
 /// sleeps, so they take a proper Arc clone instead of a borrow.
 fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
-    // SAFETY: INV-BINDER-PRIV — the pointer is Arc::into_raw(BinderProc)
-    // installed at open; ManuallyDrop never drops, so the count is
-    // unchanged and the clone below is a proper +1 the caller owns.
-    let raw = (unsafe { *file.private_data.get() })? as *const BinderProc;
-    let arc = core::mem::ManuallyDrop::new(unsafe { Arc::from_raw(raw) });
+    // INV-BINDER-PRIV — the pointer is Arc::into_raw(BinderProc)
+    // installed at open; the borrow edge (ManuallyDrop) never drops, so
+    // the count is unchanged and the clone below is a proper +1 the
+    // caller owns.
+    let raw = crate::ipc::edges::cell_copy(&file.private_data)? as *const BinderProc;
+    let arc = crate::ipc::edges::arc_borrow(raw);
     Some((*arc).clone())
 }
 
@@ -3234,14 +3213,15 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
     // INV-BINDER-PRIV close twin: take the single strong reference
     // stashed at open and clear the slot. The one audited take window.
     let proc = {
-        // SAFETY: INV-BINDER-PRIV — Arc::into_raw(BinderProc) from open;
-        // this is its single strong reference being reclaimed.
-        let raw = match unsafe { *file.private_data.get() } {
+        // INV-BINDER-PRIV — Arc::into_raw(BinderProc) from open; this
+        // is its single strong reference being reclaimed (audited
+        // take/cell edges).
+        let raw = match crate::ipc::edges::cell_copy(&file.private_data) {
             Some(p) => p as *const BinderProc,
             None => return 0,
         };
-        let proc = unsafe { Arc::from_raw(raw) };
-        unsafe { *file.private_data.get() = None };
+        let proc = crate::ipc::edges::arc_take(raw);
+        crate::ipc::edges::cell_set(&file.private_data, None);
         proc
     };
 
@@ -3933,9 +3913,9 @@ pub fn binder_mmap_handler(
         return Err(-12);
     }
     let size = (1usize << order) * PAGE_SIZE;
-    // SAFETY: fresh buddy allocation of 2^order contiguous pages.
+    // Fresh buddy allocation of 2^order contiguous pages.
     let kvirt = crate::arch::mm::phys_to_virt(PhysAddr::new(phys as u64)).bits() as *mut u8;
-    unsafe { core::ptr::write_bytes(kvirt, 0, size) };
+    crate::ipc::edges::mem_zero(kvirt, size);
 
     let mut vma_flags = VmaFlags::new();
     vma_flags.insert(VmaFlags::READ);
@@ -4081,10 +4061,9 @@ pub fn binder_mmap_handler(
         for i in 0..(size / PAGE_SIZE) {
             let va = vaddr + i * PAGE_SIZE;
             let pa = phys + i * PAGE_SIZE;
-            // SAFETY: root is the task's live page-table root; the walk is
-            // read-only and lock-protected.
-            if let Some((old_ppn, _bits)) =
-                unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64) }
+            // INV-BINDER-PROBE — root is the task's live page-table
+            // root; the walk is read-only and lock-protected.
+            if let Some((old_ppn, _bits)) = crate::ipc::edges::pt_walk(root, va as u64)
             {
                 // Demand-fault winner: free its exclusive anon page, then
                 // replace below. put_page→0 frees; refcount is 1 (fresh
@@ -4099,11 +4078,10 @@ pub fn binder_mmap_handler(
                 }
                 addr_space.sub_rss(1);
             }
-            // SAFETY: root is the task's page-table root; phys..phys+size is our
-            // fresh contiguous allocation, mapped page-aligned under the PTE lock.
-            unsafe {
-                map_page(root, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
-            }
+            // INV-BINDER-MMAP-1 — root is the task's page-table root;
+            // phys..phys+size is our fresh contiguous allocation, mapped
+            // page-aligned under the PTE lock the caller holds.
+            crate::ipc::edges::map_frame_take_ref(root, va as u64, pa as u64, pte_flags);
             // Mapping reference (io_uring discipline): munmap drops one,
             // binder_close drops the owner one, the last drop frees.
             if let Some(page) = crate::mm::page_desc(crate::mm::phys_to_pfn(pa)) {
@@ -4427,7 +4405,7 @@ pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task:
     // safe accessor reads it, the raw pointer is the queue identity.
     let tid = crate::sched::current()
         .map(|t| t.ns_pid_local())
-        .unwrap_or_else(|| unsafe { (*task).ns_pid_local() });
+        .unwrap_or_else(|| crate::process::edges::borrow_task(task).ns_pid_local());
     let w = world_lock();
     {
         let world = w.as_ref().unwrap();
@@ -4467,7 +4445,7 @@ pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::tas
     // task is the parking poller == current (poll core contract).
     let tid = crate::sched::current()
         .map(|t| t.ns_pid_local())
-        .unwrap_or_else(|| unsafe { (*task).ns_pid_local() });
+        .unwrap_or_else(|| crate::process::edges::borrow_task(task).ns_pid_local());
     let w = world_lock();
     {
         let world = w.as_ref().unwrap();
@@ -4600,142 +4578,14 @@ fn stall_thread_line(
 // until its last pin) returns zeros instead of touching the frame.
 // ============================================================================
 
-/// Diagnostic entry-frame read: (pc, syscall-no, a0, a1, a2).
-/// Zeros when `top == 0` (see the INV-BINDER-ENTRYFRAME header).
-#[inline]
-fn entry_frame(top: usize) -> (u64, u64, u64, u64, u64) {
-    if top == 0 {
-        return (0, 0, 0, 0, 0);
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
-        // SAFETY: diagnostic read of this task's own entry frame; the
-        // caller obtained `top` from kernel_stack_top_checked() (or the
-        // owns_kernel_stack() gate), so the frame pages are mapped.
-        unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi, (*regs).rdx) }
-    }
-    #[cfg(feature = "riscv64")]
-    {
-        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::riscv64::pt_regs::PtRegs;
-        // SAFETY: same contract as the x86_64 arm.
-        unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1, (*regs).a2) }
-    }
-    #[cfg(feature = "aarch64")]
-    {
-        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::aarch64::pt_regs::PtRegs;
-        // SAFETY: same contract as the x86_64 arm.
-        unsafe { ((*regs).pc, (*regs).syscallno, (*regs).regs[0], (*regs).regs[1], (*regs).regs[2]) }
-    }
-    #[cfg(not(any(feature = "x86_64", feature = "riscv64", feature = "aarch64")))]
-    (0, 0, 0, 0, 0)
-}
-
-/// Diagnostic entry-frame read of the user stack pointer + pc: (sp, pc).
-/// Zeros when `top == 0` (see the INV-BINDER-ENTRYFRAME header).
-#[inline]
-fn entry_frame_sp(top: usize) -> (u64, u64) {
-    if top == 0 {
-        return (0, 0);
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::x86_64::pt_regs::PtRegs;
-        // SAFETY: as entry_frame.
-        unsafe { ((*regs).rsp, (*regs).rip) }
-    }
-    #[cfg(feature = "riscv64")]
-    {
-        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::riscv64::pt_regs::PtRegs;
-        // SAFETY: as entry_frame.
-        unsafe { ((*regs).sp, (*regs).epc) }
-    }
-    #[cfg(feature = "aarch64")]
-    {
-        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
-            as *const crate::arch::aarch64::pt_regs::PtRegs;
-        // SAFETY: as entry_frame.
-        unsafe { ((*regs).sp, (*regs).pc) }
-    }
-    #[cfg(not(any(feature = "x86_64", feature = "riscv64", feature = "aarch64")))]
-    (0, 0)
-}
-
-/// Diagnostic leaf walk: (ppn, pte-bits) of the mapping at `va` in the
-/// target's live user page tables. INV-BINDER-PROBE: read-only, the one
-/// audited walk span all probes build on.
-#[inline]
-fn probe_leaf(root: u64, va: u64) -> Option<(u64, u64)> {
-    // SAFETY: read-only diagnostic walk of live user page tables.
-    unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) }
-}
-
-/// Diagnostic cross-address-space probe: walk the target's live user
-/// page tables and volatile-read one u32 from the mapped page. Returns
-/// None when the page is unmapped. INV-BINDER-PROBE: read-only and
-/// fault-free — the leaf is walked first and the read happens only
-/// through the walked, present mapping.
-#[inline]
-fn probe_u32(root: u64, addr: u64) -> Option<u32> {
-    probe_leaf(root, addr).map(|(ppn, _)| {
-        let pa = (ppn as usize) << 12;
-        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
-            as usize
-            + (addr as usize & 0xfff);
-        // SAFETY: the walked leaf maps this user word.
-        unsafe { core::ptr::read_volatile(kv as *const u32) }
-    })
-}
-
-/// u64 twin of [`probe_u32`] (INV-BINDER-PROBE).
-#[inline]
-fn probe_u64(root: u64, addr: u64) -> Option<u64> {
-    probe_leaf(root, addr).map(|(ppn, _)| {
-        let pa = (ppn as usize) << 12;
-        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
-            as usize
-            + (addr as usize & 0xfff);
-        // SAFETY: the walked leaf maps this user word.
-        unsafe { core::ptr::read_volatile(kv as *const u64) }
-    })
-}
-
-/// x86-only entry-frame triple the futex decode needs: (rbp, rsp, r10).
-/// INV-BINDER-ENTRYFRAME arm; zeros when `top == 0`.
+// The diagnostic read helpers (entry_frame / entry_frame_sp /
+// entry_frame_futex_x86 / probe_u32 / probe_u64 / stack_word and the
+// probe_leaf walk they build on) moved wholesale into the audited ipc
+// edges file (ipc/unsafe.rs) by the 2026-11-27 consolidation;
+// INV-BINDER-ENTRYFRAME / -PROBE / -STACKWIN contracts live there now.
+use crate::ipc::edges::{entry_frame, entry_frame_sp, probe_leaf, probe_u32, probe_u64, stack_word};
 #[cfg(feature = "x86_64")]
-#[inline]
-fn entry_frame_futex_x86(top: usize) -> (u64, u64, u64) {
-    if top == 0 {
-        return (0, 0, 0);
-    }
-    let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
-        as *const crate::arch::x86_64::pt_regs::PtRegs;
-    // SAFETY: diagnostic read of this task's own entry frame; the
-    // caller gated the stack via owns_kernel_stack/kernel_stack_top_checked.
-    unsafe { ((*regs).rbp, (*regs).rsp, (*regs).r10) }
-}
-
-/// Diagnostic kernel-stack word read: bounds-check `addr` inside the
-/// task's own kernel-stack window [base, top) and volatile-read one u64.
-/// INV-BINDER-STACKWIN: the only raw kernel-stack-window reads in this
-/// file's diagnostics. (The pre-conversion scans bounds-checked only the
-/// FIRST word and then walked up to 640 more — reads past `top` were
-/// never part of the documented "inside the task's own kernel-stack
-/// window" contract; the per-word check enforces it.)
-#[inline]
-fn stack_word(addr: usize, base: usize, top: usize) -> Option<u64> {
-    if addr < base || addr + 8 > top || addr & 7 != 0 {
-        return None;
-    }
-    // SAFETY: addr is inside the task's own kernel-stack window,
-    // 8-byte aligned, and the full word fits below `top`.
-    Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
-}
+use crate::ipc::edges::entry_frame_futex_x86;
 
 fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
     use core::fmt::Write;
@@ -6214,8 +6064,9 @@ pub fn txn_hang_audit() {
         if p.is_null() {
             return "?";
         }
-        // SAFETY: diagnostic comm read of a live task (INV above).
-        let c = unsafe { (*p).comm() };
+        // INV-BINDER-DIAG-COMM — diagnostic comm read of a live task
+        // (audited borrow edge).
+        let c = crate::process::edges::borrow_task(p).comm();
         core::str::from_utf8(&c[..])
             .unwrap_or("?")
             .trim_end_matches('\0')
@@ -6887,8 +6738,9 @@ pub fn bwr_park_audit() {
         if p.is_null() {
             return "?";
         }
-        // SAFETY: diagnostic comm read of a live task (INV above).
-        let c = unsafe { (*p).comm() };
+        // INV-BINDER-DIAG-COMM — diagnostic comm read of a live task
+        // (audited borrow edge).
+        let c = crate::process::edges::borrow_task(p).comm();
         core::str::from_utf8(&c[..])
             .unwrap_or("?")
             .trim_end_matches('\0')
@@ -8059,9 +7911,10 @@ fn user_task_park_stack_w(
     if task.is_null() {
         return;
     }
-    // SAFETY: non-null live task from the caller's pid lookup (contract
-    // named at the call sites); the fn is the park-stack capsule.
-    let tk = unsafe { &*task };
+    // INV-BINDER-DIAG-COMM — non-null live task from the caller's pid
+    // lookup (contract named at the call sites); the fn is the
+    // park-stack capsule (audited borrow edge).
+    let tk = crate::process::edges::borrow_task(task);
     let Some(aspace) = tk.address_space() else { return };
     let root = aspace.root_ppn();
     let read_u64_at = |va: u64| -> Option<u64> {
@@ -9455,10 +9308,10 @@ fn bc_corruption_snapshot(
             if crate::mm::pfn_valid(ppn as usize) {
                 let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(ppn << 12));
                 let base = kv.bits() as usize as *const u64;
-                // SAFETY: base points at the physical page behind the PTE
-                // just walked, inside the kernel direct map; 16 u64 words
-                // are within the page.
-                let words = unsafe { core::slice::from_raw_parts(base, 16) };
+                // INV-BINDER-PROBE — base points at the physical page
+                // behind the PTE just walked, inside the kernel direct
+                // map; 16 u64 words are within the page.
+                let words = crate::ipc::edges::slice_from_raw(base, 16);
                 crate::pr_debug!("BC-FORENSICS: page[{:#x}] first 128B ={:016x?}", ppn << 12, words);
             }
         }
@@ -13069,11 +12922,12 @@ impl PinnedTask {
         }
     }
     fn get(&self) -> &crate::process::task::Task {
-        // SAFETY: pinned at construction (task_refcnt held until Drop).
-        // Shared borrow only: the task may be mutated concurrently by its
-        // own CPU, so callers touch only internally-locked members here
-        // (the fdtable handles carry their own locks).
-        unsafe { &*self.ptr }
+        // INV-PROC-BORROW-1 hatch row — pinned at construction
+        // (task_refcnt held until Drop). Shared borrow only: the task
+        // may be mutated concurrently by its own CPU, so callers touch
+        // only internally-locked members (the audited borrow edge
+        // performs the borrow).
+        crate::process::edges::borrow_task(self.ptr)
     }
 }
 impl Drop for PinnedTask {

@@ -50,6 +50,7 @@
 //!
 //! LTP targets verified against: add_key01..04, keyctl01..03.
 
+#![forbid(unsafe_code)]
 use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, strncpy_from_user};
 use crate::process::task::Cred;
 use crate::sync::spinlock::Spinlock;
@@ -1416,9 +1417,9 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
             ];
             let n = (a2 as usize).min(caps.len());
             if a1 != 0 && n > 0 {
-                // SAFETY: n bytes to a user buffer via the
-                // exception-table path.
-                unsafe { copy_to_user(a1 as *mut u8, caps.as_ptr(), n) };
+                // INV-IPC-UACCESS-1 — n bytes to the access_ok-validated
+                // user buffer via the audited edge (exception-table path).
+                crate::ipc::edges::copy_to_user_bytes(a1 as *mut u8, caps.as_ptr(), n);
             }
             n as i64
         }

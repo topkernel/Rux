@@ -7,6 +7,7 @@
 //! Implements mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
 //! following the Linux kernel design. POSIX MQs are file descriptor-based.
 
+#![forbid(unsafe_code)]
 use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
@@ -1205,9 +1206,9 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
         return;
     }
     // task was null-checked above and is a valid pointer to the exiting
-    // task passed from do_exit.
-    // SAFETY: do_exit's raw task pointer, pinned for the cleanup call.
-    let pid = unsafe { (*task).pid() as u32 };
+    // task passed from do_exit (pinned for the cleanup call; the
+    // audited borrow edge performs the read).
+    let pid = crate::process::edges::borrow_task(task).pid() as u32;
 
     // Phase 1: Collect matching entries and clear them from the fd table.
     // We must release the fd table lock before touching the global table

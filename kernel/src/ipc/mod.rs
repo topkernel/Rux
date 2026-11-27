@@ -16,6 +16,14 @@
 //! - `keys` — Kernel key retention service (add_key, request_key, keyctl)
 
 pub mod util;
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): file named `unsafe.rs` per the mainline
+// naming decision, module named `edges` per the sibling convention
+// (fs/unsafe.rs, process/unsafe.rs, syscall/edges.rs, sync/edges.rs).
+// The #[path] keeps the FILE name the mainline gate requires while
+// call sites stay on the plain `edges` identifier.
+#[path = "unsafe.rs"]
+pub mod edges;
 pub mod sysv_sem;
 pub mod sysv_msg;
 pub mod sysv_shm;

@@ -6,6 +6,7 @@
 //!
 //! Implements msgget, msgctl, msgsnd, msgrcv following the Linux kernel design.
 
+#![forbid(unsafe_code)]
 use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
@@ -749,13 +750,13 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                         entry.inner.wq_send.remove(current as *mut _);
                     }
                 }
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::RUNNING,
-                        ),
-                    );
-                }
+                // `current` is sched::current()'s &mut Task — the deref
+                // is safe; no raw-pointer edge involved.
+                (*current).set_state(
+                    crate::process::task::TaskState::new(
+                        crate::process::task::TaskState::RUNNING,
+                    ),
+                );
                 crate::sched::dequeue_task(&*current);
                 return 0;
             }
@@ -870,22 +871,20 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         // MSG_COPY: non-destructive read — copy without removing
                         let msg = &messages[mi];
                         // Copy mtype (8 bytes)
-                        // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
-                        // put_user is the exception-table copy path.
-                        unsafe {
-                            let _ = put_user(msgp as *mut i64, msg.mtype);
-                        }
+                        // INV-IPC-UACCESS-1 — msgp was access_ok-validated
+                        // for msgsz+8 bytes above; the audited edge is the
+                        // exception-table copy path.
+                        let _ = crate::ipc::edges::put_user_val(msgp as *mut i64, msg.mtype);
                         // MSG_NOERROR truncates to msgsz like the normal read.
                         let msg_len = msg.data.len().min(msgsz);
-                        // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
-                        // msg_len <= msgsz, so the copy is within bounds.
-                        unsafe {
-                            copy_to_user(
-                                msgp.add(8),
-                                msg.data.as_ptr(),
-                                msg_len,
-                            );
-                        }
+                        // INV-IPC-UACCESS-1 — msgp+8 was access_ok-validated
+                        // for msgsz bytes above; msg_len <= msgsz, so the
+                        // copy is within bounds.
+                        crate::ipc::edges::copy_to_user_bytes(
+                            crate::ipc::edges::ptr_offset(msgp, 8) as *mut u8,
+                            msg.data.as_ptr(),
+                            msg_len,
+                        );
                         // Do NOT update stats, do NOT wake senders
                         return msg_len as i64;
                     }
@@ -982,13 +981,13 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         entry.inner.wq_recv.remove(current as *mut _);
                     }
                 }
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::RUNNING,
-                        ),
-                    );
-                }
+                // `current` is sched::current()'s &mut Task — the deref
+                // is safe; no raw-pointer edge involved.
+                (*current).set_state(
+                    crate::process::task::TaskState::new(
+                        crate::process::task::TaskState::RUNNING,
+                    ),
+                );
                 crate::sched::dequeue_task(&*current);
                 continue;
             }

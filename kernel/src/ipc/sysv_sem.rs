@@ -6,6 +6,7 @@
 //!
 //! Implements semget, semctl, semop, semtimedop following the Linux kernel design.
 
+#![forbid(unsafe_code)]
 use crate::arch::uaccess::{access_ok, copy_to_user, get_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
@@ -868,15 +869,14 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     // pre-filled owned local; copy_in_t's failure path zero-fills, so
     // the entries stay initialized).
     let sops: &[SemBuf] = if nsops <= MAX_SOPS_FAST {
-        // SAFETY: dst is the owned stack array of at least nsops
-        // entries; the byte-length matches nsops * size_of::<SemBuf>().
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(
-                sops_small.as_mut_ptr() as *mut u8,
-                sops_ptr as *const u8,
-                nsops * core::mem::size_of::<SemBuf>(),
-            )
-        } != 0
+        // INV-IPC-UACCESS-1 — dst is the owned stack array of at least
+        // nsops entries; the byte-length matches nsops *
+        // size_of::<SemBuf>() (audited edge, exception-table path).
+        if crate::ipc::edges::copy_from_user_bytes(
+            sops_small.as_mut_ptr() as *mut u8,
+            sops_ptr as *const u8,
+            nsops * core::mem::size_of::<SemBuf>(),
+        ) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -884,14 +884,13 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     } else {
         let mut big =
             alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
-        // SAFETY: big is an owned Vec of exactly nsops entries.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(
-                big.as_mut_ptr() as *mut u8,
-                sops_ptr as *const u8,
-                nsops * core::mem::size_of::<SemBuf>(),
-            )
-        } != 0
+        // INV-IPC-UACCESS-1 — big is an owned Vec of exactly nsops
+        // entries (audited edge, exception-table path).
+        if crate::ipc::edges::copy_from_user_bytes(
+            big.as_mut_ptr() as *mut u8,
+            sops_ptr as *const u8,
+            nsops * core::mem::size_of::<SemBuf>(),
+        ) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -1510,12 +1509,11 @@ pub fn sem_undo_exit(task: *mut crate::process::Task) {
 
     // Take the undo table (replaces with empty Vec)
     let entries: alloc::vec::Vec<super::util::SemUndoEntry>;
-    // SAFETY: task was null-checked above and is a valid pointer to the exiting
-    // task passed from do_exit; sem_undo lock is safe to acquire here.
-    unsafe {
-        let mut undo_table = (*task).sem_undo.lock();
-        entries = core::mem::take(&mut *undo_table);
-    }
+    // task was null-checked above and is a valid pointer to the exiting
+    // task passed from do_exit; sem_undo lock is safe to acquire here
+    // (audited borrow edge performs the read).
+    let mut undo_table = crate::process::edges::borrow_task(task).sem_undo.lock();
+    entries = core::mem::take(&mut *undo_table);
 
     // Reverse each adjustment
     for entry in entries {
