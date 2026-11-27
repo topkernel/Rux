@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -376,8 +377,8 @@ pub fn dx_find_entry(
     let root_bh = read_dir_logical_block(fs, dir, 0)?;
     let (hash, root_at, indirect_levels, root_eoff, root_count);
     {
-        // SAFETY: bh from bio::bread; read-only access below.
-        let data = unsafe { &(*root_bh).b_data };
+        // bh from bio::bread; read-only access below.
+        let data = crate::fs::edges::bh_data(root_bh);
         if data.len() < block_size {
             bio::brelse(root_bh);
             return None;
@@ -450,9 +451,9 @@ pub fn dx_find_entry(
         while level < indirect_levels {
             let (block, target_hash) = {
                 let fr = &frames[level];
-                // SAFETY: bh alive in the frame; read-only access.
+                // bh alive in the frame; read-only access.
                 (
-                    unsafe { entry_block(&(*fr.bh).b_data, fr.entries_off, fr.at) },
+                    entry_block(crate::fs::edges::bh_data(fr.bh), fr.entries_off, fr.at),
                     fr.hash,
                 )
             };
@@ -470,8 +471,8 @@ pub fn dx_find_entry(
                 return Some(Err(crate::errno::Errno::IOError.as_neg_i32()));
             };
             let parsed = {
-                // SAFETY: nbh just read; read-only access.
-                let data = unsafe { &(*nbh).b_data };
+                // nbh just read; read-only access.
+                let data = crate::fs::edges::bh_data(nbh);
                 if data.len() < block_size {
                     None
                 } else {
@@ -513,7 +514,7 @@ pub fn dx_find_entry(
             let top = &frames[frames.len() - 1];
             // SAFETY: bh alive in the frame; read-only access.
             (
-                unsafe { entry_block(&(*top.bh).b_data, top.entries_off, top.at) },
+                entry_block(crate::fs::edges::bh_data(top.bh), top.entries_off, top.at),
                 top.hash,
             )
         };
@@ -523,7 +524,7 @@ pub fn dx_find_entry(
         let mut found: Option<Ext4DirEntry> = None;
         {
             // SAFETY: lbh just read; read-only access.
-            let data = unsafe { &(*lbh).b_data };
+            let data = crate::fs::edges::bh_data(lbh);
             let mut offset = 0usize;
             while offset < block_size {
                 let entry = Ext4DirEntry::from_bytes(&data[offset..], block_size);
@@ -563,7 +564,7 @@ pub fn dx_find_entry(
         let bhash = {
             let fr = &frames[level];
             // SAFETY: bh alive in the frame; read-only access.
-            unsafe { entry_hash(&(*fr.bh).b_data, fr.entries_off, fr.at) }
+            entry_hash(crate::fs::edges::bh_data(fr.bh), fr.entries_off, fr.at)
         };
         // ext4_htree_next_block's stop rule: only for LSB-0 (even)
         // lookup hashes does the walk stop, and only when the next
@@ -582,7 +583,7 @@ pub fn dx_find_entry(
             let block = {
                 let fr = &frames[level];
                 // SAFETY: bh alive in the frame; read-only access.
-                unsafe { entry_block(&(*fr.bh).b_data, fr.entries_off, fr.at) }
+                entry_block(crate::fs::edges::bh_data(fr.bh), fr.entries_off, fr.at)
             };
             level += 1;
             let Some(nbh) = read_dir_logical_block(fs, dir, block as u64) else {
@@ -590,8 +591,8 @@ pub fn dx_find_entry(
                 return Some(Err(crate::errno::Errno::IOError.as_neg_i32()));
             };
             let parsed = {
-                // SAFETY: nbh just read; read-only access.
-                let data = unsafe { &(*nbh).b_data };
+                // nbh just read; read-only access.
+                let data = crate::fs::edges::bh_data(nbh);
                 parse_index_block(data, block_size, fs.metadata_csum)
                     .map(|(_, eoff, count, _)| (eoff, count))
             };

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -97,14 +98,14 @@ impl Ext4ExtentIdx {
 pub fn i_block_bytes(i_block: &[u32; 15]) -> &[u8] {
     // SAFETY: [u32; 15] and [u8; 60] are the same size and alignment
     // (4-byte aligned >= u8); the slice covers exactly the array.
-    unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) }
+    crate::fs::edges::struct_bytes(i_block)
 }
 
 /// Mutable twin of [`i_block_bytes`].
 #[inline]
 pub fn i_block_bytes_mut(i_block: &mut [u32; 15]) -> &mut [u8] {
     // SAFETY: as above; exclusive borrow.
-    unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) }
+    crate::fs::edges::struct_bytes_mut(i_block)
 }
 
 /// Mutable twin of [`get_extent_header`] (INV-EXT-VIEW: the single
@@ -336,10 +337,10 @@ fn find_run_in_external_extent(
     if depth > 5 {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    // SAFETY: bh is pinned by bread; b_data is a block-sized slice.
+    // bh is pinned by bread; b_data is a block-sized slice.
     let bh =         bio::bread(fs.device, block_num).ok_or(errno::Errno::IOError.as_neg_i32())?
     ;
-    let data = unsafe { &(*bh).b_data };
+    let data = crate::fs::edges::bh_data(bh);
     {
         let header = node_header(data);
         if header.eh_magic != EXT4_EXT_MAGIC || header.eh_entries > header.eh_max {
@@ -1388,8 +1389,8 @@ fn node_header(data: &[u8]) -> &Ext4ExtentHeader {
         data.len() >= core::mem::size_of::<Ext4ExtentHeader>(),
         "extent node buffer smaller than its header"
     );
-    // SAFETY: repr(C) on-disk layout; size asserted above.
-    unsafe { &*(data.as_ptr() as *const Ext4ExtentHeader) }
+    // repr(C) on-disk layout; size asserted above.
+    crate::fs::edges::raw_ref(data.as_ptr() as *const Ext4ExtentHeader)
 }
 
 fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
@@ -1397,8 +1398,8 @@ fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
         data.len() >= core::mem::size_of::<Ext4ExtentHeader>(),
         "extent node buffer smaller than its header"
     );
-    // SAFETY: repr(C) on-disk layout; size asserted above.
-    unsafe { &mut *(data.as_mut_ptr() as *mut Ext4ExtentHeader) }
+    // repr(C) on-disk layout; size asserted above.
+    crate::fs::edges::raw_mut(data.as_mut_ptr() as *mut Ext4ExtentHeader)
 }
 
 /// INV-EXT4-IBLOCK-HDR (unsafe-slim r3c): typed header views of an
@@ -1410,13 +1411,13 @@ fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
 pub fn iblock_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
     // SAFETY: INV-EXT4-IBLOCK-HDR above (size and alignment hold by
     // layout; the byte view of a [u32; 15] is its own representation).
-    unsafe { &*(core::ptr::from_ref(i_block) as *const Ext4ExtentHeader) }
+    crate::fs::edges::raw_ref(core::ptr::from_ref(i_block) as *const Ext4ExtentHeader)
 }
 
 /// Exclusive twin of [`iblock_header`].
 pub fn iblock_header_mut(i_block: &mut [u32; 15]) -> &mut Ext4ExtentHeader {
     // SAFETY: INV-EXT4-IBLOCK-HDR above.
-    unsafe { &mut *(core::ptr::from_mut(i_block) as *mut Ext4ExtentHeader) }
+    crate::fs::edges::raw_mut(core::ptr::from_mut(i_block) as *mut Ext4ExtentHeader)
 }
 
 /// Exclusive view of extent entry `index` following the header in an
@@ -1441,13 +1442,12 @@ fn node_extents(data: &[u8], count: usize) -> &[Ext4Extent] {
     if count == 0 || data.len() < need {
         return &[];
     }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts(
-            data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-            count,
-        )
-    }
+    // repr(C) layout; bounds checked above.
+    crate::fs::edges::slice_cast_at::<Ext4Extent>(
+        data,
+        core::mem::size_of::<Ext4ExtentHeader>(),
+        count,
+    )
 }
 
 fn node_extents_mut(data: &mut [u8], count: usize) -> &mut [Ext4Extent] {
@@ -1456,13 +1456,12 @@ fn node_extents_mut(data: &mut [u8], count: usize) -> &mut [Ext4Extent] {
     if count == 0 || data.len() < need {
         return &mut [];
     }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
-            count,
-        )
-    }
+    // repr(C) layout; bounds checked above.
+    crate::fs::edges::slice_cast_at_mut::<Ext4Extent>(
+        data,
+        core::mem::size_of::<Ext4ExtentHeader>(),
+        count,
+    )
 }
 
 fn node_indices(data: &[u8], count: usize) -> &[Ext4ExtentIdx] {
@@ -1471,13 +1470,12 @@ fn node_indices(data: &[u8], count: usize) -> &[Ext4ExtentIdx] {
     if count == 0 || data.len() < need {
         return &[];
     }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts(
-            data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
-            count,
-        )
-    }
+    // repr(C) layout; bounds checked above.
+    crate::fs::edges::slice_cast_at::<Ext4ExtentIdx>(
+        data,
+        core::mem::size_of::<Ext4ExtentHeader>(),
+        count,
+    )
 }
 
 fn node_indices_mut(data: &mut [u8], count: usize) -> &mut [Ext4ExtentIdx] {
@@ -1486,13 +1484,12 @@ fn node_indices_mut(data: &mut [u8], count: usize) -> &mut [Ext4ExtentIdx] {
     if count == 0 || data.len() < need {
         return &mut [];
     }
-    // SAFETY: repr(C) layout; bounds checked above.
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4ExtentIdx,
-            count,
-        )
-    }
+    // repr(C) layout; bounds checked above.
+    crate::fs::edges::slice_cast_at_mut::<Ext4ExtentIdx>(
+        data,
+        core::mem::size_of::<Ext4ExtentHeader>(),
+        count,
+    )
 }
 
 /// Allocate one metadata (index/leaf) block, zero it, and account the
@@ -1524,9 +1521,9 @@ fn read_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     blk: u64,
 ) -> Result<alloc::vec::Vec<u8>, i32> {
-    // SAFETY: bh pinned by bread; b_data is a block-sized slice.
+    // bh pinned by bread; b_data is a block-sized slice.
     let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let data = unsafe { (*bh).b_data.to_vec() };
+    let data = crate::fs::edges::bh_data(bh).clone();
     bio::brelse(bh);
     Ok(data)
 }
@@ -1714,9 +1711,7 @@ pub fn ext4_ext_append(
 ) -> Result<(), i32> {
     // Work on a byte image of the 60-byte root.
     let mut root = alloc::vec![0u8; 60];
-    root.copy_from_slice(unsafe {
-        core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60)
-    });
+    root.copy_from_slice(crate::fs::edges::struct_bytes(i_block));
     let depth = node_header(&root).eh_depth;
     if node_header(&root).eh_magic != EXT4_EXT_MAGIC {
         init_node_header(&mut root, 0, ROOT_NODE_CAP as u16);
@@ -1779,15 +1774,8 @@ pub fn ext4_ext_append(
         }
     }
 
-    // Copy the root image back into i_block.
-    // SAFETY: same-size copy (60 bytes) into the inode field.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            root.as_ptr(),
-            i_block.as_mut_ptr() as *mut u8,
-            60,
-        );
-    }
+    // Copy the root image back into i_block: same-size copy (60 bytes).
+    crate::fs::edges::kcopy(i_block.as_mut_ptr() as *mut u8, 0, root.as_ptr(), 0, 60);
     Ok(())
 }
 
@@ -2203,12 +2191,10 @@ pub fn ext4_ext_convert_unwritten(
         let mut node = root.to_vec();
         let h = node_header_mut(&mut node);
         h.eh_entries = spliced.len() as u16;
-        // SAFETY: spliced.len() <= ROOT_NODE_CAP fits the 60-byte root.
-        unsafe {
-            node_extents_mut(&mut node, ROOT_NODE_CAP)[..spliced.len()]
-                .copy_from_slice(&spliced.iter().map(|e| e.to_disk()).collect::<alloc::vec::Vec<_>>());
-            core::ptr::copy_nonoverlapping(node.as_ptr(), i_block.as_mut_ptr() as *mut u8, 60);
-        }
+        // spliced.len() <= ROOT_NODE_CAP fits the 60-byte root.
+        node_extents_mut(&mut node, ROOT_NODE_CAP)[..spliced.len()]
+            .copy_from_slice(&spliced.iter().map(|e| e.to_disk()).collect::<alloc::vec::Vec<_>>());
+        crate::fs::edges::kcopy(i_block.as_mut_ptr() as *mut u8, 0, node.as_ptr(), 0, 60);
         return Ok(());
     }
     // Depth >= 1: LEAF-LOCAL splices. The write's range usually covers a
@@ -2367,10 +2353,8 @@ pub fn ext4_ext_materialize_block(
             }
             None => {
                 // Root: copy the 60-byte image back.
-                // SAFETY: same-size copy into i_block.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(node.as_ptr(), i_block.as_mut_ptr() as *mut u8, 60);
-                }
+                // same-size copy into i_block.
+                crate::fs::edges::kcopy(i_block.as_mut_ptr() as *mut u8, 0, node.as_ptr(), 0, 60);
             }
         }
         Ok(Some(raw.phys + prefix as u64))

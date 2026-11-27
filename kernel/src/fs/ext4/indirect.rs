@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -311,17 +312,11 @@ pub fn get_indirect_level(size: u64, block_size: u64) -> u32 {
     3
 }
 
-unsafe fn reinterpret_slice<T>(data: &[u8]) -> &[T] {
-    core::slice::from_raw_parts(
-        data.as_ptr() as *const T,
-        data.len() / core::mem::size_of::<T>(),
-    )
+fn reinterpret_slice<T>(data: &[u8]) -> &[T] {
+    crate::fs::edges::slice_as_t(data)
 }
 
-unsafe fn reinterpret_slice_mut<T>(data: &mut [u8]) -> &mut [T] {
-    core::slice::from_raw_parts_mut(
-        data.as_ptr() as *mut T,
-        data.len() / core::mem::size_of::<T>(),
-    )
+fn reinterpret_slice_mut<T>(data: &mut [u8]) -> &mut [T] {
+    crate::fs::edges::slice_as_t_mut(data)
 }
 

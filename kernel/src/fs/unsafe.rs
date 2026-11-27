@@ -707,6 +707,141 @@ pub(crate) fn chunk_view_mut<'a>(fc: *mut crate::fs::buffer::FileChunk, off: usi
     unsafe { core::slice::from_raw_parts_mut((*fc).base_ptr().add(off), len) }
 }
 
+/// The indexed twin of [`slice_as_t`] (INV-FS-SLICECAST-1): the header
+/// offset happens inside the edge; `count` is in T units and the caller
+/// bounds it against data.len().
+pub(crate) fn slice_cast_at<'a, T>(data: &[u8], byte_off: usize, count: usize) -> &'a [T] {
+    // SAFETY: INV-FS-SLICECAST-1 (indexed form).
+    unsafe {
+        core::slice::from_raw_parts(data.as_ptr().add(byte_off) as *const T, count)
+    }
+}
+
+/// The mut twin of [`slice_cast_at`] (INV-FS-SLICECAST-1).
+pub(crate) fn slice_cast_at_mut<'a, T>(
+    data: &mut [u8],
+    byte_off: usize,
+    count: usize,
+) -> &'a mut [T] {
+    // SAFETY: INV-FS-SLICECAST-1 (indexed form).
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            data.as_mut_ptr().add(byte_off) as *mut T,
+            count,
+        )
+    }
+}
+
+/// The offset twin of [`volatile_write`] (INV-FS-VOLATILE-1): the index
+/// happens inside the edge, in T units.
+pub(crate) fn volatile_write_at<T: Copy>(base: *mut T, k: usize, v: T) {
+    // SAFETY: INV-FS-VOLATILE-1 (indexed form).
+    unsafe { core::ptr::write_volatile(base.add(k), v) }
+}
+
+/// INV-FS-JREVOKE-1: journal revoke registration — `handle` is the
+/// current task's live transaction handle (INV-EXT4-JHANDLE-1), `block`
+/// the block number being returned to the free pool. Bookkeeping only.
+pub(crate) fn jbd2_revoke(
+    handle: *mut crate::fs::jbd2::Handle,
+    blocknr: u64,
+    bh_in: Option<*mut crate::fs::jbd2::journal::BufferHead>,
+) -> Result<(), i32> {
+    // SAFETY: INV-FS-JREVOKE-1 (deref forms the &mut the API takes).
+    unsafe { crate::fs::jbd2::revoke::jbd2_journal_revoke(&mut *handle, blocknr, bh_in) }
+}
+
+/// INV-FS-KCOPY-2: kernel-to-kernel span copy with the pointer
+/// arithmetic inside the edge (both offsets). Caller obligations: the
+/// two spans [src+src_off, +n) and [dst+dst_off, +n) are valid,
+/// non-overlapping kernel memory (kernel slices, staging buffers,
+/// pinned cache frames).
+pub(crate) fn kcopy(
+    dst: *mut u8,
+    dst_off: usize,
+    src: *const u8,
+    src_off: usize,
+    n: usize,
+) {
+    // SAFETY: INV-FS-KCOPY-2.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.add(src_off), dst.add(dst_off), n)
+    }
+}
+
+/// INV-FS-KVIEW-1: byte view of a kernel span with the offset inside
+/// the edge. Caller obligations: [p+off, +n) is readable kernel memory
+/// (the syscall layer's staging slices and WriteSrc::Kernel pointers).
+pub(crate) fn kernel_slice_at<'a>(p: *const u8, off: usize, n: usize) -> &'a [u8] {
+    // SAFETY: INV-FS-KVIEW-1.
+    unsafe { core::slice::from_raw_parts(p.add(off), n) }
+}
+
+/// The mut twin of [`kernel_slice_at`] (INV-FS-KVIEW-1): the span is
+/// writable (staging buffers, bounce buffers).
+pub(crate) fn kernel_slice_mut_at<'a>(p: *mut u8, off: usize, n: usize) -> &'a mut [u8] {
+    // SAFETY: INV-FS-KVIEW-1.
+    unsafe { core::slice::from_raw_parts_mut(p.add(off), n) }
+}
+
+/// The offset twin of [`copy_to_user_bytes`] (INV uaccess contract):
+/// the destination offset happens inside the edge; the source is an
+/// ordinary kernel slice.
+pub(crate) fn copy_to_user_bytes_at(dst: *mut u8, dst_off: usize, src: &[u8]) -> usize {
+    // SAFETY: exception-table copy into [dst+dst_off, +src.len());
+    // uncopied tail returned (any user address is sound to pass).
+    unsafe { crate::arch::uaccess::copy_to_user(dst.add(dst_off), src.as_ptr(), src.len()) }
+}
+
+/// The source-offset twin of [`copy_from_user_bytes`]: the source
+/// offset happens inside the edge.
+pub(crate) fn copy_from_user_bytes_at(dst: &mut [u8], src: *const u8, src_off: usize) -> usize {
+    // SAFETY: exception-table copy from [src+src_off, +dst.len()).
+    unsafe { crate::arch::uaccess::copy_from_user(dst.as_mut_ptr(), src.add(src_off), dst.len()) }
+}
+
+/// INV-FS-CELLMUT-1: exclusive UnsafeCell borrow — the caller holds the
+/// serializing lock for the cell (io_lock for the readahead state, the
+/// File being exclusively owned on the description path).
+pub(crate) fn cell_ref_mut<'a, T>(c: &core::cell::UnsafeCell<T>) -> &'a mut T {
+    // SAFETY: INV-FS-CELLMUT-1.
+    unsafe { &mut *c.get() }
+}
+
+/// INV-FS-STRUCTBYTES-1: byte view of a repr(C) plain-data on-disk
+/// struct (ext4 inode/disk-header family): the value is a live,
+/// well-aligned local/owned struct; callers copy only the bounds-checked
+/// span (copy_len <= size_of::<T>()) into or out of block buffers.
+pub(crate) fn struct_bytes<'a, T>(t: &T) -> &'a [u8] {
+    // SAFETY: INV-FS-STRUCTBYTES-1.
+    unsafe {
+        core::slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>())
+    }
+}
+
+/// The mut twin of [`struct_bytes`] (INV-FS-STRUCTBYTES-1): fills a
+/// local POD struct from block bytes before first logical read.
+pub(crate) fn struct_bytes_mut<'a, T>(t: &mut T) -> &'a mut [u8] {
+    // SAFETY: INV-FS-STRUCTBYTES-1.
+    unsafe {
+        core::slice::from_raw_parts_mut(t as *mut T as *mut u8, core::mem::size_of::<T>())
+    }
+}
+
+/// INV-FS-UNALIGN-1: unaligned little-endian-independent scalar reads
+/// out of an on-disk byte block (jbd2 revoke blocks): the caller proved
+/// off+size <= data.len(); read_unaligned makes alignment irrelevant.
+pub(crate) fn read_unaligned_u32(data: &[u8], off: usize) -> u32 {
+    // SAFETY: INV-FS-UNALIGN-1.
+    unsafe { core::ptr::read_unaligned(data.as_ptr().add(off) as *const u32) }
+}
+
+/// The u64 twin of [`read_unaligned_u32`] (INV-FS-UNALIGN-1).
+pub(crate) fn read_unaligned_u64(data: &[u8], off: usize) -> u64 {
+    // SAFETY: INV-FS-UNALIGN-1.
+    unsafe { core::ptr::read_unaligned(data.as_ptr().add(off) as *const u64) }
+}
+
 /// INV-FS-LINMAP-1: byte-slice view of the kernel linear map
 /// (`phys_to_virt` product): the caller's page-table walk proved the
 /// target page present and mapped, so [p, p+n) is readable kernel
