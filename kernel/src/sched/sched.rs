@@ -8748,21 +8748,38 @@ pub fn scheduler_tick() {
                     // jiffies — see the counter block above for the three
                     // defeated age-producer families. run == 0 ("younger
                     // than one observation") is inherently not stale.
-                    let stale_200 = |run: u64| run >= 200;
+                    //
+                    // HZ=1000 readiness (p23-p1panic): the bar's
+                    // semantics are "2 s of consecutive own-CPU tick
+                    // observations" (the sc41/a336568f calibration:
+                    // 200 ticks at kernel_hz=100). A literal 200 at
+                    // HZ=1000 shrank the proven-phantom threshold to
+                    // 200 ms — inside the range of real guard holds
+                    // under syscall-storm loads — so the heal started
+                    // stripping LIVE counts (the lm300 boots: heal on a
+                    // live holder, its guard drop later underflow-clamps,
+                    // the holder is preemptible mid-section, scheduler
+                    // state machines interleave, double-run + wild PC).
+                    // Scale the bar with KERNEL_HZ: identical at the
+                    // calibration HZ, wall-clock-true everywhere.
+                    let stale_2s = |run: u64| {
+                        run >= 2 * crate::config::KERNEL_HZ as u64
+                    };
                     let p_stale = p_set && {
-                        stale_200(crate::sched::edges::task_shared(cur).ti_pc_pirq_present_run())
+                        stale_2s(crate::sched::edges::task_shared(cur).ti_pc_pirq_present_run())
                     };
                     let s_stale = s_set && {
-                        stale_200(crate::sched::edges::task_shared(cur).ti_pc_sirq_present_run())
+                        stale_2s(crate::sched::edges::task_shared(cur).ti_pc_sirq_present_run())
                     };
                     let h_stale = h_extra && {
-                        stale_200(crate::sched::edges::task_shared(cur).ti_pc_hirq_present_run())
+                        stale_2s(crate::sched::edges::task_shared(cur).ti_pc_hirq_present_run())
                     };
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
                     w.last.store(now, core::sync::atomic::Ordering::Relaxed);
                     if t0 != 0
-                            && now.wrapping_sub(t0) >= 200
+                            && now.wrapping_sub(t0)
+                                >= 2 * crate::config::KERNEL_HZ as u64
                             // Serial-noise policy: the periodic PREEMPT-LEAK
                             // reporter is a hunt instrument (rux:wwcensus (retired dfx=wwcensus)),
                             // not default output — idle-task word residue on
@@ -9473,7 +9490,14 @@ pub fn scheduler_tick() {
                         let bad0 = s.bad_since.load(core::sync::atomic::Ordering::Relaxed);
                         if bad0 == 0 {
                             s.bad_since.store(now, core::sync::atomic::Ordering::Relaxed);
-                        } else if now.wrapping_sub(bad0) >= 400 {
+                        }
+                        // HZ=1000 readiness (p23-p1panic): the bar is
+                        // "4 s of consecutive parked-with-nonzero walks"
+                        // (400 jiffies at the calibration kernel_hz=100).
+                        // A literal 400 at HZ=1000 shrank it to 400 ms.
+                        else if now.wrapping_sub(bad0)
+                            >= 4 * crate::config::KERNEL_HZ as u64
+                        {
                             { crate::sched::edges::task_shared(*task).ti_preempt_count_zero(); }
                             s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
                             use crate::debug::taskdump::putc_brief as putchar;

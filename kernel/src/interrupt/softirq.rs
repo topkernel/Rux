@@ -219,15 +219,21 @@ pub struct CarrierEvidence {
 
 /// Freshness bound for carrier evidence, in jiffies. Vector dispatches
 /// refresh the stamp (bounded by the 2 ms budget check before each
-/// vector), so 10 jiffies (100 ms at 100Hz) keeps the heal-gate margin
-/// doctrine — 20x UNDER the heal's own 200-tick (2s) bar — while a
-/// leaked/stranded count is delayed by at most this window past the
-/// last genuine softirq boundary. Windows whose current handler runs
-/// longer than the bound go stale mid-handler; that residual gap is
-/// covered by the exact window-open flag (`in_progress_cpu`) consulted
-/// alongside this slot by the adjudication, and named in
-/// run/CARRIER-HEAL.md.
-pub const CARRIER_EVIDENCE_FRESH_JIF: u64 = 10;
+/// vector), so 100 ms of wall time keeps the heal-gate margin doctrine
+/// — 20x UNDER the heal's own 2s bar — while a leaked/stranded count
+/// is delayed by at most this window past the last genuine softirq
+/// boundary. Windows whose current handler runs longer than the bound
+/// go stale mid-handler; that residual gap is covered by the exact
+/// window-open flag (`in_progress_cpu`) consulted alongside this slot
+/// by the adjudication, and named in run/CARRIER-HEAL.md.
+///
+/// HZ=1000 readiness (p23-p1panic): wall-time semantics (100 ms,
+/// calibrated at kernel_hz=100 as 10 jiffies), not a literal tick
+/// count — at HZ=1000 a literal 10 shrank the window to 10 ms and
+/// weakened the heal refusal exactly where ticks were 10x denser
+/// (see the ACQUIRE_EVIDENCE_FRESH_JIF note in sync/spinlock.rs).
+pub const CARRIER_EVIDENCE_FRESH_JIF: u64 =
+    (crate::config::KERNEL_HZ as u64) / 10;
 
 /// The per-CPU carrier-evidence slots (see [`CarrierEvidence`]).
 pub static CARRIER_EVIDENCE: [CarrierEvidence; MAX_CPUS] = {
