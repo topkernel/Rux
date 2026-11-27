@@ -106,12 +106,6 @@ pub mod fsw;
 /// branches — names where the hilogd storm's 28-58 us per-op wall goes;
 /// see debug/unixrd.rs.
 pub mod unixrd;
-/// Leak-origin probe (cmdline `rux:leakhunt (retired dfx=leakhunt)`): records the call site of
-/// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
-/// moment a task returns to userspace (or is seen parked) with a nonzero
-/// preempt_count — names the producer of the leaked-count wake-strand
-/// family; see debug/leakorigin.rs.
-pub mod leakorigin;
 /// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
 /// same syscall entry for >= 8 s get a line with args and the parked
 /// kernel-stack chain — attributes the leaf of nested-call cascades

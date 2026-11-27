@@ -62,7 +62,6 @@ STATUS = {
     "kernel/src/debug/ledger.rs": ("part", "page census"),
     "kernel/src/debug/allocwatch.rs": ("todo", "r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane"),
     "kernel/src/debug/cctx.rs": ("todo", "r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane"),
-    "kernel/src/debug/leakorigin.rs": ("done", "cr3 closeout: read end to end — diagnostics-only (dfx=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS"),
     "kernel/src/debug/memwatch.rs": ("part", "heap census"),
     "kernel/src/debug/metawatch.rs": ("part", "buddy shadow scan"),
     "kernel/src/debug/mod.rs": ("part", "init, debugfs knob registration"),

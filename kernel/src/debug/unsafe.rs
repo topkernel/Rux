@@ -7,7 +7,7 @@
 //!
 //! OWNERSHIP (the coordinator's framework-consolidation doctrine): every
 //! raw stale-handle read the dfx hunt family performs routes through
-//! THIS file. The modules that hunt (leakorigin, scribble,
+//! THIS file. The modules that hunt (scribble,
 //! wildwatch, memwatch's fp-chain, the preempt/softirq
 //! bracket diagnostics) stay in their own files; their raw pointer
 //! discipline lives here, named and audited once.
@@ -125,7 +125,7 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
 // forensics_edges.rs per the edges->unsafe.rs naming decision) is now
 // the dfx subsystem's ONE audited unsafe file. The arms below absorbed
 // the last inline unsafe of the hunt/diagnostic modules (backtrace,
-// memwatch, scribble, wildwatch, leakorigin, taskdump, pstore,
+// memwatch, scribble, wildwatch, taskdump, pstore,
 // ledger, mmforensics, oops, hung_task, slowtask,
 // mod) — all sixteen now zero-unsafe with file-level forbid. Existing
 // INV-FOR-1..3 contracts are unchanged; the arms reuse those families
@@ -201,20 +201,6 @@ pub(crate) fn t_ti_cpu(task: *const Task) -> i32 {
     unsafe { (*task).ti_cpu() }
 }
 
-/// Racy volatile read of a sched slot's published current pointer
-/// (INV-FOR-1 racy-diagnostic arm: the slot is written by its owning
-/// CPU under the GRQ; this read is moment-stale by design — the same
-/// discipline as the hunt modules' header reads). Returns the raw pointer VALUE
-/// (0 when the slot is empty), never a reference.
-pub(crate) fn sched_slot_current_volatile(cpu: usize) -> usize {
-    // SAFETY: INV-FOR-1 — single volatile read of the published slot;
-    /// the value is only compared or printed, never dereferenced here.
-    unsafe {
-        core::ptr::read_volatile(
-            &crate::sched::sched::cpu_state(cpu).current as *const *mut Task,
-        ) as usize
-    }
-}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-2 arms: the raw word/slice access family (volatile reads and

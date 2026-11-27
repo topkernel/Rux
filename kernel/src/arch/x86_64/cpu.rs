@@ -198,7 +198,7 @@ pub fn get_core_id() -> u64 {
     super::cpu_id()
 }
 
-/// Read ANOTHER CPU's current-task pointer slot (leakorigin v3).
+/// Read ANOTHER CPU's current-task pointer slot (diagnostic).
 #[inline]
 pub fn get_thread_id_of(cpu: usize) -> u64 {
     super::smp::current_task_ptr_of(cpu)

@@ -4124,10 +4124,6 @@ fn __schedule() {
                 // direct-console, GRQ NOT held here — printk would also
                 // work, keep it raw for the IRQ-off window).
                 if voluntary_sleep && holdout != 0 {
-                    crate::debug::leakorigin::report_outermost(
-                        b"PARK-REFUSED-ORIGIN",
-                        prev,
-                    );
                 }
                 crate::arch::cpu::restore_irq(flags);
                 prev_t.set_state(TaskState::new(TaskState::RUNNING));
@@ -7111,16 +7107,6 @@ pub fn wake_up_enqueue_opt(
                         }
                         ph(pc as u32 as u64);
                         putchar(b'\n');
-                        // preempt-hunt (2026-11-01): name the acquire
-                        // site whose 1->0 release never ran — the
-                        // outermost-acquire tap. This is the producer's
-                        // home site, printed at the moment the phantom
-                        // count is adjudicated (still the direct-console
-                        // discipline: GRQ held).
-                        crate::debug::leakorigin::report_outermost(
-                            b"WAKE-HEAL-ORIGIN",
-                            task,
-                        );
                         // wake-fastrepro (leak hunt): the ORIGIN tap is
                         // collision-churned on OH boots (2048 slots vs
                         // thousands of tasks — both control boots printed
@@ -7233,12 +7219,6 @@ pub fn wake_up_enqueue_opt(
                         // family. Report the outermost acquire site here
                         // too (rux:leakhunt (retired dfx=leakhunt)-gated, own 200-line budget,
                         // still direct-console: GRQ held).
-                        if curr_on {
-                            crate::debug::leakorigin::report_outermost(
-                                b"WAKE-SKIP-ORIGIN",
-                                task,
-                            );
-                        }
                         // Lost-park census tail (rux:lostpark (retired dfx=lostpark)): when the
                         // refusal is curr_on, name the lying slot's CPU +
                         // writer tag and the victim's full ownership word —
@@ -8492,10 +8472,6 @@ pub fn scheduler_tick() {
     crate::debug::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
-    // phantom-bits orphan scan: bits the interrupted task carried INTO
-    // the tick whose release never executed (softirq bit outside any
-    // open window / stranded hardirq bit). rux:leakhunt (retired dfx=leakhunt)-gated inside.
-    crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
     // Allocator class-lock holder watch (rux:allocwatch (retired dfx=allocwatch)): scan ALL mm
     // stamp slots CROSS-CPU and name any holder frozen >1 s mid-section.
@@ -8836,10 +8812,6 @@ pub fn scheduler_tick() {
                                     .load(core::sync::atomic::Ordering::Relaxed)
                                     as u64);
                                 putchar(b'\n');
-                                // rux:leakhunt (retired dfx=leakhunt): the acquire site of the
-                                // leaked count (last PREEMPT_OFFSET
-                                // acquire on the incumbent).
-                                crate::debug::leakorigin::report_incumbent_site(cur);
                             }
                         }
                         // PREEMPT-HEAL (round 3c, bound 10 s -> 2 s by
@@ -9147,28 +9119,6 @@ pub fn scheduler_tick() {
                             ph(crate::interrupt::preempt::TICK_ENTRY_CS[cpu_id]
                                 .load(core::sync::atomic::Ordering::Relaxed));
                             putchar(b'\n');
-                            // preempt-hunt (2026-11-01): the
-                            // outermost-acquire record is guaranteed
-                            // intact here — the incumbent's base never
-                            // returned to 0 since the phantom formed
-                            // (inner pairs are 1->2->1 and do not clear
-                            // it), so this names the acquire whose 1->0
-                            // release is missing / late.
-                            crate::debug::leakorigin::report_outermost(
-                                b"PREEMPT-HEAL-ORIGIN",
-                                cur,
-                            );
-                            // phantom-bits: when the healed count carried
-                            // the SOFTIRQ bit, name its +0x100 booker
-                            // (the monopolist face — the release never
-                            // executed anywhere: no sub=0x100 underflow
-                            // exists to point at it instead).
-                            if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
-                                crate::debug::leakorigin::report_softirq_origin(
-                                    b"PREEMPT-HEAL-SOFTIRQ",
-                                    cur,
-                                );
-                            }
                         }
                         // phantom-bits round 2 — the pure-field faces the
                         // base leg can never reach: base == 0 with a
@@ -9232,18 +9182,6 @@ pub fn scheduler_tick() {
                             }
                             putchar(if h_stale { b'H' } else { b'S' });
                             putchar(b'\n');
-                            if s_stale {
-                                crate::debug::leakorigin::report_softirq_origin(
-                                    b"PREEMPT-HEAL-SOFTIRQ",
-                                    cur,
-                                );
-                            }
-                            if h_stale {
-                                crate::debug::leakorigin::report_hardirq_origin(
-                                    b"PREEMPT-HEAL-HARDIRQ",
-                                    cur,
-                                );
-                            }
                         }
                     }
                 }
@@ -9626,9 +9564,6 @@ pub fn scheduler_tick() {
                     }
                     ph(*tp_named as u64);
                     putchar(b'\n');
-                    // rux:leakhunt (retired dfx=leakhunt): name the acquire site of the leaked
-                    // count (last PREEMPT_OFFSET acquire on this task).
-                    crate::debug::leakorigin::report_parked_site(*task);
                 }
             }
             // Lazily reclaim slots whose tasks missed 2+ walks.

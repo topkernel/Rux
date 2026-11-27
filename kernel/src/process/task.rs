@@ -3431,19 +3431,6 @@ fn preempt_underflow_report(
         ph(site as u32);
     }
     putchar(b'\n');
-    // preempt-hunt (2026-11-01): the outermost-acquire record for this
-    // task names the acquire whose 1->0 release this clamp adjudicates —
-    // for a post-heal underflow that is the REAL guard the heal zeroed
-    // (a guard held across a scheduler point); for a booking split it is
-    // the phantom's home site. Rate-gate already passed above.
-    if crate::trace::EVENT_LEAKHUNT.armed() {
-        if let Some(task) = crate::sched::current() {
-            crate::debug::leakorigin::report_outermost(
-                b"UNDERFLOW-ORIGIN",
-                task as *mut Task,
-            );
-        }
-    }
 }
 
 impl Task {
@@ -3577,32 +3564,27 @@ impl Task {
         loc: &'static core::panic::Location<'static>,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
-        // Outermost base release (base field 1->0): clear the
-        // leakorigin outermost-acquire record (preempt-hunt tap). One
-        // relaxed load + compare when the probe is off.
+        // Outermost base release (base field 1->0) — phantom-bits /
+        // stress-port r3: a LIVE outermost pair just completed — re-arm
+        // the run counter the tick-side heal actually gates on. (The
+        // pb3 re-arm stored the superseded ti_pc_zero_jif field, which
+        // nothing reads, so the per-field bar never re-armed here and
+        // hot lock users accumulated stale bars between absent tick
+        // samples.)
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
-            // phantom-bits / stress-port r3: a LIVE outermost pair just
-            // completed — re-arm the run counter the tick-side heal
-            // actually gates on. (The pb3 re-arm stored the superseded
-            // ti_pc_zero_jif field, which nothing reads, so the
-            // per-field bar never re-armed here and hot lock users
-            // accumulated stale bars between absent tick samples.)
             self.ti_pc_pirq_present_run.store(
                 0,
                 core::sync::atomic::Ordering::Relaxed,
             );
         }
         // phantom-bits: softirq field drained to zero — the +0x100
-        // acquire paired; drop the shadow so a later orphan report names
-        // only still-unpaired bookings, and re-arm the sirq run counter
-        // (the drain is the field's own liveness proof).
+        // acquire paired; re-arm the sirq run counter (the drain is the
+        // field's own liveness proof).
         if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
             && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
         {
-            crate::debug::leakorigin::note_softirq_release(self as *const Task as *mut Task);
             self.ti_pc_sirq_present_run.store(
                 0,
                 core::sync::atomic::Ordering::Relaxed,
@@ -3686,7 +3668,6 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: live pair completed — re-arm
             // the run counter the heal gates on (see sub_preempt_count_at;
             // the old store hit the superseded ti_pc_zero_jif field).
