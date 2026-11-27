@@ -357,10 +357,10 @@ pub struct TlPoisonCounters {
 /// always; the slot comparison and `into_free`'s body are
 /// byte-identical to the raw-pointer form they replace (the
 /// corruption-battery obligation).
-pub struct ReapClaim(pub(super) core::ptr::NonNull<Task>);
+pub struct ReapClaim(pub core::ptr::NonNull<Task>);
 
-pub(super) struct PendingReap {
-    pub(super) claim: ReapClaim,
+pub struct PendingReap {
+    pub claim: ReapClaim,
     /// The parent's pid at reap time (boot-118's WAIT4-PARK fix: a
     /// parent parked in wait4 on THIS child gets a deferred-notify
     /// wake when the drainer completes the child's storage — the
@@ -368,11 +368,11 @@ pub(super) struct PendingReap {
     /// could have missed it; this is the belt-and-braces arm, 0 = no
     /// parent known). Captured at MINT (release_task still knows the
     /// tree), consumed at BURN.
-    pub(super) parent_pid: u32,
+    pub parent_pid: u32,
     /// Consecutive ticks the entry has held the R85 conjunction.
-    pub(super) r85_ticks: u32,
+    pub r85_ticks: u32,
     /// Past the switch stage, waiting for the batch grace target.
-    pub(super) grace: bool,
+    pub grace: bool,
     /// P0 exit-reap (per-entry grace bound): the FIRST generation
     /// OPENED AFTER this entry's pid_hash removal (RCU_GEN at mint +
     /// 1). The entry frees only when the grace watermark reaches it —
@@ -384,7 +384,7 @@ pub(super) struct PendingReap {
     /// postdate the target, and a CPU whose last report predates the
     /// removal could still satisfy "reported >= target" — a free
     /// under a live pid_hash reader.
-    pub(super) needs: u32,
+    pub needs: u32,
 }
 
 // ---------------------------------------------------------------------------

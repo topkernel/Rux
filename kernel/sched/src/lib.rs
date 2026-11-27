@@ -33,6 +33,12 @@ extern crate alloc;
 // The scheduling classes and the policy walks.
 // The policy files, flat at the crate root (seed-core-design 2c.2).
 pub mod sched_policy;
+pub mod cgroup;
+pub mod census;
+pub mod pickgen;
+pub mod entities;
+pub mod class;
+pub mod reapdrain;
 pub mod fair;
 pub mod rt;
 pub mod deadline;
@@ -96,6 +102,7 @@ pub fn register_all() {
             orphan_watch_clear: sched_policy::orphan_watch_clear,
             pick_giveups: fair::pick_giveups,
             ww_slot_mismatch_counters: sched_policy::ww_slot_mismatch_counters,
+            ww_pick_walks: census::ww_pick_walks,
             ww_sched_snapshot: sched_policy::ww_sched_snapshot,
             ww_stalled_cpu_state: sched_policy::ww_stalled_cpu_state,
             debug_claim_inject: sched_policy::debug_claim_inject,
@@ -105,6 +112,11 @@ pub fn register_all() {
             ww_rt_pick_stats: wakewatch::ww_rt_pick_stats,
             heartbeat: wakewatch::heartbeat,
             stallwatch_tick: wakewatch::stallwatch_tick,
+            reap_drain_tick: reapdrain::reap_drain_tick,
+            defer_reap_storage: reapdrain::defer_reap_storage,
+            cgroup_cpu_tick: cgroup::cgroup_cpu_tick,
+            cgroup_exit: cgroup::cgroup_exit,
+            cgroup_on_fork: cgroup::cgroup_on_fork,
             preempt_check_wake: sched_policy::preempt_check_wake,
             preempt_check_wake_sync: sched_policy::preempt_check_wake_sync,
             w2_refusal_census: sched_policy::w2_refusal_census,

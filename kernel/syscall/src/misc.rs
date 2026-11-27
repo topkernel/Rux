@@ -2877,7 +2877,7 @@ pub fn param_stall_dump() {
             let (pid, comm) = (watched.pid(), watched.comm());
             let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
             let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
-            let n0 = rux::sched::hotpath::ww_tail_fill(i);
+            let n0 = ::sched::census::ww_tail_fill(i);
             if pid == 1 {
                 p1_watched = true;
             }

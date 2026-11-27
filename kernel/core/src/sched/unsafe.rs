@@ -1670,7 +1670,7 @@ impl ReapClaim {
     /// alive by postponing the free).
     /// INV-SCE-2: shared read view of the claim's Task (unreachable-but-mapped; the claim owns the free). The block text is unchanged; only the method's home moved.
     #[inline]
-    pub(crate) fn task(&self) -> &Task {
+    pub fn task(&self) -> &Task {
         // SAFETY: the claim owns the free; until into_free runs the
         // page is mapped and immutable to everyone else (DEAD,
         // unlinked) — the same argument every task_shared caller

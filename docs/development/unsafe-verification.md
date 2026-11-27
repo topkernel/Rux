@@ -35,10 +35,10 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1664**
-- recovered from reference versions: **58** (same-file 58, edited-site 0, file-move 0, moved-item 0)
-- references consulted: HEAD, MERGE_HEAD, 795744824
-- annotated regions, baseline -> this bank: **1758 -> 1722**
+- artifacts kept by id: **1722**
+- recovered from reference versions: **0**
+- references consulted: HEAD, MERGE_HEAD
+- annotated regions, baseline -> this bank: **1722 -> 1722**
 
 ## Per-subsystem
 

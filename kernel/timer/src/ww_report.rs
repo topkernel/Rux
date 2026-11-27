@@ -67,7 +67,7 @@ pub fn ww_heartbeat(now_time: u64) {
     // tp register disagreed with cpu_state.current (lying slot).
     static LAST_MM: [AtomicU64; crate::config::MAX_CPUS] =
         [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
-    let mm = crate::sched::hotpath::ww_slot_mismatch_counters();
+    let mm = rux::api::sched::ww_slot_mismatch_counters();
     let mut mm_d = [0u64; 2];
     for c in 0..2 {
         mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
@@ -80,7 +80,7 @@ pub fn ww_heartbeat(now_time: u64) {
     // locks at this point). Wheel-side: len + overdue hres backlog.
     let (wheel_len, overdue) = rux::timer::wheel_census(now_time);
 
-    let sched = crate::sched::hotpath::ww_sched_snapshot();
+    let sched = rux::api::sched::ww_sched_snapshot();
 
     // nanosleep-loss hunt: arm/fire accounting — NEXT_TIMER_ID-1 is the
     // total arms ever; fires + live entries + cancels must cover it. A
@@ -213,7 +213,7 @@ pub fn ww_heartbeat(now_time: u64) {
     static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
     static LAST_OH: AtomicU64 = AtomicU64::new(0);
     static LAST_CH: AtomicU64 = AtomicU64::new(0);
-    let walks_total = crate::sched::hotpath::ww_pick_walks();
+    let walks_total = rux::api::sched::ww_pick_walks();
     let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
     LAST_WALKS.store(walks_total, Ordering::Relaxed);
     let (oh, ch) = rux::api::sched::ww_heals();
