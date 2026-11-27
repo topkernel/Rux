@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use syn::ItemMacro;
 
+pub mod fixture;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionKind {

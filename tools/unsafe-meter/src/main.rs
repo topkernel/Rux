@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::exit;
 
-use unsafe_meter::{scan_root, FileMetrics};
+use unsafe_meter::{fixture, scan_root, FileMetrics};
 
 fn totals(metrics: &[FileMetrics]) -> Totals {
     let mut t = Totals::default();
@@ -145,6 +145,15 @@ fn escape(s: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("selftest") => match fixture::check() {
+            Ok(msg) => {
+                println!("selftest OK: {}", msg);
+            }
+            Err(e) => {
+                eprintln!("selftest FAILED: {}", e);
+                exit(1);
+            }
+        },
         Some("lines") => {
             // Debug aid for hand-verification: per-line series attribution of
             // one file. usage: unsafe-meter lines <src-root> <path-under-root>
@@ -197,7 +206,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage:\n  unsafe-meter scan <src-root> [--json] [--top N]\n\nWalks <src-root>/kernel/src/**/*.rs (kernel/src/tests excluded)."
+                "usage:\n  unsafe-meter scan <src-root> [--json] [--top N]\n  unsafe-meter selftest\n\nWalks <src-root>/kernel/src/**/*.rs (kernel/src/tests excluded)."
             );
             exit(1);
         }
