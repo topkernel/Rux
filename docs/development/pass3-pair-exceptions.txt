@@ -744,3 +744,10 @@ rux::process::(hotpath::)?(types::)?find_task_by_pid$
 # (reboot(POWER_OFF) hang fix) exists only in the current build — zero base
 # references, an intentional addition, not a move.
 x86_acpi_power_off$
+
+# --- rebootfix gate (2026-11-27): the new PIO primitive and the edited
+# power-off arm. outw is an intentional addition (zero base references);
+# shutdown_cascade's POWER_OFF arm calls the new edge — its body grows by
+# the call. The service-crate disambiguator hash is build-dependent.
+rux::arch::x86_64::cpu::outw$
+process\[[0-9a-f]+\]::reboot::shutdown_cascade$
