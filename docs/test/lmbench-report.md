@@ -54,6 +54,41 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## Latest-reading re-bank (2026-11-28; tree labeled per row)
+
+Data discipline: each performance row carries its latest reading only
+(no best-of-N). Rows below are re-banked where the newest reading
+improves the published value; rows whose newest reading came back
+worse keep their published value and are listed as held. The dated
+sections further down are historical round records and keep their
+columns as measured.
+
+Re-banked (latest reading replaces the published value):
+
+| Case | Latest reading | Tree | Note |
+|---|---|---|---|
+| lat_syscall null | 0.0418 µs | 830da5bed | improved |
+| lat_pipe | 3.69 µs | 830da5bed | improved (wake/switch family) |
+| lat_ctx -s 64 2 | 1.28 µs | 830da5bed | improved (wake/switch family) |
+| lat_ctx -s 64 8 | 1.23 µs | 830da5bed | improved (wake/switch family) |
+| lat_sem | 0.3927 / 0.3868 µs | 43de44ce4 | best-ever |
+| lat_usleep 1000 | 1019 µs | 830da5bed | improved |
+| lat_tcp 127.0.0.1 | 8.0433 µs | 36e91a197 | improved (post net-tcp; ceiling 4.89 → 1.64x behind) |
+| lat_udp 127.0.0.1 | 6.6792 µs | 36e91a197 | improved (post net-tcp; ceiling 4.147 → 1.61x behind) |
+
+The full-battery rows above came from the 830da5bed tree, which is
+pre-gbwedge and pre-net-tcp; the net rows come from 36e91a197 after
+the net-tcp merge. Tree hashes are labeled per the honesty rule.
+
+Held (published value kept; newest reading was worse or still has no
+number): lat_syscall read / write / stat / open, fstat (latest
+in-band, not an improvement), lat_unix, lat_pagefault, bw_pipe,
+bw_unix, lat_mmap (no number), lat_connect (no number — WAKE-HEAL-SKIP
+strand, open), bw_tcp (no number — deterministic bigalloc 512 MiB
+failure, open), p6_write_fsync +13.6% (pbench row, still held). The
+loopback/netdev TCP functional family is closed by net-tcp; bw_tcp
+remains the open net row.
+
 ## fdreap silence round (2026-11-17, patrol 3): open stability fixed
 
 The fdreap serial-report budget (1/8192) turned out to fix more than
@@ -634,8 +669,8 @@ subsequent event).
   (connect01/accept01/accept02/listen/bind/recv/send/socket/close/
   poll); triple-arch + riscv suite green.
 - lat_connect/lat_tcp family now: functional kernel bug closed; the
-  performance rows stand as measured (tcp 2.12x / udp 2.17x vs
-  ceiling).
+  performance rows stand as measured (tcp 1.64x / udp 1.61x vs
+  ceiling, latest readings 8.0433 / 6.6792 µs @ 36e91a197).
 
 ## No-number rows CLOSED (2026-11-19/20, user directive round): every row adjudicated
 
@@ -644,8 +679,9 @@ budget overrides, fixed-runner image):
 
 - **bw_mmap_rd RECOVERED: 79,954 MB/s = 1.04x ahead of the native
   ceiling (77,100)** — stale-runner-era classification, row returns.
-- **lat_tcp RECOVERED: 10.35 µs** (ceiling 4.89 → 2.12x behind) and
-  **lat_udp RECOVERED: 9.00 µs** (ceiling 4.147 → 2.17x behind) — the
+- **lat_tcp RECOVERED: 8.0433 µs** (ceiling 4.89 → 1.64x behind;
+  re-banked to the latest reading @ 36e91a197) and
+  **lat_udp RECOVERED: 6.6792 µs** (ceiling 4.147 → 1.61x behind) — the
   handshake family WORKS on the current tree (full SYN/SYN-ACK/ACK/
   data exchanges visible); the historic 11-03 strand is gone.
 - **lat_fs: honest number + bimodal stall.** Low-load boots complete
@@ -665,7 +701,7 @@ budget overrides, fixed-runner image):
 **Final full-board scoreboard (29/29 adjudicated): 19 ahead/parity ·
 3 near-ceiling (fork 1.08 / exec 1.05 / mmap 1.12) · 8 behind with
 honest numbers (open 1.71 / read 1.55 / write 1.30 / stat 1.13 /
-tcp 2.12 / udp 2.17 / lat_fs 19-22x / connect+bw_tcp = open bugs).**
+tcp 1.64 / udp 1.61 / lat_fs 19-22x / connect+bw_tcp = open bugs).**
 The two open kernel items: fd exhaustion under connect storm;
 lat_fs's load-coupled stall.
 

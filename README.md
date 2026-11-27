@@ -9,7 +9,7 @@ Subsystems are implemented by AI agents under human architecture review and merg
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#quickstart)
-[![Tests](https://img.shields.io/badge/tests-LTP%201%2C139%20%2B%20suite%201%2C584-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-LTP%201%2C139%20%2B%20suite%201596--1597-brightgreen.svg)](#testing)
 [![Code](https://img.shields.io/badge/code-~421%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 Reports & documentation: **<https://topkernel.github.io/Rux/>** (中文 / EN)
@@ -98,7 +98,7 @@ Full boards: [fio](https://topkernel.github.io/Rux/performance/fio.html) · [rt-
 | Class | Scale |
 |---|---|
 | LTP compatibility list | **1,139 of 1,869** |
-| In-kernel suite | **1,584 cases**, every merge |
+| In-kernel suite | **1,596–1,597 cases** (one environment-dependent SKIP), every merge |
 | Architectures | riscv64 · x86_64 · aarch64 — build + boot regression, every push |
 | Formal verification | 164 Kani harnesses · 1,184 host tests · 4 SPIN models · 8 loom scenarios · Miri nightly |
 | Data integrity | fio `--verify`, e2fsck, hard-kill persistence batteries |
@@ -139,7 +139,7 @@ make build                   # kernel (default riscv64)
 make user rootfs             # userspace + minimal rootfs image
 make run                     # boot to a shell
 PLATFORM=x86_64 make build   # x86_64 / aarch64
-make test                    # 1,584-case in-kernel suite
+make test                    # 1,596–1,597-case in-kernel suite
 make ubuntu-run              # boot the Ubuntu desktop
 make oh-run                  # boot OpenHarmony to the launcher
 make ci                      # full stress pipeline, unattended
