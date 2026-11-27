@@ -503,9 +503,9 @@ pub fn borrow_active_mm<'a>(mm_ptr: *const crate::mm::AddressSpace) -> &'a crate
 /// live list head.
 #[inline]
 pub fn list_add_tail(node: &mut crate::list::ListHead, head: *mut crate::list::ListHead) {
-    // SAFETY: INV-PROC-LIST-1 — lock-held (or pre-publication) link of
-    // an initialized node into a live head.
-    unsafe { node.add_tail(head) }
+    // INV-LIST-1 (list.rs's safe API, INV-LIST-RAW-1 edge): lock-held
+    // (or pre-publication) link of an initialized node into a live head.
+    node.add_tail(head)
 }
 
 /// Unlink `node` from its list.
@@ -514,8 +514,9 @@ pub fn list_add_tail(node: &mut crate::list::ListHead, head: *mut crate::list::L
 /// `node` is currently linked in a list whose neighbors are live.
 #[inline]
 pub fn list_del(node: &mut crate::list::ListHead) {
-    // SAFETY: INV-PROC-LIST-1 — lock-held unlink of a linked node.
-    unsafe { node.del() }
+    // INV-LIST-1 (list.rs's safe API, INV-LIST-RAW-1 edge): lock-held
+    // unlink of a linked node.
+    node.del()
 }
 
 /// Walk `head`'s list, handing each node pointer to `f`.
@@ -528,8 +529,9 @@ pub fn list_for_each<F>(head: *mut crate::list::ListHead, f: F)
 where
     F: FnMut(*mut crate::list::ListHead),
 {
-    // SAFETY: INV-PROC-LIST-1 — lock-held walk of a live list.
-    unsafe { crate::list::ListHead::for_each(head, f) }
+    // INV-LIST-1 (list.rs's safe API, INV-LIST-RAW-1 edge): lock-held
+    // walk of a live list.
+    crate::list::ListHead::for_each(head, f)
 }
 
 /// Deref a task pointer for the wake/notify family (the (*task) sites).

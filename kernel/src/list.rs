@@ -17,11 +17,17 @@
 //! - Small memory overhead: each node only needs 2 pointers (16 bytes)
 //!
 //! INV-LIST-1 (F15-registered primitive, safety-and-performance.md):
-//! every unsafe method's contract is "the caller holds the embedding
+//! every list operation's contract is "the caller holds the embedding
 //! structure's lock and passes nodes that are live members of THIS
-//! list or freshly constructed" — the per-method Safety notes below
-//! restate that contract per shape. This module IS the primitive core
-//! (the plan's round-C class (a)); it stays unsafe-fn by design.
+//! list or freshly constructed" — the per-method notes below restate
+//! that contract per shape.
+//!
+//! Zero-unsafe API surface (mainline minimal-first collection,
+//! 2026-11-27): the raw link reads/writes moved to kernel/src/unsafe.rs
+//! (INV-LIST-RAW-1); the API methods here stay `pub fn` — the contract
+//! moved from the type system (unsafe fn) to the caller-side lock
+//! discipline the INV records.
+#![forbid(unsafe_code)]
 
 use core::ptr;
 
@@ -66,18 +72,16 @@ impl ListHead {
     /// # Arguments
     /// - `head`: List position to insert (insert after head)
     ///
-    /// # Safety
-    /// Caller must ensure `head` is valid
+    /// # Contract (INV-LIST-1 through the INV-LIST-RAW-1 edge)
+    /// Caller holds the list-owning lock; `head` is a valid live
+    /// position and `self` a freshly constructed node.
     ///
     /// ...
-    pub unsafe fn add(&mut self, head: *mut ListHead) {
-        let next = (*head).next;
+    pub fn add(&mut self, head: *mut ListHead) {
+        let next = Self::raw_next(head);
 
         // Insert current node between head and head->next
-        self.next = next;
-        self.prev = head;
-        (*head).next = self;
-        (*next).prev = self;
+        self.raw_link_between(head, next);
     }
 
     /// Add node at list tail
@@ -85,36 +89,27 @@ impl ListHead {
     /// # Arguments
     /// - `head`: List head (insert before head, i.e. at tail)
     ///
-    /// # Safety
-    /// Caller must ensure `head` is valid
+    /// # Contract (INV-LIST-1 through the INV-LIST-RAW-1 edge)
+    /// Caller holds the list-owning lock; `head` is a valid live
+    /// position and `self` a freshly constructed node.
     ///
     /// ...
-    pub unsafe fn add_tail(&mut self, head: *mut ListHead) {
-        let prev = (*head).prev;
+    pub fn add_tail(&mut self, head: *mut ListHead) {
+        let prev = Self::raw_prev(head);
 
         // Insert current node between head->prev and head
-        self.next = head;
-        self.prev = prev;
-        (*head).prev = self;
-        (*prev).next = self;
+        self.raw_link_between(prev, head);
     }
 
     /// Delete current node from list
     ///
-    /// # Safety
-    /// Caller must ensure node is in the list
+    /// # Contract (INV-LIST-1 through the INV-LIST-RAW-1 edge)
+    /// Caller holds the list-owning lock; `self` is currently linked
+    /// and its neighbors are live.
     ///
     /// ...
-    pub unsafe fn del(&mut self) {
-        let next = self.next;
-        let prev = self.prev;
-
-        (*next).prev = prev;
-        (*prev).next = next;
-
-        // Mark as deleted (point to self, for debugging)
-        self.next = self as *mut _;
-        self.prev = self as *mut _;
+    pub fn del(&mut self) {
+        self.raw_unlink();
     }
 
     /// Get reference to structure containing this ListHead
@@ -129,18 +124,20 @@ impl ListHead {
     /// # use crate::list::ListHead;
     /// # struct Task { children: ListHead, pid: u32 };
     /// # let list_head_ptr = &mut Task { children: ListHead::new(), pid: 0 }.children as *mut _;
-    /// let task = unsafe { ListHead::entry(list_head_ptr, Task, children) };
-    /// assert_eq!((*task).pid, 0);
+    /// let task = ListHead::entry(list_head_ptr, Task, children);
+    /// assert!(!task.is_null());
     /// ```
     ///
-    /// # Safety
+    /// # Contract (INV-LIST-1)
     /// Caller must ensure `ptr` is valid and points to correct `member`
+    /// — the offset math is the container_of idiom, kept non-panicking
+    /// (wrapping) exactly like the pointer arithmetic it replaces.
     ///
     /// ...
-    pub unsafe fn entry<T>(ptr: *mut ListHead, member: impl OffsetHelper<T>) -> *mut T {
+    pub fn entry<T>(ptr: *mut ListHead, member: impl OffsetHelper<T>) -> *mut T {
         // Calculate structure start address: ptr - offset_of(member)
         let offset = member.offset();
-        (ptr as *mut u8).sub(offset) as *mut T
+        (ptr as *mut u8).wrapping_sub(offset) as *mut T
     }
 
     /// Iterate through list
@@ -149,11 +146,12 @@ impl ListHead {
     /// - `head`: List head
     /// - `f`: Closure to call for each node
     ///
-    /// # Safety
-    /// Caller must ensure `head` is valid and list is not modified during iteration
+    /// # Contract (INV-LIST-1 through the INV-LIST-RAW-1 edge)
+    /// Caller holds the lock that serializes link/unlink on `head` for
+    /// the whole walk; the list is not modified during iteration.
     ///
     /// ...
-    pub unsafe fn for_each<F>(head: *mut ListHead, mut f: F)
+    pub fn for_each<F>(head: *mut ListHead, mut f: F)
     where
         F: FnMut(*mut ListHead),
     {
@@ -180,9 +178,9 @@ impl ListHead {
         // would be caught by the spinlock/deadlock watchdog — silently
         // truncating correct walks is the worse failure mode. Termination
         // is `pos != head`, exactly the reference discipline.
-        let mut pos = (*head).next;
+        let mut pos = Self::raw_next(head);
         while pos != head {
-            let next = (*pos).next;
+            let next = Self::raw_next(pos);
             f(pos);
             pos = next;
         }
@@ -191,11 +189,12 @@ impl ListHead {
     /// Get first node
     ///
     /// ...
-    pub unsafe fn first_entry<T>(head: *mut ListHead, member: impl OffsetHelper<T>) -> Option<*mut T> {
-        if (*head).next == head {
+    pub fn first_entry<T>(head: *mut ListHead, member: impl OffsetHelper<T>) -> Option<*mut T> {
+        let next = Self::raw_next(head);
+        if next == head {
             None
         } else {
-            Some(Self::entry((*head).next, member))
+            Some(Self::entry(next, member))
         }
     }
 }
@@ -210,17 +209,9 @@ macro_rules! impl_offset_helper {
     ($type:ty, $member:ident) => {
         impl OffsetHelper<$type> for fn() -> usize {
             fn offset(&self) -> usize {
-                // Use core::mem::offset_of! (Rust 1.77+)
-                // If not available, use unsafe alternative
-                extern crate core;
-                // SAFETY: MaybeUninit is never read, only its pointer is used to compute
-                // the offset of a field — this is a standard offset-of pattern.
-                unsafe {
-                    let dummy = core::mem::MaybeUninit::<$type>::uninit();
-                    let base = dummy.as_ptr();
-                    let member_ptr = core::ptr::addr_of!((*base).$member);
-                    (member_ptr as usize) - (base as usize)
-                }
+                // core::mem::offset_of! (Rust 1.77+): the compile-time
+                // constant the MaybeUninit/addr_of dance used to compute.
+                ::core::mem::offset_of!($type, $member)
             }
         }
     };

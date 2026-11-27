@@ -326,8 +326,9 @@ pub(crate) fn cpu_local_val<'a, T>(p: *mut T) -> &'a mut T {
 /// The intrusive rewire (the reference's blist_add_tail counterpart) —
 /// it mutates THIS node's links. Caller holds the cb_list lock.
 pub fn list_add_tail(node: &mut crate::list::ListHead, tail: *mut crate::list::ListHead) {
-    // SAFETY: INV-SY-7 — lock held, both nodes initialized.
-    unsafe { node.add_tail(tail) }
+    // INV-SY-7 via INV-LIST-RAW-1 (list.rs's safe API): lock held,
+    // both nodes initialized.
+    node.add_tail(tail)
 }
 
 /// Enqueue `head`'s list node onto cpu's callback list (INV-SY-7): the

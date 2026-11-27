@@ -371,24 +371,27 @@ pub fn task_of_rt_list(pos: *mut crate::list::ListHead) -> *mut Task {
 #[inline]
 pub fn rt_list_add(task: *mut Task, head: *mut crate::list::ListHead) {
     let t = task_mut(task);
-    // SAFETY: INV-SCE-7 — the intrusive add under the GRQ.
-    unsafe { t.rt_run_list.add(head) }
+    // INV-SCE-7 via INV-LIST-RAW-1 (list.rs's safe API): the
+    // intrusive add under the GRQ.
+    t.rt_run_list.add(head)
 }
 
 /// Tail variant of [rt_list_add].
 #[inline]
 pub fn rt_list_add_tail(task: *mut Task, head: *mut crate::list::ListHead) {
     let t = task_mut(task);
-    // SAFETY: INV-SCE-7.
-    unsafe { t.rt_run_list.add_tail(head) }
+    // INV-SCE-7 via INV-LIST-RAW-1 (list.rs's safe API): the
+    // intrusive tail-add under the GRQ.
+    t.rt_run_list.add_tail(head)
 }
 
 /// Unlink `task`'s RT node (INV-SCE-7 write).
 #[inline]
 pub fn rt_list_del(task: *mut Task) {
     let t = task_mut(task);
-    // SAFETY: INV-SCE-7.
-    unsafe { t.rt_run_list.del() }
+    // INV-SCE-7 via INV-LIST-RAW-1 (list.rs's safe API): the
+    // intrusive unlink under the GRQ.
+    t.rt_run_list.del()
 }
 
 /// Is `task`'s embedded RT list node linked (INV-SCE-7 read)? A freed

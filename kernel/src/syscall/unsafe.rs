@@ -107,8 +107,9 @@ pub fn list_link_tail(node: *mut ListHead, head: *mut ListHead) {
 /// lock; the node is currently linked and its neighbors are live).
 #[inline]
 pub fn list_unlink(node: &mut ListHead) {
-    // SAFETY: INV-SYSC-1 — lock-held unlink of a linked node.
-    unsafe { node.del() }
+    // INV-SYSC-1 via INV-LIST-RAW-1 (list.rs's safe API): lock-held
+    // unlink of a linked node.
+    node.del()
 }
 
 // ---------------------------------------------------------------------------

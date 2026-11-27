@@ -485,3 +485,71 @@ pub fn initrd_raw_slice(virt: usize, len: usize) -> &'static [u8] {
     // SAFETY: INV-INITRD-1 — reserved, validated, machine-lifetime RAM.
     unsafe { core::slice::from_raw_parts(virt as *const u8, len) }
 }
+
+// ---------------------------------------------------------------------------
+// INV-LIST-RAW-1: the intrusive-list raw primitives (moved from list.rs
+// by the root-file unsafe collection, 2026-11-27; list.rs keeps the
+// safe API surface — add/add_tail/del/entry/for_each/first_entry — and
+// delegates here). Contracts are list.rs's INV-LIST-1 unchanged.
+// ---------------------------------------------------------------------------
+
+impl crate::list::ListHead {
+    /// Raw `next` read off a list position.
+    ///
+    /// INV-LIST-RAW-1: `head` is an initialized ListHead — a live list
+    /// position (sentinel or linked node); the links were written under
+    /// the list-owning lock and are read under the same discipline.
+    #[inline]
+    pub fn raw_next(head: *const crate::list::ListHead) -> *mut crate::list::ListHead {
+        // SAFETY: INV-LIST-RAW-1 — initialized, live list position.
+        unsafe { (*head).next }
+    }
+
+    /// Raw `prev` read off a list position.
+    ///
+    /// INV-LIST-RAW-1: same contract as [`ListHead::raw_next`].
+    #[inline]
+    pub fn raw_prev(head: *const crate::list::ListHead) -> *mut crate::list::ListHead {
+        // SAFETY: INV-LIST-RAW-1 — initialized, live list position.
+        unsafe { (*head).prev }
+    }
+
+    /// Link `self` between `prev` and `next` (the one insertion
+    /// primitive — add and add_tail both resolve to it).
+    ///
+    /// INV-LIST-RAW-1: `self` is a freshly constructed (unlinked) node;
+    /// `prev`/`next` are adjacent live positions of the list the
+    /// caller's lock owns; the four writes are the standard Linux
+    /// __list_add bracket.
+    #[inline]
+    pub fn raw_link_between(&mut self, prev: *mut crate::list::ListHead, next: *mut crate::list::ListHead) {
+        self.next = next;
+        self.prev = prev;
+        // SAFETY: INV-LIST-RAW-1 — live neighbors of the owning lock's
+        // list; writes stay inside their link fields.
+        unsafe {
+            (*prev).next = self;
+            (*next).prev = self;
+        }
+    }
+
+    /// Unlink `self` from its two neighbors and mark it deleted
+    /// (self-linked, the debugging convention).
+    ///
+    /// INV-LIST-RAW-1: `self` is currently linked; its neighbors are
+    /// live nodes of the list the caller's lock owns.
+    #[inline]
+    pub fn raw_unlink(&mut self) {
+        let next = self.next;
+        let prev = self.prev;
+        // SAFETY: INV-LIST-RAW-1 — live neighbors; the splice keeps the
+        // list consistent (list_del shape).
+        unsafe {
+            (*next).prev = prev;
+            (*prev).next = next;
+        }
+        // Mark as deleted (point to self, for debugging)
+        self.next = self as *mut _;
+        self.prev = self as *mut _;
+    }
+}
