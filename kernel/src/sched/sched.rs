@@ -1619,15 +1619,47 @@ pub fn switching_out_names(task: *mut Task) -> bool {
 ///
 /// Therefore: every heal that releases the ownership qword of a task it
 /// did not see switch (the pick screens, the phantom sweep, the R80
-/// LIVE-on-linked leg) must first pass this gate. True = some cpu still
-/// plausibly owns the task (a marker names it and that cpu has serviced
-/// ticks within the bar, or the qword claim names a live cpu — the m25
-/// starved-picker case: a picker between its GRQ release and its asm
-/// affirm holds a pending claim; these heals bypass the steal's
-/// revocation CAS, so the claim must gate them too). False = every
-/// naming cpu is timer-dead past the bar — the switch is never coming
-/// back, the heal may proceed.
+/// LIVE-on-linked leg) must first pass this gate.
+///
+/// The discriminator is SOUND by the IRQ discipline of the window: the
+/// marker is born under the GRQ (IRQs off), the GRQ is dropped with
+/// unlock_irqretain (IRQs stay off through context_switch), and the
+/// incoming tail clears the marker BEFORE its irq re-enable — so a
+/// genuinely open window implies the switching cpu has serviced NO
+/// timer tick since the marker's birth: `frozen_ms >= age_ms`. When
+/// the cpu HAS ticked since the birth (frozen_ms << age), the window
+/// provably closed — the marker is a lost retire and the release must
+/// proceed (the d023bc051 strand recovery is preserved: a live cpu
+/// that leaked its marker does not strand the task). A cpu frozen past
+/// [`PICK_RELEASE_DEAD_MS`] is treated as gone (the window will never
+/// close on its own; 30 s bounds the recovery of a genuinely lost
+/// switch instead of the old forever).
+///
+/// DELIBERATELY NOT gated on the qword CLAIM's cpu liveness: a claim
+/// on a ticking cpu with no slot naming the task is a corpse (the
+/// picker's slot names the task for its whole pick — the curr_on
+/// screens exclude every live-pending-pick shape), and gating on it
+/// would strand the CRASH3 ENQ-CLAIMED shape {on_cpu=1, claim=3, no
+/// slot, no marker} forever behind a healthy cpu (the W3 strand face).
 pub const PICK_RELEASE_DEAD_MS: u64 = 30_000;
+
+/// True when cpu `c`'s SWITCHING_OUT marker for a task may still be an
+/// open switch window (see [`switch_owner_maybe_live`]).
+fn switch_marker_maybe_in_flight(c: usize) -> bool {
+    let frozen = crate::debug::softlockup::cpu_irq_frozen_ms(c);
+    if frozen >= PICK_RELEASE_DEAD_MS {
+        return false; // the switcher is gone; the window never closes
+    }
+    let born = SWITCHING_OUT_JIF[c].load(core::sync::atomic::Ordering::Acquire);
+    if born == 0 {
+        return true; // un-stamped marker: age unknown, stay conservative
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    let age_ms = now
+        .wrapping_sub(born)
+        .saturating_mul(1000 / crate::config::KERNEL_HZ as u64);
+    frozen >= age_ms // the cpu has been IRQ-silent since the birth
+}
 
 pub fn switch_owner_maybe_live(task: *mut Task) -> bool {
     if task.is_null() {
@@ -1635,24 +1667,10 @@ pub fn switch_owner_maybe_live(task: *mut Task) -> bool {
     }
     for c in 0..MAX_CPUS {
         if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
-            && crate::debug::softlockup::cpu_irq_frozen_ms(c) < PICK_RELEASE_DEAD_MS
+            && switch_marker_maybe_in_flight(c)
         {
             return true;
         }
-    }
-    // The claim half: a starved-but-live picker between its GRQ release
-    // and its asm affirm carries a pending claim (m25 lesson — tick
-    // staleness proves nothing about a picker's death). These release
-    // legs have no revocation CAS to protect them, so the claim's cpu
-    // liveness gates them directly.
-    let claim = crate::sched::edges::task_shared(task)
-        .running_on_cpu
-        .load(core::sync::atomic::Ordering::Acquire);
-    if claim >= 0
-        && (claim as usize) < MAX_CPUS
-        && crate::debug::softlockup::cpu_irq_frozen_ms(claim as usize) < PICK_RELEASE_DEAD_MS
-    {
-        return true;
     }
     false
 }
@@ -11856,22 +11874,20 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                                 || now.wrapping_sub(born) >= SWITCHING_OUT_STALE_JIF
                             {
                                 // R87P (gbwedge, Geekbench MC double-run):
-                                // an aged marker on a LIVE cpu is an open
-                                // switch window, not a lost retire — the
-                                // cpu may unstall at any microsecond and
+                                // a marker that may still be an open switch
+                                // window (the switching cpu IRQ-silent since
+                                // the marker's birth) must NOT be retired —
+                                // the cpu may unstall at any microsecond and
                                 // its release store is the protocol's own
-                                // heal. Retiring the marker (and with it
-                                // the strict gate's evidence) while the
-                                // switcher may still be mid-window let
-                                // the qword clear below hand the task to
-                                // a second CPU on the switcher's live
-                                // stack. Leave the marker; the strand
-                                // retry re-runs next round (1 Hz) and the
-                                // 30 s timer-dead bar still recovers a
-                                // genuinely lost switch.
-                                if crate::debug::softlockup::cpu_irq_frozen_ms(c)
-                                    < PICK_RELEASE_DEAD_MS
-                                {
+                                // heal; retiring the marker (and with it the
+                                // strict gate's evidence) let the qword clear
+                                // below hand the task to a second CPU on the
+                                // switcher's live stack. A marker whose cpu
+                                // HAS ticked since the birth is a lost retire
+                                // (d023bc051) and still retires; a cpu frozen
+                                // past the 30 s bar is gone and still
+                                // recovers. The strand retry re-runs at 1 Hz.
+                                if switch_marker_maybe_in_flight(c) {
                                     continue;
                                 }
                                 SWITCHING_OUT[c]
