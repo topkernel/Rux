@@ -1,4 +1,4 @@
-# Geekbench on Rux — Rig, Scores, and Findings (2026-11-01, refreshed 2026-11-04)
+# Geekbench on Rux — Rig, Scores, and Findings (2026-11-01, refreshed 2026-11-28)
 
 Lane `perf-geekbench`, first full Geekbench run on the Rux x86_64 kernel.
 Geekbench 5.5.1, AMD Ryzen 9 9950X, KVM (`-M q35 -accel kvm -cpu host
@@ -15,6 +15,10 @@ evidence below.
 | **Single-Core Score** | 1941 → 2274 (11-02 rounds) | **2115** | 2165 | 2549 |
 | **Multi-Core Score** | 7139 | **7332** | 7027 | 20402 |
 | **vs 4-CPU reference** | 90% / 102% | **97.7% single / 104% multi** | 100% | (topology differs) |
+
+**Latest official board (main=36e91a197): SC 2405 / MC 7690** — 42/42
+workloads scored, zero panics; see the 2026-11-28 standing at the end
+of this file.
 
 The 2026-11-04 refresh (kernel 8d81c5da — RCU fd lookup + retire
 reaper + dispatch consolidation) ran under host loadavg ~5.5 (the
@@ -594,3 +598,12 @@ campaign milestone.
 `mmprobe/{mm_probe.c, probe-x86.img, rux*.log, ref*.log, ab-*.log,
 verify-*.log}`; `lmbench-rux-{main,opt}.txt`, `lmbench-linux.txt`,
 `lmbench-table-{main,opt}.md`; `pipeline.log` (every stage logged).
+
+# 2026-11-28 standing — main@36e91a197 (official board)
+
+Official-board re-run on the current main (x86_64+KVM, `-smp 4 -m 4G`,
+GB 5.5.1, the standard rig): **SC 2405 / MC 7690** — 42/42 workloads
+scored, zero panics. Per the latest-reading discipline this board is
+now the cited reading everywhere (docs and site); the prior boards
+(11-15/16/18: SC 2440 / MC 7709) are within the established noise band
+— latest reading replaces, not a regression hold.
