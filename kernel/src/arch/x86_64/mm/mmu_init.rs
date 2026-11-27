@@ -341,7 +341,7 @@ pub fn alloc_page_table() -> Option<u64> {
                 };
                 // SAFETY: the chain walk is the dfx stack-forensics edge;
                 // mw_bp is this frame's own frame pointer.
-                unsafe { crate::dfx::memwatch::walk_fp_chain(mw_bp, &mut mw_frames) };
+                crate::dfx::memwatch::walk_fp_chain(mw_bp, &mut mw_frames);
                 crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
             }
 

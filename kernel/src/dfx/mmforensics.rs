@@ -41,6 +41,7 @@
 //! bounds-checked (`phys_valid` + RAM top) before descent and every
 //! walk carries a hard entry budget.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Per-boot cap on captures: the events occur <=2/boot; four captures
@@ -98,8 +99,9 @@ pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old
     if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
-    // SAFETY: the caller passes a valid page descriptor it is operating on.
-    let p = unsafe { &*page };
+    // INV-FOR-9 raw-ref edge: the caller passes a valid page
+    // descriptor it is operating on.
+    let p = crate::dfx::forensics_edges::raw_ref(page);
     use crate::mm::page_desc::PageType;
     if p.page_type() != PageType::PageCache {
         return;
@@ -329,36 +331,36 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
     if page.is_null() {
         crate::pr_err!("  desc: NO DESCRIPTOR (pfn outside managed range)");
     } else {
-        // SAFETY: read-only descriptor access on the diagnostic path.
-        unsafe {
-            use crate::mm::page_desc::PageFlag;
-            let p = &*page;
-            let bit = |f: PageFlag, n: &'static str| -> &'static str {
-                if p.test_flag(f) {
-                    n
-                } else {
-                    ""
-                }
-            };
-            crate::pr_err!(
-                "  desc: refcount={} mapcount={} order={} mapped={} type={} mapping={:#x} index={} flags:[{}{}{}{}{}{}{}{}]",
-                p.refcount(),
-                p.mapcount(),
-                p.order(),
-                p.is_mapped(),
-                p.page_type() as u32,
-                p.mapping() as usize,
-                p.index(),
-                bit(PageFlag::OnFreelist, "OnFreelist "),
-                bit(PageFlag::OnPcp, "OnPcp "),
-                bit(PageFlag::Lru, "Lru "),
-                bit(PageFlag::Anonymous, "Anon "),
-                bit(PageFlag::Dirty, "Dirty "),
-                bit(PageFlag::UpToDate, "UpToDate "),
-                bit(PageFlag::Reserved, "Reserved "),
-                bit(PageFlag::Active, "Active "),
-            );
-        }
+        // INV-FOR-9 diagnostic edges: read-only descriptor access on
+        // the diagnostic path.
+        let (rc, mc, order, mapped, ptype, mapping, idx) =
+            crate::dfx::forensics_edges::page_diag_words(page);
+        let flags = crate::dfx::forensics_edges::page_diag_flags(page);
+        let bit = |on: bool, n: &'static str| -> &'static str {
+            if on {
+                n
+            } else {
+                ""
+            }
+        };
+        crate::pr_err!(
+            "  desc: refcount={} mapcount={} order={} mapped={} type={} mapping={:#x} index={} flags:[{}{}{}{}{}{}{}{}]",
+            rc,
+            mc,
+            order,
+            mapped,
+            ptype,
+            mapping,
+            idx,
+            bit(flags[0], "OnFreelist "),
+            bit(flags[1], "OnPcp "),
+            bit(flags[2], "Lru "),
+            bit(flags[3], "Anon "),
+            bit(flags[4], "Dirty "),
+            bit(flags[5], "UpToDate "),
+            bit(flags[6], "Reserved "),
+            bit(flags[7], "Active "),
+        );
     }
 
     // ---- 2. PT ledger ----

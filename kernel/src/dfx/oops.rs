@@ -43,6 +43,7 @@
 //! — `/sys/fs/pstore/dmesg-ramoops-0` after the reboot (the panic
 //! record stays `console-ramoops-0`; a later panic overwrites either).
 
+#![forbid(unsafe_code)]
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -113,7 +114,8 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     // Latch first: recursion inside the report parks here instead of
     // nesting forever.
     if OOPS_ENTERED.swap(true, Ordering::Relaxed) {
-        let mut put = |b: u8| unsafe { crate::console::putchar_no_lock(b) };
+        // INV-FOR-6 raw-console edge (panic path, locks down).
+    let mut put = |b: u8| crate::dfx::forensics_edges::console_put_raw(b);
         for &b in b"trap: oops re-entered during report; halting\n" {
             put(b);
         }

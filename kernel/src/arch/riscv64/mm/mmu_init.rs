@@ -271,7 +271,7 @@ pub fn alloc_page_table() -> Option<u64> {
                     core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
                     v
                 };
-                unsafe { crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames) };
+                crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
                 crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
             }
 
@@ -1550,7 +1550,7 @@ fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -
                 core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
                 v
             };
-            unsafe { crate::dfx::memwatch::walk_fp_chain(s0, &mut frames) };
+            crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
             crate::dfx::taskdump::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
             let mut sh: i32 = 64;
             while sh > 0 {

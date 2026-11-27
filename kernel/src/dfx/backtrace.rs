@@ -12,6 +12,7 @@
 //! (bypasses printk ring buffer), making these safe to call from
 //! crash/panic contexts.
 
+#![forbid(unsafe_code)]
 use core::fmt;
 use core::fmt::Write;
 
@@ -97,75 +98,30 @@ impl fmt::Write for ConsoleWriter {
 // Frame Pointer Stack Walk
 // ============================================================================
 
-/// Read the current frame pointer register (`s0` on riscv64, `rbp` on x86_64).
+/// Read the current frame pointer register (`s0` on riscv64, `rbp` on
+/// x86_64). The raw register reads are the audited edge's INV-FOR-4
+/// family (forensics_edges::fp_read_raw).
 #[inline]
 pub fn current_frame_pointer() -> u64 {
-    let fp: u64;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
-    }
-    #[cfg(feature = "aarch64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
-    {
-        fp = 0;
-    }
-    fp
+    crate::dfx::forensics_edges::fp_read_raw()
 }
 
-/// Return address of the calling function (for "current" trace entries).
+/// Return address of the calling function (for "current" trace
+/// entries). Raw reads are the audited edge's INV-FOR-4 family
+/// (forensics_edges::caller_ra_read_raw).
 #[inline]
 pub(crate) fn caller_return_address() -> u64 {
-    let ra: u64;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: frame pointers are forced on (force-frame-pointers=yes), so
-    // [rbp+8] is this function's return address.
-    unsafe {
-        core::arch::asm!("mov {}, [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "aarch64")]
-    // SAFETY: x29 is the frame-chain base; [x29+8] is the LR slot.
-    unsafe {
-        core::arch::asm!("ldr {}, [x29, 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
-    {
-        ra = 0;
-    }
-    ra
+    crate::dfx::forensics_edges::caller_ra_read_raw()
 }
 
 /// Unwind one frame: given a frame pointer, return (return_addr, next_fp).
 ///
 /// riscv64 frame layout: [fp] = saved_fp, [fp+8] = return_addr.
 /// x86_64 frame layout:  [rbp] = saved_rbp, [rbp+8] = return_addr.
+/// The frame-word reads are the audited edge's INV-FOR-2 arm.
 #[inline]
 fn unwind_frame(fp: u64) -> Option<(u64, u64)> {
-    // SAFETY: caller validated `fp` (kernel range, aligned); reads of the
-    // two frame words are the standard unwind operation.
-    unsafe {
-        let ret_addr = *((fp + 8) as *const u64);
-        let next_fp = *(fp as *const u64);
-        if ret_addr == 0 {
-            return None;
-        }
-        Some((ret_addr, next_fp))
-    }
+    crate::dfx::forensics_edges::unwind_frame_raw(fp)
 }
 
 /// Walk frame pointers and call the callback for each frame.
@@ -275,122 +231,32 @@ const REG_NAMES: [&str; 31] = [
 ];
 
 /// aarch64: capture x0..x30 into the dump array (x0 at slot 0).
+/// The register spill is the audited edge's INV-FOR-4 family.
 #[cfg(feature = "aarch64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    // SAFETY: register stores into a stack buffer; no memory reads.
-    unsafe {
-        core::arch::asm!(
-            "str x0, [{buf}, #0]",
-            "str x1, [{buf}, #8]",
-            "str x2, [{buf}, #16]",
-            "str x3, [{buf}, #24]",
-            "str x4, [{buf}, #32]",
-            "str x5, [{buf}, #40]",
-            "str x6, [{buf}, #48]",
-            "str x7, [{buf}, #56]",
-            "str x8, [{buf}, #64]",
-            "str x9, [{buf}, #72]",
-            "str x10, [{buf}, #80]",
-            "str x11, [{buf}, #88]",
-            "str x12, [{buf}, #96]",
-            "str x13, [{buf}, #104]",
-            "str x14, [{buf}, #112]",
-            "str x15, [{buf}, #120]",
-            "str x16, [{buf}, #128]",
-            "str x17, [{buf}, #136]",
-            "str x18, [{buf}, #144]",
-            "str x19, [{buf}, #152]",
-            "str x20, [{buf}, #160]",
-            "str x21, [{buf}, #168]",
-            "str x22, [{buf}, #176]",
-            "str x23, [{buf}, #184]",
-            "str x24, [{buf}, #192]",
-            "str x25, [{buf}, #200]",
-            "str x26, [{buf}, #208]",
-            "str x27, [{buf}, #216]",
-            "str x28, [{buf}, #224]",
-            "str x29, [{buf}, #232]",
-            "str x30, [{buf}, #240]",
-            buf = inout(reg) regs.as_mut_ptr() => _,
-            options(nostack)
-        );
-    }
+    crate::dfx::forensics_edges::save_regs_raw(&mut regs);
     regs
 }
 
 /// Save all integer registers to a stack buffer via inline assembly.
 ///
 /// Returns an array of 31 u64 values representing x1..x31.
+/// The register spill is the audited edge's INV-FOR-4 family.
 #[cfg(feature = "riscv64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    unsafe {
-        core::arch::asm!(
-            "sd ra,  0*8({buf})",
-            "sd sp,  1*8({buf})",
-            "sd gp,  2*8({buf})",
-            "sd tp,  3*8({buf})",
-            "sd t0,  4*8({buf})",
-            "sd t1,  5*8({buf})",
-            "sd t2,  6*8({buf})",
-            "sd s0,  7*8({buf})",
-            "sd s1,  8*8({buf})",
-            "sd a0,  9*8({buf})",
-            "sd a1,  10*8({buf})",
-            "sd a2,  11*8({buf})",
-            "sd a3,  12*8({buf})",
-            "sd a4,  13*8({buf})",
-            "sd a5,  14*8({buf})",
-            "sd a6,  15*8({buf})",
-            "sd a7,  16*8({buf})",
-            "sd s2,  17*8({buf})",
-            "sd s3,  18*8({buf})",
-            "sd s4,  19*8({buf})",
-            "sd s5,  20*8({buf})",
-            "sd s6,  21*8({buf})",
-            "sd s7,  22*8({buf})",
-            "sd s8,  23*8({buf})",
-            "sd s9,  24*8({buf})",
-            "sd s10, 25*8({buf})",
-            "sd s11, 26*8({buf})",
-            "sd t3,  27*8({buf})",
-            "sd t4,  28*8({buf})",
-            "sd t5,  29*8({buf})",
-            "sd t6,  30*8({buf})",
-            buf = inout(reg) regs.as_mut_ptr() => _,
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::dfx::forensics_edges::save_regs_raw(&mut regs);
     regs
 }
 
 /// x86_64 register capture: spill the callee-saved GPRs (rbx is reserved
 /// in LLVM, so push/spill/pop is the reliable way to read it).
+/// The register spill is the audited edge's INV-FOR-4 family.
 #[cfg(feature = "x86_64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    // SAFETY: the pushes are balanced by the rsp adjustment; only this
-    // stack scratch area is touched.
-    unsafe {
-        core::arch::asm!(
-            "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
-            "mov {rbx_v}, [rsp + 5*8]",
-            "mov {rbp_v}, [rsp + 4*8]",
-            "mov {r12_v}, [rsp + 3*8]",
-            "mov {r13_v}, [rsp + 2*8]",
-            "mov {r14_v}, [rsp + 1*8]",
-            "mov {r15_v}, [rsp + 0*8]",
-            "add rsp, 6*8",
-            rbx_v = out(reg) regs[0],
-            rbp_v = out(reg) regs[1],
-            r12_v = out(reg) regs[2],
-            r13_v = out(reg) regs[3],
-            r14_v = out(reg) regs[4],
-            r15_v = out(reg) regs[5],
-            options(preserves_flags)
-        );
-    }
+    crate::dfx::forensics_edges::save_regs_raw(&mut regs);
     regs
 }
 
@@ -419,21 +285,12 @@ pub fn dump_regs(regs: &[u64; 31]) {
 }
 
 /// Read and print CSR state (sstatus, scause, stval, sepc).
+/// The CSR reads are the audited edge's INV-FOR-4 family.
 #[cfg(feature = "riscv64")]
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
 
-    let (sstatus, scause, stval, sepc): (u64, u64, u64, u64);
-    unsafe {
-        core::arch::asm!(
-            "csrr {0}, sstatus",
-            "csrr {1}, scause",
-            "csrr {2}, stval",
-            "csrr {3}, sepc",
-            out(reg) sstatus, out(reg) scause, out(reg) stval, out(reg) sepc,
-            options(nomem, nostack)
-        );
-    }
+    let (sstatus, scause, stval, sepc) = crate::dfx::forensics_edges::trap_regs_read_raw();
 
     let _ = write!(w, "Sstatus: {:016x}\n", sstatus);
     let _ = write!(w, "Scause : {:016x}\n", scause);
@@ -450,21 +307,11 @@ pub fn dump_csrs() {
 }
 
 /// aarch64: print the exception syndrome registers instead of RISC-V CSRs.
+/// The system-register reads are the audited edge's INV-FOR-4 family.
 #[cfg(feature = "aarch64")]
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
-    let (esr, elr, far, spsr): (u64, u64, u64, u64);
-    // SAFETY: pure system-register reads, valid in any context.
-    unsafe {
-        core::arch::asm!(
-            "mrs {0}, esr_el1",
-            "mrs {1}, elr_el1",
-            "mrs {2}, far_el1",
-            "mrs {3}, spsr_el1",
-            out(reg) esr, out(reg) elr, out(reg) far, out(reg) spsr,
-            options(nomem, nostack)
-        );
-    }
+    let (esr, elr, far, spsr) = crate::dfx::forensics_edges::trap_regs_read_raw();
     let _ = write!(w, "ESR    : {:016x}\n", esr);
     let _ = write!(w, "ELR    : {:016x}\n", elr);
     let _ = write!(w, "FAR    : {:016x}\n", far);

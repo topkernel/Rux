@@ -28,6 +28,11 @@
 //! (Z2/Z4 — honored by TCG, unlike guest DR registers) on the victim
 //! neighborhood to catch the writer's next store with its RIP.
 
+// deny (not forbid): this file owns #[no_mangle] gdb-park symbols and
+// asm-read statics — the unsafe_attributes lint (part of the unsafe_code
+// group) needs item-level allows below; the boundary is the same: ZERO
+// unsafe keywords (mainline-gate checked).
+#![deny(unsafe_code)]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::process::task::Task;
@@ -224,13 +229,11 @@ pub fn audit_frames() -> [u64; 6] {
         if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
             break;
         }
-        // SAFETY: diagnostic reads of the live call stack.
-        let (ra, next) = unsafe {
-            (
-                core::ptr::read_volatile((fp + 8) as *const u64),
-                core::ptr::read_volatile(fp as *const u64),
-            )
-        };
+        // INV-FOR-2 volatile-read edges: the live call stack.
+        let (ra, next) = (
+            crate::dfx::forensics_edges::diag_read_qword((fp + 8) as usize),
+            crate::dfx::forensics_edges::diag_read_qword(fp as usize),
+        );
         if ra == 0 {
             break;
         }
@@ -389,32 +392,31 @@ pub fn task_plausible(task: *mut Task) -> bool {
     if !in_kimg && !in_heap {
         return false;
     }
-    // SAFETY: read-only probes of scheduler header fields. The range
-    // check above keeps us inside mapped memory for both known classes.
-    unsafe {
-        let pid = (*task).pid();
-        if pid == crate::sched::sched::TASK_POISON || pid > (1 << 22) {
-            return false;
-        }
-        if !in_heap {
-            return true; // static task (idle/boot): stacks are static too
-        }
-        let top = (*task).get_kernel_stack().map_or(0, |p| p as usize);
-        if top == 0 || top & 0xF != 0 {
-            return false;
-        }
-        if !HEAP_WINDOW.contains(&top)
-            && !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&top)
-        {
-            return false;
-        }
-        let bottom = (*task).kernel_stack_bottom();
-        let sp = (*task).thread().sp as usize;
-        if bottom >= top || sp < bottom || sp > top {
-            return false;
-        }
-        true
+    // INV-FOR-1 field edges: read-only probes of scheduler header
+    // fields. The range check above keeps us inside mapped memory for
+    // both known classes.
+    let pid = crate::dfx::forensics_edges::t_pid(task);
+    if pid == crate::sched::sched::TASK_POISON || pid > (1 << 22) {
+        return false;
     }
+    if !in_heap {
+        return true; // static task (idle/boot): stacks are static too
+    }
+    let top = crate::dfx::forensics_edges::t_get_kernel_stack(task).map_or(0, |p| p as usize);
+    if top == 0 || top & 0xF != 0 {
+        return false;
+    }
+    if !HEAP_WINDOW.contains(&top)
+        && !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&top)
+    {
+        return false;
+    }
+    let bottom = crate::dfx::forensics_edges::t_kernel_stack_bottom(task);
+    let sp = crate::dfx::forensics_edges::t_thread(task).sp as usize;
+    if bottom >= top || sp < bottom || sp > top {
+        return false;
+    }
+    true
 }
 
 /// R65 double-run seed report: `mark_picked_on_cpu` (GRQ held) is about to
@@ -437,15 +439,13 @@ pub fn double_seed(task: *mut Task, me: u64, owner_slot: i32, claim: i32) {
     REPORTING.store(true, Ordering::Relaxed);
     puts(b"\nDOUBLE-SEED task=");
     put_hex(task as u64);
-    // SAFETY: diagnostic header reads of the seed task.
-    unsafe {
-        puts(b" pid=");
-        put_dec((*task).pid() as u64);
-        puts(b" oncpu=");
-        put_dec((*task).on_cpu() as u64);
-        puts(b" claim=");
-        put_dec(claim as i64 as u64);
-    }
+    // INV-FOR-1 field edges: diagnostic header reads of the seed task.
+    puts(b" pid=");
+    put_dec(crate::dfx::forensics_edges::t_pid(task) as u64);
+    puts(b" oncpu=");
+    put_dec(crate::dfx::forensics_edges::t_on_cpu(task) as u64);
+    puts(b" claim=");
+    put_dec(claim as i64 as u64);
     puts(b" me=");
     put_dec(me);
     puts(b" owner_slot=");
@@ -542,16 +542,19 @@ pub fn switch_window_heal(prev: u64) {
 }
 
 /// GDB park: pin victim registered — arm watchpoints on $rsi (oncpu addr).
+#[allow(unsafe_code)]
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn scribble_pin_park(_task: u64, _oncpu_addr: u64) {}
 
 /// GDB park: double-run seed caught at pick time.
+#[allow(unsafe_code)]
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn scribble_seed_park(_task: u64) {}
 
 /// GDB park: garbage switch argument caught before dereference.
+#[allow(unsafe_code)]
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn scribble_switch_park(_bad: u64, _which: u64) {}
@@ -566,14 +569,14 @@ fn putc(c: u8) {
     // interleaving).
     if REPORTING.load(Ordering::Relaxed) {
         let p = REPORT_POS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: diagnostic buffer, bounded by len check.
-        let buf = unsafe { &mut *REPORT_BUF.0.get() };
+        // INV-FOR-6 report-buffer edge (bounded by the len check).
+        let buf = crate::dfx::forensics_edges::scribble_report_buf_mut();
         if p < buf.len() {
             buf[p] = c;
         }
     }
-    // SAFETY: raw console byte, no locking, no allocation.
-    unsafe { crate::console::putchar_no_lock(c) };
+    // INV-FOR-6 raw-console edge (no locking, no allocation).
+    crate::dfx::forensics_edges::console_put_raw(c);
 }
 
 fn puts(s: &[u8]) {
@@ -622,8 +625,8 @@ fn dump_qwords(tag: &[u8], base: usize, n: usize) {
             puts(b":");
         }
         puts(b" ");
-        // SAFETY: diagnostic read of kernel memory.
-        let v = unsafe { core::ptr::read_volatile((base + i * 8) as *const u64) };
+        // INV-FOR-2 volatile-read edge: kernel memory.
+        let v = crate::dfx::forensics_edges::diag_read_qword(base + i * 8);
         put_hex(v);
         if i % 4 == 3 {
             puts(b"\n");
@@ -660,8 +663,8 @@ fn slot_of(task: *mut Task) -> Option<usize> {
 
 #[inline]
 fn rd(task: *mut Task, off: usize) -> u64 {
-    // SAFETY: diagnostic read of a live Task field.
-    unsafe { core::ptr::read_volatile((task as usize + off) as *const u64) }
+    // INV-FOR-2 volatile-read edge: a live Task field.
+    crate::dfx::forensics_edges::diag_read_qword(task as usize + off)
 }
 
 #[inline]
@@ -743,18 +746,17 @@ pub fn register(task: *mut Task) {
             // addresses (the x86 link strips DWARF, so the kernel hands
             // gdb the exact field addresses).
             if PARK_PID1.load(Ordering::Relaxed) {
-                // SAFETY: read-only pid probe of the just-built task.
-                let pid = unsafe { (*task).pid() };
+                // INV-FOR-1 field edge: read-only pid probe of the
+                // just-built task.
+                let pid = crate::dfx::forensics_edges::t_pid(task);
                 if pid == 1 {
                     puts(b"SCRIBBLE-PID1");
                     puts(b" task=");
                     put_hex(task as u64);
-                    if let Some(kstack_bottom) = unsafe {
-                        (*task).get_kernel_stack().map(|top| {
-                            top as usize
-                                - crate::config::KERNEL_STACK_SIZE
-                        })
-                    } {
+                    if let Some(kstack_bottom) = crate::dfx::forensics_edges::t_get_kernel_stack(task).map(|top| {
+                        top as usize
+                            - crate::config::KERNEL_STACK_SIZE
+                    }) {
                         puts(b" kstack=");
                         put_hex(kstack_bottom as u64);
                     }
@@ -835,20 +837,18 @@ pub fn quiesce(task: *mut Task) {
     s.sh_ret.store(rd(task, OFF_RET), Ordering::Relaxed);
     // Snapshot the parked pt_regs (last complete trap frame at the
     // kernel stack top).
-    if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
+    if let Some(stack_top) = crate::dfx::forensics_edges::t_get_kernel_stack(task) {
         let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
         const OFF_RIP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rip);
         const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
         const OFF_RSP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rsp);
-        // SAFETY: diagnostic reads of the task's kernel stack top.
-        unsafe {
-            s.sh_rip
-                .store(core::ptr::read_volatile((pr + OFF_RIP) as *const u64), Ordering::Relaxed);
-            s.sh_rsp
-                .store(core::ptr::read_volatile((pr + OFF_RSP) as *const u64), Ordering::Relaxed);
-            s.sh_cs
-                .store(core::ptr::read_volatile((pr + OFF_CS) as *const u64), Ordering::Relaxed);
-        }
+        // INV-FOR-2 volatile-read edges: the task's kernel stack top.
+        s.sh_rip
+            .store(crate::dfx::forensics_edges::diag_read_qword(pr + OFF_RIP), Ordering::Relaxed);
+        s.sh_rsp
+            .store(crate::dfx::forensics_edges::diag_read_qword(pr + OFF_RSP), Ordering::Relaxed);
+        s.sh_cs
+            .store(crate::dfx::forensics_edges::diag_read_qword(pr + OFF_CS), Ordering::Relaxed);
     }
     s.gen.fetch_add(1, Ordering::AcqRel); // even again
     s.armed.store(1, Ordering::Release);
@@ -884,7 +884,7 @@ pub fn verify() {
         // detector noise (u-series logs). Skip anything a CPU actually
         // runs or is picking right now; only fully quiescent sleepers
         // can be judged.
-        if unsafe { (*task).on_cpu() }
+        if crate::dfx::forensics_edges::t_on_cpu(task)
             || (0..crate::config::MAX_CPUS)
                 .any(|c| crate::sched::sched::cpu_state(c).current == task)
         {
@@ -897,7 +897,7 @@ pub fn verify() {
         // rewriting them). Neither is a judgeable quiescent sleeper;
         // both produced the state=0x80/empty-comm HIT spam (u5, v1).
         {
-            let st = unsafe { (*task).state().bits() };
+            let st = crate::dfx::forensics_edges::t_state(task).bits();
             if st
                 & (crate::process::task::TaskState::TASK_NEW
                     | crate::process::task::TaskState::ZOMBIE
@@ -922,25 +922,23 @@ pub fn verify() {
         // false-positive storm).
         if HEAP_WINDOW.contains(&(task as usize))
             && s.armed.load(Ordering::Acquire) != 0
-            && unsafe { (*task).has_address_space() }
+            && crate::dfx::forensics_edges::t_has_address_space(task)
             // Latch: report each victim once (the kill comes at resume;
             // re-reporting every scan floods the console and wedges the
             // serial interleave — the s1 lesson).
             && s.armed_swapped.fetch_or(8, Ordering::AcqRel) & 8 == 0
         {
-            if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
+            if let Some(stack_top) = crate::dfx::forensics_edges::t_get_kernel_stack(task) {
                 let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
                 const OFF_RIP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rip);
                 const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
                 const OFF_SS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, ss);
-                // SAFETY: diagnostic reads of the task's parked frame.
-                let (rip, cs, ss) = unsafe {
-                    (
-                        core::ptr::read_volatile((pr + OFF_RIP) as *const u64),
-                        core::ptr::read_volatile((pr + OFF_CS) as *const u64),
-                        core::ptr::read_volatile((pr + OFF_SS) as *const u64),
-                    )
-                };
+                // INV-FOR-2 volatile-read edges: the task's parked frame.
+                let (rip, cs, ss) = (
+                    crate::dfx::forensics_edges::diag_read_qword(pr + OFF_RIP),
+                    crate::dfx::forensics_edges::diag_read_qword(pr + OFF_CS),
+                    crate::dfx::forensics_edges::diag_read_qword(pr + OFF_SS),
+                );
                 let bad_tail = if cs & 3 == 0 {
                     // kernel-origin tail: rip must be inside the kernel image
                     !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&rip)
@@ -977,31 +975,28 @@ pub fn verify() {
         // one-shot: a corrupted header re-trips every scan and would
         // flood the serial interleave (the s1 lesson).
         #[cfg(feature = "x86_64")]
+        let (hts, a0) = (
+            crate::dfx::forensics_edges::t_hung_task_since(task),
+            crate::dfx::forensics_edges::diag_read_qword(
+                task as usize + crate::process::task::TI_A0,
+            ),
+        );
         if HEAP_WINDOW.contains(&(task as usize))
-            && unsafe {
-                let hts = (*task).hung_task_since.load(Ordering::Acquire);
-                let a0 = core::ptr::read_volatile(
-                    (task as usize + crate::process::task::TI_A0) as *const u64,
-                );
-                hts >> 48 != 0 || a0 != 0
-            }
+            && (hts >> 48 != 0 || a0 != 0)
             && !HEADER_HIT_ANNOUNCED.swap(true, core::sync::atomic::Ordering::AcqRel)
         {
             puts(b"\nSCRIBBLE-HDR task=");
             put_hex(task as u64);
-            unsafe {
-                puts(b" pid=");
-                put_dec((*task).pid() as u64);
-                puts(b" hts=");
-                put_hex((*task).hung_task_since.load(Ordering::Acquire));
-                puts(b" a0=");
-                put_hex(core::ptr::read_volatile(
-                    (task as usize + crate::process::task::TI_A0) as *const u64,
-                ));
-                puts(b" comm=");
-                for &b in (*task).comm() {
-                    put_hex(b as u64);
-                }
+            // INV-FOR-1/2 field edges (hts/a0 snapped above).
+            puts(b" pid=");
+            put_dec(crate::dfx::forensics_edges::t_pid(task) as u64);
+            puts(b" hts=");
+            put_hex(hts);
+            puts(b" a0=");
+            put_hex(a0);
+            puts(b" comm=");
+            for &b in crate::dfx::forensics_edges::t_comm(task) {
+                put_hex(b as u64);
             }
             puts(b"\n");
             ring_dump();
@@ -1059,18 +1054,18 @@ pub fn verify() {
         // (not __USER_CS 0x33 / __KERNEL_CS 0x08) is a frame scribble.
         let mut frame_bad = false;
         // SAFETY: atomic state probe of a live task.
-        let st = unsafe { (*task).state().bits() };
-        let on_cpu = unsafe { (*task).on_cpu() };
+        let st = crate::dfx::forensics_edges::t_state(task).bits();
+        let on_cpu = crate::dfx::forensics_edges::t_on_cpu(task);
         if !on_cpu
             && st != crate::process::task::TaskState::RUNNING
             && (st == crate::process::task::TaskState::INTERRUPTIBLE
                 || st == crate::process::task::TaskState::UNINTERRUPTIBLE)
         {
-            if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
+            if let Some(stack_top) = crate::dfx::forensics_edges::t_get_kernel_stack(task) {
                 let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
                 const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
-                // SAFETY: diagnostic read of the task's parked frame.
-                let cs = unsafe { core::ptr::read_volatile((pr + OFF_CS) as *const u64) };
+                // INV-FOR-2 volatile-read edge: the task's parked frame.
+                let cs = crate::dfx::forensics_edges::diag_read_qword(pr + OFF_CS);
                 if cs != 0x33 && cs != 0x08 {
                     frame_bad = true;
                 }
@@ -1131,18 +1126,8 @@ pub fn verify_gs() {
         put_dec(badiret as u64);
         puts(b" (faulting user-return iretq repaired: SIGSEGV routed)\n");
     }
-    // SAFETY: one %gs-relative u32 read; MSR reads are data-safe.
-    let (gscpu, gsbase, kgsbase) = unsafe {
-        let id: u32;
-        core::arch::asm!(
-            "mov {0:e}, dword ptr gs:[0]",
-            out(reg) id,
-            options(nomem, nostack, preserves_flags)
-        );
-        let b1 = crate::arch::x86_64::cpu::rdmsr(0xC000_0101);
-        let b2 = crate::arch::x86_64::cpu::rdmsr(0xC000_0102);
-        (id, b1, b2)
-    };
+    // INV-FOR-4 gs-data edge: the %gs-relative u32 + both GS MSRs.
+    let (gscpu, gsbase, kgsbase) = crate::dfx::forensics_edges::gs_pairing_read();
     if gscpu as usize >= crate::config::MAX_CPUS {
         let n = HITS.fetch_add(1, Ordering::AcqRel) + 1;
         puts(b"\nSCRIBBLE-GS-BAD #");
@@ -1184,11 +1169,12 @@ pub fn verify_consistency() {
             continue;
         }
         let task = t as *mut Task;
-        // SAFETY: read-only probes of live task scheduling fields; the
-        // GRQ lock is held, so pick/dequeue/publish windows are closed.
-        let (on_rq, on_cpu, state) = unsafe {
-            ((*task).sched_entity().is_on_rq(), (*task).on_cpu(), (*task).state().bits())
-        };
+        // INV-FOR-1 field edges: read-only probes of live task
+        // scheduling fields; the GRQ lock is held, so pick/dequeue/
+        // publish windows are closed.
+        let on_rq = crate::dfx::forensics_edges::t_sched_on_rq(task);
+        let on_cpu = crate::dfx::forensics_edges::t_on_cpu(task);
+        let state = crate::dfx::forensics_edges::t_state(task).bits();
         let running = state == crate::process::task::TaskState::RUNNING;
         const CLS_A: &[u8] = b"onrq+oncpu";
         const CLS_B: &[u8] = b"onrq+sleeping";
@@ -1248,11 +1234,9 @@ pub fn verify_consistency() {
         }
         puts(b"SCRIBBLE-CONS ");
         put_hex(task as u64);
-        // SAFETY: diagnostic read of the task header.
-        unsafe {
-            puts(b" pid=");
-            put_dec((*task).pid() as u64);
-        }
+        // INV-FOR-1 field edge: diagnostic read of the task header.
+        puts(b" pid=");
+        put_dec(crate::dfx::forensics_edges::t_pid(task) as u64);
         puts(b" cls=");
         puts(anomaly);
         puts(b" onrq=");
@@ -1265,12 +1249,12 @@ pub fn verify_consistency() {
         put_dec(crate::arch::cpu_id() as u64);
         // Full ownership picture: which CPU's slots claim this task,
         // the task's own ti_cpu + running_on_cpu claim, policy.
-        // SAFETY: diagnostic reads of scheduling fields.
-        unsafe {
+        // INV-FOR-1 field edges: diagnostic reads of scheduling fields.
+        {
             puts(b" ticpu=");
-            put_dec((*task).ti_cpu() as i64 as u64);
+            put_dec(crate::dfx::forensics_edges::t_ti_cpu(task) as i64 as u64);
             puts(b" claim=");
-            put_dec((*task).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
+            put_dec(crate::dfx::forensics_edges::t_running_on_cpu(task) as i64 as u64);
             for c in 0..crate::config::MAX_CPUS {
                 puts(b" s");
                 put_dec(c as u64);
@@ -1322,18 +1306,19 @@ pub fn slot_divergence(cpu: usize, tp: *mut Task, slot_prev: *mut Task) {
     put_dec(cpu as u64);
     puts(b" tp=");
     put_hex(tp as u64);
-    // SAFETY: diagnostic header reads; the pages are live task structs.
-    unsafe {
+    // INV-FOR-1 field edges: diagnostic header reads; the pages are
+    // live task structs.
+    {
         if !tp.is_null() {
             puts(b"(pid=");
-            put_dec((*tp).pid() as u64);
+            put_dec(crate::dfx::forensics_edges::t_pid(tp) as u64);
             puts(b")");
         }
         puts(b" slot=");
         put_hex(slot_prev as u64);
         if !slot_prev.is_null() {
             puts(b"(pid=");
-            put_dec((*slot_prev).pid() as u64);
+            put_dec(crate::dfx::forensics_edges::t_pid(slot_prev) as u64);
             puts(b")");
         }
         puts(b" slots:");
@@ -1344,13 +1329,13 @@ pub fn slot_divergence(cpu: usize, tp: *mut Task, slot_prev: *mut Task) {
         }
         if !tp.is_null() {
             puts(b" tponcpu=");
-            put_dec((*tp).on_cpu() as u64);
+            put_dec(crate::dfx::forensics_edges::t_on_cpu(tp) as u64);
             puts(b" tpclaim=");
-            put_dec((*tp).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
+            put_dec(crate::dfx::forensics_edges::t_running_on_cpu(tp) as i64 as u64);
             puts(b" tponrq=");
-            put_dec((*tp).sched_entity().is_on_rq() as u64);
+            put_dec(crate::dfx::forensics_edges::t_sched_on_rq(tp) as u64);
             puts(b" tpst=0x");
-            put_hex((*tp).state().bits() as u64);
+            put_hex(crate::dfx::forensics_edges::t_state(tp).bits() as u64);
         }
     }
     puts(b"\n");
@@ -1418,12 +1403,14 @@ pub fn double_run(pid: u64, newcpu: u64, oldcpu: u64, prevpid: u64, next: u64) {
 /// syscall entry (trap.S reads this symbol from asm). Non-zero during
 /// a run proves kernel code executed with a mis-paired (user/wild) GS
 /// base — the scribble engine — and that the guard neutralized it.
+#[allow(unsafe_code)]
 #[no_mangle]
 pub static scribble_gs_fixups: AtomicU32 = AtomicU32::new(0);
 
 /// Count of bad-iret frame repairs (trap.S reads this symbol from asm):
 /// exceptions whose faulting rip is trap_exit's user-path iretq -- the
 /// mis-pairing source that fed the cross-stack scribble engine.
+#[allow(unsafe_code)]
 #[no_mangle]
 pub static scribble_badiret_fixups: AtomicU32 = AtomicU32::new(0);
 
@@ -1431,6 +1418,7 @@ pub static scribble_badiret_fixups: AtomicU32 = AtomicU32::new(0);
 /// kernpanic_park` under `qemu -s`; args are (badaddr, rip, rsp). The
 /// debugger then walks the live CR3 to see which root was active and
 /// which PTE was missing.
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn kernpanic_park(badaddr: u64, rip: u64, rsp: u64) {
     let _ = (badaddr, rip, rsp);
@@ -1438,14 +1426,15 @@ pub extern "C" fn kernpanic_park(badaddr: u64, rip: u64, rsp: u64) {
 
 /// GDB park hook: `break scribble_park` under `qemu -s`; `$rdi` holds
 /// the most diagnostic scribbled field address to watch.
+#[allow(unsafe_code)]
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn scribble_park(_field_addr: u64) {}
 
 /// Full text of the last HIT report (also readable via gdb after the
 /// run dies: serial interleaving cannot destroy this copy).
-pub struct ReportBuf(core::cell::UnsafeCell<[u8; 4096]>);
-unsafe impl Sync for ReportBuf {}
+pub struct ReportBuf(pub(super) core::cell::UnsafeCell<[u8; 4096]>);
+// (Sync commitment moved to the audited unsafe file — INV-FOR-6.)
 /// Symbol gdb dumps after a run: `dump binary memory file &REPORT_BUF ..`
 pub static REPORT_BUF: ReportBuf = ReportBuf(core::cell::UnsafeCell::new([0; 4096]));
 pub static REPORT_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -1510,22 +1499,21 @@ pub fn crash_report(vector: &[u8], regs: &crate::arch::pt_regs::PtRegs) {
     puts(b" tp=");
     put_hex(tp as u64);
     if !tp.is_null() {
-        // SAFETY: diagnostic header reads of the task the hardware runs.
-        unsafe {
-            puts(b" pid=");
-            put_dec((*tp).pid() as u64);
-            puts(b" st=0x");
-            put_hex((*tp).state().bits() as u64);
-            puts(b" oncpu=");
-            put_dec((*tp).on_cpu() as u64);
-            puts(b" claim=");
-            put_dec((*tp).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
-            puts(b" onrq=");
-            put_dec((*tp).sched_entity().is_on_rq() as u64);
-            if let Some(kstack) = (*tp).get_kernel_stack() {
-                puts(b" kstack=");
-                put_hex(kstack as u64);
-            }
+        // INV-FOR-1 field edges: diagnostic header reads of the task
+        // the hardware runs.
+        puts(b" pid=");
+        put_dec(crate::dfx::forensics_edges::t_pid(tp) as u64);
+        puts(b" st=0x");
+        put_hex(crate::dfx::forensics_edges::t_state(tp).bits() as u64);
+        puts(b" oncpu=");
+        put_dec(crate::dfx::forensics_edges::t_on_cpu(tp) as u64);
+        puts(b" claim=");
+        put_dec(crate::dfx::forensics_edges::t_running_on_cpu(tp) as i64 as u64);
+        puts(b" onrq=");
+        put_dec(crate::dfx::forensics_edges::t_sched_on_rq(tp) as u64);
+        if let Some(kstack) = crate::dfx::forensics_edges::t_get_kernel_stack(tp) {
+            puts(b" kstack=");
+            put_hex(kstack as u64);
         }
     }
     puts(b"\nSLOTS:");
@@ -1583,21 +1571,20 @@ fn report(task: *mut Task, idx: usize, phase: &[u8]) {
     put_dec(crate::arch::cpu_id() as u64);
     puts(b" task=");
     put_hex(task as u64);
-    // SAFETY: diagnostic reads of stable Task header fields.
-    unsafe {
-        puts(b" pid=");
-        put_dec((*task).pid() as u64);
-        puts(b" comm=");
-        let comm = (*task).comm();
-        for &b in comm.iter() {
-            if b == 0 {
-                break;
-            }
-            putc(b);
+    // INV-FOR-1 field edges: diagnostic reads of stable Task header
+    // fields.
+    puts(b" pid=");
+    put_dec(crate::dfx::forensics_edges::t_pid(task) as u64);
+    puts(b" comm=");
+    let comm = crate::dfx::forensics_edges::t_comm(task);
+    for &b in comm.iter() {
+        if b == 0 {
+            break;
         }
-        puts(b" state=0x");
-        put_hex((*task).state().bits() as u64);
+        putc(b);
     }
+    puts(b" state=0x");
+    put_hex(crate::dfx::forensics_edges::t_state(task).bits() as u64);
     puts(b"\n");
 
     puts("  gs  sh=".as_bytes());
@@ -1625,7 +1612,7 @@ fn report(task: *mut Task, idx: usize, phase: &[u8]) {
     // Task header (thread_info fields + state/pid + early list links).
     dump_qwords(b"TASKHDR", task as usize, 16);
     // Parked pt_regs at the stack top.
-    if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
+    if let Some(stack_top) = crate::dfx::forensics_edges::t_get_kernel_stack(task) {
         let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
         dump_qwords(b"PTREGS", pr, 21);
     }

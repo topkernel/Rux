@@ -21,19 +21,20 @@
 //! two paths of tasks colliding on a slot, which is cosmetic (bounded
 //! print, utf8-checked).
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU32, Ordering};
 
-const N: usize = 8;
+pub(crate) const N: usize = 8;
 const CAP: usize = 128;
 
-struct Slot {
+pub(crate) struct Slot {
     tid: AtomicU32,
     op: AtomicU32,
     len: AtomicU32,
     buf: [u8; CAP],
 }
 
-static mut SLOTS: [Slot; N] = [const {
+pub(crate) static mut SLOTS: [Slot; N] = [const {
     Slot {
         tid: AtomicU32::new(0),
         op: AtomicU32::new(0),
@@ -75,9 +76,9 @@ pub fn stash_file(op: u32, path: &str) {
     }
     let bytes = path.as_bytes();
     let n = bytes.len().min(CAP);
-    // SAFETY: diagnostic write into a static slot; this task is the
-    // only writer for its tid slot, publication ordered via tid/len.
-    let s = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS[(tid as usize) % N]) };
+    // INV-FOR-1 stash edge: this task is the only writer for its tid
+    // slot, publication ordered via tid/len.
+    let s = crate::dfx::forensics_edges::pathstash_slot_mut(tid);
     s.tid.store(0, Ordering::Release);
     s.buf[..n].copy_from_slice(&bytes[..n]);
     s.op.store(op, Ordering::Release);
@@ -104,10 +105,9 @@ pub fn stash_file_lazy(op: u32, f: impl FnOnce() -> alloc::string::String) {
 /// slot is empty, owned by another tid, or the path was never written.
 pub fn lookup_file(tid: u32) -> Option<(u32, &'static str)> {
     let i = (tid as usize) % N;
-    // SAFETY: diagnostic read of the static slot table; the 'static
-    // borrow is derived from the static itself and bytes are
-    // utf8-checked below.
-    let s: &'static Slot = unsafe { &*core::ptr::addr_of!(SLOTS).cast::<Slot>().add(i) };
+    // INV-FOR-1 stash-read edge: diagnostic read of the static slot
+    // table; bytes are utf8-checked below.
+    let s: &'static Slot = crate::dfx::forensics_edges::pathstash_slot_ref(i);
     if s.tid.load(Ordering::Acquire) != tid {
         return None;
     }

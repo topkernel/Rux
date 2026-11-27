@@ -40,14 +40,28 @@ pub mod hung_task;
 // (round-5: dfx/sbi_debug.rs DELETED — the SBI low-level print helpers
 // had zero consumers anywhere in the tree; same dead-hunt-module class
 // as round-4D's hexdump.rs.)
+// NOTE (2026-11-27 consolidation): this file deliberately carries NO
+// tree-level #![forbid(unsafe_code)] — unlike syscall (whose audited
+// edges module is declared at the crate root, outside the forbid tree),
+// dfx's audited unsafe file (forensics_edges, #[path = "unsafe.rs"]) is
+// a CHILD of this module and would inherit a forbid. The per-file
+// #![forbid(unsafe_code)] in every hunt/diagnostic file carries the
+// boundary instead.
 pub mod switches;
 /// Runtime kernel symbol table (/proc/kallsyms, symbolized traces).
 pub mod ksyms;
 pub mod taskdump;
-/// The hunt-era forensics family's shared raw edges (round-5
-/// consolidation; the irreducibility proofs in
+/// The subsystem's ONE audited unsafe file (mainline minimal-first
+/// consolidation, 2026-11-27): the former `forensics_edges` collection
+/// renamed to `unsafe.rs` on disk per the 2026-11-25 edges->unsafe.rs
+/// naming decision (git mv keeps history); the #[path] keeps the FILE
+/// name the gate requires while the module keeps its historical
+/// `forensics_edges` identifier, so every crate::dfx::forensics_edges
+/// call site stays stable. The irreducibility proofs in
 /// docs/architecture/safety-and-performance.md name this file as the
-/// owner of the stale-handle read family).
+/// owner of the stale-handle read family; the hunt modules' absorbed
+/// raw accesses join the same INV families here.
+#[path = "unsafe.rs"]
 pub mod forensics_edges;
 pub mod memwatch;
 /// Full physical-accounting ledger (fake-OOM family): census + counters
@@ -267,11 +281,10 @@ pub fn register_debugfs_knobs() -> usize {
                 "" => 0, // the trailing-newline write, same convention
                 "pagefault" | "1" => {
                     crate::pr_info!("dfx: provoking kernel page fault oops");
-                    // SAFETY: deliberate fault — read address 0x10 (a
-                    // NULL-adjacent page with no mapping and no fixup
-                    // entry on this instruction).
-                    let p = 0x10usize as *const u64;
-                    let _ = unsafe { core::ptr::read_volatile(p) };
+                    // INV-FOR-5 deliberate-fault edge: read address 0x10
+                    // (a NULL-adjacent page with no mapping and no fixup
+                    // entry on this instruction); the fault is the point.
+                    crate::dfx::forensics_edges::provoke_null_page_read();
                     // Unreachable when the oops policy runs; if the
                     // fault was fixed up somehow, report it.
                     crate::pr_err!("dfx: provoke-oops fault did not fire");
@@ -280,17 +293,13 @@ pub fn register_debugfs_knobs() -> usize {
                 "illegal" => {
                     crate::pr_info!("dfx: provoking kernel illegal-instruction oops");
                     #[cfg(feature = "riscv64")]
-                    // SAFETY: deliberate fault — machine-mode CSR access
-                    // from S-mode traps IllegalInstruction.
-                    unsafe {
-                        core::arch::asm!("csrr x0, 0x300", options(nomem, nostack));
-                    }
+                    // INV-FOR-5 deliberate-fault edge: machine-mode CSR
+                    // access from S-mode traps IllegalInstruction.
+                    crate::dfx::forensics_edges::provoke_illegal_insn_riscv();
                     #[cfg(feature = "x86_64")]
-                    // SAFETY: deliberate fault — ud2 is reserved for
-                    // traps (the BUG instruction).
-                    unsafe {
-                        core::arch::asm!("ud2", options(nomem, nostack));
-                    }
+                    // INV-FOR-5 deliberate-fault edge: ud2 is reserved
+                    // for traps (the BUG instruction).
+                    crate::dfx::forensics_edges::provoke_illegal_insn_x86();
                     crate::pr_err!("dfx: provoke-oops illegal did not fire");
                     crate::errno::Errno::IOError.as_neg_i32()
                 }
@@ -376,14 +385,7 @@ macro_rules! bug {
 /// for the dfx family; INV-DFXWALK-1: `root` is the diagnosed task's own
 /// mm root and the read is read-only through the linear map).
 pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {
-    use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    // SAFETY: INV-DFXWALK-1 — the backend walk is the arch contract
-    // (caller holds the address space), and the linear map covers all of
-    // RAM for a read-only diagnostic access.
-    let (ppn, _) = unsafe { PageTableWalker::walk(root, va) }?;
-    let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
-    Some(unsafe {
-        core::ptr::read_volatile((base.as_usize() + (va & 0xfff) as usize) as *const T)
-    })
+    // INV-DFXWALK-1 unchanged; the raw body is the audited edge
+    // (forensics_edges::dfx_walk_read_raw).
+    crate::dfx::forensics_edges::dfx_walk_read_raw(root, va)
 }

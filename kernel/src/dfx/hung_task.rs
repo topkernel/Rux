@@ -9,6 +9,7 @@
 //! any that have been in D-state with unchanged context switch count
 //! for longer than the threshold.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::dfx::taint;
 use crate::dfx::backtrace;
@@ -214,11 +215,11 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
         use crate::process::task::Task;
         let t: &Task = task_ref;
         let claim = t.running_on_cpu.load(Ordering::Acquire);
-        // SAFETY (one adopt edge): the vfork parent tree handle under the
+        // INV-FOR-1 adopt edge: the vfork parent tree handle under the
         // caller's softirq context — TaskBorrow's short-read contract.
         let vfork_ppid = t
             .vfork_parent_ptr()
-            .and_then(|p| unsafe { crate::process::task_ref::TaskBorrow::from_raw(p as *mut crate::process::task::Task) })
+            .and_then(|p| crate::dfx::forensics_edges::task_borrow(p as *mut crate::process::task::Task))
             .map(|p| p.pid())
             .unwrap_or(0);
         let _ = write!(

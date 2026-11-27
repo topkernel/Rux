@@ -36,6 +36,7 @@
 //! contexts), one report per leak episode per task (the latch re-arms on
 //! the next 0→1 acquire), total budget 400 lines per boot.
 
+#![forbid(unsafe_code)]
 use core::panic::Location;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -186,15 +187,11 @@ pub fn note_acquire(
         // stale-tp / aborted-switch families. A set flag on a leak line
         // is strong stale-booking evidence.
         let mis = if (cpu as usize) < crate::config::MAX_CPUS {
-            // Volatile: the sched slot is written by its owning CPU under
-            // the GRQ; this is a racy diagnostic read (same discipline as
-            // r83hunt's header reads).
-            let slot_task = unsafe {
-                core::ptr::read_volatile(
-                    &crate::sched::sched::cpu_state(cpu as usize).current
-                        as *const *mut crate::process::Task
-                ) as usize
-            };
+            // INV-FOR-1 racy-slot edge: the sched slot is written by its
+            // owning CPU under the GRQ; this is a racy diagnostic read
+            // (same discipline as r83hunt's header reads).
+            let slot_task =
+                crate::dfx::forensics_edges::sched_slot_current_volatile(cpu as usize);
             if slot_task != task as usize {
                 slot.oslot.store(slot_task, Ordering::Release);
                 // ph5/ph5b verdict (2/2 boots wedged vs ph3's clean 1200s
@@ -234,8 +231,8 @@ pub fn note_acquire(
         // pid=0, budget gone before the runtime window). Budgeted
         // direct console (R34): the acquire path may run with IRQs on
         // and locks held.
-        if !unsafe { (*task).state().is_dead() }
-            && unsafe { (*task).pid() } != 0
+        if !crate::dfx::forensics_edges::t_state(task).is_dead()
+            && crate::dfx::forensics_edges::t_pid(task) != 0
             && !crate::sched::sched::pick_owner_live(task)
         {
             static PB_N: AtomicU32 = AtomicU32::new(120);
@@ -281,7 +278,7 @@ pub fn note_acquire(
                 for &c in b" pid=" {
                     putchar(c);
                 }
-                pdec(unsafe { (*task).pid() } as u64);
+                pdec(crate::dfx::forensics_edges::t_pid(task) as u64);
                 for &c in b" cpu=" {
                     putchar(c);
                 }
@@ -289,7 +286,7 @@ pub fn note_acquire(
                 for &c in b" state=0x" {
                     putchar(c);
                 }
-                phex(unsafe { (*task).state().bits() } as usize);
+                phex(crate::dfx::forensics_edges::t_state(task).bits() as usize);
                 // SAFETY: stored from a &'static Location above.
                 let site = loc;
                 for &c in b" site=" {
@@ -323,7 +320,6 @@ pub fn note_acquire(
 /// print rides only on boots that ask for it, on a tree where kpreempt
 /// defaults OFF.
 
-#[allow(unsafe_code)]
 fn report_acquire_divergent(
     task: *mut crate::process::Task,
     loc: &'static Location,
@@ -343,15 +339,15 @@ fn report_acquire_divergent(
         return;
     }
     use crate::console::uart_putc_raw as putchar;
-    // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
-    // current on this CPU (pinned by execution), `slot_task` was this
-    // CPU's slot content moments before (same discipline as the s14
-    // IRQ-PAIR report).
-    unsafe {
-        let pid = (*task).pid();
-        let pc = (*task).preempt_count();
+    // INV-FOR-1 field edges: diagnostic scalar reads of stable Task
+    // fields; `task` is current on this CPU (pinned by execution),
+    // `slot_task` was this CPU's slot content moments before (same
+    // discipline as the s14 IRQ-PAIR report).
+    {
+        let pid = crate::dfx::forensics_edges::t_pid(task);
+        let pc = crate::dfx::forensics_edges::t_preempt_count(task);
         let slot_pid = if slot_task >= 0x80000000 {
-            (*(slot_task as *mut crate::process::Task)).pid()
+            crate::dfx::forensics_edges::t_pid(slot_task as *mut crate::process::Task)
         } else {
             0
         };
@@ -552,12 +548,14 @@ pub fn note_release(task: *mut crate::process::Task) {
     // was executing on `ocpu` moments ago; same discipline as
     // note_acquire's sched-slot read.
     if ot >= 0x80000000 {
-        unsafe {
+        {
+            // INV-FOR-1 field edges: stable Task fields on a pointer
+            // that was executing on `ocpu` moments ago.
             let rt = ot as *mut crate::process::Task;
             for &c in b" rpid=" {
                 putchar(c);
             }
-            let mut v = (*rt).pid() as u64;
+            let mut v = crate::dfx::forensics_edges::t_pid(rt) as u64;
             let mut n = 0;
             if v == 0 {
                 putchar(b'0');
@@ -574,7 +572,7 @@ pub fn note_release(task: *mut crate::process::Task) {
             for &c in b" rpc=" {
                 putchar(c);
             }
-            let mut v = ((*rt).preempt_count()
+            let mut v = ((crate::dfx::forensics_edges::t_preempt_count(rt))
                 & crate::interrupt::preempt::PREEMPT_MASK) as u64;
             let mut n = 0;
             if v == 0 {
@@ -662,13 +660,8 @@ pub fn note_softirq_acquire(
     let cpu = crate::arch::cpu_id() as u32;
     slot.scpu.store(cpu, Ordering::Release);
     let mis = if (cpu as usize) < crate::config::MAX_CPUS {
-        // Volatile racy diagnostic read (same discipline as note_acquire).
-        let slot_task = unsafe {
-            core::ptr::read_volatile(
-                &crate::sched::sched::cpu_state(cpu as usize).current
-                    as *const *mut crate::process::Task
-            ) as usize
-        };
+        // INV-FOR-1 racy-slot edge (same discipline as note_acquire).
+        let slot_task = crate::dfx::forensics_edges::sched_slot_current_volatile(cpu as usize);
         if slot_task != task as usize { 1 } else { 0 }
     } else {
         2
@@ -732,7 +725,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     for &c in b" pid=" {
         putchar(c);
     }
-    putd(unsafe { (*task).pid() } as u64);
+    putd(crate::dfx::forensics_edges::t_pid(task) as u64);
     // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
     let loc = crate::dfx::forensics_edges::location_ref(site);
     for &c in b" hsite=" {
@@ -803,11 +796,11 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     for &c in b" pid=" {
         putchar(c);
     }
-    putd(unsafe { (*task).pid() } as u64);
+    putd(crate::dfx::forensics_edges::t_pid(task) as u64);
     for &c in b" pc=0x" {
         putchar(c);
     }
-    let pc = unsafe { (*task).preempt_count() } as u32 as u64;
+    let pc = crate::dfx::forensics_edges::t_preempt_count(task) as u32 as u64;
     for sh in (0..8).rev() {
         let n = ((pc >> (sh * 4)) & 0xF) as u8;
         putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -858,7 +851,7 @@ pub fn check_user_return() {
         return;
     };
     // SAFETY: current() pins a live task; scalar field reads.
-    let pc = unsafe { (*task).preempt_count() };
+    let pc = crate::dfx::forensics_edges::t_preempt_count(task);
     if pc == 0 {
         return;
     }
@@ -919,7 +912,7 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
         if tp == task {
             tpcpu = c as i32;
             // SAFETY: diagnostic field read.
-            tppc = unsafe { (*tp).preempt_count() };
+            tppc = crate::dfx::forensics_edges::t_preempt_count(tp);
             break;
         }
     }
@@ -935,7 +928,7 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
         }
         pd(tppc as u64);
     }
-    emit(b" LEAK-ORIGIN parked", task, unsafe { (*task).preempt_count() });
+    emit(b" LEAK-ORIGIN parked", task, crate::dfx::forensics_edges::t_preempt_count(task));
 }
 
 /// Append the recorded site for the tick-side PREEMPT-LEAK incumbent
@@ -944,7 +937,7 @@ pub fn report_incumbent_site(task: *mut crate::process::Task) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
-    emit(b"\nLEAK-ORIGIN running", task, unsafe { (*task).preempt_count() });
+    emit(b"\nLEAK-ORIGIN running", task, crate::dfx::forensics_edges::t_preempt_count(task));
 }
 
 /// Print the OUTERMOST-acquire record for `task` (the preempt-hunt tap):
@@ -1000,7 +993,7 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
     for &c in b" pid=" {
         putchar(c);
     }
-    putd(unsafe { (*task).pid() } as u64);
+    putd(crate::dfx::forensics_edges::t_pid(task) as u64);
     let site = slot.osite.load(Ordering::Acquire) as *const Location;
     if !site.is_null() {
         // SAFETY: stored from a &'static Location (see note_acquire).
@@ -1090,7 +1083,7 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
     for &c in b" pid=" {
         putchar(c);
     }
-    put_i64(unsafe { (*task).pid() } as i64);
+    put_i64(crate::dfx::forensics_edges::t_pid(task) as i64);
     for &c in b" pc=" {
         putchar(c);
     }

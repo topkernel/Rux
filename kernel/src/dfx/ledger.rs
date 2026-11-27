@@ -36,6 +36,7 @@
 //! rides the raw-UART taskdump writer with a fixed stack buffer (the
 //! kernel heap cannot be trusted at the moment this dump exists for).
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::taskdump::taskdump_raw_line;
@@ -280,16 +281,11 @@ pub fn dump(site: &str) {
         if page.is_null() {
             continue;
         }
-        // SAFETY: read-only descriptor access inside the mapped vmemmap
-        // span; the flags atomics are the same ones every other reader
-        // uses lock-free.
-        let (rc, linked, reserved) = unsafe {
-            (
-                (*page).refcount(),
-                (*page).test_flag(PageFlag::OnFreelist),
-                (*page).is_reserved(),
-            )
-        };
+        // INV-FOR-9 diagnostic descriptor edge: read-only access inside
+        // the mapped vmemmap span; the flags atomics are the same ones
+        // every other reader uses lock-free.
+        let (rc, linked, reserved, _anon, _cow, _mapped, _lru) =
+            crate::dfx::forensics_edges::page_diag_read(page);
         if rc == 0 {
             if reserved {
                 c.reserved += 1;
@@ -318,14 +314,7 @@ pub fn dump(site: &str) {
                 continue;
             }
         }
-        let (anon, cow, mapped, lru) = unsafe {
-            (
-                (*page).is_anonymous(),
-                (*page).is_cow(),
-                (*page).is_mapped(),
-                (*page).test_flag(PageFlag::Lru),
-            )
-        };
+        let (anon, cow, mapped, lru) = (_anon, _cow, _mapped, _lru);
         if anon {
             c.anon += 1;
         } else if cow {

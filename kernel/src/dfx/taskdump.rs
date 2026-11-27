@@ -13,6 +13,7 @@
 //! switches.rs); also available on demand through the UART trigger when
 //! `taskdump` is on.
 
+#![forbid(unsafe_code)]
 use crate::safety::frame::KernelStackWindow;
 use core::sync::atomic::Ordering;
 
@@ -456,9 +457,9 @@ pub fn dump_all_tasks(reason: &str) {
             if cur.is_null() {
                 put_dec(999999);
             } else {
-                // SAFETY (one adopt edge): the per-CPU current Task stays
+                // INV-FOR-1 adopt edge: the per-CPU current Task stays
                 // allocated; pid is a stable field read.
-                put_dec(unsafe { crate::process::task_ref::TaskBorrow::from_raw(cur) }
+                put_dec(crate::dfx::forensics_edges::task_borrow(cur)
                     .map(|t| t.pid() as u64)
                     .unwrap_or(999999));
             }
@@ -502,10 +503,10 @@ pub fn dump_all_tasks(reason: &str) {
             if t.is_null() {
                 continue;
             }
-            // SAFETY (one adopt edge): the per-CPU current snapshot's Task
-            // stays allocated (idle tasks and hash-invisible exiting tasks
-            // are still valid Task objects); stable-field diagnostic read.
-            let tk = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(t) } {
+            // INV-FOR-1 adopt edge: the per-CPU current snapshot's Task
+            // stays allocated (idle tasks and hash-invisible exiting
+            // tasks are still valid Task objects); stable-field reads.
+            let tk = match crate::dfx::forensics_edges::task_borrow(t) {
                 Some(tk) => tk,
                 None => continue,
             };
@@ -954,17 +955,10 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
     // misdirection canary (51st session's prime suspect: cpu1's
     // cpu_id() resolving to 0 would land its QS reports in slot 0).
     let gs_cpu = crate::arch::x86_64::smp::gs_cpu_id() as u32;
-    let gs_magic_q: u64;
-    // SAFETY: %gs:PC_MAGIC reads this CPU's PerCpu.magic — a plain data
-    // read of the active GS base, exactly what the trap stubs do.
-    unsafe {
-        core::arch::asm!(
-            "mov {0}, qword ptr gs:[{1}]",
-            out(reg) gs_magic_q,
-            const crate::arch::x86_64::smp::PC_MAGIC,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    // INV-FOR-4 gs-data edge: %gs:PC_MAGIC reads this CPU's
+    // PerCpu.magic — a plain data read of the active GS base, exactly
+    // what the trap stubs do.
+    let gs_magic_q = crate::dfx::forensics_edges::percpu_magic_read();
     a.gs_cpu.store(gs_cpu, Ordering::Relaxed);
     a.gs_magic.store(gs_magic_q, Ordering::Relaxed);
 
@@ -977,9 +971,10 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
     // are the monopolist loop's live instruction and stack pointer.
     let pr = crate::arch::trap::current_pt_regs() as *const crate::arch::pt_regs::PtRegs;
     if !pr.is_null() && (pr as u64) >= 0xffff_8000_0000_0000 {
-        // SAFETY: CURRENT_PT_REGS[cpu] was swapped to this IPI's live
-        // frame by trap_handler before dispatch — the one frame edge.
-        let frame = unsafe { &*pr };
+        // INV-FOR-3 raw-ref edge: CURRENT_PT_REGS[cpu] was swapped to
+        // this IPI's live frame by trap_handler before dispatch — the
+        // one frame edge.
+        let frame = crate::dfx::forensics_edges::raw_ref(pr);
         let (rip, rsp) = (frame.rip, frame.rsp);
         a.int_rip.store(rip, Ordering::Relaxed);
         a.int_rsp.store(rsp, Ordering::Relaxed);
@@ -1077,9 +1072,9 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             let cur = crate::sched::sched::grq_diag_cpu_currents();
             let t = cur[stuck].2 as *mut crate::process::task::Task;
             if !t.is_null() {
-                // SAFETY (one adopt edge): as the per-CPU walk — the
+                // INV-FOR-1 adopt edge: as the per-CPU walk — the
                 // current Task stays allocated; stable-field reads.
-                let tk = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(t) } {
+                let tk = match crate::dfx::forensics_edges::task_borrow(t) {
                     Some(tk) => tk,
                     None => return,
                 };
