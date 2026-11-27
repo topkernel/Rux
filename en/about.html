@@ -162,7 +162,7 @@
     <ul>
       <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
       <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
-      <li>The unsafe surface: 0.27% (1,022 of 375,622 lines), all of it inside the 19 audited unsafe.rs files, every block under an INV contract (see the <a href="security/unsafe.html">ledger</a>)</li>
+      <li>The unsafe surface: 0.27% (1,022 of 375,622 lines), all of it inside the 19 audited unsafe.rs files, every block under an INV contract (see the <a href="../security/unsafe.html">ledger</a>)</li>
       <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
       <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
       <li>The 29 registered divergences need their compatibility evidence kept current</li>
