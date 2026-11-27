@@ -344,7 +344,8 @@ impl DlRunQueue {
     }
 }
 
-// Send/Sync impls live in side_edges.rs (this file carries zero unsafe).
+// Send/Sync impls live in the subsystem's one audited unsafe file
+// (crate::sched::edges, unsafe.rs; this file carries zero unsafe).
 
 /// Deadline scheduling entity
 #[derive(Debug)]

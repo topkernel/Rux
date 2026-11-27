@@ -2,7 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! The scheduler's audited unsafe edges (framework zone).
+//! The scheduler's ONE audited unsafe file (framework zone).
+//!
+//! Mainline layout (2026-11-27): this is the former edges.rs renamed
+//! per the 2026-11-25 edges->unsafe.rs ruling, now holding the whole
+//! subsystem's unsafe — the L1 INV-SCE edges, the former side_edges.rs
+//! entries (deadline/sched_ev), every Send/Sync commitment, and the
+//! framework wrappers the policy files call. Every OTHER file in the
+//! subsystem is safe (file-level forbid).
 //!
 //! unsafe-slim round L1 (2026-11-20), per the framekernel doctrine: the
 //! scheduler's POLICY code (sched.rs, fair.rs, rt.rs, cgroup.rs) is safe
@@ -1097,4 +1104,368 @@ pub fn secondary_idle_table_base() -> usize {
 pub fn secondary_idle_task(cpu: usize) -> usize {
     // SAFETY: INV-SCE-4 — published before any secondary reads it.
     unsafe { __secondary_idle_tasks[cpu] }
+}
+
+// ---------------------------------------------------------------------------
+// The former side_edges.rs entries (mainline consolidation, 2026-11-27):
+// the SIDE-file edges (deadline, sched_ev) merged into the subsystem's
+// one audited file. Contracts unchanged.
+// ---------------------------------------------------------------------------
+
+// ---- deadline.rs ---------------------------------------------------------
+
+// SAFETY: DlRunQueue is only ever accessed behind the GRQ (its callers
+// hold the global runqueue lock for every enqueue/dequeue/pick); the
+// raw Task pointers inside the BTreeMap are guarded by the queue's
+// link/unlink protocol.
+unsafe impl Send for crate::sched::deadline::DlRunQueue {}
+// SAFETY: same GRQ serialization across CPUs.
+unsafe impl Sync for crate::sched::deadline::DlRunQueue {}
+
+// ---- sched_ev.rs ----------------------------------------------------------
+
+/// The event ring's reserved slot (writer side).
+///
+/// INV-SCHED-EVRING-1: `slot` is the modulo-bounded index of a unique
+/// fetch_add reservation — this call owns the slot until the publish
+/// store; the array is a fixed static; an overrun clobbers the oldest
+/// record (counted in EV_LOST, never a correctness object).
+#[inline]
+pub fn evring_slot_mut(
+    ring: &crate::sched::sched_ev::EvRing,
+    slot: usize,
+) -> &mut crate::sched::sched_ev::SchedEv {
+    debug_assert!(slot < crate::sched::sched_ev::EV_RING_SLOTS);
+    // SAFETY: INV-SCHED-EVRING-1 — owned reserved slot in the fixed
+    // static array.
+    unsafe { &mut (*ring.0.get())[slot] }
+}
+
+/// The event ring's published slot (reader side).
+///
+/// INV-SCHED-EVRING-1 (read arm): read-only diagnostic access; the
+/// caller validates `pub_seq` before trusting any field.
+#[inline]
+pub fn evring_slot_ref(
+    ring: &crate::sched::sched_ev::EvRing,
+    slot: usize,
+) -> &crate::sched::sched_ev::SchedEv {
+    debug_assert!(slot < crate::sched::sched_ev::EV_RING_SLOTS);
+    // SAFETY: INV-SCHED-EVRING-1 — shared diagnostic read of a slot the
+    // pub_seq protocol validates.
+    unsafe { &(*ring.0.get())[slot] }
+}
+
+// SAFETY: the EvRing slot protocol (fetch_add reservation + pub_seq
+// publication) is the same lock-free discipline the printk ring uses;
+// at most one writer owns a slot at a time.
+unsafe impl Sync for crate::sched::sched_ev::EvRing {}
+
+// ===========================================================================
+// Send/Sync commitments (moved verbatim from their home files by the
+// 2026-11-27 mainline consolidation; each carries its SAFETY note —
+// the per-field lock/cell discipline arguments live with the type
+// definitions, and these impls add no field access of their own).
+// ===========================================================================
+
+// SAFETY: the GlobalRunQueue's task queues are only ever touched while
+// holding the GRQ spinlock (enqueue/dequeue/pick all take it); the
+// atomic counters need no synchronization beyond their own atomics.
+unsafe impl Sync for GlobalRunQueue {}
+
+// SAFETY: the RtRunQueue's queues are only touched under the GRQ (its
+// callers hold the global runqueue lock for every enqueue/dequeue/pick);
+// the raw Task pointers inside are guarded by the queue's link/unlink
+// protocol.
+unsafe impl Send for crate::sched::rt::RtRunQueue {}
+// SAFETY: same GRQ serialization across CPUs.
+unsafe impl Sync for crate::sched::rt::RtRunQueue {}
+
+// SAFETY: the CfsRunQueue's rbtree/queue state is only touched under the
+// GRQ (its callers hold the global runqueue lock for every
+// enqueue/dequeue/pick); raw Task pointers are guarded by the queue's
+// link/unlink protocol.
+unsafe impl Send for crate::sched::fair::CfsRunQueue {}
+// SAFETY: same GRQ serialization across CPUs.
+unsafe impl Sync for crate::sched::fair::CfsRunQueue {}
+
+// SAFETY: all shared mutable state is behind irqsave Spinlocks or atomics.
+unsafe impl Send for crate::sched::cgroup::CgroupNode {}
+// SAFETY: see above — no data race is possible across CPUs.
+unsafe impl Sync for crate::sched::cgroup::CgroupNode {}
+
+// SAFETY: The claim crosses CPUs by design (reaper mints, the ticking
+// CPU burns); the exclusivity is the linear type itself plus the
+// unreachability contract minted on — the same Send/Sync declaration
+// every queue handle in this subsystem carries.
+unsafe impl Send for crate::sched::reapdrain::ReapClaim {}
+
+// ===========================================================================
+// Assembly-crossing symbols (moved from sched.rs by the 2026-11-27
+// mainline consolidation: a symbol exported to assembly IS a raw edge —
+// the link boundary is outside the language's guarantees — and
+// #![forbid(unsafe_code)] cannot coexist with #[no_mangle] in a file).
+// ===========================================================================
+
+#[no_mangle]
+pub extern "C" fn asm_need_resched() -> i64 {
+    if crate::sched::sched::need_resched() { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn asm_schedule() {
+    crate::sched::sched::schedule();
+}
+
+#[no_mangle]
+pub extern "C" fn schedule_tail(_prev: *mut Task) {
+    // forkprof: first Rust code in the newborn's frame — splits the
+    // switch machinery (context_switch entry -> here) from the
+    // return-to-user tail (here -> first syscall entry).
+    if crate::dfx::forkprof::trace_on() {
+        let pid = crate::sched::get_current_pid();
+        crate::dfx::forkprof::trace(12, pid); // T_NEWBORN_TAIL
+    }
+    // Called after context_switch in the new task's context (ret_from_fork).
+    // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
+    // per-CPU deferred exit notify stored by the task we replaced would be
+    // skipped — and the next exit on this CPU overwrites the slot, losing
+    // the parent's SIGCHLD forever (silent wait hang in fork+fast-exit
+    // pipelines). Process it here; the slot clear makes this idempotent
+    // with the __schedule tail.
+    //
+    // fg1 (oh-launch round 5): enable IRQs BEFORE the notify — the
+    // newborn frame inherits the switcher's IRQs-off window, and the
+    // notify's wake chain (signal_wake_up / wake_group_chldexit ->
+    // wake_up) must never spin on a waitqueue lock with interrupts
+    // disabled (the 4.5 s "not servicing IPIs" holder shape; same fix
+    // as the repick path). The trap-exit tails do their own cli before
+    // the register pops, so returning IF=1 here is safe (SP-5).
+    crate::arch::cpu::enable_irq();
+    crate::sched::sched::process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
+    // R63: for the same reason, retire the switch-out ownership mark the
+    // replaced task's __schedule set on this CPU — a newborn's first
+    // resume bypasses __schedule's tail, so without this the mark would
+    // linger until this CPU's next context switch and keep the phantom
+    // heal conservative for a task that is already fully switched out.
+    crate::sched::sched::SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
+    // R11 (terminal-release window): the newborn's context is by
+    // definition not the replaced task's — the replaced prev's final
+    // switch-out has really completed here, so publish the positive
+    // terminal flag for the exit-path frees (same store as the
+    // __schedule-tail retire site; a dying task the newborn replaced
+    // would otherwise wait for a tail that never runs).
+    if !_prev.is_null() {
+        // INV-SCE-2: the newborn's context is by definition not prev's
+        // (the R11 terminal-release positive-knowledge store).
+        let pt = crate::sched::edges::task_shared(_prev);
+        pt.terminal_switch_done
+            .store(true, core::sync::atomic::Ordering::Release);
+        pt.terminal_pacing
+            .store(false, core::sync::atomic::Ordering::Release);
+    }
+    // r11: and retire the pick generation that switched us in — the
+    // newborn is the materialization of this CPU's current generation
+    // (the fourth retire site; without it every fork child leaves its
+    // publisher's generation unretired).
+    crate::sched::sched::pick_gen_retire(crate::arch::cpu_id() as usize);
+}
+
+
+// ===========================================================================
+// Framework wrappers for the service files' remaining raw edges
+// (mainline consolidation, 2026-11-27): each function below is the ONE
+// audited crossing for its family; the policy files call them and stay
+// safe.
+// ===========================================================================
+
+/// Read the current frame pointer (INV-SCE-5, the F-REG-1 family): the
+/// compiler-managed frame-address read for the GRQ crime-scene
+/// backtrace, the same consumer as `dumpstack.c`'s fp path. Contract:
+/// read-only, `nomem` + `nostack` + `preserves_flags` — no memory,
+/// stack or flag effect; the only soundness requirement is that the
+/// output register is written, which the operand enforces.
+#[inline(always)]
+pub fn grq_current_fp() -> u64 {
+    let fp: u64;
+    #[cfg(feature = "x86_64")]
+    // F-REG-1 (x86_64): mov rbp — the reference's __builtin_frame_address(0).
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(feature = "riscv64")]
+    // F-REG-1 (riscv64): mv s0 — same lowered builtin.
+    unsafe {
+        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(feature = "aarch64")]
+    // F-REG-1 (aarch64): mov x29 — same lowered builtin.
+    unsafe {
+        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    fp
+}
+
+/// Zero the trap scratch register (INV-SCE-6, the F-REG-3 family):
+/// `csrw sscratch, zero` on the usermode-entry paths (the scratch
+/// register holds the kernel tp across user execution; zeroing here
+/// establishes the boot-time convention before the first userspace
+/// entry). Contract: a CSR write with no memory effect; the one-shot
+/// boot ordering is guaranteed by the caller (init, pre-scheduler).
+#[inline]
+pub fn clear_trap_scratch() {
+    #[cfg(feature = "riscv64")]
+    // F-REG-3 (riscv64): csrw sscratch, zero — entry.S usermode-entry setup.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
+    }
+}
+
+/// Read the current stack pointer (INV-SCE-7, the F-REG-2 family): the
+/// reference's `current_stack_pointer` (arch/x86 stacktrace.h, riscv
+/// entry.S's sp, arm64's global); Rust's equivalent is this asm! read.
+/// Consumer: the idle-stack-overflow guard. Contract: read-only,
+/// nomem + nostack; the output operand is the only effect.
+#[inline]
+pub fn idle_guard_sp() -> usize {
+    let sp: usize;
+    #[cfg(feature = "x86_64")]
+    // F-REG-2 (x86_64): mov rsp.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
+    #[cfg(feature = "riscv64")]
+    // F-REG-2 (riscv64): mv sp.
+    unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
+    #[cfg(feature = "aarch64")]
+    // F-REG-2 (aarch64): mov sp.
+    unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
+    sp
+}
+
+/// INV-TL-1 (the raw allocator family): allocate a `layout`-sized raw
+/// block. The Task slot's raw-pointer identity is preserved (no typed
+/// wrapper); the caller null-checks before any use.
+#[inline]
+pub fn raw_alloc(layout: core::alloc::Layout) -> *mut u8 {
+    // SAFETY: INV-TL-1 — layout is non-zero (sized type); the null
+    // check is the caller's first use.
+    unsafe { alloc::alloc::alloc(layout) }
+}
+
+/// INV-TL-1 (the raw allocator family): free a block that came from
+/// [`raw_alloc`] with the SAME layout, while it is logically dead
+/// (never initialized, or already poisoned/dropped).
+#[inline]
+pub fn raw_dealloc(ptr: *mut u8, layout: core::alloc::Layout) {
+    // SAFETY: INV-TL-1 — ptr came from raw_alloc with this exact
+    // layout and is owned exclusively by the caller at this point.
+    unsafe { alloc::alloc::dealloc(ptr, layout) }
+}
+
+/// INV-SCE-2 (volatile diagnostics family): one volatile u64 read at
+/// `addr`. Diagnostic/atomic-only consumers (tick canary).
+#[inline]
+pub fn volatile_read_u64(addr: usize) -> u64 {
+    // SAFETY: INV-SCE-2 — single volatile read, diagnostic-only.
+    unsafe { core::ptr::read_volatile(addr as *const u64) }
+}
+
+/// INV-SCE-2 (volatile diagnostics family): one volatile u64 store at
+/// `addr` (tick-canary repair write).
+#[inline]
+pub fn volatile_write_u64(addr: usize, v: u64) {
+    // SAFETY: INV-SCE-2 — single volatile store, diagnostic-only
+    // (writes the canary marker over a reported smash).
+    unsafe { core::ptr::write_volatile(addr as *mut u64, v) }
+}
+
+/// INV-TL-2: run the field destructors for the page's last
+/// type-system-invisible reference. The call-site audit (free_task_slot)
+/// proves every path here operates on a FULLY initialized task.
+#[inline]
+pub fn drop_task_in_place(task_ptr: *mut Task) {
+    // SAFETY: INV-TL-2 — fully initialized task, exclusive ownership
+    // proven by the release-path handshake at the call site.
+    unsafe { core::ptr::drop_in_place(task_ptr) }
+}
+
+/// INV-TL-2 (the terminal-release family): the poison/paint/dealloc tail
+/// of `sched::free_task_slot`, moved verbatim (mainline consolidation
+/// 2026-11-27). Caller contract (the single-atomic-window discipline):
+/// between the last observer's release and this call there is ONE
+/// window with ONE writer (the freeing CPU); the steps inside are
+/// strictly ordered — R12-4 ring record, R47 positional poison of
+/// state+pid (the ONLY freed-state authority), the R83 header paint,
+/// task_page_unmark, and the dealloc. No safe shape exists for this
+/// sequence: it writes through a pointer that is logically dead (the
+/// poison/paint) — by definition outside the language's model.
+pub fn poison_and_dealloc_task(task_ptr: *mut Task) {
+    // SAFETY: INV-TL-2 — every write below goes through a pointer the
+    // type system already considers dead; that is the POINT of the
+    // poison discipline (the R47/R12-4 guards read these words to
+    // refuse stale wakes). Volatile stores at the compile-time
+    // offsets; the paint loop bounds itself to 0x100 bytes; the
+    // dealloc closes the window.
+    unsafe {
+        let slot = task_ptr as *mut u8;
+        let h = crate::sched::sched::FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
+        crate::sched::sched::FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
+        // R47: poison state and pid at their COMPILE-TIME offsets
+        // (task_offsets::TASK_STATE/TASK_PID; currently 0x50/0x54). The
+        // previous hardcoded `slot.add(0x48)` u64 write predated the
+        // journal_handle/ti_on_cpu/task_refcnt insertion before `state`
+        // (the same +8 drift trap.rs R20 fixed for its own walk) and
+        // landed entirely inside ti_a2 — so every poison reader
+        // (Task::wake_up R15-6, enqueue_task_locked R15-6,
+        // ensure_linked_locked R41, trap.rs panic walk) checked fields
+        // that were never poisoned. Freed Task pages were
+        // indistinguishable from live ones, and the stale wakes those
+        // guards exist to drop proceeded to set_state(RUNNING == 0)
+        // into freed-then-reused pages — the positional 4-byte zero at
+        // the state word behind the phantom-RUNNING / recurrence-at-
+        // same-address signature (rounds 39-47 form-B). Two separate
+        // u32 writes (not one u64) so a future field inserted between
+        // state and pid cannot silently miss pid again.
+        core::ptr::write_volatile(
+            slot.add(crate::process::task::TASK_STATE) as *mut u32,
+            crate::sched::sched::TASK_POISON,
+        );
+        core::ptr::write_volatile(
+            slot.add(crate::process::task::TASK_PID) as *mut u32,
+            crate::sched::sched::TASK_POISON,
+        );
+        // R83 (R74 producer hunt): paint the whole freed header (0x100
+        // bytes) with a fixed pattern AFTER the field destructors and
+        // BEFORE the state/pid poison below is (re)written above. Any
+        // later reader of this page that still reaches it through a
+        // stale Task pointer sees the paint instead of stale task
+        // data — turning the "recycled page vs wild write" question
+        // into a one-bit answer at the R74/R83 detection sites.
+        {
+            let mut off = 0usize;
+            while off < 0x100 {
+                core::ptr::write_volatile(
+                    slot.add(off) as *mut u64,
+                    crate::dfx::r83hunt::R83_FREED_PAINT,
+                );
+                off += 8;
+            }
+            // Keep the R47/R12-4 poison words authoritative over the
+            // paint (guards read state/pid to refuse stale wakes).
+            core::ptr::write_volatile(
+                slot.add(crate::process::task::TASK_STATE) as *mut u32,
+                crate::sched::sched::TASK_POISON,
+            );
+            core::ptr::write_volatile(
+                slot.add(crate::process::task::TASK_PID) as *mut u32,
+                crate::sched::sched::TASK_POISON,
+            );
+        }
+        // R69: release the ownership bit and tell the heap's free-side
+        // audit that THIS free is the legitimate one (anything else
+        // freeing a live Task page is the double-handoff engine).
+        crate::sched::sched::task_page_unmark(slot);
+        crate::sched::sched::IN_TASK_FREE.store(true, core::sync::atomic::Ordering::Release);
+        alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
+        crate::sched::sched::IN_TASK_FREE.store(false, core::sync::atomic::Ordering::Release);
+    }
 }

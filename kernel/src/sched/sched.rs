@@ -24,6 +24,7 @@
 //!
 //! Raw pointers are used to avoid borrow checker limitations, which is common
 //! practice in OS kernel development.
+#![forbid(unsafe_code)]
 
 use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
@@ -89,7 +90,8 @@ pub struct GlobalRunQueue {
 static LAST_IDLE_HINT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
-unsafe impl Sync for GlobalRunQueue {}
+// Send/Sync commitment moved to the subsystem's one audited unsafe
+// file (crate::sched::edges, unsafe.rs) — mainline consolidation.
 
 impl GlobalRunQueue {
     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
@@ -847,42 +849,6 @@ pub static GRQ_SITE_FP: [core::sync::atomic::AtomicU64; MAX_CPUS] =
 pub static GRQ_ACQ_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
-/// Read the current frame pointer (rbp on x86_64, s0 on riscv64,
-/// x29 on aarch64).
-///
-/// IRREDUCIBLE F-ROW (F-REG-1): there is no safe shape for reading a
-/// CPU register — Rust exposes no intrinsic for rbp/s0/x29 and the
-/// register file is outside the language's memory model. The reference
-/// kernel reaches the same value in C via
-/// `__builtin_frame_address(0)` (gcc lowers it to the identical
-/// `mov rbp` / `mv s0` / `mov x29`), used by its frame-pointer
-/// stackwalker (`arch/arm64/kernel/stacktrace.c`, x86
-/// `dumpstack.c`'s fp path); this read feeds the GRQ crime-scene
-/// backtrace, the same consumer. Contract: read-only, `nomem` +
-/// `nostack` + `preserves_flags` — no memory, stack or flag effect,
-/// so the only soundness requirement is that the output register is
-/// written, which the operand enforces.
-#[inline(always)]
-fn grq_current_fp() -> u64 {
-    let fp: u64;
-    #[cfg(feature = "x86_64")]
-    // F-REG-1 (x86_64): mov rbp — the reference's __builtin_frame_address(0).
-    unsafe {
-        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    #[cfg(feature = "riscv64")]
-    // F-REG-1 (riscv64): mv s0 — same lowered builtin.
-    unsafe {
-        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    #[cfg(feature = "aarch64")]
-    // F-REG-1 (aarch64): mov x29 — same lowered builtin.
-    unsafe {
-        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    fp
-}
-
 /// Stamp the site on `cpu` (one relaxed store — the hot-path shape).
 #[inline(always)]
 fn grq_site_mark_at(cpu: usize, site: u32) {
@@ -898,7 +864,7 @@ fn grq_site_mark_at(cpu: usize, site: u32) {
 fn grq_site_mark_fp_at(cpu: usize, site: u32) {
     if cpu < MAX_CPUS {
         GRQ_SITE[cpu].store(site, core::sync::atomic::Ordering::Relaxed);
-        GRQ_SITE_FP[cpu].store(grq_current_fp(), core::sync::atomic::Ordering::Relaxed);
+        GRQ_SITE_FP[cpu].store(crate::sched::edges::grq_current_fp(), core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1408,7 +1374,7 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { cor
 // from an orphaned one. Written only from __schedule on the local CPU
 // (set under the GRQ lock, cleared on the same hardware CPU after the
 // coroutine switch), so the waker's under-lock read is race-free.
-static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+pub(crate) static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
 // grq-hold-slim Cut 2 (class-chain short-circuit): one word answers
@@ -1901,7 +1867,7 @@ fn pick_gen_publish(cpu: usize, task: *mut Task) {
 }
 
 #[inline]
-fn pick_gen_retire(cpu: usize) {
+pub(crate) fn pick_gen_retire(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
@@ -2116,7 +2082,7 @@ fn process_deferred_exit_pid(packed: i64) {
 /// CPU after the switch.
 // (delivery helper lives above as process_deferred_exit_pid(packed))
 
-fn process_deferred_exit_notify_cpu(cpu: usize) {
+pub(crate) fn process_deferred_exit_notify_cpu(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
@@ -2174,7 +2140,6 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
 /// Per-CPU idle task pointers, accessed by boot.S to set tp on secondary CPUs.
 /// Written once by sched::init() on the boot CPU, read by secondary_start in
 /// assembly before any C code runs.  0 means not yet initialized.
-#[no_mangle]
 // __secondary_idle_tasks moved into crate::sched::edges (INV-SCE-4
 // companion): published once by the BSP init loop, consumed read-only
 // by boot.S on secondary bring-up.
@@ -2212,10 +2177,8 @@ pub fn cond_resched() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn asm_need_resched() -> i64 {
-    if need_resched() { 1 } else { 0 }
-}
+// asm_need_resched moved to crate::sched::edges (unsafe.rs) — mainline
+// consolidation: asm-crossing symbols are framework edges.
 
 /// bool sched_can_stop_tick(struct rq *rq) — reference kernel/sched/
 /// core.c, decision tree preserved in order (DL → RR → FIFO → CFS):
@@ -2769,7 +2732,7 @@ pub fn init_secondary(cpu_id: usize) {
             crate::arch::cpu::set_thread_id(idle_ptr as u64);
         }
 
-        clear_trap_scratch();
+        crate::sched::edges::clear_trap_scratch();
 
         let pcpu = cpu_state_mut(cpu_id);
         pcpu.idle = idle_ptr;
@@ -2777,24 +2740,8 @@ pub fn init_secondary(cpu_id: usize) {
     }
 }
 
-/// Clear the trap-entry scratch register (riscv64 `sscratch`; no-op
-/// elsewhere — x86_64 keeps per-CPU state in memory, not a scratch reg).
-///
-/// IRREDUCIBLE F-ROW (F-REG-3): CSR state has no safe Rust access —
-/// the reference's `arch/riscv/kernel/entry.S` writes the same
-/// `csrw sscratch, zero` on the usermode-entry paths (the scratch
-/// register holds the kernel tp across user execution; zeroing here
-/// establishes the boot-time convention before the first userspace
-/// entry). Contract: a CSR write with no memory effect; the one-shot
-/// boot ordering is guaranteed by the caller (init, pre-scheduler).
-#[inline]
-fn clear_trap_scratch() {
-    #[cfg(feature = "riscv64")]
-    // F-REG-3 (riscv64): csrw sscratch, zero — entry.S usermode-entry setup.
-    unsafe {
-        core::arch::asm!("csrw sscratch, zero");
-    }
-}
+// clear_trap_scratch moved to crate::sched::edges (unsafe.rs) —
+// mainline consolidation; the F-REG-3 contract lives with it.
 
 pub fn init() {
     let boot_cpu = crate::arch::cpu_id() as u64 as usize;
@@ -2824,26 +2771,31 @@ pub fn init() {
         // cpu's idle slot exactly once, before any secondary schedules;
         // __secondary_idle_tasks is consumed read-only by boot.S after
         // this loop publishes it.
-        unsafe {
+        {
+            // SAFETY: INV-SCE-4 writer side — the BSP init loop writes each
+            // cpu's idle slot exactly once, before any secondary schedules;
+            // __secondary_idle_tasks is consumed read-only by boot.S after
+            // this loop publishes it. Raw derefs cross the audited
+            // task_mut edge (INV-SCE-1).
             let idle_ptr = crate::sched::edges::idle_task_ptr(cpu);
             Task::new_idle_at(idle_ptr);
 
             crate::process::pid_hash::pid_hash_insert(idle_ptr);
 
-            if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
-                (*idle_ptr).thread_mut().sp = stack_top as u64;
+            if let Some(stack_top) = crate::sched::edges::task_mut(idle_ptr).alloc_kernel_stack() {
+                crate::sched::edges::task_mut(idle_ptr).thread_mut().sp = stack_top as u64;
             } else {
                 // HOTPATH-PRINT: boot-time one-shot (init allocation failure).
             println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
             }
 
-            (*idle_ptr).set_ti_cpu(cpu as i32);
+            crate::sched::edges::task_mut(idle_ptr).set_ti_cpu(cpu as i32);
 
             // Store pointer for assembly secondary_start
             crate::sched::edges::secondary_idle_publish(cpu, idle_ptr as usize);
 
             if cpu == boot_cpu {
-                clear_trap_scratch();
+                crate::sched::edges::clear_trap_scratch();
                 crate::arch::cpu::set_thread_id(idle_ptr as u64);
 
                 let pcpu = cpu_state_mut(cpu);
@@ -2906,7 +2858,7 @@ fn task_page_mark(ptr: *mut u8) {
     }
 }
 #[inline]
-fn task_page_unmark(ptr: *mut u8) {
+pub(crate) fn task_page_unmark(ptr: *mut u8) {
     if let Some((w, bit)) = task_page_bit(ptr) {
         TASK_PAGE_OWNED[w].fetch_and(!bit, core::sync::atomic::Ordering::AcqRel);
     }
@@ -2979,7 +2931,7 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     // allocator has no safe wrapper that preserves the Task slot's
     // raw-pointer identity (Round-B typed-handle conversion pending);
     // null check follows immediately.
-    let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
+    let task_ptr = crate::sched::edges::raw_alloc(layout) as *mut Task;
     IN_TASK_ALLOC.store(false, core::sync::atomic::Ordering::Release);
     if task_ptr.is_null() {
         return None;
@@ -2989,14 +2941,14 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
         Some(p) => p,
         None => {
             // SAFETY: task_ptr was allocated above with the same Layout; not yet initialized.
-            unsafe { alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>()); }
+            crate::sched::edges::raw_dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>());
             return None;
         }
     };
 
     // SAFETY: task_ptr was freshly allocated with Layout::new::<Task>() and is non-null;
     // new_task_at initializes it in-place before use.
-    unsafe {
+    {
         if !Task::new_task_at(task_ptr, pid, SchedPolicy::Normal) {
             // R10-9: stack allocation failed — discard the slot cleanly.
             crate::process::pid::free_pid(pid);
@@ -3033,7 +2985,7 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
 /// R12-4: recently-freed Task slots (pid at free time) for post-mortems.
 pub static FREED_TASK_RING: [core::sync::atomic::AtomicU32; 64] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 64];
-static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub(crate) static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// R12-4: poison marker written into a freed Task's state/pid words.
 pub const TASK_POISON: u32 = 0xDEAD_BEEF;
 
@@ -3408,9 +3360,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // call-site audit (the comment block above) proves every path
         // here operates on a FULLY initialized task (new_task_at's only
         // failure return precedes any Drop-bearing field).
-        unsafe {
-            core::ptr::drop_in_place(task_ptr);
-        }
+        crate::sched::edges::drop_task_in_place(task_ptr);
         // R12-4: poison + record before the free — the next "zeroed/garbage
         // linked child" or wild-pointer wake then shows this exact marker
         // instead of anonymous zeros, proving (or ruling out) the
@@ -3421,69 +3371,10 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // guards read these words to refuse stale wakes). Volatile
         // stores at the compile-time offsets; the paint loop bounds
         // itself to 0x100 bytes; the dealloc closes the window.
-        unsafe {
-            let slot = task_ptr as *mut u8;
-            let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
-            FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
-            // R47: poison state and pid at their COMPILE-TIME offsets
-            // (task_offsets::TASK_STATE/TASK_PID; currently 0x50/0x54). The
-            // previous hardcoded `slot.add(0x48)` u64 write predated the
-            // journal_handle/ti_on_cpu/task_refcnt insertion before `state`
-            // (the same +8 drift trap.rs R20 fixed for its own walk) and
-            // landed entirely inside ti_a2 — so every poison reader
-            // (Task::wake_up R15-6, enqueue_task_locked R15-6,
-            // ensure_linked_locked R41, trap.rs panic walk) checked fields
-            // that were never poisoned. Freed Task pages were
-            // indistinguishable from live ones, and the stale wakes those
-            // guards exist to drop proceeded to set_state(RUNNING == 0)
-            // into freed-then-reused pages — the positional 4-byte zero at
-            // the state word behind the phantom-RUNNING / recurrence-at-
-            // same-address signature (rounds 39-47 form-B). Two separate
-            // u32 writes (not one u64) so a future field inserted between
-            // state and pid cannot silently miss pid again.
-            core::ptr::write_volatile(
-                slot.add(crate::process::task::TASK_STATE) as *mut u32,
-                TASK_POISON,
-            );
-            core::ptr::write_volatile(
-                slot.add(crate::process::task::TASK_PID) as *mut u32,
-                TASK_POISON,
-            );
-            // R83 (R74 producer hunt): paint the whole freed header (0x100
-            // bytes) with a fixed pattern AFTER the field destructors and
-            // BEFORE the state/pid poison below is (re)written above. Any
-            // later reader of this page that still reaches it through a
-            // stale Task pointer sees the paint instead of stale task
-            // data — turning the "recycled page vs wild write" question
-            // into a one-bit answer at the R74/R83 detection sites.
-            {
-                let mut off = 0usize;
-                while off < 0x100 {
-                    core::ptr::write_volatile(
-                        slot.add(off) as *mut u64,
-                        crate::dfx::r83hunt::R83_FREED_PAINT,
-                    );
-                    off += 8;
-                }
-                // Keep the R47/R12-4 poison words authoritative over the
-                // paint (guards read state/pid to refuse stale wakes).
-                core::ptr::write_volatile(
-                    slot.add(crate::process::task::TASK_STATE) as *mut u32,
-                    TASK_POISON,
-                );
-                core::ptr::write_volatile(
-                    slot.add(crate::process::task::TASK_PID) as *mut u32,
-                    TASK_POISON,
-                );
-            }
-            // R69: release the ownership bit and tell the heap's free-side
-            // audit that THIS free is the legitimate one (anything else
-            // freeing a live Task page is the double-handoff engine).
-            task_page_unmark(slot);
-            IN_TASK_FREE.store(true, core::sync::atomic::Ordering::Release);
-            alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
-            IN_TASK_FREE.store(false, core::sync::atomic::Ordering::Release);
-        }
+        // The R12-4 ring record, the R47 poison, the R83 paint, the
+        // ownership-bit release and the dealloc moved verbatim into the
+        // subsystem's one audited unsafe file (INV-TL-2):
+        crate::sched::edges::poison_and_dealloc_task(task_ptr);
 }
 
 // ==================== Core Scheduling ====================
@@ -3688,10 +3579,8 @@ pub fn schedule() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn asm_schedule() {
-    schedule();
-}
+// asm_schedule moved to crate::sched::edges (unsafe.rs) — mainline
+// consolidation: asm-crossing symbols are framework edges.
 
 /// Terminal deschedule for a DEAD task — do_exit's "final schedule, never
 /// returns". sc186/sc189 (session R eighth leg): a racing wake/heal can
@@ -10038,11 +9927,11 @@ pub fn scheduler_tick() {
     // into the adjacent heap page (the children-list zeroing engine).
     // First-hit-only reporting; the fix is stack-size/depth work (r19).
     if let Some(t) = crate::sched::current() {
-        unsafe {
+        {
             let t = crate::sched::edges::task_shared(t);
             let bottom = t.kernel_stack_bottom();
             if bottom != 0 {
-                let v = core::ptr::read_volatile(bottom as *const u64);
+                let v = crate::sched::edges::volatile_read_u64(bottom);
                 static REPORTED: core::sync::atomic::AtomicBool =
                     core::sync::atomic::AtomicBool::new(false);
                 if v != 0xCAFE_F00D_DEAD_BEEF
@@ -10114,7 +10003,7 @@ pub fn scheduler_tick() {
                     while kk > 0 { kk -= 1; putchar(dd[kk]); }
                     putchar(b'\n');
                     // repair so we report once
-                    core::ptr::write_volatile(bottom as *mut u64, 0xCAFE_F00D_DEAD_BEEF);
+                    crate::sched::edges::volatile_write_u64(bottom, 0xCAFE_F00D_DEAD_BEEF);
                 }
             }
         }
@@ -10553,59 +10442,9 @@ fn context_switch(prev: &mut Task, next: &mut Task) {
     crate::sched::edges::arch_context_switch(prev, next);
 }
 
-#[no_mangle]
-pub extern "C" fn schedule_tail(_prev: *mut Task) {
-    // forkprof: first Rust code in the newborn's frame — splits the
-    // switch machinery (context_switch entry -> here) from the
-    // return-to-user tail (here -> first syscall entry).
-    if crate::dfx::forkprof::trace_on() {
-        let pid = crate::sched::get_current_pid();
-        crate::dfx::forkprof::trace(12, pid); // T_NEWBORN_TAIL
-    }
-    // Called after context_switch in the new task's context (ret_from_fork).
-    // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
-    // per-CPU deferred exit notify stored by the task we replaced would be
-    // skipped — and the next exit on this CPU overwrites the slot, losing
-    // the parent's SIGCHLD forever (silent wait hang in fork+fast-exit
-    // pipelines). Process it here; the slot clear makes this idempotent
-    // with the __schedule tail.
-    //
-    // fg1 (oh-launch round 5): enable IRQs BEFORE the notify — the
-    // newborn frame inherits the switcher's IRQs-off window, and the
-    // notify's wake chain (signal_wake_up / wake_group_chldexit ->
-    // wake_up) must never spin on a waitqueue lock with interrupts
-    // disabled (the 4.5 s "not servicing IPIs" holder shape; same fix
-    // as the repick path). The trap-exit tails do their own cli before
-    // the register pops, so returning IF=1 here is safe (SP-5).
-    crate::arch::cpu::enable_irq();
-    process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
-    // R63: for the same reason, retire the switch-out ownership mark the
-    // replaced task's __schedule set on this CPU — a newborn's first
-    // resume bypasses __schedule's tail, so without this the mark would
-    // linger until this CPU's next context switch and keep the phantom
-    // heal conservative for a task that is already fully switched out.
-    SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
-    // R11 (terminal-release window): the newborn's context is by
-    // definition not the replaced task's — the replaced prev's final
-    // switch-out has really completed here, so publish the positive
-    // terminal flag for the exit-path frees (same store as the
-    // __schedule-tail retire site; a dying task the newborn replaced
-    // would otherwise wait for a tail that never runs).
-    if !_prev.is_null() {
-        // INV-SCE-2: the newborn's context is by definition not prev's
-        // (the R11 terminal-release positive-knowledge store).
-        let pt = crate::sched::edges::task_shared(_prev);
-        pt.terminal_switch_done
-            .store(true, core::sync::atomic::Ordering::Release);
-        pt.terminal_pacing
-            .store(false, core::sync::atomic::Ordering::Release);
-    }
-    // r11: and retire the pick generation that switched us in — the
-    // newborn is the materialization of this CPU's current generation
-    // (the fourth retire site; without it every fork child leaves its
-    // publisher's generation unretired).
-    pick_gen_retire(crate::arch::cpu_id() as usize);
-}
+// schedule_tail moved to crate::sched::edges (unsafe.rs) — mainline
+// consolidation: asm-crossing symbols are framework edges (its
+// ret_from_fork caller is assembly).
 
 // ==================== Utility Functions ====================
 
@@ -12472,27 +12311,8 @@ pub fn cpu_idle_loop() -> ! {
     // read. Consumer: the idle-stack-overflow guard (same shape as the
     // reference's TASK_SIZE-bounded stack check). Contract: read-only,
     // nomem + nostack; the output operand is the only effect.
-    #[cfg(feature = "x86_64")]
-    fn idle_guard_sp() -> usize {
-        let sp: usize;
-        // F-REG-2 (x86_64): mov rsp.
-        unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
-        sp
-    }
-    #[cfg(feature = "riscv64")]
-    fn idle_guard_sp() -> usize {
-        let sp: usize;
-        // F-REG-2 (riscv64): mv sp.
-        unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
-        sp
-    }
-    #[cfg(feature = "aarch64")]
-    fn idle_guard_sp() -> usize {
-        let sp: usize;
-        // F-REG-2 (aarch64): mov sp.
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
-        sp
-    }
+    // idle_guard_sp moved to crate::sched::edges (unsafe.rs) — mainline
+    // consolidation; the F-REG-2 contract lives with it.
     fn idle_guard_report(cpu: usize, sp: u64, floor: u64) {
         use crate::dfx::taskdump::putc_brief as putchar;
         fn ph(mut v: u64) {
@@ -12530,7 +12350,7 @@ pub fn cpu_idle_loop() -> ! {
     loop {
         // Idle-depth guard: measure at the same point every pass.
         {
-            let sp = idle_guard_sp() as u64;
+            let sp = crate::sched::edges::idle_guard_sp() as u64;
             let floor = IDLE_SP_FLOOR[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
             if floor == 0 {
                 IDLE_SP_FLOOR[cpu_id].store(sp, core::sync::atomic::Ordering::Relaxed);

@@ -2,6 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+#![forbid(unsafe_code)]
 
 //! cgroup v2 — unified hierarchy core (simplified Linux cgroup v2)
 //!
@@ -310,10 +311,10 @@ impl CgroupNode {
     }
 }
 
-// SAFETY: all shared mutable state is behind irqsave Spinlocks or atomics.
-unsafe impl Send for CgroupNode {}
-// SAFETY: see above — no data race is possible across CPUs.
-unsafe impl Sync for CgroupNode {}
+// Send/Sync commitments moved to the subsystem's one audited unsafe
+// file (crate::sched::edges, unsafe.rs) — mainline consolidation; the
+// SAFETY argument (all shared mutable state behind irqsave Spinlocks
+// or atomics) is recorded with the impls there.
 
 // ============================================================================
 // Global root

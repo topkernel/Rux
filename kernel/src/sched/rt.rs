@@ -10,6 +10,7 @@
 //! - Priority bitmap for O(1) highest priority task selection
 //! - SCHED_FIFO: Run until blocked or preempted by higher priority
 //! - SCHED_RR: FIFO with time slices (default 100ms)
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use crate::process::task::{Task, SchedPolicy};
@@ -646,8 +647,8 @@ impl RtRunQueue {
     }
 }
 
-unsafe impl Send for RtRunQueue {}
-unsafe impl Sync for RtRunQueue {}
+// Send/Sync commitments moved to the subsystem's one audited unsafe
+// file (crate::sched::edges, unsafe.rs) — mainline consolidation.
 
 /// RT scheduling entity
 ///

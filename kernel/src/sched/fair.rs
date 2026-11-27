@@ -23,6 +23,7 @@
 //! SCHED_IDLE policy is NOT the same as idle_sched_class:
 //! - idle_sched_class is for per-CPU idle tasks (pid=0) only
 //! - SCHED_IDLE policy tasks use this class with minimal weight
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
@@ -3228,8 +3229,8 @@ impl Default for CfsRunQueue {
     }
 }
 
-unsafe impl Send for CfsRunQueue {}
-unsafe impl Sync for CfsRunQueue {}
+// Send/Sync commitments moved to the subsystem's one audited unsafe
+// file (crate::sched::edges, unsafe.rs) — mainline consolidation.
 
 /// Calculate time slice (milliseconds)
 ///
