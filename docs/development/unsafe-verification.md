@@ -35,10 +35,10 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1721**
-- recovered from reference versions: **1** (same-file 1, edited-site 0, file-move 0, moved-item 0)
-- references consulted: HEAD, MERGE_HEAD, 1ae2a43c2
-- annotated regions, baseline -> this bank: **1729 -> 1722**
+- artifacts kept by id: **1664**
+- recovered from reference versions: **58** (same-file 58, edited-site 0, file-move 0, moved-item 0)
+- references consulted: HEAD, MERGE_HEAD, 795744824
+- annotated regions, baseline -> this bank: **1758 -> 1722**
 
 ## Per-subsystem
 
@@ -591,33 +591,33 @@ FILE` owns one), and the gate fails on a drop that
 | 502 | trap_handler | block | volatile,ptr-ops | INV:F19 | `911b1f27990f` |
 | 504 | trap_handler | block | volatile,ptr-ops | INV:F19 | `c8d3616ae9a0` |
 | 698 | handle_timer_interrupt | block | - | INV:F19 | `97d8847c27e0` |
-| 744 | handle_software_interrupt | block | asm | INV:F19 | `814ed8e65729` |
-| 786 | handle_syscall | block | asm | INV:F19 | `8eaa7f66ce11` |
-| 819 | handle_syscall | block | ptr-ops | INV:F19 | `b2fe537737b3` |
-| 871 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `0af811e3c039` |
-| 907 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `232c77cc7639` |
-| 951 | handle_illegal_instruction | block | - | INV:F19 | `aad13a96108c` |
-| 989 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `e0d00617b400` |
-| 1002 | handle_illegal_instruction | block | - | INV:F19 | `e60e5298a1d9` |
-| 1027 | handle_illegal_instruction | block | - | INV:F19 | `e0ca6ea31a13` |
-| 1108 | handle_breakpoint | block | - | INV:F19 | `ebf1f1cec8bc` |
-| 1145 | handle_breakpoint | block | - | INV:F19 | `6856151a3b9c` |
-| 1184 | sigsegv_has_handler | block | - | INV:F19 | `1fb3c4f4f8bc` |
-| 1204 | sigbus_has_handler | block | - | INV:F19 | `f2e4d0772a28` |
-| 1216 | riscv_bad_user_frame | block | - | INV:F19 | `2f46e21d5788` |
-| 1243 | riscv_bad_user_frame | block | asm | INV:F19 | `3dfe7017bdd2` |
-| 1380 | handle_page_fault | block | - | INV:F19 | `b06924727b8d` |
-| 1389 | handle_page_fault | block | - | INV:F19 | `a238e2a9c115` |
-| 1394 | handle_page_fault | block | - | INV:F19 | `d467e16a2eae` |
-| 1622 | handle_page_fault | block | asm | INV:F19 | `301a58cb19c5` |
-| 1654 | handle_page_fault | block | - | INV:F19 | `98af16e4fab0` |
-| 1663 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `09e7780e1e15` |
-| 1688 | handle_page_fault | block | ptr-ops | INV:F19 | `551ffa37148b` |
-| 1691 | handle_page_fault | block | no-preempt | INV:F19 | `a61bfa91f066` |
-| 1724 | handle_page_fault | block | volatile | INV:F19 | `e4e2e41f487e` |
-| 1730 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `40acb89a8132` |
-| 1731 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `34e4310a90dd` |
-| 1754 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `adac419e62b7` |
+| 764 | handle_software_interrupt | block | asm | INV:F19 | `4fd3615774bf` |
+| 806 | handle_syscall | block | asm | INV:F19 | `9348526e2071` |
+| 839 | handle_syscall | block | ptr-ops | INV:F19 | `803e02fbb173` |
+| 891 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `80bece062537` |
+| 927 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `ccf8a6391b94` |
+| 971 | handle_illegal_instruction | block | - | INV:F19 | `2ef28856bb20` |
+| 1009 | handle_illegal_instruction | block | ptr-ops | INV:F19 | `58156047eb66` |
+| 1022 | handle_illegal_instruction | block | - | INV:F19 | `1db77e7991db` |
+| 1047 | handle_illegal_instruction | block | - | INV:F19 | `1b5576c92159` |
+| 1128 | handle_breakpoint | block | - | INV:F19 | `6268f212e506` |
+| 1165 | handle_breakpoint | block | - | INV:F19 | `e98bbb24ef03` |
+| 1204 | sigsegv_has_handler | block | - | INV:F19 | `54ac42ff8549` |
+| 1224 | sigbus_has_handler | block | - | INV:F19 | `c53876687648` |
+| 1236 | riscv_bad_user_frame | block | - | INV:F19 | `acb7f3dcbf23` |
+| 1263 | riscv_bad_user_frame | block | asm | INV:F19 | `b99eb0c38d58` |
+| 1400 | handle_page_fault | block | - | INV:F19 | `2c25498b69bd` |
+| 1409 | handle_page_fault | block | - | INV:F19 | `dbd62e4359c7` |
+| 1414 | handle_page_fault | block | - | INV:F19 | `8747adea6673` |
+| 1642 | handle_page_fault | block | asm | INV:F19 | `a96400e3e8c9` |
+| 1674 | handle_page_fault | block | - | INV:F19 | `a4623258ff51` |
+| 1683 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `6c42f9520c74` |
+| 1708 | handle_page_fault | block | ptr-ops | INV:F19 | `2836626337bd` |
+| 1711 | handle_page_fault | block | no-preempt | INV:F19 | `c088cb0f0d9e` |
+| 1744 | handle_page_fault | block | volatile | INV:F19 | `6bf9f6d5b231` |
+| 1750 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `77f76dc886ac` |
+| 1751 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `339669d31107` |
+| 1774 | handle_page_fault | block | volatile,ptr-ops | INV:F19 | `e553ad37f5f4` |
 
 ### kernel/core/src/arch/riscv64/uaccess.rs (12)
 
@@ -2313,37 +2313,37 @@ FILE` owns one), and the gate fails on a drop that
 | 720 | ring_read_user_tail | block | volatile,ptr-ops | INV:INV-PERF-EV-1 | `89783b92d234` |
 | 731 | ring_publish_head | block | volatile,ptr-ops | INV:INV-PERF-EV-1 | `79fb8c9f4a5a` |
 | 752 | ring_audit | block | - | INV:INV-PERF-EV-1 | `73cdbf2baf40` |
-| 902 | kernel_callchain | block | volatile,ptr-ops | INV:INV-PERF-EV-1 | `e4d46fb0669b` |
-| 951 | softirq_tick | block | ptr-ops | INV:INV-PERF-EV-1 | `7685fbe6a0df` |
-| 1014 | softirq_tick | block | - | INV:INV-PERF-EV-1 | `891daf294595` |
-| 1137 | hook_comm | block | ptr-ops | INV:INV-PERF-EV-1 | `27c0643ee3ac` |
-| 1186 | hook_mmap2 | block | ptr-ops | INV:INV-PERF-EV-1 | `bc309bcb03c5` |
-| 1213 | hook_fork | block | ptr-ops | INV:INV-PERF-EV-1 | `38be217a9803` |
-| 1238 | hook_exit | block | ptr-ops | INV:INV-PERF-EV-1 | `cc7b1eb37e71` |
-| 1260 | read_value | block | - | INV:INV-PERF-EV-1 | `a9496dbc4360` |
-| 1280 | read_value | block | - | INV:INV-PERF-EV-1 | `089cd0d33425` |
-| 1360 | event_of | block | - | INV:INV-PERF-EV-1 | `48fbcbebe731` |
-| 1362 | event_of | block | ptr-ops | INV:INV-PERF-EV-1 | `2831dd76f1f6` |
-| 1366 | perf_close | block | - | INV:INV-PERF-EV-1 | `c5b4f8e81dc0` |
-| 1368 | perf_close | block | ptr-ops | INV:INV-PERF-EV-1 | `e3bd73ca21b8` |
-| 1392 | perf_close | block | - | INV:INV-PERF-EV-1 | `c657440bb1e8` |
-| 1419 | perf_close | block | ptr-ops | INV:INV-PERF-EV-1 | `e19dc83b5cbf` |
-| 1422 | perf_close | block | - | INV:INV-PERF-EV-1 | `df0ada638e93` |
-| 1521 | perf_mmap_handler | block | - | INV:INV-PERF-EV-1 | `428ef3380e23` |
-| 1534 | perf_mmap_handler | block | ptr-ops | INV:INV-PERF-EV-1 | `13f3bc9b3d86` |
-| 1648 | perf_mmap_handler | block | - | INV:INV-PERF-EV-1 | `735e7950013f` |
-| 1662 | perf_mmap_handler | block | - | INV:INV-PERF-EV-1 | `87ceb03fb1e5` |
-| 1675 | perf_mmap_handler | block | volatile,ptr-ops | INV:INV-PERF-EV-1 | `8f9d9258cade` |
-| 1773 | perf_ioctl | block | ptr-ops | INV:INV-PERF-EV-1 | `0c02c6f8cd93` |
-| 1786 | perf_ioctl | block | ptr-ops | INV:INV-PERF-EV-1 | `1504ede1b7ac` |
-| 1842 | sys_perf_event_open | block | ptr-ops | INV:INV-PERF-EV-1 | `f76815dd9d97` |
-| 1854 | sys_perf_event_open | block | ptr-ops | INV:INV-PERF-EV-1 | `1556e2b50ada` |
-| 1977 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `9230cd76010d` |
-| 1994 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `dba04f554c0f` |
-| 2079 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `07f532479254` |
-| 2085 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `7f9c1135a699` |
-| 2098 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `70d736f2161e` |
-| 2103 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `db3852e9a4f1` |
+| 904 | kernel_callchain | block | volatile,ptr-ops | INV:INV-PERF-EV-1 | `7983a2696973` |
+| 953 | softirq_tick | block | ptr-ops | INV:INV-PERF-EV-1 | `2a0f70c82c2f` |
+| 1016 | softirq_tick | block | - | INV:INV-PERF-EV-1 | `0c8a6fc0433d` |
+| 1139 | hook_comm | block | ptr-ops | INV:INV-PERF-EV-1 | `4065b1117d59` |
+| 1188 | hook_mmap2 | block | ptr-ops | INV:INV-PERF-EV-1 | `089f1418ae57` |
+| 1215 | hook_fork | block | ptr-ops | INV:INV-PERF-EV-1 | `a789fbf16a8c` |
+| 1240 | hook_exit | block | ptr-ops | INV:INV-PERF-EV-1 | `1065c7cf2513` |
+| 1262 | read_value | block | - | INV:INV-PERF-EV-1 | `99ffc02a853b` |
+| 1282 | read_value | block | - | INV:INV-PERF-EV-1 | `3fdfe9f81d18` |
+| 1362 | event_of | block | - | INV:INV-PERF-EV-1 | `854b99bd5d8d` |
+| 1364 | event_of | block | ptr-ops | INV:INV-PERF-EV-1 | `36bc18f074a3` |
+| 1368 | perf_close | block | - | INV:INV-PERF-EV-1 | `6f9015ec3be1` |
+| 1370 | perf_close | block | ptr-ops | INV:INV-PERF-EV-1 | `beb129cc23e3` |
+| 1394 | perf_close | block | - | INV:INV-PERF-EV-1 | `3e8cd8f7f14a` |
+| 1421 | perf_close | block | ptr-ops | INV:INV-PERF-EV-1 | `d3d7b230b612` |
+| 1424 | perf_close | block | - | INV:INV-PERF-EV-1 | `a49d39142f26` |
+| 1523 | perf_mmap_handler | block | - | INV:INV-PERF-EV-1 | `44aba142e4a7` |
+| 1536 | perf_mmap_handler | block | ptr-ops | INV:INV-PERF-EV-1 | `c10efc535003` |
+| 1650 | perf_mmap_handler | block | - | INV:INV-PERF-EV-1 | `14a1e09c1bc8` |
+| 1664 | perf_mmap_handler | block | - | INV:INV-PERF-EV-1 | `fa337ab61c4c` |
+| 1677 | perf_mmap_handler | block | volatile,ptr-ops | INV:INV-PERF-EV-1 | `40a0469cc16c` |
+| 1775 | perf_ioctl | block | ptr-ops | INV:INV-PERF-EV-1 | `0a446e8a34ae` |
+| 1788 | perf_ioctl | block | ptr-ops | INV:INV-PERF-EV-1 | `0a1427f65590` |
+| 1844 | sys_perf_event_open | block | ptr-ops | INV:INV-PERF-EV-1 | `25ecb130b515` |
+| 1856 | sys_perf_event_open | block | ptr-ops | INV:INV-PERF-EV-1 | `3a8917fec823` |
+| 1979 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `5a2900a357ea` |
+| 1996 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `ad05b9524e2b` |
+| 2081 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `402652ea205e` |
+| 2087 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `a854924971f8` |
+| 2100 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `8a1d467ca7f2` |
+| 2105 | sys_perf_event_open | block | - | INV:INV-PERF-EV-1 | `3b8c3df56cc1` |
 
 ## net
 

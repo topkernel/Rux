@@ -343,33 +343,33 @@ dce6a494c51f	kernel/core/src/arch/riscv64/trap.rs	trap_handler	457		INV:F19
 911b1f27990f	kernel/core/src/arch/riscv64/trap.rs	trap_handler	502	volatile,ptr-ops	INV:F19
 c8d3616ae9a0	kernel/core/src/arch/riscv64/trap.rs	trap_handler	504	volatile,ptr-ops	INV:F19
 97d8847c27e0	kernel/core/src/arch/riscv64/trap.rs	handle_timer_interrupt	698		INV:F19
-814ed8e65729	kernel/core/src/arch/riscv64/trap.rs	handle_software_interrupt	744	asm	INV:F19
-8eaa7f66ce11	kernel/core/src/arch/riscv64/trap.rs	handle_syscall	786	asm	INV:F19
-b2fe537737b3	kernel/core/src/arch/riscv64/trap.rs	handle_syscall	819	ptr-ops	INV:F19
-0af811e3c039	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	871	ptr-ops	INV:F19
-232c77cc7639	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	907	ptr-ops	INV:F19
-aad13a96108c	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	951		INV:F19
-e0d00617b400	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	989	ptr-ops	INV:F19
-e60e5298a1d9	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	1002		INV:F19
-e0ca6ea31a13	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	1027		INV:F19
-ebf1f1cec8bc	kernel/core/src/arch/riscv64/trap.rs	handle_breakpoint	1108		INV:F19
-6856151a3b9c	kernel/core/src/arch/riscv64/trap.rs	handle_breakpoint	1145		INV:F19
-1fb3c4f4f8bc	kernel/core/src/arch/riscv64/trap.rs	sigsegv_has_handler	1184		INV:F19
-f2e4d0772a28	kernel/core/src/arch/riscv64/trap.rs	sigbus_has_handler	1204		INV:F19
-2f46e21d5788	kernel/core/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1216		INV:F19
-3dfe7017bdd2	kernel/core/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1243	asm	INV:F19
-b06924727b8d	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1380		INV:F19
-a238e2a9c115	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1389		INV:F19
-d467e16a2eae	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1394		INV:F19
-301a58cb19c5	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1622	asm	INV:F19
-98af16e4fab0	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1654		INV:F19
-09e7780e1e15	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1663	volatile,ptr-ops	INV:F19
-551ffa37148b	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1688	ptr-ops	INV:F19
-a61bfa91f066	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1691	no-preempt	INV:F19
-e4e2e41f487e	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1724	volatile	INV:F19
-40acb89a8132	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1730	volatile,ptr-ops	INV:F19
-34e4310a90dd	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1731	volatile,ptr-ops	INV:F19
-adac419e62b7	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1754	volatile,ptr-ops	INV:F19
+4fd3615774bf	kernel/core/src/arch/riscv64/trap.rs	handle_software_interrupt	764	asm	INV:F19
+9348526e2071	kernel/core/src/arch/riscv64/trap.rs	handle_syscall	806	asm	INV:F19
+803e02fbb173	kernel/core/src/arch/riscv64/trap.rs	handle_syscall	839	ptr-ops	INV:F19
+80bece062537	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	891	ptr-ops	INV:F19
+ccf8a6391b94	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	927	ptr-ops	INV:F19
+2ef28856bb20	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	971		INV:F19
+58156047eb66	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	1009	ptr-ops	INV:F19
+1db77e7991db	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	1022		INV:F19
+1b5576c92159	kernel/core/src/arch/riscv64/trap.rs	handle_illegal_instruction	1047		INV:F19
+6268f212e506	kernel/core/src/arch/riscv64/trap.rs	handle_breakpoint	1128		INV:F19
+e98bbb24ef03	kernel/core/src/arch/riscv64/trap.rs	handle_breakpoint	1165		INV:F19
+54ac42ff8549	kernel/core/src/arch/riscv64/trap.rs	sigsegv_has_handler	1204		INV:F19
+c53876687648	kernel/core/src/arch/riscv64/trap.rs	sigbus_has_handler	1224		INV:F19
+acb7f3dcbf23	kernel/core/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1236		INV:F19
+b99eb0c38d58	kernel/core/src/arch/riscv64/trap.rs	riscv_bad_user_frame	1263	asm	INV:F19
+2c25498b69bd	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1400		INV:F19
+dbd62e4359c7	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1409		INV:F19
+8747adea6673	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1414		INV:F19
+a96400e3e8c9	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1642	asm	INV:F19
+a4623258ff51	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1674		INV:F19
+6c42f9520c74	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1683	volatile,ptr-ops	INV:F19
+2836626337bd	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1708	ptr-ops	INV:F19
+c088cb0f0d9e	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1711	no-preempt	INV:F19
+6bf9f6d5b231	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1744	volatile	INV:F19
+77f76dc886ac	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1750	volatile,ptr-ops	INV:F19
+339669d31107	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1751	volatile,ptr-ops	INV:F19
+e553ad37f5f4	kernel/core/src/arch/riscv64/trap.rs	handle_page_fault	1774	volatile,ptr-ops	INV:F19
 7c5ca38e81f7	kernel/core/src/arch/riscv64/uaccess.rs	__clear_user	118	ptr-ops	INV:INV-UACCESS-1
 655fb6f04bca	kernel/core/src/arch/riscv64/uaccess.rs	copy_to_user	132		INV:INV-UACCESS-1
 f2073c84828d	kernel/core/src/arch/riscv64/uaccess.rs	copy_to_user	144		INV:INV-UACCESS-1
@@ -1320,37 +1320,37 @@ f17fae868736	kernel/core/src/perf/mod.rs	ring_slice	689		INV:INV-PERF-EV-1
 89783b92d234	kernel/core/src/perf/mod.rs	ring_read_user_tail	720	volatile,ptr-ops	INV:INV-PERF-EV-1
 79fb8c9f4a5a	kernel/core/src/perf/mod.rs	ring_publish_head	731	volatile,ptr-ops	INV:INV-PERF-EV-1
 73cdbf2baf40	kernel/core/src/perf/mod.rs	ring_audit	752		INV:INV-PERF-EV-1
-e4d46fb0669b	kernel/core/src/perf/mod.rs	kernel_callchain	902	volatile,ptr-ops	INV:INV-PERF-EV-1
-7685fbe6a0df	kernel/core/src/perf/mod.rs	softirq_tick	951	ptr-ops	INV:INV-PERF-EV-1
-891daf294595	kernel/core/src/perf/mod.rs	softirq_tick	1014		INV:INV-PERF-EV-1
-27c0643ee3ac	kernel/core/src/perf/mod.rs	hook_comm	1137	ptr-ops	INV:INV-PERF-EV-1
-bc309bcb03c5	kernel/core/src/perf/mod.rs	hook_mmap2	1186	ptr-ops	INV:INV-PERF-EV-1
-38be217a9803	kernel/core/src/perf/mod.rs	hook_fork	1213	ptr-ops	INV:INV-PERF-EV-1
-cc7b1eb37e71	kernel/core/src/perf/mod.rs	hook_exit	1238	ptr-ops	INV:INV-PERF-EV-1
-a9496dbc4360	kernel/core/src/perf/mod.rs	read_value	1260		INV:INV-PERF-EV-1
-089cd0d33425	kernel/core/src/perf/mod.rs	read_value	1280		INV:INV-PERF-EV-1
-48fbcbebe731	kernel/core/src/perf/mod.rs	event_of	1360		INV:INV-PERF-EV-1
-2831dd76f1f6	kernel/core/src/perf/mod.rs	event_of	1362	ptr-ops	INV:INV-PERF-EV-1
-c5b4f8e81dc0	kernel/core/src/perf/mod.rs	perf_close	1366		INV:INV-PERF-EV-1
-e3bd73ca21b8	kernel/core/src/perf/mod.rs	perf_close	1368	ptr-ops	INV:INV-PERF-EV-1
-c657440bb1e8	kernel/core/src/perf/mod.rs	perf_close	1392		INV:INV-PERF-EV-1
-e19dc83b5cbf	kernel/core/src/perf/mod.rs	perf_close	1419	ptr-ops	INV:INV-PERF-EV-1
-df0ada638e93	kernel/core/src/perf/mod.rs	perf_close	1422		INV:INV-PERF-EV-1
-428ef3380e23	kernel/core/src/perf/mod.rs	perf_mmap_handler	1521		INV:INV-PERF-EV-1
-13f3bc9b3d86	kernel/core/src/perf/mod.rs	perf_mmap_handler	1534	ptr-ops	INV:INV-PERF-EV-1
-735e7950013f	kernel/core/src/perf/mod.rs	perf_mmap_handler	1648		INV:INV-PERF-EV-1
-87ceb03fb1e5	kernel/core/src/perf/mod.rs	perf_mmap_handler	1662		INV:INV-PERF-EV-1
-8f9d9258cade	kernel/core/src/perf/mod.rs	perf_mmap_handler	1675	volatile,ptr-ops	INV:INV-PERF-EV-1
-0c02c6f8cd93	kernel/core/src/perf/mod.rs	perf_ioctl	1773	ptr-ops	INV:INV-PERF-EV-1
-1504ede1b7ac	kernel/core/src/perf/mod.rs	perf_ioctl	1786	ptr-ops	INV:INV-PERF-EV-1
-f76815dd9d97	kernel/core/src/perf/mod.rs	sys_perf_event_open	1842	ptr-ops	INV:INV-PERF-EV-1
-1556e2b50ada	kernel/core/src/perf/mod.rs	sys_perf_event_open	1854	ptr-ops	INV:INV-PERF-EV-1
-9230cd76010d	kernel/core/src/perf/mod.rs	sys_perf_event_open	1977		INV:INV-PERF-EV-1
-dba04f554c0f	kernel/core/src/perf/mod.rs	sys_perf_event_open	1994		INV:INV-PERF-EV-1
-07f532479254	kernel/core/src/perf/mod.rs	sys_perf_event_open	2079		INV:INV-PERF-EV-1
-7f9c1135a699	kernel/core/src/perf/mod.rs	sys_perf_event_open	2085		INV:INV-PERF-EV-1
-70d736f2161e	kernel/core/src/perf/mod.rs	sys_perf_event_open	2098		INV:INV-PERF-EV-1
-db3852e9a4f1	kernel/core/src/perf/mod.rs	sys_perf_event_open	2103		INV:INV-PERF-EV-1
+7983a2696973	kernel/core/src/perf/mod.rs	kernel_callchain	904	volatile,ptr-ops	INV:INV-PERF-EV-1
+2a0f70c82c2f	kernel/core/src/perf/mod.rs	softirq_tick	953	ptr-ops	INV:INV-PERF-EV-1
+0c8a6fc0433d	kernel/core/src/perf/mod.rs	softirq_tick	1016		INV:INV-PERF-EV-1
+4065b1117d59	kernel/core/src/perf/mod.rs	hook_comm	1139	ptr-ops	INV:INV-PERF-EV-1
+089f1418ae57	kernel/core/src/perf/mod.rs	hook_mmap2	1188	ptr-ops	INV:INV-PERF-EV-1
+a789fbf16a8c	kernel/core/src/perf/mod.rs	hook_fork	1215	ptr-ops	INV:INV-PERF-EV-1
+1065c7cf2513	kernel/core/src/perf/mod.rs	hook_exit	1240	ptr-ops	INV:INV-PERF-EV-1
+99ffc02a853b	kernel/core/src/perf/mod.rs	read_value	1262		INV:INV-PERF-EV-1
+3fdfe9f81d18	kernel/core/src/perf/mod.rs	read_value	1282		INV:INV-PERF-EV-1
+854b99bd5d8d	kernel/core/src/perf/mod.rs	event_of	1362		INV:INV-PERF-EV-1
+36bc18f074a3	kernel/core/src/perf/mod.rs	event_of	1364	ptr-ops	INV:INV-PERF-EV-1
+6f9015ec3be1	kernel/core/src/perf/mod.rs	perf_close	1368		INV:INV-PERF-EV-1
+beb129cc23e3	kernel/core/src/perf/mod.rs	perf_close	1370	ptr-ops	INV:INV-PERF-EV-1
+3e8cd8f7f14a	kernel/core/src/perf/mod.rs	perf_close	1394		INV:INV-PERF-EV-1
+d3d7b230b612	kernel/core/src/perf/mod.rs	perf_close	1421	ptr-ops	INV:INV-PERF-EV-1
+a49d39142f26	kernel/core/src/perf/mod.rs	perf_close	1424		INV:INV-PERF-EV-1
+44aba142e4a7	kernel/core/src/perf/mod.rs	perf_mmap_handler	1523		INV:INV-PERF-EV-1
+c10efc535003	kernel/core/src/perf/mod.rs	perf_mmap_handler	1536	ptr-ops	INV:INV-PERF-EV-1
+14a1e09c1bc8	kernel/core/src/perf/mod.rs	perf_mmap_handler	1650		INV:INV-PERF-EV-1
+fa337ab61c4c	kernel/core/src/perf/mod.rs	perf_mmap_handler	1664		INV:INV-PERF-EV-1
+40a0469cc16c	kernel/core/src/perf/mod.rs	perf_mmap_handler	1677	volatile,ptr-ops	INV:INV-PERF-EV-1
+0a446e8a34ae	kernel/core/src/perf/mod.rs	perf_ioctl	1775	ptr-ops	INV:INV-PERF-EV-1
+0a1427f65590	kernel/core/src/perf/mod.rs	perf_ioctl	1788	ptr-ops	INV:INV-PERF-EV-1
+25ecb130b515	kernel/core/src/perf/mod.rs	sys_perf_event_open	1844	ptr-ops	INV:INV-PERF-EV-1
+3a8917fec823	kernel/core/src/perf/mod.rs	sys_perf_event_open	1856	ptr-ops	INV:INV-PERF-EV-1
+5a2900a357ea	kernel/core/src/perf/mod.rs	sys_perf_event_open	1979		INV:INV-PERF-EV-1
+ad05b9524e2b	kernel/core/src/perf/mod.rs	sys_perf_event_open	1996		INV:INV-PERF-EV-1
+402652ea205e	kernel/core/src/perf/mod.rs	sys_perf_event_open	2081		INV:INV-PERF-EV-1
+a854924971f8	kernel/core/src/perf/mod.rs	sys_perf_event_open	2087		INV:INV-PERF-EV-1
+8a1d467ca7f2	kernel/core/src/perf/mod.rs	sys_perf_event_open	2100		INV:INV-PERF-EV-1
+3b8c3df56cc1	kernel/core/src/perf/mod.rs	sys_perf_event_open	2105		INV:INV-PERF-EV-1
 779e345463dd	kernel/core/src/printk.rs	<module>	111		INV:INV-SENDSYNC-1
 002f97612eab	kernel/core/src/printk.rs	ring_rec	130		INV:INV-STATIC-CELL-1
 7c13650ad5de	kernel/core/src/printk.rs	ring_rec_mut	142		INV:INV-STATIC-CELL-1

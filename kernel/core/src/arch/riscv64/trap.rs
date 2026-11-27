@@ -702,12 +702,32 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
                     crate::debug::hotpath::tick_user();
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
-                    // interrupted PC for the softirq charger. Lock-free.
-                    crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid());
+                    // interrupted PC + frame pointer for the softirq
+                    // charger (s0 feeds the callchain walk — the riscv64
+                    // twin of x86_64's rbp; the walk reads [fp]=saved fp,
+                    // [fp+8]=ra on both arches). Lock-free.
+                    crate::perf::note_tick_fp(
+                        regs.epc,
+                        crate::perf::MODE_USER,
+                        (*task).pid(),
+                        regs.s0,
+                        (*task).tgid(),
+                    );
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
                     crate::debug::hotpath::tick_kern(regs.epc);
-                    crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid());
+                    // Kernel-mode ticks carry s0 too (p23-rvfp: without it
+                    // the kernel callchain was empty and samples had no
+                    // attribution beyond self). Frames the walker rejects
+                    // (non-kernel/non-text or non-ascending) just shorten
+                    // the chain — a junk s0 cannot produce a wrong chain.
+                    crate::perf::note_tick_fp(
+                        regs.epc,
+                        crate::perf::MODE_KERNEL,
+                        (*task).pid(),
+                        regs.s0,
+                        (*task).tgid(),
+                    );
                 }
             } else {
                 crate::debug::hotpath::tick_idle();

@@ -878,8 +878,10 @@ fn user_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
 /// comment claimed kernel chains were "not walkable (no kernel frame
 /// pointers)" — false: this kernel is built with
 /// force-frame-pointers=yes (see debug::backtrace). The tick stash now
-/// captures the interrupted rbp for KERNEL-mode ticks too (trap.rs),
-/// so kernel samples can carry their caller chain — the enable_irq /
+/// captures the interrupted frame pointer for KERNEL-mode ticks too
+/// (rbp on x86_64, s0 on riscv64 — both trap.rs; the frame layout
+/// [fp]=saved fp, [fp+8]=ra is identical on the two arches), so kernel
+/// samples can carry their caller chain — the enable_irq /
 /// atomic-cloud ownership question from the 90th's tail window needs
 /// exactly this. Validation discipline = walk_stack_trace / REMOTE-BT:
 /// 8-aligned, kernel VA range, strictly ascending, sane gap; a frame
