@@ -82,7 +82,6 @@ STATUS = {
     "kernel/src/debug/syscost.rs": ("part", "per-syscall cost table"),
     "kernel/src/debug/taint.rs": ("done", "the reference kernel taint letters"),
     "kernel/src/debug/taskdump.rs": ("part", "task dump format"),
-    "kernel/src/debug/treehunt.rs": ("todo", ""),
     "kernel/src/debug/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),

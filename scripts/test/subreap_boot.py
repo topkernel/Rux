@@ -9,9 +9,6 @@ root-cause hunt (leg-29A).
 Verdict discipline (exitwalk_boot.py family):
   SUBREAP-PASS                          -> rc 0
   SUBREAPFAIL-*                         -> rc 2 (probe-level fail)
-  TREE-PARENT-DEAD / TREE-SNAP-STALE /
-  TREE-UNLINKED (dfx=treehunt)          -> rc 2 (forensic: the
-                                           invariant violation drew)
   kernel panic / Oops / wedge           -> rc 2
   timeout (no PASS line)                -> rc 3
 
@@ -38,7 +35,7 @@ MUSL_CC = os.path.join(WT, "toolchain", "x86_64-rux-linux-musl", "bin",
 
 PASS_LINE = re.compile(rb"SUBREAP-PASS")
 FAIL_LINE = re.compile(rb"SUBREAPFAIL-")
-FORENSIC_LINE = re.compile(rb"TREE-PARENT-DEAD|TREE-SNAP-STALE|TREE-UNLINKED")
+FORENSIC_LINE = re.compile(rb"(?!x)x")  # periodic scanner deleted; no forensic lines
 WEDGE_LINE = re.compile(
     rb"Kernel panic|panic: |BUG: |Oops: |unable to handle kernel|"
     rb"DEADLOCK: spinlock stuck|BUG: soft lockup|trap: #GP|trap: #PF|"
@@ -67,7 +64,7 @@ def main():
         WT, "target/x86_64-unknown-none/debug/bzImage"))
     ap.add_argument("--accel", default="kvm",
                     help="kvm (default; falls back to tcg) or tcg")
-    ap.add_argument("--dfx", default="dfx=treehunt")
+    ap.add_argument("--dfx", default="")
     ap.add_argument("--keep-img", action="store_true")
     ap.add_argument("--show", action="store_true",
                     help="stream raw serial to stdout too")

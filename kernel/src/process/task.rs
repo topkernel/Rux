@@ -3132,9 +3132,9 @@ impl Task {
         }
     }
 
-    /// Raw parent-children-list head pointer (rux:treehunt (retired dfx=treehunt) reads it to
-    /// distinguish linked leaders from unlinked snapshot members; null
-    /// for members by design). Diagnostic use only.
+    /// Raw parent-children-list head pointer (distinguishes linked
+    /// leaders from unlinked snapshot members; null for members by
+    /// design). Diagnostic use only.
     #[inline]
     pub fn parent_children_head_ptr(&self) -> *mut core::ffi::c_void {
         self.parent_children_head as *mut core::ffi::c_void
@@ -5164,6 +5164,12 @@ impl Task {
 
         // Clear parent children list head pointer
         c.parent_children_head = ptr::null_mut();
+
+        // leg-29A invariant (kept from the retired periodic scanner):
+        // a cleared parent link must leave BOTH the pointer and the
+        // list-head empty — a non-null remainder is the E8-REPAR
+        // unlinked-snapshot shape that once faulted the subreaper walk.
+        debug_assert!(c.parent.is_none() && c.parent_children_head.is_null());
     }
 
     /// E8-REPAR: collect `self`'s children into `out`, PINNING each one
@@ -5255,7 +5261,7 @@ impl Task {
         // memory that gets reaped and recycled while the members live.
         // The member's own exit then walks release_task's
         // parent_ptr()/remove_child through freed memory (the sc304
-        // signal-Arc Oops family; reproduced by rux:treehunt (retired dfx=treehunt) +
+        // signal-Arc Oops family; reproduced by
         // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
         // member's snapshot to the new dest under this same lock hold —
         // the ring walk is the same bounded pattern the reparent member

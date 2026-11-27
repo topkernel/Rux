@@ -8,7 +8,7 @@
 //! OWNERSHIP (the coordinator's framework-consolidation doctrine): every
 //! raw stale-handle read the dfx hunt family performs routes through
 //! THIS file. The modules that hunt (leakorigin, scribble,
-//! treehunt, wildwatch, memwatch's fp-chain, the preempt/softirq
+//! wildwatch, memwatch's fp-chain, the preempt/softirq
 //! bracket diagnostics) stay in their own files; their raw pointer
 //! discipline lives here, named and audited once.
 //!
@@ -126,7 +126,7 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
 // the dfx subsystem's ONE audited unsafe file. The arms below absorbed
 // the last inline unsafe of the hunt/diagnostic modules (backtrace,
 // memwatch, scribble, wildwatch, leakorigin, taskdump, pstore,
-// treehunt, pathstash, ledger, mmforensics, oops, hung_task, slowtask,
+// pathstash, ledger, mmforensics, oops, hung_task, slowtask,
 // mod) — all sixteen now zero-unsafe with file-level forbid. Existing
 // INV-FOR-1..3 contracts are unchanged; the arms reuse those families
 // or extend them with new numbers.
