@@ -174,9 +174,11 @@ def first_kw(m, pos, end):
     return None, None
 
 
-def scan_items(m, start, end):
+def scan_items(text, m, start, end):
     """Items of region m[start:end] at base depth. Returns dicts
-    {start, end, kwpos, kw}; spans include leading attributes/docs.
+    {start, end, kwpos, kw}; spans include leading attributes AND
+    /// doc-comment lines (comments are masked, so the span start is
+    walked back over them explicitly).
     An item ends at a depth-0 `;` or at the `}` that returns depth to 0
     (`)`/`]` closers return to 0 mid-item — fn args, array types)."""
     items = []
@@ -207,25 +209,40 @@ def scan_items(m, start, end):
             j = kwpos
             d2 = 0
             closed = False
+            expect_semi = False  # a `}` closed the outer brace group, but a
+            # following `;` still belongs to the item (`use a::{b};`)
             while j < end:
                 cj = m[j]
                 if cj in "([{":
                     d2 += 1
                 elif cj in ")]}":
                     d2 -= 1
-                    if d2 == 0 and (cj == "}" or cj == ";"):
+                    if d2 == 0 and cj == "}":
+                        # peek: a `;` after the group keeps the item going
+                        k = j + 1
+                        while k < end and m[k] in " \t\r\n":
+                            k += 1
+                        if k < end and m[k] == ";":
+                            expect_semi = True
+                        else:
+                            j += 1
+                            closed = True
+                            break
+                    if d2 == 0 and cj == ";":
                         j += 1
                         closed = True
                         break
-                    if d2 == 0:
-                        # paren/bracket group closed mid-item; keep going
-                        pass
                 elif cj == ";" and d2 == 0:
                     j += 1
                     closed = True
                     break
+                if expect_semi and d2 == 0 and cj == ";":
+                    j += 1
+                    closed = True
+                    break
                 j += 1
-            items.append({"start": i, "end": j if closed else end,
+            span_start = walk_back_docs(text, m, i, start)
+            items.append({"start": span_start, "end": j if closed else end,
                           "kwpos": kwpos, "kw": kw})
             i = items[-1]["end"]
             continue
@@ -233,7 +250,23 @@ def scan_items(m, start, end):
     return items
 
 
-QUAL = re.compile(r"\s*(pub(\([^)]*\))?|async|extern(\s*\"[^\"]*\")?|unsafe)\b")
+def walk_back_docs(text, m, i, limit):
+    """extend the item span start backward over `///` doc lines, `#[...]`
+    attribute lines and blank lines (never over code or `//!` file docs)."""
+    s = i
+    while s > limit:
+        line_start = text.rfind("\n", limit, s - 1) + 1 if s - 1 > limit else limit
+        prev_line = text[line_start:s].rstrip("\n")
+        stripped = prev_line.strip()
+        if stripped.startswith("///") or stripped.startswith("#[") \
+                or stripped == "":
+            s = line_start
+            continue
+        break
+    return s
+
+
+QUAL = re.compile(r"\s*(pub(\([^)]*\))?|async|extern(\s*\"[^\"]*\")?|unsafe)(?![A-Za-z0-9_])")
 
 
 def kind_of(m, it):
@@ -298,10 +331,10 @@ def split_top(s, sep=","):
 
 
 def fn_kwpos(seg_m):
-    fk = first_kw(seg_m, 0, len(seg_m))
-    seg2 = seg_m[fk[0]:]
-    fm = re.search(r"\bfn\b", seg2)
-    return fk[0] + fm.start()
+    """END of the attribute/doc region = position of the first real keyword
+    (pub/const/unsafe/extern/fn...). Signatures must start here so the
+    visibility qualifiers stay in the generated wrapper."""
+    return first_kw(seg_m, 0, len(seg_m))[0]
 
 
 def parse_free_fn(seg, seg_m):
@@ -347,8 +380,10 @@ def parse_free_fn(seg, seg_m):
                 break
     names = []
     for p in split_top(seg_m[pstart + 1:j]):
-        if not p or p == "...":
-            names.append(p.strip() or "_")
+        if not p:
+            continue
+        if p == "...":
+            names.append("...")
             continue
         cpart = split_top(p, ":")[0].strip()
         nm = re.sub(r"^mut\s+", "", cpart).strip()
@@ -449,6 +484,11 @@ def move_fn_text(seg, inv, rel, modpath):
         newseg = newseg[:ustart] + newseg[ustart + len("unsafe"):]
         mm = mask(newseg)
         kwpos = fn_kwpos(mm)
+    # moved items must be reachable from their old module: ensure vis
+    if not re.match(r"pub\b|pub\(", mm[kwpos:]):
+        newseg = newseg[:kwpos] + "pub(crate) " + newseg[kwpos:]
+        mm = mask(newseg)
+        kwpos = fn_kwpos(mm)
     brace = mm.find("{", kwpos)
     close = match_brace(mm, brace)
     newseg = (newseg[:brace]
@@ -465,12 +505,15 @@ def wrapper_text(seg, info, moved_path, inv):
     the moved fn by full path."""
     mm = mask(seg)
     kwpos = fn_kwpos(mm)
-    attrs_src, sig_src = seg[:kwpos], seg[kwpos:]
-    b = mask(sig_src).find("{")
-    sig = sig_src[:b if b >= 0 else len(sig_src)].rstrip()
-    sig = re.sub(r"\bunsafe\s+(?=fn\b)", "", sig, count=1)
+    attrs_src = seg[:kwpos]
+    b = mm.find("{", kwpos)
+    sig_m = mm[kwpos:b if b >= 0 else len(mm)]
+    sig_m = re.sub(r"\bunsafe\s+(?=(?:async|const|extern|fn)\b)", "", sig_m, count=1)
+    # collapse the masked header to one clean line (comments are already
+    # spaces; inter-token comment lines must not split `pub` from `fn`)
+    sig = " ".join(sig_m.split())
     attrs = keep_attrs(attrs_src)
-    call = "crate::arch::r#unsafe::%s::%s" % (moved_path, info["name"])
+    call = "crate::arch::arch_floor::%s::%s" % (moved_path, info["name"])
     if info["tps"] and not info["has_impl_anon"]:
         call += "::<%s>" % ", ".join(info["tps"])
     call += "(%s)" % ", ".join(n for n in info["names"] if n != "...")
@@ -478,18 +521,18 @@ def wrapper_text(seg, info, moved_path, inv):
     docblock = ""
     if doc:
         docblock += "/// %s\n///\n" % doc
-    docblock += ("/// Collected into `arch::r#unsafe` (%s): the unsafe floor moved there\n"
+    docblock += ("/// Collected into `arch::arch_floor` (%s): the unsafe floor moved there\n"
                  "/// verbatim; this safe wrapper keeps the original call path.\n" % inv)
     return "%s%s%s {\n    %s\n}" % (docblock, attrs, sig, call)
 
 
 def const_name(seg):
-    mm = re.search(r"\b(?:static|const)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)", seg)
+    mm = re.search(r"\b(?:static|const)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)", mask(seg))
     return mm.group(1) if mm else "UNKNOWN"
 
 
 def extern_names(seg):
-    return [mm.group(1) for mm in re.finditer(r"\b(?:fn|static|type)\s+([A-Za-z_][A-Za-z0-9_]*)", seg)]
+    return [mm.group(1) for mm in re.finditer(r"\b(?:fn|static|type)\s+([A-Za-z_][A-Za-z0-9_]*)", mask(seg))]
 
 
 def item_name(seg, it):
@@ -497,7 +540,7 @@ def item_name(seg, it):
         base = it["kw"][:-1]
         return base.split("::")[-1] if not base.startswith("macro_rules") else \
             (re.search(r"macro_rules!\s+([A-Za-z_]\w*)", seg) or [None, "UNKNOWN"])[1]
-    mm = re.search(r"\b(?:mod|struct|enum|union|type|trait)\s+([A-Za-z_][A-Za-z0-9_]*)", seg)
+    mm = re.search(r"\b(?:mod|struct|enum|union|type|trait)\s+([A-Za-z_][A-Za-z0-9_]*)", mask(seg))
     return mm.group(1) if mm else "UNKNOWN"
 
 
@@ -513,15 +556,64 @@ def widen(text):
     res = []
     depth = 0
     stack = []  # (depth_at_open, inherent?)
+    pending_vis = False  # a bare `pub` line opened the next item already
     for line, ml in zip(lines, mlines):
-        if depth == 1 and stack and stack[-1][1]:
+        if depth == 1 and stack and stack[-1][1] in ("struct", "union"):
+            fm2 = re.match(r"^(    )(pub(\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", line)
+            if fm2 and not fm2.group(2):
+                line = "    pub(crate) " + line[4:]
+        elif depth == 1 and stack and stack[-1][1] is True:
+            pm4 = re.match(r"^    pub\((?!crate)[^)]*\)\s+", line)
+            if pm4:
+                rest4 = line[pm4.end():]
+                if re.match(r"^(async |const |unsafe |extern \"[^\"]*\" )*(fn|static)\b", rest4):
+                    line = "    pub(crate) " + rest4
             nm = re.match(r"^(    )(async |const |unsafe |extern \"[^\"]*\" )*(fn|static)\b", line)
             if nm and not line.lstrip().startswith("pub"):
                 line = re.sub(r"^    ", "    pub(crate) ", line)
+            elif nm and re.match(r"^    pub\((?!crate\))", line):
+                line = re.sub(r"^    pub\([^)]*\)", "    pub(crate)", line)
         elif depth == 0:
-            nm = re.match(r"^(async |const |unsafe |extern \"[^\"]*\" )*(fn|static|const|type|struct|enum|union|trait)\b", line)
-            if nm and not re.match(r"^const\s+(unsafe\s+)?fn\b", line) and not line.startswith("pub"):
+            sm = re.match(r"(?:pub(\([^)]*\))?\s+)?(struct|union|enum)\b", ml)
+            tup = re.match(r"(?:pub(\([^)]*\))?\s+)?(struct|union)\s+[A-Za-z_][A-Za-z0-9_]*"
+                           r"(?:<[^>]*>)?\(", ml)
+            if sm and ("{" in ml or tup):
+                stack.append((depth, sm.group(2)))  # kind: struct/union/enum
+                if sm.group(2) in ("struct", "union") and tup:
+                    # one-line tuple struct: widen each element FIRST (the
+                    # masked-header offsets are only valid on the unedited
+                    # line; the vis prefix below would shift them)
+                    pidx = tup.end() - 1
+                    try:
+                        close = match_brace(ml, pidx)
+                    except ValueError:
+                        close = -1
+                    if close > pidx and line[pidx + 1:close].strip():
+                        elems = split_top(line[pidx + 1:close])
+                        elems = [("pub(crate) " + e if not e.startswith("pub") else e)
+                                 for e in elems]
+                        line = line[:pidx + 1] + ", ".join(elems) + line[close:]
+            pmv = re.match(r"^pub\((?!crate)[^)]*\)\s+", line)
+            if pmv:
+                rest = line[pmv.end():]
+                if re.match(r"^(async |const |unsafe |extern \"[^\"]*\" )*(fn|static|const|type|struct|enum|union|trait)\b", rest) \
+                        and not re.match(r"^const\s+(unsafe\s+)?fn\b", rest):
+                    line = "pub(crate) " + rest
+            nm = re.match(r"^(async |const |unsafe |extern \"[^\"]*\" )*(fn|static|const|type|struct|enum|union|trait|mod)\b", line)
+            if nm and pending_vis:
+                pass  # a bare `pub` qualifier line already opened this item
+            elif nm and not line.startswith("pub"):
                 line = "pub(crate) " + line
+            elif nm and re.match(r"^pub\((?!crate\))", line):
+                # pub(super)/pub(in ..) -> pub(crate): moved bodies in
+                # arch_floor call these from outside the old subtree
+                line = re.sub(r"^pub\([^)]*\)", "pub(crate)", line)
+            # a masked line that is ONLY a vis qualifier (comments may
+            # follow on the real line) dangles over to the next item line
+            if re.match(r"^pub(\([^)]*\))?$", ml.strip()):
+                pending_vis = True
+            elif ml.strip():
+                pending_vis = False
             if ml.startswith("impl") or re.match(r"^pub\s+impl\b", ml) or re.match(r"^unsafe\s+impl\b", ml):
                 header = ml.split("{")[0]
                 stack.append((depth, not re.search(r"\bfor\b", header)))
@@ -600,7 +692,7 @@ def render_key(key, node):
 def transform_file(path, rel, coll):
     text = open(path).read()
     m = mask(text)
-    items = scan_items(m, 0, len(m))
+    items = scan_items(text, m, 0, len(m))
     stem = os.path.basename(rel)[:-3]
     arch = rel.split("/")[0] if "/" in rel else None
     if arch is None:
@@ -615,7 +707,12 @@ def transform_file(path, rel, coll):
         key = arch
         path_in = parts[1:-1]
         moved_path = "::".join(parts)
-    modpath = "::".join(parts) if arch is not None else stem
+        # the REAL module path (for globs/super-rewrites): 'mod' stems have
+        # no segment of their own — mod.rs's content IS the parent module
+        realparts = rel[:-3].split("/")
+        if realparts[-1] == "mod":
+            realparts = realparts[:-1]
+    modpath = "::".join(realparts) if arch is not None else stem
 
     use_texts = [text[it["start"]:it["end"]] for it in items
                  if kind_of(m, it) == "use"]
@@ -628,24 +725,33 @@ def transform_file(path, rel, coll):
 
     for it in reversed(items):
         kind = kind_of(m, it)
-        if kind == "use" or not re.search(r"\bunsafe\b", m[it["start"]:it["end"]]):
+        if kind == "use":
             continue
         seg = text[it["start"]:it["end"]]
+        is_global_asm = it["kw"].endswith("global_asm!")
+        has_unsafe_attr = re.search(
+            r"#\s*\[\s*(no_mangle|export_name|link_section|link_name)\b",
+            m[it["start"]:it["end"]])
+        if not re.search(r"\bunsafe\b", m[it["start"]:it["end"]]) \
+                and not is_global_asm and not has_unsafe_attr:
+            continue
 
         if kind == "fn":
             seg = rename_underscore_params(seg)
             seg_m = mask(seg)
             info = parse_free_fn(seg, seg_m)
-            is_naked = re.search(r"#\s*\[\s*(unsafe\s*\(\s*)?naked\b", seg)
+            is_naked = re.search(r"#\s*\[\s*(unsafe\s*\(\s*)?naked\b", seg_m) or \
+                re.search(r"#\s*\[\s*(no_mangle|export_name|link_section|link_name)\b", seg_m)
             inv = coll.inv(stem)
             moved.append(move_fn_text(seg, inv, rel, modpath))
             coll.moved_fns += 1
             if is_naked:
+                edits.append((it["start"], it["end"], ""))
                 vis = "pub" if re.search(r"^\s*pub\b", seg) else "pub(crate)"
                 reexports.append(
-                    "// INV-ARCH note: %s moved to arch::r#unsafe::%s (naked\n"
+                    "// INV-ARCH note: %s moved to arch::arch_floor::%s (naked\n"
                     "// trampoline — no wrapper; this re-export keeps the original\n"
-                    "// path and fn identity).\n%s use crate::arch::r#unsafe::%s::%s;\n"
+                    "// path and fn identity).\n%s use crate::arch::arch_floor::%s::%s;\n"
                     % (info["name"], moved_path, vis, moved_path, info["name"]))
             else:
                 wrapper = wrapper_text(seg, info, moved_path, inv)
@@ -665,7 +771,7 @@ def transform_file(path, rel, coll):
         elif kind == "impl":
             brace_off = it["kwpos"] - it["start"] + re.search(r"\{", m[it["kwpos"]:it["end"]]).start()
             header = seg[:brace_off].strip()
-            inner = scan_items(m, it["start"] + brace_off + 1, it["end"] - 1)
+            inner = scan_items(text, m, it["start"] + brace_off + 1, it["end"] - 1)
             dirty_methods = []
             for mit in reversed(inner):
                 mk = kind_of(m, mit)
@@ -673,7 +779,12 @@ def transform_file(path, rel, coll):
                     continue
                 mseg = text[mit["start"]:mit["end"]]
                 name = re.search(r"\bfn\s+([A-Za-z_]\w*)", mseg).group(1)
-                dirty_methods.insert(0, move_fn_text(mseg, coll.inv(stem), rel, modpath))
+                moved_m = move_fn_text(mseg, coll.inv(stem), rel, modpath)
+                mm_m = mask(moved_m)
+                mkp = fn_kwpos(mm_m)
+                if not re.match(r"pub\b|pub\(", mm_m[mkp:]):
+                    moved_m = moved_m[:mkp] + "pub(crate) " + moved_m[mkp:]
+                dirty_methods.insert(0, moved_m)
                 edits.append((mit["start"], mit["end"], ""))
                 coll.moved_fns += 1
             if dirty_methods:
@@ -688,30 +799,58 @@ def transform_file(path, rel, coll):
 
         elif kind == "const_item":
             name = const_name(seg)
+            if not re.search(r"\bunsafe\b", m[it["start"]:it["end"]]) \
+                    and not re.search(r"#\s*\[\s*(no_mangle|export_name|link_section|link_name)\b",
+                                      m[it["start"]:it["end"]]):
+                continue
             vis = "pub" if re.search(r"^\s*pub\b", seg) else "pub(crate)"
+            cseg = rewrite_paths(seg, modpath)
+            cm = mask(cseg)
+            ck = first_kw(cm, 0, len(cm))[0]
+            if not re.match(r"pub\b|pub\(", cm[ck:]):
+                cseg = cseg[:ck] + "pub(crate) " + cseg[ck:]
             moved.append("// %s (collected %s): static/const moved verbatim from %s\n"
-                         % (coll.inv(stem), NOW, rel) + rewrite_paths(seg, modpath))
-            reexports.append("%s use crate::arch::r#unsafe::%s::%s;\n"
+                         % (coll.inv(stem), NOW, rel) + cseg)
+            reexports.append("%s use crate::arch::arch_floor::%s::%s;\n"
                              % (vis, moved_path, name))
             edits.append((it["start"], it["end"], ""))
             coll.moved_others += 1
 
         elif kind == "unsafe_extern":
+            seg = re.sub(r"(\{|;)\s*(static|fn|type)\s+", r"\1 pub(crate) \2 ", seg)
+            seg = re.sub(r"(^\s*)extern", r"\1pub(crate) extern", seg) if not re.match(r"\s*pub", seg) else seg
             names = extern_names(seg)
             vis = "pub" if re.search(r"^\s*pub\b", seg) else "pub(crate)"
             moved.append("// %s (collected %s): extern block moved verbatim from %s\n"
                          % (coll.inv(stem), NOW, rel) + rewrite_paths(seg, modpath))
-            reexports.append("%s use crate::arch::r#unsafe::%s::{%s};\n"
+            reexports.append("%s use crate::arch::arch_floor::%s::{%s};\n"
                              % (vis, moved_path, ", ".join(names)))
+            edits.append((it["start"], it["end"], ""))
+            coll.moved_others += 1
+
+        elif kind == "macro_inv" and it["kw"].endswith("global_asm!"):
+            gseg = rewrite_paths(seg, modpath)
+            # include paths resolve against the containing FILE — unsafe.rs
+            # sits in arch/, so prefix the original file's subdirectory
+            relprefix = rel.rsplit("/", 1)[0] + "/" if "/" in rel else ""
+            gseg = re.sub(r'(include_str!|include_bytes!|include!)\("',
+                          lambda mo: '%s("%s' % (mo.group(1), relprefix), gseg)
+            moved.append("// %s (collected %s): global_asm! invocation moved verbatim from %s\n"
+                         % (coll.inv(stem), NOW, rel) + gseg)
             edits.append((it["start"], it["end"], ""))
             coll.moved_others += 1
 
         elif kind in ("macro", "macro_inv", "mod", "type_item"):
             nm = item_name(seg, it)
             vis = "pub" if re.search(r"^\s*pub\b", seg) else "pub(crate)"
+            tseg = rewrite_paths(seg, modpath)
+            tm = mask(tseg)
+            tk = first_kw(tm, 0, len(tm))[0]
+            if kind != "macro_inv" and not re.match(r"pub\b|pub\(", tm[tk:]):
+                tseg = tseg[:tk] + "pub(crate) " + tseg[tk:]
             moved.append("// %s (collected %s): %s moved verbatim from %s\n"
-                         % (coll.inv(stem), NOW, kind, rel) + rewrite_paths(seg, modpath))
-            reexports.append("%s use crate::arch::r#unsafe::%s::%s;\n"
+                         % (coll.inv(stem), NOW, kind, rel) + tseg)
+            reexports.append("%s use crate::arch::arch_floor::%s::%s;\n"
                              % (vis, moved_path, nm))
             edits.append((it["start"], it["end"], ""))
             coll.moved_others += 1
@@ -719,6 +858,16 @@ def transform_file(path, rel, coll):
         else:
             print("  !! unhandled dirty item kind=%s kw=%r in %s" % (kind, it["kw"], rel))
             sys.exit(1)
+
+    # extern-block items are not glob-importable: moved bodies reference
+    # them bare, so duplicate every extern block of this file into the
+    # moved module (duplicate extern declarations unify at link time)
+    for it in items:
+        if kind_of(m, it) == "extern":
+            dup = rewrite_paths(text[it["start"]:it["end"]], modpath)
+            moved.append("// extern declarations duplicated from %s (the original\n"
+                         "// block stays in place; duplicate extern decls unify)\n%s\n"
+                         % (rel, dup.rstrip()))
 
     if not moved:
         print("  ?? %s dirty but nothing moved" % rel)
@@ -797,15 +946,23 @@ def write_unsafe_rs(edges_tree, coll):
 //! Old edge paths stay alive: `arch::<a>::unsafe_edges` re-exports this
 //! file's module. Every other arch file is `#![forbid(unsafe_code)]`.
 ''')
-    body = ("// ===========================================================================\n"
-            "// Merged audited edges (verbatim; INV contracts preserved)\n"
-            "// ===========================================================================\n\n")
+    # merge the edges content into the SAME arch module as the collected
+    # scatter (two `pub mod <arch>` blocks would collide, E0428)
     for arch in ARMS:
-        if arch in edges_tree:
-            body += render_key(arch, edges_tree[arch]) + "\n"
-    body += ("// ===========================================================================\n"
-             "// Collected scattered unsafe (per-source-file modules; INV-ARCH-*)\n"
-             "// ===========================================================================\n\n")
+        if arch not in edges_tree:
+            continue
+        node = coll.tree.setdefault(arch, {})
+        enode = edges_tree[arch]
+        node["__parts__"] = enode.get("__parts__", []) + node.get("__parts__", [])
+        for sub, subnode in enode.items():
+            if sub == "__parts__":
+                continue
+            tgt = node.setdefault(sub, {})
+            tgt["__parts__"] = subnode.get("__parts__", []) + tgt.get("__parts__", [])
+    body = ("// ===========================================================================\n"
+            "// Merged audited edges (first; verbatim; INV contracts preserved)\n"
+            "// then the collected scatter (per-source-file modules; INV-ARCH-*)\n"
+            "// ===========================================================================\n\n")
     for key in ARMS + ["__top__"]:
         if key in coll.tree:
             body += render_key(key, coll.tree[key]) + "\n"
@@ -815,32 +972,37 @@ def write_unsafe_rs(edges_tree, coll):
 def edit_arch_mod():
     p = os.path.join(ARCH, "mod.rs")
     text = open(p).read()
-    if "r#unsafe" not in text:
+    if "arch_floor" not in text:
         text = text.replace(
             "pub mod uaccess_safe;",
             "pub mod uaccess_safe;\n\n"
             "// The arch unsafe floor: every unsafe site of this subsystem lives in this\n"
             "// one file (merged edges + collected scatter); all other arch files are\n"
             "// `#![forbid(unsafe_code)]`-enforced. See the file head for the map.\n"
-            "pub mod r#unsafe;",
+            "// (The module is spelled `arch_floor`; the file it maps to is unsafe.rs —\n"
+            "// the unsafe keyword itself may not appear in this non-exempt file.)\n"
+            '#[path = "unsafe.rs"]\n'
+            "pub mod arch_floor;",
             1)
     open(p, "w").write(text)
 
 
-def edit_edge_mods():
+def edit_edge_mods(only=None):
     edits = {
         "riscv64/mod.rs": ("pub mod unsafe_edges;",
-                           "pub use crate::arch::r#unsafe::riscv64 as unsafe_edges;"),
+                           "pub use crate::arch::arch_floor::riscv64 as unsafe_edges;"),
         "x86_64/mod.rs": ("pub mod unsafe_edges;",
-                          "pub use crate::arch::r#unsafe::x86_64 as unsafe_edges;"),
+                          "pub use crate::arch::arch_floor::x86_64 as unsafe_edges;"),
         "riscv64/mm/mod.rs": ("pub mod unsafe_edges;",
-                              "pub use crate::arch::r#unsafe::riscv64::mm as unsafe_edges;"),
+                              "pub use crate::arch::arch_floor::riscv64::mm as unsafe_edges;"),
         "x86_64/mm/mod.rs": ("pub mod unsafe_edges;",
-                             "pub use crate::arch::r#unsafe::x86_64::mm as unsafe_edges;"),
+                             "pub use crate::arch::arch_floor::x86_64::mm as unsafe_edges;"),
         "aarch64/mm/mod.rs": ("pub mod unsafe_edges;",
-                              "pub use crate::arch::r#unsafe::aarch64::mm as unsafe_edges;"),
+                              "pub use crate::arch::arch_floor::aarch64::mm as unsafe_edges;"),
     }
     for rel, (old, new) in edits.items():
+        if only and rel.split("/")[0] not in only:
+            continue
         p = os.path.join(ARCH, rel)
         if not os.path.exists(p):
             continue
@@ -853,16 +1015,25 @@ def edit_edge_mods():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--only", default="",
+                    help="comma list of arches to consolidate (cumulative; "
+                         "each run starts from a pristine arch/ tree)")
     args = ap.parse_args()
+    only = [a for a in args.only.split(",") if a]
 
     subprocess.run(["git", "checkout", "--", ARCH_REL], cwd=ROOT, check=True)
     if os.path.exists(UNSAFE_RS):
         os.remove(UNSAFE_RS)
 
     coll = Collect()
-    edges_tree = merge_edges()
+    edges = merge_edges()
+    if only:
+        edges_tree = {a: v for a, v in edges.items() if a in only}
+    else:
+        edges_tree = edges
     for rel in EDGE_FILES:
-        os.remove(os.path.join(ARCH, rel))
+        if not only or rel.split("/")[0] in only:
+            os.remove(os.path.join(ARCH, rel))
 
     for dp, dn, fn in os.walk(ARCH):
         for f in sorted(fn):
@@ -870,13 +1041,17 @@ def main():
                 continue
             full = os.path.join(dp, f)
             rel = os.path.relpath(full, ARCH)
+            if only and rel.split("/")[0] not in only and "/" in rel:
+                continue
+            if only and "/" not in rel:
+                continue  # shared top-level files go with the full run
             if not re.search(r"\bunsafe\b", mask(open(full).read())):
                 continue
             transform_file(full, rel, coll)
 
     write_unsafe_rs(edges_tree, coll)
     edit_arch_mod()
-    edit_edge_mods()
+    edit_edge_mods(only)
 
     print("\nmoved fns/methods: %d | impls: %d | statics/externs/macros: %d | wrappers: %d | files: %d"
           % (coll.moved_fns, coll.moved_impls, coll.moved_others, coll.wrappers, len(coll.files_done)))
