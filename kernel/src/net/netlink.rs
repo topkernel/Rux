@@ -25,6 +25,7 @@
 //! synced live from the underlying drivers/net devices, and addresses in
 //! a small settable table (eth0 mirrors arp::get_local_ip()).
 
+#![forbid(unsafe_code)]
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -511,8 +512,8 @@ pub struct NetlinkSocket {
     pub options: Spinlock<SocketOptions>,
 }
 
-// SAFETY: all mutable state is behind Spinlocks / atomics.
-unsafe impl Sync for NetlinkSocket {}
+// Sync commitment moved to the audited net edges file
+// (net/unsafe.rs, 2026-11-27 consolidation), SAFETY note intact.
 
 impl NetlinkSocket {
     pub fn new(protocol: i32) -> Self {

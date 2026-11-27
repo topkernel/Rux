@@ -4,6 +4,7 @@
 //!
 //! IPv4 Routing Table
 
+#![forbid(unsafe_code)]
 use crate::net::buffer::SkBuff;
 use crate::config::ROUTE_TABLE_SIZE;
 
@@ -188,8 +189,9 @@ static ROUTE_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::
 /// Route entry if found, None otherwise
 pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.lookup(dst) }
+    // INV-NET-STATIC-1 — ROUTE_TABLE is a global static accessed under
+    // ROUTE_LOCK (audited table edge).
+    crate::net::edges::static_table_ref(core::ptr::addr_of!(ROUTE_TABLE)).lookup(dst)
 }
 
 /// Add route
@@ -223,8 +225,10 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
         flags,
     };
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.add(route) }
+    // INV-NET-STATIC-1 — ROUTE_TABLE is a global static accessed under
+    // ROUTE_LOCK (audited table edge).
+    crate::net::edges::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE))
+        .add(route)
 }
 
 /// Remove route
@@ -237,22 +241,27 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
 /// Whether removal was successful
 pub fn route_remove(dst: u32, mask: u32) -> bool {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.remove(dst, mask) }
+    // INV-NET-STATIC-1 — ROUTE_TABLE is a global static accessed under
+    // ROUTE_LOCK (audited table edge).
+    crate::net::edges::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE))
+        .remove(dst, mask)
 }
 
 /// Clear routing table
 pub fn route_clear() {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.clear() }
+    // INV-NET-STATIC-1 — ROUTE_TABLE is a global static accessed under
+    // ROUTE_LOCK (audited table edge).
+    crate::net::edges::static_table_mut(core::ptr::addr_of_mut!(ROUTE_TABLE)).clear()
 }
 
 /// P0-2 (rtnetlink RTM_GETROUTE dump): snapshot of every route entry.
 pub fn route_dump() -> alloc::vec::Vec<RouteEntry> {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.entries[..ROUTE_TABLE.count].iter().flatten().cloned().collect() }
+    // INV-NET-STATIC-1 — ROUTE_TABLE is a global static accessed under
+    // ROUTE_LOCK (audited table edge).
+    let t = crate::net::edges::static_table_ref(core::ptr::addr_of!(ROUTE_TABLE));
+    t.entries[..t.count].iter().flatten().cloned().collect()
 }
 
 /// Initialize default routes

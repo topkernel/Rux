@@ -818,7 +818,7 @@ pub(crate) struct BufBlock {
     pub(crate) reply_done: bool,
 }
 
-pub(super) struct BinderAlloc {
+pub(crate) struct BinderAlloc {
     pub(crate) kvirt: *mut u8,
     pub(crate) phys: usize,
     pub(crate) npages: usize,
@@ -1877,7 +1877,7 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     }
 }
 
-pub(super) struct BinderTxn {
+pub(crate) struct BinderTxn {
     id: u64,
     from_proc: Option<Arc<BinderProc>>,
     from_tid: Option<u32>,

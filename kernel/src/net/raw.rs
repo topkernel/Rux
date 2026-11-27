@@ -25,6 +25,7 @@
 //!
 //! recv/read returns exactly one packet per call.
 
+#![forbid(unsafe_code)]
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -111,8 +112,8 @@ impl Default for RawSockOptions {
     }
 }
 
-// SAFETY: all mutable state is behind Spinlocks.
-unsafe impl Sync for RawSocket {}
+// Sync commitment moved to the audited net edges file
+// (net/unsafe.rs, 2026-11-27 consolidation), SAFETY note intact.
 
 impl RawSocket {
     fn new(kind: RawKind, protocol: i32) -> Self {

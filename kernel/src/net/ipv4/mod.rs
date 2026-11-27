@@ -5,6 +5,7 @@
 //! IPv4 Protocol
 
 
+#![forbid(unsafe_code)]
 pub mod route;
 pub mod checksum;
 mod defrag;

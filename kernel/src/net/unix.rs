@@ -41,6 +41,7 @@
 //!   non-exclusive poller; a drain wakes ONE parked sender per freed
 //!   record; close/shutdown wake everything (EOF broadcast).
 
+#![forbid(unsafe_code)]
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -318,8 +319,8 @@ pub struct UnixSocket {
     pub file_id: AtomicU64,
 }
 
-// SAFETY: all mutable state is behind Spinlocks.
-unsafe impl Sync for UnixSocket {}
+// Sync commitment moved to the audited net edges file
+// (net/unsafe.rs, 2026-11-27 consolidation), SAFETY note intact.
 
 impl UnixSocket {
     pub fn new(kind: UnixKind) -> Self {
@@ -962,7 +963,7 @@ fn unix_wait_round(
         if n < 24 || n % 200 == 0 {
             let sock_of_queue = (queue as *const _ as usize)
                 .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
-            let q = unsafe { &*(sock_of_queue as *const UnixSocket) };
+            let q = crate::net::edges::raw_ref(sock_of_queue as *const UnixSocket);
             static LAST_J: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
@@ -3261,16 +3262,17 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     if kbuf.try_reserve_exact(count).is_err() {
         return cc_out(-12); // ENOMEM
     }
-    // SAFETY: capacity is exactly count; copy_from_user fills it before
-    // set_len exposes the bytes. A partial copy is EFAULT with nothing
-    // sent — the exact contract the generic staged path had (its staged
-    // copy_in returned EFAULT on a first-chunk fault, no short send).
-    unsafe {
-        let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
+    // INV-NET-UACCESS-1 — capacity is exactly count; copy_from_user
+    // fills it before set_len exposes the bytes. A partial copy is
+    // EFAULT with nothing sent — the exact contract the generic staged
+    // path had (its staged copy_in returned EFAULT on a first-chunk
+    // fault, no short send). Audited edge.
+    {
+        let uncopied = crate::net::edges::copy_from_user_bytes(kbuf.as_mut_ptr(), src, count);
         if uncopied > 0 {
             return cc_out(-14); // EFAULT
         }
-        kbuf.set_len(count);
+        crate::net::edges::vec_set_len(&mut kbuf, count);
     }
     match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
         Ok(n) => cc_out(n as isize),
@@ -3322,9 +3324,10 @@ pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize
     let sk: &UnixSocket = file
         .private_data_ptr()
         .map(|p| {
-            // SAFETY: UNIX_SOCKET_OPS files carry an Arc<UnixSocket>
-            // installed at creation (file-lifetime; read-only here).
-            unsafe { &*(p as *const UnixSocket) }
+            // INV-NETARC-1 — UNIX_SOCKET_OPS files carry an
+            // Arc<UnixSocket> installed at creation (file-lifetime;
+            // read-only here; audited raw-ref edge).
+            crate::net::edges::raw_ref(p as *const UnixSocket)
         })?;
     let name = sk
         .bound_name
@@ -4192,11 +4195,12 @@ pub fn unix_park_audit() {
     use core::fmt::Write as _;
     let mut out = alloc::string::String::new();
     crate::sched::for_each_task(|task| {
-        // SAFETY: callback runs under the pid-hash bucket lock (same
-        // contract as sleep_snapshot); reads confined to the task's own
-        // fields, its entry frame, its fdtable and the socket objects.
-        unsafe {
-            let tk = &*task;
+        // INV-PROC-BORROW-1 hatch row — callback runs under the
+        // pid-hash bucket lock (same contract as sleep_snapshot); reads
+        // confined to the task's own fields, its entry frame, its
+        // fdtable and the socket objects (audited borrow edge).
+        {
+            let tk = crate::process::edges::borrow_task_shared(task);
             if tk.pid() == 0 {
                 return;
             }
@@ -4209,24 +4213,10 @@ pub fn unix_park_audit() {
             if top == 0 {
                 return;
             }
-            #[cfg(feature = "x86_64")]
-            let (sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry frame.
-                ((*regs).orig_rax, (*regs).rdi)
-            };
-            #[cfg(feature = "riscv64")]
-            let (sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                // SAFETY: same contract, riscv64.
-                ((*regs).a7, (*regs).a0)
-            };
-            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (sys, a0) = (0u64, 0u64);
+            // INV-NET-DIAG-1 — diagnostic read of the parked task's own
+            // entry frame (top from kernel_stack_top_checked, non-zero
+            // checked above; audited edge, per-arch arms inside).
+            let (sys, a0) = crate::net::edges::entry_sys_args(top);
             // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.
             // riscv: 207=recvfrom 211=recvmsg 206=sendto 66=writev.
             #[cfg(feature = "x86_64")]

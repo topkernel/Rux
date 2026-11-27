@@ -14,6 +14,7 @@
 //! - v4-mapped (::ffff:x.x.x.x) translation helpers for the dual-stack
 //!   socket layer
 
+#![forbid(unsafe_code)]
 pub mod icmpv6;
 
 use crate::net::buffer::SkBuff;
@@ -385,12 +386,10 @@ impl Ipv6Hdr {
         if data[0] >> 4 != 6 {
             return None;
         }
-        // SAFETY: data has at least IPV6_HDR_LEN bytes; the lifetime is
-        // 'static because it aliases skb data which lives until the packet
-        // is freed (same convention as IpHdr::from_bytes).
-        unsafe {
-            Some(&*(data.as_ptr() as *const Ipv6Hdr))
-        }
+        // INH-BUF-3 — data has at least IPV6_HDR_LEN bytes; the
+        // borrow aliases skb data which lives until the packet is freed
+        // (same convention as IpHdr::from_bytes; audited raw-ref edge).
+        Some(crate::net::edges::raw_ref(data.as_ptr() as *const Ipv6Hdr))
     }
 
     /// Version nibble (host order view of ver_tc_flow)
@@ -429,11 +428,11 @@ pub fn ipv6_push_header(
     }
     let ptr = skb.skb_push(IPV6_HDR_LEN as u32).ok_or(())?;
 
-    // SAFETY: skb_push returned a valid, properly aligned pointer covering
-    // at least IPV6_HDR_LEN bytes; writing the repr(C) fields is
-    // well-defined.
-    unsafe {
-        let hdr = &mut *(ptr as *mut Ipv6Hdr);
+    // INH-BUF-4 — skb_push returned a valid, properly aligned pointer
+    // covering at least IPV6_HDR_LEN bytes; writing the repr(C) fields
+    // is well-defined (audited raw-mut edge).
+    {
+        let hdr = crate::net::edges::raw_mut(ptr as *mut Ipv6Hdr);
         // Version=6, traffic class 0, flow label 0.
         hdr.ver_tc_flow = (6u32 << 28).to_be();
         hdr.payload_len = (payload_len as u16).to_be();

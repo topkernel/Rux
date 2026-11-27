@@ -4,6 +4,7 @@
 //!
 //! Socket Abstraction Layer
 
+#![forbid(unsafe_code)]
 use alloc::sync::Arc;
 use alloc::collections::VecDeque;
 use crate::sync::spinlock::Spinlock;
@@ -294,8 +295,8 @@ pub struct Socket {
     pub file_id: core::sync::atomic::AtomicU64,
 }
 
-// SAFETY: Socket uses Spinlocks for all mutable shared state.
-unsafe impl Sync for Socket {}
+// Sync commitment moved to the audited net edges file
+// (net/unsafe.rs, 2026-11-27 consolidation), SAFETY note intact.
 
 impl Socket {
     /// Create a new Socket
@@ -1434,9 +1435,10 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
         // Arc layout: [strong:u64, weak:u64, data...] — into_raw hands
         // out &data, so the counts live at raw-16/raw-8 (the first c3
         // run read *raw = the Socket's first field, not the count).
-        // SAFETY: diagnostic reads of two u64s in the same allocation.
-        let strong = unsafe { core::ptr::read_volatile((raw - 16) as *const u64) };
-        let weak = unsafe { core::ptr::read_volatile((raw - 8) as *const u64) };
+        // INV-NET-DIAG-1 — diagnostic reads of two u64s in the same
+        // allocation (audited volatile-read edge).
+        let strong = crate::net::edges::volatile_read_u64((raw - 16) as *const u64);
+        let weak = crate::net::edges::volatile_read_u64((raw - 8) as *const u64);
         if (1..=(1 << 20)).contains(&strong) {
             // Plausible live Arc — classify as valid, forensics only.
             static MAG_N: core::sync::atomic::AtomicU32 =
@@ -1491,9 +1493,10 @@ fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
 /// table's dispatch serialization.
 fn socket_borrow(file: &File, site: &'static str) -> Option<&'static Socket> {
     let ptr = checked_socket_ptr(file, site)?;
-    // SAFETY: validated in-kernel-heap pointer naming a live Arc<Socket>
-    // (strong ref held by private_data for the file's lifetime).
-    Some(unsafe { &*(ptr as *const Socket) })
+    // INV-NETARC-1 — validated in-kernel-heap pointer naming a live
+    // Arc<Socket> (strong ref held by private_data for the file's
+    // lifetime; audited raw-ref edge).
+    Some(crate::net::edges::raw_ref(ptr as *const Socket))
 }
 
 fn socket_read(file: &File, buf: &mut [u8]) -> isize {
@@ -1628,8 +1631,9 @@ fn socket_close(file: &File) -> i32 {
     // sys_socket_create with a +1 strong count; clearing first prevents
     // a second reconstruction).
     file.clear_private_data();
-    // SAFETY: the slot's sole Arc reference, checked above.
-    let socket_arc = unsafe { Arc::from_raw(ptr as *const Socket) };
+    // INV-NETARC-1 — the slot's sole Arc reference, checked above
+    // (audited take edge).
+    let socket_arc = crate::net::edges::arc_take(ptr as *const Socket);
 
     // MSG_MORE cork release (Linux inet_release/ip_cork_release): data
     // held by send(MSG_MORE) is flushed, best-effort and nonblocking,

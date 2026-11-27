@@ -4,6 +4,14 @@
 //!
 //! Network Subsystem
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): file named `unsafe.rs` per the mainline
+// naming decision, module named `edges` per the sibling convention
+// (fs/unsafe.rs, process/unsafe.rs, ipc/unsafe.rs, syscall/edges.rs).
+// The #[path] keeps the FILE name the mainline gate requires while
+// call sites stay on the plain `edges` identifier.
+#[path = "unsafe.rs"]
+pub mod edges;
 pub mod buffer;
 pub mod ethernet;
 pub mod arp;
@@ -37,33 +45,7 @@ pub use ipv6::{AF_INET6, IpAddr};
 /// the ONE audited Arc-recovery edge for the net family (INV-NETARC-1).
 ///
 /// INV-NETARC-1 (provenance + liveness): the File's private_data holds
-/// an `Arc::into_raw` pointer installed by the socket's own file-ops
-/// installer, and the caller has ALREADY identity-checked the file
-/// against that ops table (`*file.ops.get()` equality — the per-family
-/// `*_socket_from_fd` checks). The File's lifetime keeps the Arc alive
-/// (close() is the only drop path); increment-before-clone keeps the
-/// returned Arc independent of the slot.
-pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
-    let ptr = file.private_data_ptr()? as *const T;
-    // SAFETY: INV-NETARC-1 — the pointer is a live Arc::into_raw value
-    // of this type (ops identity checked by the caller); the increment
-    // balances the from_raw construction below.
-    unsafe {
-        alloc::sync::Arc::increment_strong_count(ptr);
-        Some(alloc::sync::Arc::from_raw(ptr))
-    }
-}
-
-/// Take the Arc OUT of a closing socket File's private_data slot and
-/// drop it (the close path — INV-NETARC-1 + the caller's ops identity
-/// check; the slot is cleared under the file's own close serialization).
-pub(crate) fn take_file_arc<T>(file: &crate::fs::file::File) -> Option<()> {
-    let ptr = file.private_data_ptr()? as *const T;
-    // SAFETY: INV-NETARC-1 — reconstructing the stored Arc consumes the
-    // slot's single reference (close is the last user of the file).
-    unsafe {
-        drop(alloc::sync::Arc::from_raw(ptr));
-    }
-    file.clear_private_data();
-    Some(())
-}
+// file_arc / take_file_arc (INV-NETARC-1) moved into the audited
+// net edges file (unsafe.rs, 2026-11-27 consolidation); the re-export
+// below keeps every `crate::net::file_arc` call site stable.
+pub use edges::{file_arc, take_file_arc};

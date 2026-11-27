@@ -8,6 +8,7 @@
 // with headroom-tracked data pointers (alloc/reserve/put maintain the
 // span invariants); data_slice_at rows are bounds-checked against the
 // len tail; Send/Sync carried by the head's single-owner discipline.)
+#![forbid(unsafe_code)]
 use core::sync::atomic::AtomicU64;
 
 /// Packet types
@@ -128,8 +129,8 @@ pub struct SkBuff {
     pub transport_header: *mut u8,
 }
 
-unsafe impl Send for SkBuff {}
-unsafe impl Sync for SkBuff {}
+// Send/Sync commitments moved to the audited net edges file
+// (net/unsafe.rs, 2026-11-27 consolidation), SAFETY notes intact.
 
 /// SkBuff owns its backing allocation; dropping a buffer that was not
 /// explicitly freed releases it. Every error path that used to leak a
@@ -175,17 +176,18 @@ impl SkBuff {
         let layout = alloc::alloc::Layout::from_size_align(alloc_size, NET_SKBUFF_DATA_ALIGN)
             .ok()?;
 
-        // SAFETY: layout has non-zero size and valid alignment (16), checked above.
-        let head = unsafe { alloc::alloc::alloc(layout) };
+        // INV-NET-ALLOC-1 — layout has non-zero size and valid
+        // alignment (16), checked above (audited edges below).
+        let head = crate::net::edges::alloc_raw(layout);
         if head.is_null() {
             return None;
         }
 
-        // SAFETY: head is non-null and headroom <= alloc_size, so the offset stays in-bounds.
-        let data = unsafe { head.add(headroom) };
+        // head is non-null and headroom <= alloc_size, so the offset
+        // stays in-bounds (audited pointer-arithmetic edges).
+        let data = crate::net::edges::ptr_advance(head, headroom);
         let tail = data;
-        // SAFETY: head is non-null and alloc_size equals the allocation size.
-        let end = unsafe { head.add(alloc_size) };
+        let end = crate::net::edges::ptr_advance(head, alloc_size);
 
         Some(SkBuff {
             protocol: 0,
@@ -223,14 +225,13 @@ impl SkBuff {
                 self.head, self.end, size);
             return;
         }
-        // SAFETY: self.head was allocated by alloc() with alignment 16 and size computed
-        // from (end - head). Layout mismatch falls back to error path.
-        unsafe {
-            if let Ok(layout) = alloc::alloc::Layout::from_size_align(size, 16) {
-                alloc::alloc::dealloc(self.head, layout);
-            } else {
-                crate::pr_err!("skb free: invalid layout size={}", size);
-            }
+        // INV-NET-ALLOC-1 — self.head was allocated by alloc() with
+        // alignment 16 and size computed from (end - head). Layout
+        // mismatch falls back to error path (audited edge).
+        if let Ok(layout) = alloc::alloc::Layout::from_size_align(size, 16) {
+            crate::net::edges::dealloc_raw(self.head, layout);
+        } else {
+            crate::pr_err!("skb free: invalid layout size={}", size);
         }
         self.head = core::ptr::null_mut();
         self.end = core::ptr::null_mut();
@@ -256,8 +257,9 @@ impl SkBuff {
         }
 
         let ptr = self.tail;
-        // SAFETY: new_tail was bounds-checked against self.end above.
-        self.tail = unsafe { self.tail.add(len as usize) };
+        // INV-NET-PTRARITH-1 — new_tail was bounds-checked against
+        // self.end above (audited edge).
+        self.tail = crate::net::edges::ptr_advance(self.tail, len as usize);
         self.len += len;
         Some(ptr)
     }
@@ -279,8 +281,9 @@ impl SkBuff {
             return None;
         }
 
-        // SAFETY: new_data was bounds-checked against self.head above.
-        self.data = unsafe { self.data.sub(len as usize) };
+        // INV-NET-PTRARITH-1 — new_data was bounds-checked against
+        // self.head above (audited edge).
+        self.data = crate::net::edges::ptr_retreat(self.data, len as usize);
         self.len += len;
         Some(self.data)
     }
@@ -302,7 +305,7 @@ impl SkBuff {
         }
 
         // SAFETY: self.data is within head..end and len <= self.len, so offset stays in-bounds.
-        let new_data = unsafe { self.data.add(len as usize) };
+        let new_data = crate::net::edges::ptr_advance(self.data, len as usize);
         // Ensure data pointer does not pass tail (invariant: head <= data <= tail <= end)
         if new_data as usize > self.tail as usize {
             return None;
@@ -327,8 +330,9 @@ impl SkBuff {
             return None;
         }
 
-        // SAFETY: tail + len was bounds-checked against self.end above.
-        self.tail = unsafe { self.tail.add(len as usize) };
+        // INV-NET-PTRARITH-1 — tail + len was bounds-checked against
+        // self.end above (audited edge).
+        self.tail = crate::net::edges::ptr_advance(self.tail, len as usize);
         self.data = self.tail;
         Some(self.data)
     }
@@ -348,10 +352,9 @@ impl SkBuff {
         let len = data.len() as u32;
         let ptr = self.skb_put(len).ok_or(())?;
 
-        // SAFETY: skb_put reserved exactly len bytes at ptr; data.len() == len.
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        }
+        // INV-NET-ALLOC-1 — skb_put reserved exactly len bytes at ptr;
+        // data.len() == len (audited copy edge).
+        crate::net::edges::copy_bytes(ptr, data.as_ptr(), data.len());
 
         Ok(())
     }
@@ -422,9 +425,10 @@ impl SkBuff {
     /// borrow cannot alias another live reference.
     pub fn data_slice(&self, n: u32) -> &[u8] {
         let n = n.min(self.len);
-        // SAFETY: data..data+n is inside the allocation (len is the
-        // allocated length); exclusive ownership per the type doc.
-        unsafe { core::slice::from_raw_parts(self.data, n as usize) }
+        // INV-NET-PTRARITH-1 — data..data+n is inside the allocation
+        // (len is the allocated length); exclusive ownership per the
+        // type doc (audited slice edge).
+        crate::net::edges::slice_view(self.data, n as usize)
     }
 
     /// Borrow `n` bytes of the data area starting at `off` as a shared
@@ -434,9 +438,12 @@ impl SkBuff {
             return &[];
         }
         let n = n.min(self.len - off);
-        // SAFETY: same exclusive-ownership contract as data_slice; the
-        // range was clamped to the buffer end.
-        unsafe { core::slice::from_raw_parts(unsafe { self.data.add(off as usize) }, n as usize) }
+        // INV-NET-PTRARITH-1 — same exclusive-ownership contract as
+        // data_slice; the range was clamped to the buffer end.
+        crate::net::edges::slice_view(
+            crate::net::edges::ptr_advance(self.data, off as usize),
+            n as usize,
+        )
     }
 
     /// Typed read view of the header at the data-area start: `T` must
@@ -446,10 +453,9 @@ impl SkBuff {
         if (core::mem::size_of::<T>() as u32) > self.len {
             return None;
         }
-        // SAFETY: T fits (checked above); the buffer is exclusively
-        // owned; T is a plain wire header (Copy, no padding contracts
-        // beyond repr(C)).
-        Some(unsafe { &*(self.data as *const T) })
+        // INV-BUF-3 — T fits (checked above); the buffer is
+        // exclusively owned; T is a plain wire header (audited edge).
+        Some(crate::net::edges::raw_ref(self.data as *const T))
     }
 
     /// Typed write view of the header at the data-area start: `T` must
@@ -458,10 +464,9 @@ impl SkBuff {
         if (core::mem::size_of::<T>() as u32) > self.len {
             return None;
         }
-        // SAFETY: T fits (checked above); exclusive ownership; the
-        // caller serializes against readers (packet build paths are
-        // single-threaded per buffer).
-        Some(unsafe { &mut *(self.data as *mut T) })
+        // INH-BUF-4 — T fits (checked above); exclusive ownership; the
+        // caller serializes against readers (audited edge).
+        Some(crate::net::edges::raw_mut(self.data as *mut T))
     }
 
     /// Typed write view of the header plus the byte tail behind it, in
@@ -473,18 +478,14 @@ impl SkBuff {
         if hlen > self.len {
             return None;
         }
-        // SAFETY: exclusive ownership; the header reference covers
+        // INH-BUF-4 — exclusive ownership; the header reference covers
         // [0, hlen) and the tail slice [hlen, len) — disjoint by
-        // construction.
-        Some(unsafe {
-            let p = self.data;
-            let hdr = &mut *(p as *mut T);
-            let tail = core::slice::from_raw_parts(
-                p.add(hlen as usize),
-                (self.len - hlen) as usize,
-            );
-            (hdr, tail)
-        })
+        // construction (audited edge).
+        Some(crate::net::edges::hdr_tail_view(
+            self.data,
+            hlen as usize,
+            (self.len - hlen) as usize,
+        ))
     }
 
     /// Push `size_of::<T>()` bytes of headroom and hand the caller a
@@ -496,9 +497,9 @@ impl SkBuff {
     /// pushed bytes; the buffer stays exclusively owned.
     pub fn push_hdr<T: Copy>(&mut self, build: impl FnOnce(&mut T)) -> Option<()> {
         let ptr = self.skb_push(core::mem::size_of::<T>() as u32)?;
-        // SAFETY: skb_push returned headroom of at least size_of::<T>()
-        // bytes inside this exclusively-owned buffer.
-        let h: &mut T = unsafe { &mut *ptr.cast::<T>() };
+        // INH-BUF-4 — skb_push returned headroom of at least
+        // size_of::<T>() bytes inside this exclusively-owned buffer.
+        let h: &mut T = crate::net::edges::raw_mut(ptr.cast::<T>());
         build(h);
         Some(())
     }
@@ -508,9 +509,9 @@ impl SkBuff {
     /// payload-first, header-last, e.g. ARP). INH-BUF-4 as push_hdr.
     pub fn put_hdr<T: Copy>(&mut self, build: impl FnOnce(&mut T)) -> Option<()> {
         let ptr = self.skb_put(core::mem::size_of::<T>() as u32)?;
-        // SAFETY: skb_put returned tail space of at least size_of::<T>()
-        // bytes inside this exclusively-owned buffer.
-        let h: &mut T = unsafe { &mut *ptr.cast::<T>() };
+        // INH-BUF-4 — skb_put returned tail space of at least
+        // size_of::<T>() bytes inside this exclusively-owned buffer.
+        let h: &mut T = crate::net::edges::raw_mut(ptr.cast::<T>());
         build(h);
         Some(())
     }
@@ -519,9 +520,9 @@ impl SkBuff {
     /// push_hdr_val — INH-BUF-4).
     pub fn push_bytes(&mut self, src: &[u8]) -> Option<()> {
         let ptr = self.skb_push(src.len() as u32)?;
-        // SAFETY: skb_push returned headroom of src.len() bytes inside
-        // this exclusively-owned buffer.
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), ptr, src.len()) };
+        // INH-BUF-4 — skb_push returned headroom of src.len() bytes
+        // inside this exclusively-owned buffer (audited copy edge).
+        crate::net::edges::copy_bytes(ptr, src.as_ptr(), src.len());
         Some(())
     }
 
@@ -529,15 +530,13 @@ impl SkBuff {
     /// for callers that compute the header on the stack — INH-BUF-4).
     pub fn push_hdr_val<T: Copy>(&mut self, hdr: &T) -> Option<()> {
         let ptr = self.skb_push(core::mem::size_of::<T>() as u32)?;
-        // SAFETY: skb_push returned headroom of at least size_of::<T>()
-        // bytes inside this exclusively-owned buffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                hdr as *const T as *const u8,
-                ptr,
-                core::mem::size_of::<T>(),
-            );
-        }
+        // INH-BUF-4 — skb_push returned headroom of at least
+        // size_of::<T>() bytes inside this exclusively-owned buffer.
+        crate::net::edges::copy_bytes(
+            ptr,
+            hdr as *const T as *const u8,
+            core::mem::size_of::<T>(),
+        );
         Some(())
     }
 
@@ -560,11 +559,10 @@ impl SkBuff {
             return 0;
         }
 
-        // SAFETY: offset and copy_len are bounds-checked; src and buf are valid pointers.
-        unsafe {
-            let src = self.data.add(offset as usize);
-            core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), copy_len as usize);
-        }
+        // INV-NET-PTRARITH-1 — offset and copy_len are bounds-checked;
+        // src and buf are valid pointers (audited edges).
+        let src = crate::net::edges::ptr_advance(self.data, offset as usize);
+        crate::net::edges::copy_bytes(buf.as_mut_ptr(), src, copy_len as usize);
 
         copy_len
     }
@@ -600,28 +598,8 @@ impl SkBuff {
     }
 }
 
-/// View the head of `data` as a shared `&T` wire header — the ONE
-/// audited parse edge shared by the protocol modules (replaces the
-/// per-protocol `&*(data.as_ptr() as *const Hdr)` duplicates).
-///
-/// INH-BUF-3: `T: Copy` (a repr(C) wire header) and `data` has at
-/// least `size_of::<T>()` bytes (checked; None otherwise). The borrow
-/// is tied to `data` — no invented lifetimes.
-pub fn hdr_view<T: Copy>(data: &[u8]) -> Option<&T> {
-    if data.len() < core::mem::size_of::<T>() {
-        return None;
-    }
-    // SAFETY: length checked above; T is a plain wire header; the
-    // reference borrows from `data` with its own lifetime.
-    Some(unsafe { &*(data.as_ptr() as *const T) })
-}
-
-/// The mutable twin of [`hdr_view`] (the build side over a caller-owned
-/// byte region).
-pub fn hdr_view_mut<T: Copy>(data: &mut [u8]) -> Option<&mut T> {
-    if data.len() < core::mem::size_of::<T>() {
-        return None;
-    }
-    // SAFETY: as hdr_view, over the exclusive borrow.
-    Some(unsafe { &mut *(data.as_mut_ptr() as *mut T) })
-}
+// hdr_view / hdr_view_mut (INH-BUF-3, the shared wire-header parse /
+// build edge) moved into the audited net edges file (net/unsafe.rs,
+// 2026-11-27 consolidation); the re-exports keep every
+// `crate::net::buffer::hdr_view` call site stable.
+pub use crate::net::edges::{hdr_view, hdr_view_mut};
