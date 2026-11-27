@@ -37,24 +37,18 @@ use super::Ext4FileSystem;
 // lives on that task's stack for the enclosing ext4_* op, and the
 // clear/get/take_pre_capture rows all run task-local; no cross-task
 // aliasing exists by construction.)
-pub(crate) unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
-    if let Some(task) = crate::sched::current() {
-        (*task).journal_handle.set(handle);
-    }
+pub(crate) fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
+    crate::fs::edges::jbd2_handle_set(handle);
 }
 
 /// Clear the current journal handle
-pub(crate) unsafe fn clear_current_handle() {
-    if let Some(task) = crate::sched::current() {
-        (*task).journal_handle.set(core::ptr::null_mut());
-    }
+pub(crate) fn clear_current_handle() {
+    crate::fs::edges::jbd2_handle_clear();
 }
 
 /// Get the current journal handle, if any
-pub(crate) unsafe fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
-    let task = crate::sched::current()?;
-    let ptr = (*task).journal_handle.get();
-    if ptr.is_null() { None } else { Some(ptr) }
+pub(crate) fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
+    crate::fs::edges::jbd2_handle_get()
 }
 
 // ============================================================================
@@ -1115,7 +1109,7 @@ fn add_entry_to_block(
 /// created — the capture window, if one was armed, is simply discarded.
 unsafe fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u64 {
     // SAFETY: get_current_handle is task-local and null-safe.
-    let handle_ptr = match unsafe { get_current_handle() } {
+    let handle_ptr = match get_current_handle() {
         Some(p) => p,
         None => return 0,
     };
@@ -1424,7 +1418,7 @@ fn ext4_mkdir_inner(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 12)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window: record this operation's own metadata dirtied
     // before the entry publication (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
@@ -1432,7 +1426,7 @@ fn ext4_mkdir_inner(
     let result = ext4_mkdir_no_journal(fs, dir_ino, name, mode);
 
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_mkdir_us(
         (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
@@ -1490,12 +1484,12 @@ pub fn ext4_create(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_create_inner(fs, dir_ino, name, mode);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1562,11 +1556,11 @@ pub fn ext4_mknod(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_mknod_inner(fs, dir_ino, name, mode, dev);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1636,12 +1630,12 @@ pub fn ext4_symlink(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_symlink_inner(fs, dir_ino, name, target);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1731,12 +1725,12 @@ pub fn ext4_link(
     let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 6)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window (see defer_entry_publication).
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_link_inner(fs, dir_ino, target_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -1832,7 +1826,7 @@ pub(crate) fn ext4_reap_unlinked(
     // set_current_handle stores it in a thread-local for jbd2 metadata
     // journaling during this operation; clear_current_handle below resets
     // it before the stack slot dies.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     let result = (|| -> Result<(), i32> {
         // R20-FS1 order (same as the old eager path): persist the dead
         // inode FIRST (dtime set), then free blocks, then the inode number.
@@ -1854,7 +1848,7 @@ pub(crate) fn ext4_reap_unlinked(
     })();
     // SAFETY: clear_current_handle resets the thread-local journal handle
     // to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }
@@ -2132,10 +2126,10 @@ pub fn ext4_unlink(
     let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     let result = ext4_unlink_inner(fs, dir_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_unlink_us(
         (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
@@ -2220,7 +2214,7 @@ impl PostCaptureGuard {
     fn new(fs: &Ext4FileSystem, dir_block: Option<u64>) -> Self {
         if let Some(blk) = dir_block {
             // SAFETY: get_current_handle is task-local and null-safe.
-            if unsafe { get_current_handle() }.is_some() {
+            if get_current_handle().is_some() {
                 let id = bio::publication_defer_entry_only(fs.device, blk);
                 // SAFETY: the handle is alive for this syscall and mutable
                 // from its owning task (us).
@@ -2285,10 +2279,10 @@ pub fn ext4_rmdir(
     let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 10)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     let result = ext4_rmdir_inner(fs, dir_ino, name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     crate::dfx::fsw::note_rmdir_us(
         (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
@@ -2605,7 +2599,7 @@ fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
     // SAFETY: reading the current task's journal handle slot is task-local;
     // the handle lives on this task's stack for the duration of the
     // enclosing ext4_* operation (set/clear bracket it).
-    if let Some(handle_ptr) = unsafe { get_current_handle() } {
+    if let Some(handle_ptr) = get_current_handle() {
         // SAFETY: same stack-lifetime contract as above.
         unsafe {
             let _ = crate::fs::jbd2::jbd2_journal_revoke(&mut *handle_ptr, block, None);
@@ -2767,7 +2761,7 @@ pub fn ext4_rename(
     // ordered publication queue (see ext4/journal.rs).
     let mut handle = super::journal::ext4_journal_start(fs, 16)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-    unsafe { set_current_handle(&mut handle); }
+    set_current_handle(&mut handle);
     // PRE-capture window for the new-name publication (see
     // defer_entry_publication). A replace of an existing target
     // separately arms the POST window (PostCaptureGuard) after this
@@ -2775,7 +2769,7 @@ pub fn ext4_rename(
     handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
     let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-    unsafe { clear_current_handle(); }
+    clear_current_handle();
     super::journal::ext4_journal_stop(&mut handle)?;
     result
 }

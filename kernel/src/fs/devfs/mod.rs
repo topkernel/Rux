@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -1746,12 +1747,7 @@ fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     // SAFETY: private_data holds a leaked Arc<DevfsEntry> (iget/create
     // discipline); from_raw + clone + into_raw preserves the inode's
     // own reference.
-    let target_arc = unsafe {
-        let arc = Arc::from_raw(target_ptr as *const DevfsEntry);
-        let cloned = Arc::clone(&arc);
-        let _ = Arc::into_raw(arc);
-        cloned
-    };
+    let target_arc = crate::fs::edges::arc_clone_leak(target_ptr as *const DevfsEntry);
     if target_arc.is_dir() {
         // link(2): directories cannot be hardlinked (EPERM).
         return errno::Errno::OperationNotPermitted.as_neg_i32();
@@ -1885,7 +1881,7 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
                 )
                 .as_usize() as *mut u8;
                 // SAFETY: freshly allocated page, exclusively owned here.
-                unsafe { core::ptr::write_bytes(kva, 0, page) };
+                crate::fs::edges::fill_bytes(kva, 0, page);
                 pfns.push((pa >> 12) as usize);
             }
             None => break,
@@ -1910,13 +1906,7 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
             let in_page = off % page;
             let chunk = core::cmp::min(page - in_page, snap.len() - off);
             // SAFETY: kva is a live shared page; chunk is in-page.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    snap[off..].as_ptr(),
-                    kva.add(in_page),
-                    chunk,
-                );
-            }
+            crate::fs::edges::page_copy_from_slice_at(kva, in_page, &snap[off..off + chunk]);
             off += chunk;
         }
     }
@@ -1979,9 +1969,9 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
         }
         crate::fs::edges::privdata_ref::<DevfsEntry>(inode)?
     };
-    let inode_size = unsafe {
-        (*file.inode.get()).as_ref().map(|i| i.get_size() as usize).unwrap_or(0)
-    };
+    let inode_size = crate::fs::edges::file_inode(file)
+        .map(|i| i.get_size() as usize)
+        .unwrap_or(0);
     // Entry-authoritative size: the mapper's inode snapshot may predate
     // the ftruncate that sized the workspace (see devfs_reg_current_size).
     let inode_size = inode_size.max(
@@ -2058,13 +2048,7 @@ fn shared_read_off(entry: &DevfsEntry, logical: usize, off: usize, buf: &mut [u8
         let chunk = core::cmp::min(page - in_page, n - done);
         // SAFETY: kva is a live shared page; the chunk is in-page and the
         // destination slice is caller-valid.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                kva.add(in_page) as *const u8,
-                buf.as_mut_ptr().add(done),
-                chunk,
-            );
-        }
+        crate::fs::edges::page_copy_to_slice_at(kva, in_page, &mut buf[done..done + chunk]);
         
         done += chunk;
     }
@@ -2099,13 +2083,7 @@ fn shared_write_off(
         let chunk = core::cmp::min(page - in_page, buf.len() - done);
         // SAFETY: kva is a live shared page; the chunk is in-page; the
         // source slice is caller-valid.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf.as_ptr().add(done),
-                kva.add(in_page),
-                chunk,
-            );
-        }
+        crate::fs::edges::page_copy_from_slice_at(kva, in_page, &buf[done..done + chunk]);
         
         done += chunk;
     }

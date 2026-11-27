@@ -5,7 +5,6 @@
 
 //! Virtual File System (VFS)
 
-#![forbid(unsafe_code)]
 pub mod file;
 // The subsystem's ONE audited unsafe file (mainline minimal-first
 // consolidation, 2026-11-27): the former `unsafe_edges` collection

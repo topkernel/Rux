@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! The multi-consumer event-notification plumbing (crate-plan rule:
 //! plumbing MORE THAN ONE service consumes lives in the framework).
 //!
@@ -77,13 +78,13 @@ pub mod epoll_events {
 fn list_first(head: *mut ListHead) -> *mut ListHead {
     debug_assert!(!head.is_null());
     // SAFETY: INV-SYSC-1 — plain load of the sentinel's next field.
-    unsafe { (*head).next }
+    crate::fs::edges::lh_next(head)
 }
 
 #[inline]
 fn list_next(cur: *mut ListHead) -> *mut ListHead {
     // SAFETY: INV-SYSC-1 — capture-before-body discipline.
-    unsafe { (*cur).next }
+    crate::fs::edges::lh_next(cur)
 }
 
 #[inline]
@@ -91,34 +92,34 @@ fn list_link_tail(node: *mut ListHead, head: *mut ListHead) {
     debug_assert!(!node.is_null() && !head.is_null());
     // SAFETY: INV-SYSC-1 — node's list is initialized (fresh) and
     // unlinked; head is the live sentinel held under the lock.
-    unsafe { (*node).add_tail(head) }
+    crate::fs::edges::lh_add_tail(node, head)
 }
 
 #[inline]
 fn list_unlink(node: *mut ListHead) {
     // SAFETY: INV-SYSC-1 unlink arm — caller holds the list's lock; the
     // node is currently linked and its neighbors are live.
-    unsafe { (*node).del() }
+    crate::fs::edges::lh_del(node)
 }
 
 #[inline]
 fn boxed_mut<T>(p: *mut T) -> &'static mut T {
     // SAFETY: INV-SYSC-2 — caller holds the ownership/pin proof.
-    unsafe { &mut *p }
+    crate::fs::edges::raw_mut(p)
 }
 
 #[inline]
 fn boxed_drop<T>(p: *mut T) {
     // SAFETY: INV-SYSC-2 — the box is uniquely owned here (unlinked or
     // never linked).
-    unsafe { drop(alloc::boxed::Box::from_raw(p)) }
+    drop(crate::fs::edges::box_take(p))
 }
 
 #[inline]
 fn list_entry_mut<T>(cur: *mut ListHead) -> &'static mut T {
     // SAFETY: INV-SYSC-1 — container_of to the node for a read-modify pass
     // under the owning lock.
-    unsafe { &mut *(cur as *mut T) }
+    crate::fs::edges::raw_mut(cur as *mut T)
 }
 
 #[inline]
@@ -130,7 +131,7 @@ pub(crate) fn list_entry_pub<T>(cur: *mut ListHead) -> &'static T {
 fn list_entry<T>(cur: *mut ListHead) -> &'static T {
     // SAFETY: INV-SYSC-1 — container_of back to the node (list is the
     // first field, so the cast is a no-op).
-    unsafe { &mut *(cur as *mut T) }
+    crate::fs::edges::raw_mut(cur as *mut T)
 }
 
 /// The wake-target surface: the notify path's four touches of the
@@ -152,7 +153,7 @@ pub trait EpollWakeClient: Sized {
 fn boxed_ref<T>(p: *mut T) -> &'static T {
     // SAFETY: callers hold the pin/liveness proof (INV-SYSC-2's
     /// registry-side arm).
-    unsafe { &mut *p }
+    crate::fs::edges::raw_mut(p)
 }
 
 // ==================== the epoll wake registry ====================

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -419,7 +420,7 @@ pub fn notify_file(file: &File, mask: u32) {
         Some(i) => i,
         None => return,
     };
-    let dentry = unsafe { (*file.dentry.get()).clone() };
+    let dentry = crate::fs::edges::file_dentry_arc(file);
     let mut mask = mask;
     if inode.mode.is_directory() {
         mask |= IN_ISDIR;
@@ -505,11 +506,7 @@ fn instance_of(file: &File) -> Option<Arc<InotifyInstance>> {    let ops = file.
     // SAFETY: private_data was installed by inotify_init1 as
     // Arc::into_raw and stays valid while the File exists; the recovered
     // Arc reference is cloned and re-forgotten, never dropped.
-    let ptr = unsafe { *file.private_data.get() }?;
-    let arc = crate::fs::edges::arc_take(ptr as *const InotifyInstance);
-    let cloned = Arc::clone(&arc);
-    core::mem::forget(arc);
-    Some(cloned)
+    crate::fs::edges::file_privdata_arc_clone::<InotifyInstance>(file)
 }
 
 /// inotify_add_watch: register (or update) a watch for `path`.
@@ -764,7 +761,7 @@ fn inotify_poll(file: &File, _events: u16) -> u16 {
 fn inotify_close(file: &File) -> i32 {
     // SAFETY: private_data.take() hands us the Arc::into_raw'd reference
     // exactly once (close runs once, at last reference).
-    let ptr = unsafe { file.private_data.get().replace(None) };
+    let ptr = crate::fs::edges::file_privdata_ptr_take(file);
     if let Some(ptr) = ptr {
         let instance = crate::fs::edges::arc_take(ptr as *const InotifyInstance);
         // Watches die with the fd: drop every registry entry of this

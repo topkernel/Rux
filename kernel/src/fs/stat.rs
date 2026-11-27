@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -28,7 +29,6 @@
 /// - st_ctime: i64 @ 104
 /// - st_ctime_nsec: u64 @ 112
 /// - __unused: [u64; 2] @ 120 (padding to 128 bytes)
-#![forbid(unsafe_code)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Stat {

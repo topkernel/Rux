@@ -470,6 +470,14 @@ pub(crate) fn copy_to_user_bytes(dst: *mut u8, src: &[u8]) -> usize {
     unsafe { crate::arch::uaccess::copy_to_user(dst, src.as_ptr(), src.len()) }
 }
 
+/// The user-to-kernel twin of [`copy_to_user_bytes`] (INV-FS-UACCESS-1):
+/// `dst` is a caller-provided kernel buffer of src-given length; faults
+/// resolve through the exception table.
+pub(crate) fn copy_from_user_bytes(dst: &mut [u8], src: *const u8) -> usize {
+    // SAFETY: INV-FS-UACCESS-1 (kernel dst, user src).
+    unsafe { crate::arch::uaccess::copy_from_user(dst.as_mut_ptr(), src, dst.len()) }
+}
+
 /// INV-FS-CELL-1: borrow through an `UnsafeCell` whose discipline is
 /// write-once-then-read or externally serialized (name cells, dentry
 /// cells — see the type's own docs). Caller holds that serialization.
@@ -557,6 +565,13 @@ pub(crate) fn fill_bytes(dst: *mut u8, byte: u8, n: usize) {
     unsafe { core::ptr::write_bytes(dst, byte, n) }
 }
 
+/// The offset twin of [`fill_bytes`] (INV-FS-ZERO-1): the `add`
+/// happens inside the edge; base+off..+n must be mapped+writable.
+pub(crate) fn fill_bytes_at(base: *mut u8, off: usize, byte: u8, n: usize) {
+    // SAFETY: INV-FS-ZERO-1 (indexed form).
+    unsafe { core::ptr::write_bytes(base.add(off), byte, n) }
+}
+
 /// INV-FS-SEGMENT-1: ELF segment fill — copy `filesz` bytes of file
 /// image then zero the BSS tail up to `memsz`, both into the freshly
 /// mapped exec page range `vaddr` (the exec path mapped and
@@ -630,4 +645,206 @@ pub(crate) fn lh_remove(entry: *mut crate::fs::jbd2::journal::ListHead) {
             (*(*entry).prev).next = (*entry).next;
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// 2026-11-27 consolidation wave 3: cells, chunk views, list shims, slices.
+// ---------------------------------------------------------------------------
+
+/// INV-FS-FILEPRIV-5: raw cell read/assign/clear twins for the
+/// File::private_data UnsafeCell (write-once + close-path-take
+/// discipline, INV-FS-FILEPRIV-1). The caller converts the taken raw
+/// pointer with the matching typed reclaim edge.
+pub(crate) fn file_privdata_cell_read(file: &File) -> Option<*mut u8> {
+    // SAFETY: INV-FS-FILEPRIV-5.
+    unsafe { *file.private_data.get() }
+}
+pub(crate) fn file_privdata_cell_assign(file: &File, p: Option<*mut u8>) {
+    // SAFETY: INV-FS-FILEPRIV-5 (install before publication / close path).
+    unsafe { *file.private_data.get() = p }
+}
+pub(crate) fn file_privdata_cell_clear(file: &File) {
+    // SAFETY: INV-FS-FILEPRIV-5 (close-path clear).
+    unsafe { *file.private_data.get() = None }
+}
+
+/// INV-FS-FILEINODE-3: the File::dentry cell — installed once at
+/// open_tree/attach time and immutable for the description's lifetime
+/// (same discipline as INV-FS-FILEINODE-1). Clones the Arc out.
+pub(crate) fn file_dentry_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs::dentry::Dentry>> {
+    // SAFETY: INV-FS-FILEINODE-3 (write-once cell).
+    unsafe { (*file.dentry.get()).clone() }
+}
+
+/// INV-FS-RAWTAKE-3: clone a strong ref from a stashed Arc pointer and
+/// RE-STASH the original (from_raw + clone + into_raw: the stashed
+/// count is untouched, the caller gets a fresh owning Arc). Provenance:
+/// the pointer owns exactly one strong count for the object's life.
+pub(crate) fn arc_clone_leak<T>(p: *const T) -> alloc::sync::Arc<T> {
+    // SAFETY: INV-FS-RAWTAKE-3 (the count round-trip documented above).
+    unsafe {
+        let arc = alloc::sync::Arc::from_raw(p);
+        let cloned = arc.clone();
+        let _ = alloc::sync::Arc::into_raw(arc);
+        cloned
+    }
+}
+
+/// INV-FS-BUFCHUNK-1: borrow `len` bytes at offset `off` inside a
+/// FileBuffer chunk (heap Vec or pooled page; capacity checked at
+/// chunk creation). The inode data lock serializes chunk access, and
+/// the returned borrow dies before the lock releases (same scope).
+pub(crate) fn chunk_view<'a>(fc: *mut crate::fs::buffer::FileChunk, off: usize, len: usize) -> &'a [u8] {
+    // SAFETY: INV-FS-BUFCHUNK-1.
+    unsafe { core::slice::from_raw_parts((*fc).base_ptr().add(off), len) }
+}
+
+/// The mut twin of [`chunk_view`] (INV-FS-BUFCHUNK-1; caller holds the
+/// data lock exclusively).
+pub(crate) fn chunk_view_mut<'a>(fc: *mut crate::fs::buffer::FileChunk, off: usize, len: usize) -> &'a mut [u8] {
+    // SAFETY: INV-FS-BUFCHUNK-1.
+    unsafe { core::slice::from_raw_parts_mut((*fc).base_ptr().add(off), len) }
+}
+
+/// INV-FS-VECFILL-1: fresh zeroed `Vec<u8>`: with_capacity reserves
+/// len bytes (no realloc for the writes below), write_bytes fills the
+/// reserved span with zeros (valid for u8), set_len commits.
+pub(crate) fn zeroed_vec(len: usize) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::with_capacity(len);
+    // SAFETY: INV-FS-VECFILL-1 (reserved capacity, zeroed bytes).
+    unsafe {
+        core::ptr::write_bytes(v.as_mut_ptr(), 0, len);
+        v.set_len(len);
+    }
+    v
+}
+
+/// INV-FS-VECLEN-1: commit `len` bytes on a Vec that JUST reserved
+/// capacity >= len (the caller's with_capacity is the proof); contents
+/// stay uninitialized as the caller wrote them.
+pub(crate) fn vec_set_len(v: &mut alloc::vec::Vec<u8>, len: usize) {
+    // SAFETY: INV-FS-VECLEN-1.
+    unsafe { v.set_len(len) }
+}
+
+/// INV-FS-BHDATA-2: the bh blocknr field read (checked-out bh per
+/// INV-FS-BHDATA-1).
+pub(crate) fn bh_blocknr(bh: *mut crate::fs::bio::BufferHead) -> u64 {
+    // SAFETY: INV-FS-BHDATA-1 (checked-out bh).
+    unsafe { (*bh).b_blocknr }
+}
+
+/// INV-FS-BHDATA-3: the exclusive b_data twin (checked-out bh).
+pub(crate) fn bh_data_mut<'a>(bh: *mut crate::fs::bio::BufferHead) -> &'a mut alloc::vec::Vec<u8> {
+    // SAFETY: INV-FS-BHDATA-1.
+    unsafe { &mut (*bh).b_data }
+}
+
+/// INV-FS-SLICECAST-1: reinterpret a byte slice as [T]. Caller
+/// obligations: T is repr(C) POD, size_of::<T>() divides data.len(),
+/// and the backing storage is T-aligned (bh blocks and fresh Vec<u8>
+/// reservations are page/malloc aligned).
+pub(crate) fn slice_as_t<'a, T>(data: &[u8]) -> &'a [T] {
+    // SAFETY: INV-FS-SLICECAST-1.
+    unsafe {
+        core::slice::from_raw_parts(data.as_ptr() as *const T, data.len() / core::mem::size_of::<T>())
+    }
+}
+
+/// The mut twin of [`slice_as_t`] (INV-FS-SLICECAST-1).
+pub(crate) fn slice_as_t_mut<'a, T>(data: &mut [u8]) -> &'a mut [T] {
+    // SAFETY: INV-FS-SLICECAST-1.
+    unsafe {
+        core::slice::from_raw_parts_mut(data.as_ptr() as *mut T, data.len() / core::mem::size_of::<T>())
+    }
+}
+
+/// The offset twins of the page-copy family (INV-FS-KCOPY-1): the
+/// in-page pointer arithmetic happens inside the edge; off+n stays
+/// within the one page (the callers' chunking proves it).
+pub(crate) fn page_copy_to_slice_at(kva: *const u8, off: usize, dst: &mut [u8]) {
+    // SAFETY: INV-FS-KCOPY-1 (indexed form).
+    unsafe { core::ptr::copy_nonoverlapping(kva.add(off), dst.as_mut_ptr(), dst.len()) }
+}
+pub(crate) fn page_copy_from_slice_at(kva: *mut u8, off: usize, src: &[u8]) {
+    // SAFETY: INV-FS-KCOPY-1 (indexed form).
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), kva.add(off), src.len()) }
+}
+
+/// INV-FS-SYSC-LIST-1: crate::list::ListHead raw shims for the
+/// event-notify chain walk (INV-SYSC-1: nodes are live under the
+/// registry lock; capture-before-body keeps neighbors alive).
+pub(crate) fn lh_next(p: *const crate::list::ListHead) -> *mut crate::list::ListHead {
+    // SAFETY: INV-FS-SYSC-LIST-1.
+    unsafe { (*p).next }
+}
+pub(crate) fn lh_add_tail(node: *mut crate::list::ListHead, head: *mut crate::list::ListHead) {
+    // SAFETY: INV-FS-SYSC-LIST-1.
+    unsafe { (*node).add_tail(head) }
+}
+pub(crate) fn lh_del(node: *mut crate::list::ListHead) {
+    // SAFETY: INV-FS-SYSC-LIST-1.
+    unsafe { (*node).del() }
+}
+
+
+/// INV-FS-BHSTATE-1: set/clear a state bit on a checked-out bh
+/// (INV-FS-BHDATA-1 discipline; the bit ops are the BH_Req in-flight
+/// marking the brelse path relies on).
+pub(crate) fn bh_set_state_bit(bh: *mut crate::fs::bio::BufferHead, bit: u8) {
+    // SAFETY: INV-FS-BHSTATE-1.
+    unsafe { (*bh).set_state_bit(bit) }
+}
+
+/// INV-FS-JHANDLE-1: the per-task current jbd2 handle slot (a task-
+/// local cell: the handle is set at transaction start on the same
+/// task and cleared at stop_handle on it — same-task access only).
+pub(crate) fn current_jbd2_handle() -> Option<*mut crate::fs::jbd2::Handle> {
+    // SAFETY: INV-FS-JHANDLE-1 (task-local cell read).
+    unsafe { crate::fs::ext4::namei::get_current_handle() }
+}
+
+
+/// INV-EXT4-JHANDLE-1 (consolidated): the per-task journal-handle cell
+/// family. sched::current() returns the RUNNING task's pointer; the
+/// handle pointer is stored by the SAME task that created the
+/// transaction, lives on that task's stack for the enclosing ext4 op,
+/// and the set/clear/get rows all run task-local — no cross-task
+/// aliasing exists by construction.
+pub(crate) fn jbd2_handle_set(handle: *mut crate::fs::jbd2::Handle) {
+    if let Some(task) = crate::sched::current() {
+        // SAFETY: INV-EXT4-JHANDLE-1 (same-task cell write).
+        crate::process::unsafe_edges::borrow_task_mut(task).journal_handle.set(handle);
+    }
+}
+
+/// The clear twin of [`jbd2_handle_set`] (INV-EXT4-JHANDLE-1).
+pub(crate) fn jbd2_handle_clear() {
+    if let Some(task) = crate::sched::current() {
+        // SAFETY: INV-EXT4-JHANDLE-1.
+        crate::process::unsafe_edges::borrow_task_mut(task).journal_handle.set(core::ptr::null_mut());
+    }
+}
+
+/// The get twin of [`jbd2_handle_set`] (INV-EXT4-JHANDLE-1).
+pub(crate) fn jbd2_handle_get() -> Option<*mut crate::fs::jbd2::Handle> {
+    let task = crate::sched::current()?;
+    // SAFETY: INV-EXT4-JHANDLE-1.
+    let ptr = crate::process::unsafe_edges::borrow_task(task).journal_handle.get();
+    if ptr.is_null() { None } else { Some(ptr) }
+}
+
+
+/// INV-FS-JDIRTY-1: journal dirty-metadata registration. `handle` is
+/// the current task's live transaction handle (INV-EXT4-JHANDLE-1 —
+/// the caller got it from jbd2_handle_get in the same task), `bh` is a
+/// checked-out metadata buffer (INV-FS-BHDATA-1). Pure registration
+/// bookkeeping; no extra validity claims beyond those two.
+pub(crate) fn jbd2_dirty_metadata(
+    handle: *mut crate::fs::jbd2::Handle,
+    bh: *mut crate::fs::bio::BufferHead,
+) -> Result<(), i32> {
+    // SAFETY: INV-FS-JDIRTY-1 (deref forms the &mut the API takes).
+    unsafe { crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh) }
 }

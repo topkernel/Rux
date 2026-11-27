@@ -167,12 +167,11 @@ pub fn read_indirect_block(
     indirect_block: u64,
     index: usize,
 ) -> Result<u64, i32> {
-    unsafe {
-        let bh = bio::bread(fs.device, indirect_block)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-        let data = &(*bh).b_data;
-        let block_numbers = reinterpret_slice::<u32>(data);
+    let bh = bio::bread(fs.device, indirect_block)
+        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+    {
+        let data = crate::fs::edges::bh_data(bh);
+        let block_numbers = crate::fs::edges::slice_as_t::<u32>(data);
 
         if index >= block_numbers.len() {
             bio::brelse(bh);
@@ -246,12 +245,11 @@ pub fn write_indirect_block(
     index: usize,
     block_num: u32,
 ) -> Result<(), i32> {
-    unsafe {
-        let bh = bio::bread(fs.device, indirect_block)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-        let data = &mut (*bh).b_data;
-        let block_numbers = reinterpret_slice_mut::<u32>(data);
+    let bh = bio::bread(fs.device, indirect_block)
+        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+    {
+        let data = crate::fs::edges::bh_data_mut(bh);
+        let block_numbers = crate::fs::edges::slice_as_t_mut::<u32>(data);
 
         if index >= block_numbers.len() {
             bio::brelse(bh);
@@ -260,11 +258,11 @@ pub fn write_indirect_block(
 
         block_numbers[index] = block_num;
 
-        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        crate::fs::edges::bh_set_state_bit(bh, crate::fs::bio::BufferState::BH_Dirty as u8);
         // Family b (ext4-corrupt lane): journal registration — indirect
         // blocks are metadata (see extent.rs write_node's note).
         if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            let _ = crate::fs::edges::jbd2_dirty_metadata(handle, bh);
         }
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);

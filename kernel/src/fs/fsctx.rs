@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -406,9 +407,9 @@ pub fn create_fs_root(
 fn fsctx_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data holds a Box<FsContext> installed by sys_fsopen
     // (single owner, identity-checked via FSCTX_OPS).
-    if let Some(p) = unsafe { *file.private_data.get() } {
+    if let Some(p) = crate::fs::edges::file_privdata_cell_read(file) {
         drop(crate::fs::edges::box_take(p as *mut FsContext));
-        unsafe { *file.private_data.get() = None };
+        crate::fs::edges::file_privdata_cell_clear(file);
     }
     0
 }
@@ -425,8 +426,8 @@ pub fn fsctx_of(file: &crate::fs::File) -> Option<&'static FsContext> {
     }
     // SAFETY: identity-checked above — private_data came from
     // Box::into_raw(FsContext) in sys_fsopen and lives until close.
-    let p = (unsafe { *file.private_data.get() })?;
-    Some(unsafe { &*(p as *const FsContext) })
+    let p = crate::fs::edges::file_privdata_cell_read(file)?;
+    Some(crate::fs::edges::raw_ref(p as *const FsContext))
 }
 
 /// Resolve a file's fs_context mutably (fsconfig/fsmount).
@@ -438,8 +439,8 @@ pub fn fsctx_of_mut(file: &crate::fs::File) -> Option<&'static mut FsContext> {
     // SAFETY: same identity check; &mut is sound because syscall context
     // serializes per-fd operations (no concurrent fsconfig on one fd —
     // the reference holds fc->uapi_mutex).
-    let p = (unsafe { *file.private_data.get() })?;
-    Some(unsafe { &mut *(p as *mut FsContext) })
+    let p = crate::fs::edges::file_privdata_cell_read(file)?;
+    Some(crate::fs::edges::raw_mut(p as *mut FsContext))
 }
 
 /// mount fd close: free the MountFd bookkeeping. An ATTACHED mount is
@@ -450,9 +451,9 @@ pub fn fsctx_of_mut(file: &crate::fs::File) -> Option<&'static mut FsContext> {
 fn mountfd_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data holds a Box<MountFd> installed by
     // fsmount/open_tree (single owner, identity-checked via MOUNTFD_OPS).
-    if let Some(p) = unsafe { *file.private_data.get() } {
+    if let Some(p) = crate::fs::edges::file_privdata_cell_read(file) {
         drop(crate::fs::edges::box_take(p as *mut MountFd));
-        unsafe { *file.private_data.get() = None };
+        crate::fs::edges::file_privdata_cell_clear(file);
     }
     0
 }
@@ -468,8 +469,8 @@ pub fn mountfd_of(file: &crate::fs::File) -> Option<&'static mut MountFd> {
         return None;
     }
     // SAFETY: identity-checked above; syscall context per-fd.
-    let p = (unsafe { *file.private_data.get() })?;
-    Some(unsafe { &mut *(p as *mut MountFd) })
+    let p = crate::fs::edges::file_privdata_cell_read(file)?;
+    Some(crate::fs::edges::raw_mut(p as *mut MountFd))
 }
 
 /// File operations for open_tree() WITHOUT OPEN_TREE_CLONE: an O_PATH
@@ -485,7 +486,7 @@ pub fn treepath_dentry(file: &crate::fs::File) -> Option<Arc<Dentry>> {
         return None;
     }
     // SAFETY: dentry written once at open_tree; read-only access.
-    unsafe { &*file.dentry.get() }.clone()
+    crate::fs::edges::file_dentry_arc(file)
 }
 
 /// Build a fresh detached mount whose root shares `root_inode`
@@ -516,9 +517,7 @@ pub fn make_detached_mount(
         submount_src_base,
     });
     // SAFETY: single-owner handoff into the fd's private_data slot.
-    unsafe {
-        *file.private_data.get() = Some(Box::into_raw(boxed) as *mut u8);
-    }
+    crate::fs::edges::file_privdata_cell_assign(file.as_ref(), Some(Box::into_raw(boxed) as *mut u8));
     file
 }
 
