@@ -27,6 +27,11 @@
 //! stack comes from SP_EL1, which the return path keeps parked at the
 //! task's kernel-stack top while at EL0).
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::arch::asm;
 
 use super::pt_regs::{PtRegs, PT_REGS_SIZE};
@@ -38,31 +43,7 @@ pub use super::pt_regs::{Cause, Pstate};
 // exit loop and ret_from_fork live in arch/aarch64/trap.S — included
 // here so the frame geometry below is the single source of truth the
 // assembly is checked against.
-core::arch::global_asm!(
-    // Operand cross-reference: the template's `.equ S_X, {S_X}` block
-    // consumes each operand via textual substitution; this comment keeps
-    // the asm usage check satisfied for the scanner (same trick the
-    // compiler suggests for intentionally "unused" asm operands).
-    "/* {S_FRAME_SIZE} {S_X0} {S_X8} {S_X20} {S_X21} {S_X22} {S_X30} {S_SP} {S_PC} {S_PSTATE} {S_ESR} {S_FAR} {S_ORIG_X0} {S_SYSCALLNO} {TI_PREEMPT} {TI_KSTACK_BOTTOM} {KSTACK_SIZE} */",
-    include_str!("trap.S"),
-    S_FRAME_SIZE = const PT_REGS_SIZE,
-    S_X0 = const 0,
-    S_X8 = const 8 * 8,
-    S_X20 = const 8 * 20,
-    S_X21 = const 8 * 21,
-    S_X22 = const 8 * 22,
-    S_X30 = const 8 * 30,
-    S_SP = const core::mem::offset_of!(PtRegs, sp),
-    S_PC = const core::mem::offset_of!(PtRegs, pc),
-    S_PSTATE = const core::mem::offset_of!(PtRegs, pstate),
-    S_ESR = const core::mem::offset_of!(PtRegs, esr),
-    S_FAR = const core::mem::offset_of!(PtRegs, far),
-    S_ORIG_X0 = const core::mem::offset_of!(PtRegs, orig_x0),
-    S_SYSCALLNO = const core::mem::offset_of!(PtRegs, syscallno),
-    TI_PREEMPT = const crate::process::task::task_offsets::TI_PREEMPT_COUNT,
-    TI_KSTACK_BOTTOM = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
-    KSTACK_SIZE = const crate::config::KERNEL_STACK_SIZE,
-);
+
 
 // ============================================================================
 // ESR_EL1 decode
@@ -136,7 +117,7 @@ pub fn dfsc_class(dfsc: u64) -> FaultStatus {
 // Per-CPU PtRegs pointer (fork/exec + cross-CPU diagnostics)
 // ============================================================================
 
-static CURRENT_PT_REGS: [core::sync::atomic::AtomicU64; crate::arch::aarch64::MAX_CPUS] =
+pub(crate) static CURRENT_PT_REGS: [core::sync::atomic::AtomicU64; crate::arch::aarch64::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::aarch64::MAX_CPUS];
 
 /// Get current PtRegs pointer (trap frame; set by the entry path)
@@ -144,251 +125,33 @@ pub fn current_pt_regs() -> *const PtRegs {
     let cpu = crate::arch::cpu_id() as usize;
     CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
-
 /// Current task's PtRegs (kernel stack top - sizeof(PtRegs))
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-11): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
-    use crate::sched::current;
-
-    // SAFETY: pt_regs lives at the fixed offset from the task's kernel
-    // stack top established by the trap entry path.
-    unsafe {
-        let task = current()?;
-        let stack_top = (*task).get_kernel_stack()? as u64;
-        let pt_regs_ptr = (stack_top - PT_REGS_SIZE as u64) as *mut PtRegs;
-        Some(&mut *pt_regs_ptr)
-    }
+    crate::arch::arch_floor::aarch64::trap::current_task_pt_regs()
 }
-
 /// RIP-equivalent (pc) of another CPU's most recent trap frame
-/// (diagnostic; riscv64 twin semantics)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-10): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
-    if cpu >= crate::arch::aarch64::MAX_CPUS {
-        return 0;
-    }
-    let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
-    if p.is_null()
-        || (p as u64) < 0xffff_8000_0000_0000
-        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
-    {
-        return 0;
-    }
-    // SAFETY: diagnostic scalar read of a live-or-stale kernel frame.
-    unsafe { core::ptr::addr_of!((*p).pc).read() }
+    crate::arch::arch_floor::aarch64::trap::pt_regs_rip_for_cpu(cpu)
 }
 
 // ============================================================================
 // Early-trap dumper (bad vectors park through here)
 // ============================================================================
 
-/// Bad-vector dumper (called from the 0x000/0x600 band stubs)
-#[no_mangle]
-extern "C" fn aarch64_trap_dump() {
-    let (esr, elr, far, spsr, sp_el1): (u64, u64, u64, u64, u64);
-    // SAFETY: pure system-register reads; safe in any exception context.
-    unsafe {
-        asm!(
-            "mrs {}, esr_el1",
-            "mrs {}, elr_el1",
-            "mrs {}, far_el1",
-            "mrs {}, spsr_el1",
-            "mov {}, sp",
-            out(reg) esr,
-            out(reg) elr,
-            out(reg) far,
-            out(reg) spsr,
-            out(reg) sp_el1,
-            options(nomem, nostack)
-        );
-    }
-    crate::pr_err!(
-        "AARCH64-BAD-VECTOR: esr={:#x} elr={:#x} far={:#x} spsr={:#x} sp={:#x}",
-        esr, elr, far, spsr, sp_el1
-    );
-    crate::pr_err!(
-        "  EC={:#x} ISS={:#x} (bad mode — see trap.S vector table)",
-        esr_ec(esr),
-        esr_iss(esr)
-    );
-}
 
 // ============================================================================
 // Dispatch
 // ============================================================================
 
-/// Trap handler — called by trap.S with the PtRegs pointer (frame base
-/// == x0, SP 16-aligned, DAIF masked).
-#[no_mangle]
-pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
-    let cpu_id = crate::arch::cpu_id() as usize;
-
-    // Save and swap PtRegs pointer (fork/exec read current_pt_regs();
-    // the swap handles nested traps the same way the riscv64 twin does).
-    let prev_pt_regs = CURRENT_PT_REGS[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
-    CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
-
-    // SAFETY: regs points at the frame trap.S just pushed; it stays
-    // valid across the dispatch (the caller asm restores from it after
-    // we return, possibly on a freshly thawed stack after schedule()).
-    let regs_ref = unsafe { &mut *regs };
-    let esr = regs_ref.esr;
-    let cause = Cause::from_cause(esr);
-
-    // WFI/WFE restart: an IRQ taken from a kernel wfi/wfe leaves ELR at
-    // the instruction itself (riscv64 twin advances past wfi — same
-    // hazard: the eret would re-execute it). Only advance for
-    // interrupt-class traps, only inside kernel text, only on an exact
-    // encoding match.
-    if matches!(cause, Cause::Irq | Cause::Fiq)
-        && regs_ref.kernel_mode()
-        && regs_ref.pc % 4 == 0
-    {
-        extern "C" {
-            static _stext: u8;
-            static _etext: u8;
-        }
-        // SAFETY: linker symbols _stext/_etext bound the kernel text.
-        let (lo, hi) = unsafe {
-            (&raw const _stext as usize as u64, &raw const _etext as usize as u64)
-        };
-        if regs_ref.pc >= lo && regs_ref.pc < hi {
-            // WFI = 0xD503207F, WFE = 0xD503205F
-            // SAFETY: pc is provably inside kernel text and 4-aligned.
-            let insn = unsafe { core::ptr::read_volatile(regs_ref.pc as *const u32) };
-            if insn == 0xD503_207F || insn == 0xD503_205F {
-                regs_ref.pc += 4;
-            }
-        }
-    }
-
-    crate::pr_debug!(
-        "trap: cause={:?}, pc={:#x}, sp={:#x}, esr={:#x}, far={:#x}, mode={}",
-        cause, regs_ref.pc, regs_ref.sp, regs_ref.esr, regs_ref.far,
-        if regs_ref.user_mode() { "user" } else { "kernel" }
-    );
-
-    match cause {
-        // Syscall from EL0 (SVC #0): x8 = nr (snapshotted into
-        // syscallno by the entry), x0-x5 args, return in x0.
-        Cause::EcallUser => handle_syscall(regs_ref),
-
-        // HVC from EL1 — the PSCI conduit (smp.rs issues hvc #0, consumed
-        // by the EL2 firmware, so it never reaches these vectors on this
-        // machine; the arm exists for a firmware-less/routing changeover).
-        // Nothing expects it today; treat it as a kernel bug.
-        Cause::EcallSupervisor => {
-            crate::pr_err!(
-                "aarch64: unexpected HVC at pc={:#x} (PSCI runs through EL2 and should not land here)",
-                regs_ref.pc
-            );
-            crate::dfx::oops::oops(
-                crate::dfx::oops::Kind::UnknownException { cause: esr },
-                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
-                    oops_show_regs(w, regs_ref);
-                },
-            );
-        }
-
-        // Page faults — the generic mm's fault path (riscv64 parity:
-        // do_page_fault receives R/W/X + origin-EL access flags; FAR is
-        // the fault address).
-        Cause::DataAbort | Cause::DataAbortCur => {
-            let iss = esr_iss(esr);
-            let mut access = if iss & ISS_DF_WNR != 0 {
-                crate::arch::mm::FaultFlags::WRITE
-            } else {
-                crate::arch::mm::FaultFlags::READ
-            };
-            access |= if regs_ref.user_mode() {
-                crate::arch::mm::FaultFlags::USER
-            } else {
-                crate::arch::mm::FaultFlags::KERNEL
-            };
-            handle_page_fault(regs_ref, access);
-        }
-        Cause::InstructionAbort | Cause::InstructionAbortCur => {
-            let access = crate::arch::mm::FaultFlags::EXEC
-                | if regs_ref.user_mode() {
-                    crate::arch::mm::FaultFlags::USER
-                } else {
-                    crate::arch::mm::FaultFlags::KERNEL
-                };
-            handle_page_fault(regs_ref, access);
-        }
-
-        // IRQ / FIQ — dispatch through the irq_enter/exit bracket. The
-        // GIC claim + INTID routing lands in stage 3 (DAIF stays masked
-        // until then; this arm is the shape, not a live path yet).
-        Cause::Irq => {
-            crate::interrupt::preempt::irq_enter();
-            handle_external_interrupt(regs_ref, cpu_id);
-            crate::interrupt::preempt::irq_exit();
-        }
-        Cause::Fiq => {
-            // QEMU routes nothing to FIQ in this configuration; report
-            // and continue (masked-again on eret).
-            crate::pr_warn!("aarch64: spurious FIQ at pc={:#x}", regs_ref.pc);
-        }
-
-        // Asynchronous external abort — fatal.
-        Cause::SError => {
-            crate::pr_err!(
-                "aarch64: SError at pc={:#x} far={:#x} esr={:#x}",
-                regs_ref.pc, regs_ref.far, esr
-            );
-            crate::dfx::oops::oops(
-                crate::dfx::oops::Kind::UnknownException { cause: esr },
-                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
-                    oops_show_regs(w, regs_ref);
-                },
-            );
-        }
-
-        // Illegal instruction / illegal execution state: user gets the
-        // SIGILL kill path, kernel is a bug.
-        Cause::IllegalInstruction | Cause::IllegalState => {
-            if regs_ref.user_mode() {
-                handle_illegal_instruction(regs_ref);
-            } else {
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::IllegalInstruction,
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
-                        oops_show_regs(w, regs_ref);
-                    },
-                );
-            }
-        }
-
-        // Trapped WFx / everything else: bad mode.
-        _ => {
-            crate::pr_err!(
-                "aarch64: unhandled exception cause={:?} ec={:#x} iss={:#x} pc={:#x} far={:#x}",
-                cause, esr_ec(esr), esr_iss(esr), regs_ref.pc, regs_ref.far
-            );
-            if regs_ref.user_mode() {
-                handle_illegal_instruction(regs_ref);
-            } else {
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::UnknownException { cause: esr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
-                        oops_show_regs(w, regs_ref);
-                    },
-                );
-            }
-        }
-    }
-
-    // Restore previous PtRegs pointer (nested-trap case, riscv64 twin).
-    CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
-
-    // Leak-origin tripwire (riscv64 twin): a user-return frame must
-    // carry preempt_count == 0.
-    if regs_ref.user_mode() {
-        crate::dfx::leakorigin::check_user_return();
-    }
-}
 
 /// Register dump for the oops paths
-fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+pub(crate) fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let _ = write!(
         w,
@@ -427,7 +190,7 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 ///   (back onto the svc) and restore orig_x0, the exact arm64 reference
 ///   do_signal shape (restart_addr = continue_addr - 4). The rewind
 ///   mirrors the +4 above — riscv64 is identical modulo instruction size.
-fn handle_syscall(regs: &mut PtRegs) {
+pub(crate) fn handle_syscall(regs: &mut PtRegs) {
     // Re-enable interrupts for the syscall body (riscv64 twin: the trap
     // masks IRQs at entry; running the whole syscall masked would kill
     // ticks/preemption/softlockup detection. The frame's pstate keeps
@@ -463,7 +226,7 @@ fn handle_syscall(regs: &mut PtRegs) {
 /// interrupts that predate the irqchip framework); everything else goes
 /// through the generic domain dispatch, whose flow handler EOIs via the
 /// chip. Fallback EOI only for unmapped INTIDs that bypassed the flow.
-fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
+pub(crate) fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
     use crate::drivers::intc::gicv3;
 
     // Bounded drain: a level source whose handler fails to deassert
@@ -497,74 +260,18 @@ fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
         }
     }
 }
-
 /// Timer interrupt (GIC PPI for the EL1 virtual timer) — the riscv64
-/// handle_timer_interrupt twin: re-arm first, then accounting, jiffies,
-/// scheduler tick, softlockup, and the preemptible in-IRQ reschedule.
-fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
-    // Increment interrupt counter for /proc/interrupts
-    crate::fs::procfs::interrupts::timer_inc(cpu);
-
-    // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
-    // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
-    // line still high re-latches pending and storms).
-    crate::drivers::timer::set_next_trigger();
-
-    // Skip scheduler/schedule logic during early boot (TPIDR holds the
-    // cpu index, no current task yet — riscv64 twin guard).
-    if crate::sched::current().is_none() {
-        return;
-    }
-
-    // 0. Per-CPU time accounting for /proc/stat
-    crate::fs::procfs::stat::charge_tick(regs.user_mode());
-
-    // 0b. CPU-time accounting: user or system time by the mode the
-    // timer hit; idle accounting for kthreads.
-    if let Some(task) = crate::sched::current() {
-        // SAFETY: current() returned a live task pointer; only per-task
-        // atomic counters are touched (riscv64/x86_64 twins).
-        unsafe {
-            if (*task).address_space().is_some() {
-                use core::sync::atomic::Ordering::Relaxed;
-                if regs.user_mode() {
-                    (*task).utime_ticks.fetch_add(1, Relaxed);
-                    crate::dfx::syscost::tick_user();
-                    crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
-                } else {
-                    (*task).stime_ticks.fetch_add(1, Relaxed);
-                    crate::dfx::syscost::tick_kern(regs.pc);
-                    crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
-                }
-            } else {
-                crate::dfx::syscost::tick_idle();
-                crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
-            }
-        }
-    } else {
-        crate::dfx::syscost::tick_idle();
-        crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
-    }
-
-    // 1. Update jiffies (+ vDSO page refresh, timer softirqs)
-    crate::drivers::timer::timer_interrupt_handler();
-
-    // 2. Scheduler tick
-    crate::sched::scheduler_tick();
-
-    // 3. Check for soft lockups
-    crate::dfx::softlockup::check();
-
-    // 4. Reschedule if needed
-    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
-        crate::sched::schedule();
-    }
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-7): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+    crate::arch::arch_floor::aarch64::trap::handle_timer_interrupt(regs, cpu)
 }
 
 /// User-mode illegal instruction: route through signal delivery with
 /// the riscv64 twin's handler-first policy (an installed SIGILL handler
 /// must run; the default disposition kills).
-fn handle_illegal_instruction(regs: &mut PtRegs) {
+pub(crate) fn handle_illegal_instruction(regs: &mut PtRegs) {
     crate::pr_err!(
         "aarch64: illegal instruction pid={} pc={:#x} esr={:#x}",
         crate::sched::get_current_pid(),
@@ -585,38 +292,37 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 // semantics of the riscv64 twins: has-handler / blocked probes against
 // the current task's signal state).
 // ---------------------------------------------------------------------------
-
 /// True when the CURRENT task has a user handler installed for `signo`.
-fn sig_has_handler(signo: usize) -> bool {
-    crate::sched::current()
-        .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(signo as i32)) })
-        .map(|a| a.is_some_and(|a| a.has_handler()))
-        .unwrap_or(false)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-6): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn sig_has_handler(signo: usize) -> bool {
+    crate::arch::arch_floor::aarch64::trap::sig_has_handler(signo)
 }
 
 /// True when the CURRENT task blocks `signo` — Linux force_sig_info
 /// semantics: a FORCED signal that is blocked is reset to SIG_DFL (a
 /// synchronous fault on a blocked handler-signal kills the task;
 /// unblocking alone would re-enter the handler and fault forever).
-fn sig_blocked_current(signo: usize) -> bool {
+pub(crate) fn sig_blocked_current(signo: usize) -> bool {
     crate::sched::current()
         .map(|t| (*t).sigmask & (1u64 << signo) != 0)
         .unwrap_or(false)
 }
 
-fn sigsegv_has_handler() -> bool {
+pub(crate) fn sigsegv_has_handler() -> bool {
     sig_has_handler(11)
 }
 
-fn sigsegv_blocked_current() -> bool {
+pub(crate) fn sigsegv_blocked_current() -> bool {
     sig_blocked_current(11)
 }
 
-fn sigbus_has_handler() -> bool {
+pub(crate) fn sigbus_has_handler() -> bool {
     sig_has_handler(7)
 }
 
-fn sigill_has_handler() -> bool {
+pub(crate) fn sigill_has_handler() -> bool {
     sig_has_handler(4)
 }
 
@@ -626,7 +332,7 @@ fn sigill_has_handler() -> bool {
 /// faulting address (Linux force_sig_fault) or any handler that
 /// demand-maps the faulting page installs the WRONG page and
 /// re-faults forever.
-fn fault_sigsegv_route(code: i32, addr: u64) {
+pub(crate) fn fault_sigsegv_route(code: i32, addr: u64) {
     let pid = crate::process::current_pid();
     let info = crate::signal::SigInfo::fault(
         crate::signal::Signal::SIGSEGV as i32,
@@ -649,37 +355,6 @@ fn fault_sigsegv_route(code: i32, addr: u64) {
 
 // (aarch64_bad_user_frame lives below, with the signal-routing helpers)
 
-/// R74 twin (garbage-frame gate): called from trap.S when a user-return
-/// frame is provably unexecutable (pc==0 or sp < 0x1000) — kill the
-/// task instead of ereting into the void. Reached by `b` from
-/// restore_and_eret, where x0 no longer holds the frame pointer (the
-/// GPR restore already ran): read the frame off the current task's
-/// kernel stack instead — the outermost frame position is fixed at
-/// stack_top - PT_REGS_SIZE.
-#[no_mangle]
-pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> ! {
-    let _ = regs_x0;
-    if let Some(regs) = current_task_pt_regs() {
-        crate::pr_err!(
-            "trap: BADFRAME pid={} pc={:#x} sp={:#x} pstate={:#x}",
-            crate::sched::get_current_pid(),
-            regs.pc,
-            regs.sp,
-            regs.pstate
-        );
-    } else {
-        crate::pr_err!("trap: BADFRAME (no current task)");
-    }
-    // huks-wedge lane (hw5): group death — Linux fixup_bad_iret class
-    // terminates the process, not just the faulting thread.
-    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
-    // do_exit schedules away and never returns; park defensively.
-    loop {
-        // SAFETY: wfi halts the core until an interrupt; safe in a dead
-        // task's final spin.
-        unsafe { core::arch::asm!("wfi") };
-    }
-}
 
 // ============================================================================
 // Page fault routing (ESR/FAR → generic mm)
@@ -688,7 +363,7 @@ pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> ! {
 /// Handle a data/instruction abort: decode the fault kind and route
 /// into the generic mm's do_page_fault; apply the result policy
 /// (riscv64 handle_page_fault shape, trimmed to its load-bearing arms).
-fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
+pub(crate) fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.far;
@@ -826,80 +501,34 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     }
 }
 
-/// Kernel-thread trampoline helper (riscv64 twin contract): called by
-/// ret_from_fork_kernel_asm with the fn/arg restored from
-/// thread.s[0]/s[1]; runs the thread function and do_exit — it never
-/// returns (the asm parks defensively).
-#[no_mangle]
-pub extern "C" fn ret_from_fork_kernel_helper(
-    fn_arg: *mut core::ffi::c_void,
-    fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
-    _regs: &mut PtRegs,
-) {
-    let ret = fn_ptr(fn_arg);
-    crate::process::exit::do_exit(ret);
-}
 
 // ============================================================================
 // Vector-table install + timer/IRQ arming (interface parity)
 // ============================================================================
-
 /// Initialize trap handling: install the vector table (VBAR_EL1)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init() {
-    extern "C" {
-        fn aarch64_vector_table();
-    }
-    // SAFETY: writing VBAR_EL1 installs the exception base; the table is
-    // 2KB-aligned by the asm. ISB makes the new vectors effective.
-    unsafe {
-        asm!(
-            "msr vbar_el1, {v}",
-            "isb",
-            v = in(reg) aarch64_vector_table as u64,
-            options(nostack)
-        );
-    }
+    crate::arch::arch_floor::aarch64::trap::init()
 }
 
 pub fn init_syscall() {
     // SVC #0 is dispatched in aarch64_trap_handler (EC 0x15)
 }
-
 /// Enable the EL1 timer interrupt — the riscv64 enable_timer_interrupt
-/// twin: enable the GIC PPI (INTID 27, virtual timer), arm the first
-/// deadline, then unmask the timer itself. Order matters: arming after
-/// the PPI is enabled means the very first expiry is never lost.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_timer_interrupt() {
-    // 1. Enable the timer PPI at this CPU's redistributor (idempotent;
-    //    the distributor was brought up in intc::init).
-    crate::drivers::intc::gicv3::enable_ppi(crate::drivers::intc::gicv3::TIMER_PPI_INTID);
-
-    // 2. Arm the first grid deadline (sets CNTV_CVAL + enables the
-    //    virtual timer).
-    crate::drivers::timer::set_next_trigger();
-
-    // 3. Unmask the timer (enable=1, imask=0).
-    // SAFETY: writing CNTV_CTL_EL0 arms the per-cpu virtual timer; the
-    // only side effect is the future PPI interrupt.
-    unsafe {
-        asm!(
-            "msr cntv_ctl_el0, {v}",
-            v = in(reg) 1u64,
-            options(nomem, nostack)
-        );
-    }
+    crate::arch::arch_floor::aarch64::trap::enable_timer_interrupt()
 }
-
 /// Disable the EL1 timer interrupt
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-TRAP-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn disable_timer_interrupt() {
-    // SAFETY: masking the virtual timer; no side effects beyond the mask.
-    unsafe {
-        asm!(
-            "msr cntv_ctl_el0, {v}",
-            v = in(reg) 3u64, // enable=1, imask=1 (stay armed, masked)
-            options(nomem, nostack)
-        );
-    }
+    crate::arch::arch_floor::aarch64::trap::disable_timer_interrupt()
 }
 
 /// Enable external interrupts (GICv3 CPU interface: redistributor wake,
@@ -917,3 +546,22 @@ pub fn enable_external_interrupt() {
 /// TrapFrame / ExceptionCause aliases (interface parity)
 pub type TrapFrame = PtRegs;
 pub type ExceptionCause = Cause;
+
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+// INV-ARCH note: ret_from_fork_kernel_helper moved to arch::arch_floor::aarch64::trap (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::aarch64::trap::ret_from_fork_kernel_helper;
+// INV-ARCH note: aarch64_bad_user_frame moved to arch::arch_floor::aarch64::trap (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::aarch64::trap::aarch64_bad_user_frame;
+// INV-ARCH note: aarch64_trap_handler moved to arch::arch_floor::aarch64::trap (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::aarch64::trap::aarch64_trap_handler;
+// INV-ARCH note: aarch64_trap_dump moved to arch::arch_floor::aarch64::trap (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::aarch64::trap::aarch64_trap_dump;

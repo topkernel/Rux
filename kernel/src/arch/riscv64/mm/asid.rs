@@ -10,6 +10,11 @@
 //! RISC-V Sv39 supports ASIDs up to 9 bits (512 ASIDs), but the actual
 //! number of bits is determined by the hardware implementation.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, AtomicU16, Ordering};
 
 /// Maximum number of ASIDs supported (9 bits = 512)
@@ -29,10 +34,10 @@ pub const ASID_FIRST: u16 = 2;
 /// The old single-AtomicU64 bitmap only covered 64 ASIDs while the scan
 /// ran to MAX_ASID — with 64+ concurrent processes `1u64 << i` overflowed
 /// and PANICKED the kernel (LTP pipe13: 50 children + waiter processes).
-const ASID_WORDS: usize = (MAX_ASID as usize + 1 + 63) / 64;
+pub(crate) const ASID_WORDS: usize = (MAX_ASID as usize + 1 + 63) / 64;
 
 /// Global ASID allocator state: word 0 starts with ASID 0 and 1 reserved.
-static ASID_BITMAP: [AtomicU64; ASID_WORDS] = {
+pub(crate) static ASID_BITMAP: [AtomicU64; ASID_WORDS] = {
     let mut words = [const { AtomicU64::new(0) }; ASID_WORDS];
     words[0] = AtomicU64::new(0b11); // ASID 0 and 1 reserved
     words
@@ -98,52 +103,26 @@ pub fn asid_usage_count() -> u32 {
 }
 
 // ==================== TLB Flush Operations ====================
-
 /// Flush all TLB entries (global TLB flush)
 ///
-/// This is the most expensive TLB operation as it invalidates
-/// all TLB entries across all ASIDs.
-#[inline(always)]
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-11): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_all() {
-    // SAFETY: sfence.vma with zero,zero is a global TLB flush — always safe.
-    unsafe {
-        core::arch::asm!(
-            "sfence.vma zero, zero",
-            options(nostack, nomem)
-        );
-    }
+    crate::arch::arch_floor::riscv64::mm::asid::flush_tlb_all()
 }
-
 /// Flush TLB entries for a specific ASID
 ///
-/// Invalidates all TLB entries tagged with the given ASID.
-#[inline(always)]
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-10): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_asid(asid: u16) {
-    // SAFETY: sfence.vma with zero,asid flushes all TLB entries for the given ASID.
-    unsafe {
-        core::arch::asm!(
-            "sfence.vma zero, {0}",
-            in(reg) asid,
-            options(nostack, nomem)
-        );
-    }
+    crate::arch::arch_floor::riscv64::mm::asid::flush_tlb_asid(asid)
 }
-
 /// Flush a single page from TLB
 ///
-/// Invalidates the TLB entry for the given virtual address
-/// in the specified ASID.
-#[inline(always)]
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-9): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_tlb_page(vaddr: usize, asid: u16) {
-    // SAFETY: sfence.vma with a specific vaddr and asid invalidates a single TLB entry.
-    unsafe {
-        core::arch::asm!(
-            "sfence.vma {0}, {1}",
-            in(reg) vaddr,
-            in(reg) asid,
-            options(nostack, nomem)
-        );
-    }
+    crate::arch::arch_floor::riscv64::mm::asid::flush_tlb_page(vaddr, asid)
 }
 
 /// Flush a range of pages from TLB
@@ -196,38 +175,19 @@ pub fn satp_to_asid(satp: usize) -> u16 {
 pub fn satp_to_ppn(satp: usize) -> usize {
     satp & 0xFFFFFFFFFFF
 }
-
 /// Read current SATP value
-#[inline(always)]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-8): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_satp() -> usize {
-    let satp: usize;
-    // SAFETY: Reading the satp CSR is a simple register read with no side effects.
-    unsafe {
-        core::arch::asm!(
-            "csrr {0}, satp",
-            out(reg) satp,
-            options(nostack, nomem)
-        );
-    }
-    satp
+    crate::arch::arch_floor::riscv64::mm::asid::read_satp()
 }
-
 /// Write SATP value
 ///
-/// This changes the current page table and ASID.
-/// A TLB flush is implicit when changing SATP.
-#[inline(always)]
+/// Collected into `arch::arch_floor` (INV-ARCH-ASID-7): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn write_satp(satp: usize) {
-    // SAFETY: Writing satp switches the page table root and ASID.
-    // sfence.vma afterwards flushes the TLB, which is required after satp change.
-    unsafe {
-        core::arch::asm!(
-            "csrw satp, {0}",
-            "sfence.vma",
-            in(reg) satp,
-            options(nostack, nomem)
-        );
-    }
+    crate::arch::arch_floor::riscv64::mm::asid::write_satp(satp)
 }
 
 // ==================== ASID Context ====================
@@ -239,9 +199,9 @@ pub fn write_satp(satp: usize) {
 /// - Generation counter for ASID reuse detection
 pub struct AsidContext {
     /// Allocated ASID (0 means not allocated)
-    asid: AtomicU16,
+    pub(crate) asid: AtomicU16,
     /// Generation counter for ASID validation
-    generation: AtomicU64,
+    pub(crate) generation: AtomicU64,
 }
 
 impl AsidContext {

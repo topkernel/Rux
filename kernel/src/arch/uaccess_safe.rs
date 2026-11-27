@@ -19,129 +19,78 @@
 //! service files (`syscall/**` first) can carry
 //! `#![forbid(unsafe_code)]` while still doing user I/O.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 // (INV-UACCESS-SAFE-1: the capsule's own edges — each safe wrapper
 // holds exactly one audited call into the per-arch exception-table
 // primitive (INV-UACCESS-1); the UserPtr/UserSlice cell rows carry
 // the address/len pair discipline.)
 use super::uaccess;
-
 /// Copy `src` (kernel memory) out to the user address `dst_user`.
 ///
-/// Returns the number of bytes NOT copied (0 = complete success). A
-/// rejected or faulting user range returns a non-zero count; the kernel
-/// source is only ever read.
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-18): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn copy_out(dst_user: usize, src: &[u8]) -> usize {
-    // SAFETY: `src` is a shared slice, so src.len() readable bytes at
-    // src.as_ptr() are guaranteed by the type system. The user side is
-    // access_ok-checked and faults through the exception table inside
-    // the primitive; any dst_user value is sound to pass.
-    unsafe { uaccess::copy_to_user(dst_user as *mut u8, src.as_ptr(), src.len()) }
+    crate::arch::arch_floor::uaccess_safe::copy_out(dst_user, src)
 }
-
 /// Copy bytes in from the user address `src_user` into `dst`.
 ///
-/// Returns the number of bytes NOT copied (0 = complete success). On
-/// failure the uncopied tail of `dst` is zero-filled by the primitive
-/// (no stale kernel bytes survive a short copy).
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-17): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn copy_in(dst: &mut [u8], src_user: usize) -> usize {
-    // SAFETY: `dst` is a mutable slice, so dst.len() writable bytes are
-    // guaranteed by the type system. The user side is access_ok-checked
-    // and faults through the exception table inside the primitive; any
-    // src_user value is sound to pass.
-    unsafe { uaccess::copy_from_user(dst.as_mut_ptr(), src_user as *const u8, dst.len()) }
+    crate::arch::arch_floor::uaccess_safe::copy_in(dst, src_user)
 }
-
 /// Read one `Copy` value from user memory at `src_user`.
 ///
-/// Returns `None` when the access fails (rejected range or fault); the
-/// primitive access_ok-checks and faults through the exception table, so
-/// any address is sound to pass.
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-16): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_user<T: Copy>(src_user: usize) -> Option<T> {
-    // SAFETY: T is Copy (no drop glue for a partially-read value) and
-    // the primitive validates/fault-safes the user address itself.
-    unsafe { uaccess::get_user(src_user as *const T) }
+    crate::arch::arch_floor::uaccess_safe::read_user::<T>(src_user)
 }
-
 /// Write one `Copy` value to user memory at `dst_user`.
 ///
-/// Returns false when the access fails (rejected range or fault).
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-15): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn write_user<T: Copy>(dst_user: usize, value: T) -> bool {
-    // SAFETY: T is Copy and the primitive validates/fault-safes the
-    // user address itself.
-    unsafe { uaccess::put_user(dst_user as *mut T, value) }
+    crate::arch::arch_floor::uaccess_safe::write_user::<T>(dst_user, value)
 }
-
 /// Zero-fill `n` bytes at the user address `dst_user`.
 ///
-/// Returns the number of bytes NOT cleared (0 = complete success).
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-14): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn clear_user(dst_user: usize, n: usize) -> usize {
-    // SAFETY: the primitive access_ok-checks and faults through the
-    // exception table; any dst_user value is sound to pass.
-    unsafe { uaccess::clear_user(dst_user as *mut u8, n) }
+    crate::arch::arch_floor::uaccess_safe::clear_user(dst_user, n)
 }
-
 /// Length of the NUL-terminated user string at `src_user` (length
-/// including the NUL, matching the primitive), or 0 on failure /
-/// overlong string.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-13): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn strnlen_user(src_user: usize, maxlen: usize) -> usize {
-    // SAFETY: the primitive access_ok-checks and faults through the
-    // exception table; any src_user value is sound to pass.
-    unsafe { uaccess::strnlen_user(src_user as *const u8, maxlen) }
+    crate::arch::arch_floor::uaccess_safe::strnlen_user(src_user, maxlen)
 }
-
 /// Atomic compare-exchange on a user u32 word (PI futex protocol).
-/// Returns the observed old value, or `None` on a rejected/faulting
-/// user address.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-12): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn futex_cmpxchg_u32(uaddr: usize, expected: u32, new: u32) -> Option<u32> {
-    // SAFETY: the primitive access_ok-checks the 4-byte user word and
-    // reports faults as None; any uaddr value is sound to pass.
-    unsafe { uaccess::futex_cmpxchg_u32_user(uaddr as *mut u32, expected, new) }
+    crate::arch::arch_floor::uaccess_safe::futex_cmpxchg_u32(uaddr, expected, new)
 }
-
 /// Copy one `T` in from user memory at `src_user` into `dst`.
 ///
-/// Returns the number of bytes NOT copied (0 = complete success). On
-/// failure the uncopied tail of `dst` is zero-filled by the primitive.
-///
-/// Contract (same as the arch `copy_from_user` the call sites used to
-/// wrap): `T: Copy` and `T` carries no bit-pattern validity constraint
-/// beyond its bytes (plain integer/struct UAPI types — not `bool`/
-/// `char`/enums with niches); `dst` must point at an initialized `T`.
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-11): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn copy_in_t<T: Copy>(dst: &mut T, src_user: usize) -> usize {
-    // SAFETY: the kernel side is a live `&mut T` (caller-initialized);
-    // the user side is access_ok-checked and faults through the
-    // exception table, so any src_user value is sound to pass.
-    unsafe {
-        uaccess::copy_from_user(
-            dst as *mut T as *mut u8,
-            src_user as *const u8,
-            core::mem::size_of::<T>(),
-        )
-    }
+    crate::arch::arch_floor::uaccess_safe::copy_in_t::<T>(dst, src_user)
 }
-
 /// Copy one `T` out from kernel memory to user address `dst_user`.
 ///
-/// Returns the number of bytes NOT copied (0 = complete success).
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-10): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn copy_out_t<T: Copy>(dst_user: usize, src: &T) -> usize {
-    // SAFETY: the kernel side is a shared `&T` (size_of::<T>() readable
-    // bytes by the type system); the user side fault-safes inside.
-    unsafe {
-        uaccess::copy_to_user(
-            dst_user as *mut u8,
-            src as *const T as *const u8,
-            core::mem::size_of::<T>(),
-        )
-    }
+    crate::arch::arch_floor::uaccess_safe::copy_out_t::<T>(dst_user, src)
 }
 
 /// Typed handle to one `Copy` value living in user memory.
@@ -157,8 +106,8 @@ pub fn copy_out_t<T: Copy>(dst_user: usize, src: &T) -> usize {
 /// campaign: service code holds `UserPtr<T>` instead of `*const T` and
 /// needs no `unsafe` at the use site.
 pub struct UserPtr<T: Copy> {
-    addr: usize,
-    _marker: core::marker::PhantomData<*mut T>,
+    pub(crate) addr: usize,
+    pub(crate) _marker: core::marker::PhantomData<*mut T>,
 }
 
 impl<T: Copy> UserPtr<T> {
@@ -185,21 +134,7 @@ impl<T: Copy> UserPtr<T> {
         uaccess::access_ok(self.addr, core::mem::size_of::<T>())
     }
 
-    /// Read the value; `None` on a rejected range or user page fault.
-    #[inline]
-    pub fn read(&self) -> Option<T> {
-        // SAFETY: T is Copy and the primitive validates/fault-safes
-        // the user address itself.
-        unsafe { uaccess::get_user(self.addr as *const T) }
-    }
 
-    /// Write `value`; false on a rejected range or user page fault.
-    #[inline]
-    pub fn write(&self, value: T) -> bool {
-        // SAFETY: T is Copy and the primitive validates/fault-safes
-        // the user address itself.
-        unsafe { uaccess::put_user(self.addr as *mut T, value) }
-    }
 
     /// Byte offset handle (e.g. a field inside a user struct header).
     #[inline]
@@ -217,9 +152,9 @@ impl<T: Copy> UserPtr<T> {
 /// accessor is fault-safe through the exception table, handle is
 /// `!Send`/`!Sync`.
 pub struct UserSlice {
-    addr: usize,
-    len: usize,
-    _marker: core::marker::PhantomData<*mut u8>,
+    pub(crate) addr: usize,
+    pub(crate) len: usize,
+    pub(crate) _marker: core::marker::PhantomData<*mut u8>,
 }
 
 impl UserSlice {
@@ -264,57 +199,8 @@ impl UserSlice {
         uaccess::access_ok(self.addr, self.len)
     }
 
-    /// Copy the range into `dst` (kernel memory). Returns the number
-    /// of bytes NOT copied (0 = complete). On failure the uncopied
-    /// tail of `dst` is zero-filled by the primitive.
-    #[inline]
-    pub fn copy_in(&self, dst: &mut [u8]) -> usize {
-        // SAFETY: dst is a mutable slice (kernel side proven by the
-        // type system); the user side fault-safes inside.
-        unsafe {
-            uaccess::copy_from_user(dst.as_mut_ptr(), self.addr as *const u8, dst.len())
-        }
-    }
 
-    /// Copy `src` (kernel memory) out to the range. Returns the number
-    /// of bytes NOT copied (0 = complete).
-    #[inline]
-    pub fn copy_out(&self, src: &[u8]) -> usize {
-        // SAFETY: src is a shared slice (kernel side proven by the
-        // type system); the user side fault-safes inside.
-        unsafe { uaccess::copy_to_user(self.addr as *mut u8, src.as_ptr(), src.len()) }
-    }
 
-    /// Zero-fill the range. Returns the number of bytes NOT cleared.
-    #[inline]
-    pub fn clear(&self) -> usize {
-        // SAFETY: fault-safe primitive; any address is sound to pass.
-        unsafe { uaccess::clear_user(self.addr as *mut u8, self.len) }
-    }
 
-    /// Read one `Copy` value at byte `offset` inside the range.
-    /// `None` when `offset` leaves no room for `T` or the access
-    /// fails.
-    #[inline]
-    pub fn read_at<T: Copy>(&self, offset: usize) -> Option<T> {
-        if offset.checked_add(core::mem::size_of::<T>())? > self.len {
-            return None;
-        }
-        // SAFETY: T is Copy; bounds-checked against the handle's own
-        // length; the user side fault-safes inside the primitive.
-        unsafe { uaccess::get_user(self.addr.wrapping_add(offset) as *const T) }
-    }
 
-    /// Write one `Copy` value at byte `offset` inside the range;
-    /// false when `offset` leaves no room for `T` or the access fails.
-    #[inline]
-    pub fn write_at<T: Copy>(&self, offset: usize, value: T) -> bool {
-        match offset.checked_add(core::mem::size_of::<T>()) {
-            Some(end) if end <= self.len => {}
-            _ => return false,
-        }
-        // SAFETY: T is Copy; bounds-checked against the handle's own
-        // length; the user side fault-safes inside the primitive.
-        unsafe { uaccess::put_user(self.addr.wrapping_add(offset) as *mut T, value) }
-    }
 }

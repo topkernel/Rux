@@ -7,6 +7,11 @@
 //! System-register primitives: DAIF interrupt control, generic timer
 //! reads (CNTFRQ/CNTVCT), per-CPU identity (MPIDR/TPIDR), barriers.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 /// Get current core ID
 #[inline]
 pub fn get_core_id() -> u64 {
@@ -24,49 +29,33 @@ pub fn get_thread_id_of(cpu: usize) -> u64 {
         0
     }
 }
-
 /// Get current thread ID (TPIDR_EL1 — the aarch64 "tp")
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-14): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_thread_id() -> u64 {
-    // SAFETY: reading TPIDR_EL1 is a pure system-register read.
-    let tp: u64;
-    unsafe {
-        core::arch::asm!("mrs {}, tpidr_el1", out(reg) tp, options(nomem, nostack, pure));
-    }
-    tp
+    crate::arch::arch_floor::aarch64::cpu::get_thread_id()
 }
-
 /// Set current thread ID (TPIDR_EL1)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-13): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn set_thread_id(tid: u64) {
-    // SAFETY: writing TPIDR_EL1 stores the kernel thread pointer; the
-    /// value is only ever read back by get_thread_id()/assembly.
-    unsafe {
-        core::arch::asm!("msr tpidr_el1, {}", in(reg) tid, options(nomem, nostack));
-    }
+    crate::arch::arch_floor::aarch64::cpu::set_thread_id(tid)
 }
-
 /// Get counter frequency (CNTFRQ_EL0 — the generic timer frequency).
-/// QEMU virt defaults to 64 MHz.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-12): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_counter_freq() -> u64 {
-    // SAFETY: CNTFRQ_EL0 is a read-only register; reading is always safe.
-    let freq: u64;
-    unsafe {
-        core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq, options(nomem, nostack, pure));
-    }
-    freq
+    crate::arch::arch_floor::aarch64::cpu::get_counter_freq()
 }
-
 /// Read the virtual counter (CNTVCT_EL0) — the monotonic cycle counter
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-11): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_counter() -> u64 {
-    // SAFETY: CNTVCT_EL0 is a read-only monotonic counter.
-    let val: u64;
-    unsafe {
-        core::arch::asm!("mrs {}, cntvct_el0", out(reg) val, options(nomem, nostack, pure));
-    }
-    val
+    crate::arch::arch_floor::aarch64::cpu::read_counter()
 }
 
 /// Read the wall-clock cycle counter (alias of read_counter on aarch64 —
@@ -75,112 +64,75 @@ pub fn read_counter() -> u64 {
 pub fn read_time() -> u64 {
     read_counter()
 }
-
 /// Enable interrupts (clear D/A/I/F mask bits in DAIF)
-#[inline]
-#[track_caller]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-10): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_irq() {
-    crate::dfx::syscost::irq_note_on();
-    // SAFETY: msr daifclr atomically clears the DAIF mask bits; safe at
-    /// any time.
-    unsafe {
-        core::arch::asm!("msr daifclr, #0xf", options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::enable_irq()
 }
-
 /// Disable interrupts (set D/A/I/F mask bits in DAIF)
-#[inline]
-#[track_caller]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-9): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn disable_irq() {
-    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
-    // SAFETY: msr daifset atomically sets the DAIF mask bits; safe at any
-    /// time.
-    unsafe {
-        core::arch::asm!("msr daifset, #0xf", options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::disable_irq()
 }
-
 /// Wait for interrupt
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-8): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn wfi() {
-    // SAFETY: wfi halts the core until the next interrupt; no side effects
-    // beyond waiting. nomem intentionally omitted (ordering matters
-    // against memory operations that set up the wake condition).
-    unsafe {
-        core::arch::asm!("wfi", options(nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::wfi()
 }
-
 /// Wait for event (SEV companion)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-7): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn wfe() {
-    // SAFETY: wfe waits for an event; harmless hint instruction.
-    unsafe {
-        core::arch::asm!("wfe", options(nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::wfe()
 }
-
 /// Send event (wakes WFE waiters)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-6): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn sev() {
-    // SAFETY: sev is a hint broadcast; no side effects on this core.
-    unsafe {
-        core::arch::asm!("sev", options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::sev()
 }
-
 /// Instruction serialization barrier
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-5): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn isb() {
-    // SAFETY: isb serializes instruction fetch; no harmful side effects.
-    unsafe {
-        core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::isb()
 }
-
 /// Data synchronization barrier (full system)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn dsb() {
-    // SAFETY: dsb sy is a completion barrier; no harmful side effects.
-    unsafe {
-        core::arch::asm!("dsb sy", options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::dsb()
 }
-
 /// Data memory barrier
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn dmb() {
-    // SAFETY: dmb is an ordering barrier; no harmful side effects.
-    unsafe {
-        core::arch::asm!("dmb ish", options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::aarch64::cpu::dmb()
 }
-
 /// Invalidate local TLB (all of EL1; full flush)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn local_flush_tlb_all() {
-    // SAFETY: tlbi vmalle1 invalidates all TLB entries for this EL;
-    // callers must have repaired the affected translations first.
-    unsafe {
-        core::arch::asm!(
-            "tlbi vmalle1",
-            "dsb nsh",
-            "isb",
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::arch::arch_floor::aarch64::cpu::local_flush_tlb_all()
 }
-
 /// Get interrupt mask state (DAIF.I/F)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_interrupts_state() -> bool {
-    let daif: u64;
-    // SAFETY: DAIF is a read-only view register at EL1.
-    unsafe {
-        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack, pure));
-    }
-    // IRQ mask bit is bit 7 (I)
-    (daif & (1 << 7)) == 0
+    crate::arch::arch_floor::aarch64::cpu::get_interrupts_state()
 }
 
 /// Save interrupt state and disable interrupts.

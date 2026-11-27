@@ -5,6 +5,11 @@
 
 //! RISC-V 64-bit kernel boot process
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 // boot.S is compiled separately in build.rs and linked as the first object
 // to ensure _start is at the kernel's load address.
 
@@ -20,13 +25,10 @@ pub fn get_core_id() -> u64 {
     // cpu_id() implements that protocol.
     super::cpu_id()
 }
-
 /// Get device tree pointer
 ///
-/// When OpenSBI jumps to the kernel, the a1 register contains the device tree pointer.
-/// If no device tree, a1 is 0.
+/// Collected into `arch::arch_floor` (INV-ARCH-BOOT-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_dtb_pointer() -> u64 {
-    // SAFETY: dtb_pointer is a static extern set by boot.S before rust_main runs.
-    // Reading it is safe once the kernel has started.
-    unsafe { dtb_pointer }
+    crate::arch::arch_floor::riscv64::boot::get_dtb_pointer()
 }

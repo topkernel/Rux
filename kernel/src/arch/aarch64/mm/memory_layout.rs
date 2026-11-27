@@ -17,6 +17,11 @@
 //! - user TASK_SIZE = 256GB (riscv64 parity; avoids touching any generic
 //!   user-space layout logic during bring-up)
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 // ==================== Page Size Constants ====================
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -200,9 +205,9 @@ pub const ECAM_ALIAS_BASE: usize = MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE;
 pub const ECAM_ALIAS_SIZE: usize = PCIE_ECAM_SIZE as usize;
 
 /// Compile-time placement guards (canonical upper half, below linear map)
-const _: () = assert!(MMIO_ALIAS_BASE >= 0xffff_0000_0000_0000_usize);
-const _: () = assert!(MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE <= PAGE_OFFSET);
-const _: () = assert!(ECAM_ALIAS_BASE + ECAM_ALIAS_SIZE <= PAGE_OFFSET);
+pub(crate) const _: () = assert!(MMIO_ALIAS_BASE >= 0xffff_0000_0000_0000_usize);
+pub(crate) const _: () = assert!(MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE <= PAGE_OFFSET);
+pub(crate) const _: () = assert!(ECAM_ALIAS_BASE + ECAM_ALIAS_SIZE <= PAGE_OFFSET);
 
 /// Translate a low identity device address (va == phys, below
 /// MMIO_ALIAS_SIZE) to its permanent kernel-half alias. ECAM-range
@@ -251,10 +256,6 @@ extern "C" {
     pub static mut KERNEL_MAP: KernelMapping;
 }
 
-/// Physical RAM base address (runtime from device tree)
-#[used]
-#[link_section = ".data"]
-pub static mut PHYS_RAM_BASE: usize = PHYS_MEMORY_BASE;
 
 // ==================== mmap Constant definitions ====================
 // Identical values to the riscv64 backend (generic ABI constants).
@@ -420,40 +421,21 @@ impl PhysAddr {
         self.0 >> PAGE_SHIFT
     }
 }
-
 /// Convert physical address to kernel virtual address (linear mapping)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MEMORY-LAYOUT-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
-    // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before
-    // rust_main; va_pa_offset is set once at boot and never modified.
-    let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
-    VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
+    crate::arch::arch_floor::aarch64::mm::memory_layout::phys_to_virt(phys)
 }
-
 /// Convert kernel virtual address to physical address (linear mapping)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MEMORY-LAYOUT-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
-    let addr = virt.0;
-
-    if is_linear_mapping(addr as usize) {
-        // SAFETY: see phys_to_virt.
-        let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
-        PhysAddr::new(addr - va_pa_offset as u64)
-    } else if (addr as usize) >= KERNEL_IMAGE_VA
-        && addr < (KERNEL_IMAGE_VA as u64 + 0x2000_000)
-    {
-        // Kernel image mapping: linked at KERNEL_IMAGE_VA, loaded at
-        // KERNEL_ENTRY. Static driver buffers (virtio queues in .bss)
-        // translate through here.
-        PhysAddr::new(addr - KERNEL_IMAGE_VA as u64 + KERNEL_ENTRY)
-    } else if addr >= KERNEL_ENTRY && addr < 0x8000_0000 {
-        // Legacy identity mapping (transition period)
-        PhysAddr::new(addr)
-    } else {
-        crate::pr_warn!(
-            "virt_to_phys: address {:#x} is outside the linear mapping",
-            addr
-        );
-        PhysAddr::new(addr)
-    }
+    crate::arch::arch_floor::aarch64::mm::memory_layout::virt_to_phys(virt)
 }
+
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+pub(crate) use crate::arch::arch_floor::aarch64::mm::memory_layout::PHYS_RAM_BASE;

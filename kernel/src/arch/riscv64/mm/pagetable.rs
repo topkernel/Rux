@@ -9,6 +9,11 @@
 //! - PageTable structure
 //! - Satp CSR handling for MMU control
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::arch::asm;
 
 use super::memory_layout::{PAGE_SIZE, PAGE_SHIFT, PAGE_OFFSET_MASK};
@@ -31,7 +36,7 @@ use super::memory_layout::{PAGE_SIZE, PAGE_SHIFT, PAGE_OFFSET_MASK};
 /// - [63:54] Reserved
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct PageTableEntry(u64);
+pub struct PageTableEntry(pub(crate) u64);
 
 impl PageTableEntry {
     /// V (Valid) - bit 0
@@ -281,14 +286,10 @@ impl Satp {
         self.mode() == Self::MODE_SV39
     }
 }
-
 /// Get current satp value
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-PAGETABLE-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_satp() -> Satp {
-    // SAFETY: Reading the satp CSR via csrr is always safe; it is a supervisor-mode register
-    // that is always accessible and the output register is a local binding with no aliasing concerns.
-    unsafe {
-        let satp: u64;
-        asm!("csrr {}, satp", out(reg) satp);
-        Satp(satp)
-    }
+    crate::arch::arch_floor::riscv64::mm::pagetable::get_satp()
 }

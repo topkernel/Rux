@@ -20,6 +20,11 @@
 //! __START_KERNEL_map on x86 Linux), which is what the boot stub's 2MB
 //! higher-half pages assume.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 // ==================== Page geometry ====================
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -199,24 +204,7 @@ pub struct KernelMapping {
     pub page_offset: usize,
 }
 
-/// Global kernel mapping structure (Rust-defined on x86; boot.S keeps the
-/// bootstrap tables, Rust builds the real ones)
-#[used]
-#[link_section = ".data"]
-pub static mut KERNEL_MAP: KernelMapping = KernelMapping {
-    virt_addr: KERNEL_LINK_ADDR,
-    virt_offset: 0,
-    phys_addr: 0x20_0000,
-    size: 0,
-    va_pa_offset: VA_PA_OFFSET,
-    va_kernel_pa_offset: 0xffff_ffff_8000_0000,
-    page_offset: PAGE_OFFSET,
-};
 
-/// Physical RAM base (multiboot may refine)
-#[used]
-#[link_section = ".data"]
-pub static mut PHYS_RAM_BASE: usize = PHYS_MEMORY_BASE;
 
 // ==================== mmap constants ====================
 
@@ -411,33 +399,12 @@ impl PhysAddr {
         self.0 >> PAGE_SHIFT
     }
 }
-
 /// Physical → virtual via the linear map
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MEMORY-LAYOUT-7): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
-    // Diagnostic: a bogus "phys" here (riscv-base leftovers, a VA passed by
-    // mistake, or wrapped pfn math) overflows the huge VA_PA_OFFSET silently
-    // in release — fail loud with the offending value.
-    match phys.0.checked_add(VA_PA_OFFSET as u64) {
-        Some(v) => VirtAddr(v),
-        None => {
-            let (ret1, ret2): (u64, u64);
-            // SAFETY: frame pointers are forced on; walk the rbp chain two
-            // frames up for this diagnostic only.
-            unsafe {
-                core::arch::asm!(
-                    "movq 8(%rbp), {}",
-                    "movq (%rbp), %rax",
-                    "movq 8(%rax), {}",
-                    out(reg) ret1,
-                    out(reg) ret2,
-                    out("rax") _,
-                    options(att_syntax)
-                );
-            }
-            crate::println!("phys_to_virt OVERFLOW: bogus phys={:#x} ret1={:#x} ret2={:#x}", phys.0, ret1, ret2);
-            panic!("phys_to_virt overflow");
-        }
-    }
+    crate::arch::arch_floor::x86_64::mm::memory_layout::phys_to_virt(phys)
 }
 
 /// Virtual → physical via the linear map (only valid in the linear region)
@@ -456,3 +423,8 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 pub const fn mmio_alias(low: u64) -> u64 {
     low
 }
+
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+pub(crate) use crate::arch::arch_floor::x86_64::mm::memory_layout::PHYS_RAM_BASE;
+pub(crate) use crate::arch::arch_floor::x86_64::mm::memory_layout::KERNEL_MAP;

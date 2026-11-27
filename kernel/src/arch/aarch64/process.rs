@@ -9,6 +9,11 @@
 //! process::thread_set_entry). The arch copy_thread here is kept for
 //! interface parity with the other backends.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use super::mm::memory_layout::VirtAddr;
 use super::pt_regs::{
     PtRegs, SPSR_DAIF, SPSR_M_EL0T, SPSR_M_MASK,
@@ -43,38 +48,12 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 // (arch copy_thread DELETED, round 6: interface-parity twin with zero
 // callers — the live fork path is the generic copy_thread in
 // process/fork.rs, writing the frame at Task::pt_regs())
-
 /// Clean up thread state (execve): clear FPSIMD image so the new image
-/// starts from a zero FP state (the riscv64 "FP residue" lesson), and
-/// reset the user TLS pointer — the new image's TLS is installed by its
-/// own libc startup, and until then a stale foreign base is worse than
-/// zero (a fault at ~(base + slot) reads as memory corruption).
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-PROCESS-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_thread() {
-    if let Some(current) = crate::sched::current() {
-        // We are the current task; no concurrent mutation of our thread
-        // state occurs.
-        {
-            let thread = current.thread_mut();
-            thread.fpu.fill(0);
-            thread.fpcr = 0;
-            thread.fpsr = 0;
-            thread.fs = 1; // INITIAL
-            // The USER image too: a fresh exec'd program must not observe
-            // the previous image's FP registers through the eret-tail
-            // restore (el0_exit_fpsimd_restore) or a signal frame.
-            thread.user_fpsimd = Default::default();
-            // TLS: saved image AND the live register (no context switch
-            // is guaranteed between here and the new image's first user
-            // instruction, so the register itself must be cleared too).
-            thread.tp_value = 0;
-        }
-        // SAFETY: writing our own user TLS register to 0; no side
-        // effects beyond the register value.
-        unsafe {
-            core::arch::asm!("msr tpidr_el0, xzr", options(nostack, preserves_flags));
-        }
-    }
+    crate::arch::arch_floor::aarch64::process::flush_thread()
 }
 
 /// Get current process's PtRegs
@@ -82,14 +61,12 @@ pub fn flush_thread() {
 pub fn current_pt_regs() -> *const PtRegs {
     crate::arch::trap::current_pt_regs()
 }
-
 /// Get task's PtRegs (fork child / stack-top frame)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-PROCESS-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn task_pt_regs(task: *const Task) -> *const PtRegs {
-    // SAFETY: caller provides a valid Task pointer; fork_pt_regs()
-    // returns the pointer stored by copy_thread, valid for the task
-    // lifetime.
-    unsafe { (*task).fork_pt_regs() }
+    crate::arch::arch_floor::aarch64::process::task_pt_regs(task)
 }
 
 /// Get user stack pointer

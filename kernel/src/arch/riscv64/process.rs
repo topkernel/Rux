@@ -12,6 +12,11 @@
 //! (the parent frame's epc is ALREADY past the ecall — trap.rs's
 //! handle_syscall advanced it — so no extra skip here).
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use crate::arch::pt_regs::{PtRegs, SR_PIE, SR_FS_INITIAL, SR_FS as SR_FS_MASK};
 use crate::arch::mm::VirtAddr;
 use crate::process::task::Task;
@@ -77,50 +82,12 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 // (arch copy_thread DELETED, round 6: dead code — the live fork path is
 // the generic copy_thread in process/fork.rs, writing the frame at
 // Task::pt_regs(); this reference twin had no callers since that landed)
-
 /// Clean up thread state
 ///
-/// Called during execve to clean up old thread state:
-/// - Clear FPU state (frm: round to nearest, fflags: cleared)
-/// - Clear vector extension state
-/// - Other architecture-specific cleanup
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-PROCESS-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn flush_thread() {
-    // Get current task (typed handle — we are the current task, so no
-    // concurrent mutation of thread state occurs).
-    if let Some(current) = crate::sched::current() {
-        {
-            let thread = current.thread_mut();
-
-            // Clear FPU state
-            thread.fpu.fill(0);
-            thread.fcsr = 0;
-            thread.fs = crate::arch::pt_regs::SR_FS_OFF as u32;
-
-            // Clear vector state: the new image starts from the
-            // initial vector state (vstate_valid=false keeps VS=Off;
-            // its first vector instruction lazily re-initializes).
-            thread.vstate_valid = false;
-            thread.vs = 0;
-            thread.vcsrs = [0; 4];
-            thread.vregs = [0; crate::arch::riscv64::vext::VREGS_BYTES];
-
-            // Drop the LIVE FPU as well (review ARCH, FP residue): without
-            // this, the next context switch-out would record the live FS
-            // (still Clean/Dirty from the old image) into thread.fs and
-            // resurrect the old image's FP registers after execve — leaking
-            // data across images. With the live FS=Off, the new image's
-            // first FP instruction traps and goes through the fpu_init
-            // path (zeroed registers).
-            // SAFETY: sstatus CSR RMW (FS/VS fields, register-only).
-            unsafe {
-                let sstatus: u64;
-                asm!("csrr {}, sstatus", out(reg) sstatus);
-                let new_sstatus = sstatus & !SR_FS_MASK & !crate::arch::riscv64::vext::SR_VS;
-                asm!("csrw sstatus, {}", in(reg) new_sstatus);
-            }
-        }
-    }
+    crate::arch::arch_floor::riscv64::process::flush_thread()
 }
 
 /// Get current process's PtRegs
@@ -130,26 +97,12 @@ pub fn flush_thread() {
 pub fn current_pt_regs() -> *const PtRegs {
     crate::arch::trap::current_pt_regs()
 }
-
 /// Get task's PtRegs
 ///
-/// # Arguments
-/// - `task`: Task structure pointer
-///
-/// # Returns
-/// Task's PtRegs pointer
-///
-/// # Note
-/// For running task, should use current_pt_regs()
-/// This function is mainly for getting forked child's PtRegs
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-PROCESS-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn task_pt_regs(task: *const Task) -> *const PtRegs {
-    // SAFETY: Caller must provide a valid Task pointer. fork_pt_regs() returns the
-    // PtRegs pointer stored by copy_thread(), which remains valid for the task lifetime.
-    unsafe {
-        // Task structure's fork_child field stores PtRegs pointer
-        (*task).fork_pt_regs()
-    }
+    crate::arch::arch_floor::riscv64::process::task_pt_regs(task)
 }
 
 /// Get user stack pointer

@@ -1374,6 +1374,14 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
 // pushed the image end to 0x81e01000, one page past the LAYOUT-7 heap base —
 // the heap moves to the 32MB window end (0x8220_0000), inside the existing
 // 34MB reserve (heap base - RAM base = 34MB, no gap). ~4MB headroom.
+// LAYOUT-7 GAP FIX: 0x81c0_0000 -> 0x81e0_0000 (the 28MB window end).
+// 2026-11-27 arch unsafe consolidation: the image grew one page past
+// 0x81e0_0000 (the overlap guard fired) — but the RUNTIME heap lives at
+// the 32MB window end 0x8220_0000 (memory_layout::HEAP_START /
+// buddy_allocator's KERNEL_HEAP_PHYS), so align this constant with the
+// real heap base instead of moving the heap (moving it leaves an
+// unclaimed gap that the vmemmap backing search grabs — the documented
+// vmemmap-gap corruption family; first block read then faults).
 const KERNEL_HEAP_PHYS: usize = 0x8220_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;

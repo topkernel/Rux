@@ -11,6 +11,11 @@
 //! x0 = device-tree pointer, at EL2 (boot.S drops to EL1 before the MMU
 //! comes on).
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 /// Device tree pointer (boot.S publishes the embedded QEMU-virt DTB
 /// blob's address; QEMU's ELF -kernel entry zeroes x0, so there is no
 /// firmware pointer to save — see docs/architecture/aarch64.md)
@@ -21,10 +26,10 @@ extern "C" {
 pub fn get_core_id() -> u64 {
     super::cpu_id()
 }
-
 /// Get device tree pointer (the embedded blob's linked address)
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-BOOT-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_dtb_pointer() -> u64 {
-    // SAFETY: dtb_pointer is a static extern set by boot.S before
-    // rust_main runs; reading it is safe once the kernel has started.
-    unsafe { dtb_pointer }
+    crate::arch::arch_floor::aarch64::boot::get_dtb_pointer()
 }

@@ -17,6 +17,11 @@
 //! in-flight sends (a second raise while a bit is already set is a
 //! no-op — the receiver drains both).
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -45,7 +50,7 @@ pub enum IpiType {
 }
 
 impl IpiType {
-    fn bit(self) -> u32 {
+    pub(crate) fn bit(self) -> u32 {
         1u32 << self as u8 as u32
     }
 }
@@ -55,28 +60,20 @@ impl IpiType {
 // ============================================================================
 
 /// Per-CPU IPI pending bitmap. Bit N corresponds to IpiType variant N.
-static IPI_PENDING: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub(crate) static IPI_PENDING: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 // ============================================================================
 // Handler table
 // ============================================================================
 
 /// IPI handler table (write-once during init, read-only thereafter).
-static mut IPI_HANDLERS: [Option<fn()>; NR_IPI_TYPES] = [None; NR_IPI_TYPES];
-
+pub(crate) static mut IPI_HANDLERS: [Option<fn()>; NR_IPI_TYPES] = [None; NR_IPI_TYPES];
 /// Register an IPI handler. Write-once — panics on double registration.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-6): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn request_ipi(ipi_type: IpiType, handler: fn()) {
-    let idx = ipi_type as u8 as usize;
-    // SAFETY: IPI_HANDLERS is a static mutable array written only
-    // during boot init (before SGIs can arrive: the trap dispatch path
-    // that calls handle_software_ipi only runs with DAIF unmasked,
-    // which single-threaded boot has not done yet at ipi::init time).
-    unsafe {
-        if IPI_HANDLERS[idx].is_some() {
-            panic!("IPI handler already registered for {:?}", ipi_type);
-        }
-        IPI_HANDLERS[idx] = Some(handler);
-    }
+    crate::arch::arch_floor::aarch64::ipi::request_ipi(ipi_type, handler)
 }
 
 // ============================================================================
@@ -131,36 +128,12 @@ pub fn flush_tlb_others() {
 // ============================================================================
 // Receive / dispatch
 // ============================================================================
-
 /// Handle the IPI SGI on this CPU (called from the trap IRQ dispatch).
 ///
-/// Snapshots and clears the pending bitmap, then dispatches each set
-/// bit LSB-first to its handler.
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-5): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn handle_software_ipi(_cpu: usize) {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= MAX_CPUS {
-        return;
-    }
-
-    let pending = IPI_PENDING[cpu].swap(0, Ordering::AcqRel);
-    if pending == 0 {
-        return;
-    }
-
-    let mut bits = pending;
-    while bits != 0 {
-        let idx = bits.trailing_zeros() as usize;
-        if idx < NR_IPI_TYPES {
-            // SAFETY: handler table is fully initialized in init()
-            // before SGIs can be delivered (write-once, see request_ipi).
-            unsafe {
-                if let Some(handler) = IPI_HANDLERS[idx] {
-                    handler();
-                }
-            }
-        }
-        bits &= bits - 1; // clear lowest set bit
-    }
+    crate::arch::arch_floor::aarch64::ipi::handle_software_ipi(_cpu)
 }
 
 // ============================================================================
@@ -193,147 +166,58 @@ impl CallSingleData {
 }
 
 /// Per-CPU callback queues; each target CPU drains its own.
-static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
+pub(crate) static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
     const INIT: ListHead = ListHead::new();
     [INIT; MAX_CPUS]
 };
 
 /// Per-CPU writer locks for the CSD queues.
-static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
-
-fn csd_init() {
-    for i in 0..MAX_CPUS {
-        // SAFETY: CSD_QUEUES is a static mutable array touched once
-        // during single-threaded boot init, before any IPI can arrive.
-        unsafe {
-            CSD_QUEUES[i].init();
-        }
-    }
+pub(crate) static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn csd_init() {
+    crate::arch::arch_floor::aarch64::ipi::csd_init()
 }
-
 /// Call a function on a remote CPU and wait for completion.
 ///
-/// Safe under BKL (the csd is Box-pinned; the wait yields — see the
-/// riscv64 twin's perf-gate note on spin-waiting with preemption off).
-pub fn smp_call_function(
-    target: usize,
-    func: fn(*mut core::ffi::c_void),
-    info: *mut core::ffi::c_void,
-) {
-    if target >= MAX_CPUS {
-        return;
-    }
-
-    let current_cpu = crate::arch::cpu_id() as usize;
-    if target == current_cpu {
-        func(info);
-        return;
-    }
-
-    let mut csd = Box::new(CallSingleData {
-        func,
-        info,
-        list: ListHead::new(),
-        done: AtomicBool::new(false),
-    });
-
-    {
-        let _lock = CSD_LOCKS[target].lock_irqsave();
-        // SAFETY: we hold CSD_LOCKS[target], serializing all mutations
-        // of CSD_QUEUES[target]; csd is Box-pinned and stays alive until
-        // done is observed.
-        unsafe {
-            csd.list.init();
-            if CSD_QUEUES[target].is_empty() {
-                CSD_QUEUES[target].next = &mut csd.list as *mut _;
-                CSD_QUEUES[target].prev = &mut csd.list as *mut _;
-                csd.list.next = &mut CSD_QUEUES[target] as *mut _;
-                csd.list.prev = &mut CSD_QUEUES[target] as *mut _;
-            } else {
-                let tail = CSD_QUEUES[target].prev;
-                (*tail).next = &mut csd.list as *mut _;
-                csd.list.prev = tail;
-                csd.list.next = &mut CSD_QUEUES[target] as *mut _;
-                CSD_QUEUES[target].prev = &mut csd.list as *mut _;
-            }
-        }
-    }
-
-    send_ipi_type(target, IpiType::CallFunction);
-
-    while !csd.done.load(Ordering::Acquire) {
-        crate::sched::cond_resched();
-        core::hint::spin_loop();
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-3): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn smp_call_function( target: usize, func: fn(*mut core::ffi::c_void), info: *mut core::ffi::c_void, ) {
+    crate::arch::arch_floor::aarch64::ipi::smp_call_function(target, func, info)
 }
-
 /// Drain this CPU's CSD queue (CallFunction IPI handler).
-fn csd_flush_queue() {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= MAX_CPUS {
-        return;
-    }
-
-    let mut head: *mut ListHead;
-    {
-        let _lock = CSD_LOCKS[cpu].lock_irqsave();
-        // SAFETY: under CSD_LOCKS[cpu]; detaching and re-initializing
-        // the queue head is exclusive to the lock holder.
-        unsafe {
-            if CSD_QUEUES[cpu].is_empty() {
-                return;
-            }
-            head = CSD_QUEUES[cpu].next;
-            CSD_QUEUES[cpu].init();
-        }
-    }
-
-    // SAFETY: queue_ptr is a stable static address; the detached list
-    // is exclusively ours until completion; senders spin on done until
-    // after we store true, so no Box is freed under us.
-    let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
-    let mut node = head;
-    while node != queue_ptr {
-        unsafe {
-            let csd = node as *mut CallSingleData;
-            let next = (*node).next;
-            let f = (*csd).func;
-            let arg = (*csd).info;
-            f(arg);
-            (*csd).done.store(true, Ordering::Release);
-            node = next;
-        }
-    }
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-2): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn csd_flush_queue() {
+    crate::arch::arch_floor::aarch64::ipi::csd_flush_queue()
 }
 
 // ============================================================================
 // Handlers
 // ============================================================================
 
-fn ipi_reschedule_handler() {
+pub(crate) fn ipi_reschedule_handler() {
     // Only set the flag — schedule() from hard-IRQ context could
     // deadlock on the GRQ lock with IRQs off (riscv64 twin note). The
     // trap-return / cond_resched points pick it up.
     crate::sched::set_need_resched();
 }
 
-fn ipi_call_function_handler() {
+pub(crate) fn ipi_call_function_handler() {
     csd_flush_queue();
 }
-
-fn ipi_stop_handler() {
-    loop {
-        // SAFETY: WFI halts the core until an interrupt; this CPU was
-        // told to stop, so parking forever is the intended behavior.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn ipi_stop_handler() {
+    crate::arch::arch_floor::aarch64::ipi::ipi_stop_handler()
 }
 
-fn ipi_wakeup_handler() {
+pub(crate) fn ipi_wakeup_handler() {
     // WFI exit is the wake itself; nothing further to run.
 }
 
-fn ipi_tlb_flush_handler() {
+pub(crate) fn ipi_tlb_flush_handler() {
     // Full non-global invalidation covers every queued request (the
     // pending-bit coalescing in send_ipi_type relies on this).
     crate::arch::cpu::local_flush_tlb_all();

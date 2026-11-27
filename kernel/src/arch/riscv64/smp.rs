@@ -13,6 +13,11 @@
 //! 5. Secondary harts enter secondary_start (boot.S), set up MMU, jump to
 //!    secondary_cpu_entry()
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use crate::println;
 use crate::config::MAX_CPUS;
 use core::arch::asm;
@@ -22,17 +27,17 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// SMP boot stack size - from config
 pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
 
-static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub(crate) static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Actual boot hart ID, saved by init(). QEMU/OpenSBI may pick any hart.
-static BOOT_HART_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+pub(crate) static BOOT_HART_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Get the boot hart ID (the hart that ran rust_main).
 pub fn boot_hart_id() -> usize {
     BOOT_HART_ID.load(Ordering::Acquire) as usize
 }
 
-fn mark_cpu_started(hart_id: usize) {
+pub(crate) fn mark_cpu_started(hart_id: usize) {
     if hart_id < MAX_CPUS {
         CPU_STARTED[hart_id].store(1, Ordering::Release);
     }
@@ -47,54 +52,12 @@ fn mark_cpu_started(hart_id: usize) {
 pub fn cpu_started(cpu: usize) -> bool {
     cpu < MAX_CPUS && CPU_STARTED[cpu].load(Ordering::Acquire) == 1
 }
-
 /// Get current CPU's hardware thread ID
 ///
-/// Design:
-/// - Early boot phase: tp = hart_id (small value)
-/// - After scheduler runs: tp = task_struct pointer, hart_id stored in task_struct.ti_cpu
-///
-/// Determine current mode by checking tp value range:
-/// - If tp < 0x1000, consider it as hart_id (early boot)
-/// - Otherwise consider it as task_struct pointer
-///
-/// Note:
-/// - Cannot use mhartid CSR (M-mode only, S-mode access triggers exception)
-/// - Must ensure trap.S handles tp register correctly
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-19): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn cpu_id() -> usize {
-    // IRREDUCIBLE F-ROW (F-TP-R1): tp (the thread pointer register) is
-    // outside Rust's memory model — reference kernel reads it in C via
-    // arch/riscv's current_thread_info()->cpu (same tp-relative load).
-    // The nomem/nostack/pure asm guarantees no side effects; the
-    // ti_cpu dereference is the one raw edge below.
-    let tp_value: u64 = unsafe {
-        let v;
-        asm!("mv {}, tp", out(reg) v, options(nomem, nostack, pure));
-        v
-    };
-
-    // Check if tp is a small value (hart_id during early boot phase)
-    // Valid task_struct pointers should be in kernel address space (>= 0x80000000)
-    if tp_value < 0x1000 {
-        // Early boot phase, tp directly stores hart_id
-        tp_value as usize
-    } else {
-        // tp points to task_struct, get hart_id from ti_cpu field
-        // SAFETY: tp was set by trap.S to a live Task (the switch
-        // protocol); the TI_CPU offset read is a relaxed atomic load.
-        let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
-        let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-        let raw = unsafe { (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) };
-            // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
-            // ti_cpu is i32; -1 (initial value) would sign-extend to
-            // usize::MAX which corrupts cpu_state indexing.
-        if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
-            0
-        } else {
-            raw as usize
-        }
-    }
+    crate::arch::arch_floor::riscv64::smp::cpu_id()
 }
 
 #[inline]
@@ -125,21 +88,18 @@ extern "C" {
 
 /// Per-CPU boot stacks for secondary CPUs.
 #[repr(align(16))]
-struct BootStack([u8; STACK_SIZE]);
+pub(crate) struct BootStack(pub(crate) [u8; STACK_SIZE]);
 
-static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] =
+pub(crate) static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] =
     [const { BootStack([0u8; STACK_SIZE]) }; MAX_CPUS];
 
 /// VA_OFFSET for converting virtual addresses to physical.
-const VA_OFFSET: usize = 0xffffffff80000000usize - 0x80200000usize;
+pub(crate) const VA_OFFSET: usize = 0xffffffff80000000usize - 0x80200000usize;
 
-/// Saved satp from boot hart (permanent page table for secondaries to use)
-#[no_mangle]
-static BOOT_HART_SATP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Flag set by boot CPU after ALL initialization is complete.
 /// Secondary CPUs spin-wait on this flag before doing anything.
-static BOOT_COMPLETE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub(crate) static BOOT_COMPLETE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Called by boot CPU just before entering cpu_idle_loop.
 /// Signals secondary CPUs that they may now participate in scheduling.
@@ -151,177 +111,14 @@ pub fn signal_boot_complete() {
 pub fn is_boot_complete() -> bool {
     BOOT_COMPLETE.load(core::sync::atomic::Ordering::Acquire)
 }
-
 /// Start secondary CPUs via SBI HSM hart_start.
-/// Must be called AFTER console + scheduler initialization.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-17): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn start_secondaries() {
-    // Save current satp (permanent page table) for secondaries
-    let current_satp: u64;
-    // SAFETY: Reading the satp CSR is a simple register read with no side effects.
-    unsafe {
-        core::arch::asm!("csrr {}, satp", out(reg) current_satp, options(nomem, nostack));
-    }
-    BOOT_HART_SATP.store(current_satp, Ordering::Release);
-
-    // SAFETY: secondary_start is an extern "C" function defined in boot.S. Subtracting
-    // VA_OFFSET converts its kernel virtual address to the physical address expected by
-    // SBI HSM hart_start, which jumps to this physical address in M-mode.
-    let start_addr = unsafe { secondary_start as usize - VA_OFFSET };
-    let my_hart = cpu_id();
-
-    // Number of CPUs we expect to come online: the boot hart plus every hart
-    // whose SBI hart_start succeeded. QEMU may expose fewer harts than the
-    // compile-time MAX_CPUS (-smp 2 with MAX_CPUS=4): hart_start then fails
-    // with SBI_INVALID_PARAM and that CPU can NEVER come online. The old wait
-    // loop compared against MAX_CPUS unconditionally, so every -smp<MAX_CPUS
-    // boot spun the full 50M-iteration timeout (~a minute under TCG) with all
-    // secondaries parked in the BOOT_COMPLETE wfi — the "boot-time hang".
-    let mut expected_cpus = 1usize; // the boot hart itself
-    let mut failed_harts = 0usize;
-
-    for hart in 0..MAX_CPUS {
-        if hart == my_hart { continue; }
-
-        // Allocate stack for this hart (virtual address, convert to PA)
-        let base = SECONDARY_BOOT_STACKS[hart].0.as_ptr() as usize;
-        let stack_top_pa = (base + STACK_SIZE) - VA_OFFSET;
-
-        let ret = sbi_rt::hart_start(hart, start_addr, stack_top_pa);
-        if ret.error != 0 {
-            // SBI_INVALID_PARAM (-3) is the expected answer for a hart the
-            // platform does not have (-smp N with N < MAX_CPUS) — not an
-            // error, folded into the online count below. Anything else is a
-            // real failure worth a row.
-            if ret.error != (-3isize) as usize {
-                failed_harts += 1;
-                println!("smp: hart {} start failed (error={})", hart, ret.error);
-            }
-        } else {
-            expected_cpus += 1;
-        }
-    }
-
-    // Wait for secondaries to come online (bounded: a hart that started but
-    // never reaches secondary_cpu_entry would otherwise wedge boot forever).
-    for _ in 0..50_000_000 {
-        if num_started_cpus() >= expected_cpus {
-            break;
-        }
-        core::hint::spin_loop();
-    }
-
-    let cpu_count = num_started_cpus();
-    // Post-bring-up PLIC restore: OpenSBI's per-secondary warm init
-    // clears each secondary's S-mode PLIC context (threshold=max,
-    // enables zero) as it wakes — clobbering the kernel's early-init
-    // delivery state. Re-establish thresholds and re-arm every
-    // registered IRQ now that the bringup window is closed (reference
-    // parity: Linux's sifive-plic cpu-online notifier).
-    crate::drivers::intc::plic::after_smp_online_restore();
-    // Post-bring-up affinity refresh: every task created before this point
-    // (boot init + early kthreads) gets its default mask widened to the
-    // online set (see Task::refresh_default_affinity_to_online).
-    crate::process::task::Task::refresh_default_affinity_to_online();
-    if failed_harts == 0 {
-        crate::print_status(
-            "smp",
-            &alloc::format!("{} CPU{} online (boot hart {})",
-                            cpu_count, if cpu_count > 1 { "s" } else { "" }, my_hart),
-            cpu_count == expected_cpus,
-        );
-    } else {
-        crate::print_status(
-            "smp",
-            &alloc::format!("{} CPUs online, {} hart-start failure(s)", cpu_count, failed_harts),
-            false,
-        );
-    }
+    crate::arch::arch_floor::riscv64::smp::start_secondaries()
 }
 
-/// Rust entry point for secondary CPUs.
-/// Called from assembly `secondary_start` in boot.S after MMU is enabled.
-/// a0 = hartid
-#[no_mangle]
-pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
-    // Mark this CPU as started so the boot CPU's start_secondaries()
-    // spin-wait can detect us and proceed.
-    mark_cpu_started(hart_id);
-
-    // Set up trap handling (stvec). Timer interrupts stay OFF until
-    // init_secondary() has published this CPU's PER_CPU slot — see the
-    // boot-complete wait below for why.
-    // Following the Linux model, tp was set to the idle task pointer by
-    // boot.S before entering this function.  This means current() is valid
-    // and the trap handler can safely access the task_struct.
-    crate::arch::trap::init();
-
-    // Per-hart counter access for U mode (see arch::init on the BSP —
-    // scounteren must be programmed on every hart for the vDSO's
-    // rdtime interpolation to be legal in user space).
-    // SAFETY: plain S-mode CSR write, no preconditions.
-    unsafe {
-        let all: u64 = 0xffff;
-        core::arch::asm!("csrw scounteren, {}", in(reg) all, options(nomem, nostack));
-    }
-
-    // Wait for boot CPU to finish ALL single-CPU initialization.
-    //
-    // R87 (smp8 panic lane, the secondary pre-init scheduling window):
-    // this wait used to run with the timer ALREADY ENABLED and wfi.
-    // Every tick during the whole BSP tail (fs mounts, drivers, init
-    // spawn — the tail scales with -m, which is why the failure matrix
-    // was memory-dependent: 8G boots sit here for seconds of wall time)
-    // could exit through irq_exit_maybe_preempt_kernel into
-    // __schedule() on this hart while PER_CPU[hart] was still
-    // {current=0, idle=0} (only the boot CPU's slot is published by
-    // sched::init; init_secondary below is the writer for this one).
-    // The zeroed slot forced the PERCPU-SCRIBBLE-HEALED /
-    // R74-SLOTLESS-TP heal chain, the hart left its boot stack inside
-    // secondary_cpu_entry and executed enqueued tasks, and the slot
-    // fights between this half-onlined hart and the BSP's bookkeeping
-    // (R56 heals, steals, ENQ-CLAIMED/STALE-ONCPU-RESET) eventually
-    // booked the wrong prev on a context switch — a mixed-context save
-    // (one task's registers written into another's thread record),
-    // which detonated later as a resume with tp from one task, sp from
-    // a second and ra pointing into a third task's kernel stack
-    // (KERNPANIC scause=2 illegal instruction, sepc=0xffffffd6xxxxxxx
-    // stack address, "Attempted to kill the idle task"). Linux parity:
-    // a secondary hart never takes interrupts until its per-CPU state
-    // is fully initialized and it has entered the idle loop.
-    //
-    // wfi cannot be used to wait with sie=0: QEMU's wfi only wakes on
-    // an ENABLED pending interrupt, so the hart would sleep through the
-    // boot_complete flag forever. Spin instead — the wait is bounded by
-    // the BSP's init tail and secondaries have nothing useful to do
-    // until then anyway.
-    while !is_boot_complete() {
-        core::hint::spin_loop();
-    }
-
-    // Boot CPU has finished init — safe to call kmalloc now.
-    crate::sched::init_secondary(hart_id);
-
-    // Now that PER_CPU[hart] is published, this hart may take
-    // interrupts and enter the scheduler (R87: enabling the timer
-    // before init_secondary was the pre-init scheduling window).
-    crate::arch::trap::enable_timer_interrupt();
-
-    // Enable external interrupts (sie.SEIE) for this hart
-    crate::arch::trap::enable_external_interrupt();
-
-    // Enable software interrupts (sie.SSIE) for this hart — the IPI
-    // path. boot.S zeroes sie on EVERY hart and ipi::init() only sets
-    // SSIE on the boot hart; without this the secondary hart ran with
-    // all IPIs masked (resched/TLB-flush/call-function sat pending
-    // forever; wakes resolved only at the next 10ms timer tick — the
-    // tick-quantized futex wake->run the perf-sched lane measured at
-    // 9118us med where a same-hart wake takes 24us). See
-    // ipi::per_hart_enable_ssoftware for the full evidence.
-    crate::arch::ipi::per_hart_enable_ssoftware();
-
-    // Enter scheduler idle loop (timer interrupts enabled inside the loop)
-    crate::sched::cpu_idle_loop();
-}
 
 pub fn num_started_cpus() -> usize {
     let mut count = 0;
@@ -340,7 +137,7 @@ pub const INTR_STACK_SIZE: usize = 16384;
 
 /// Aligned stack wrapper to ensure 16-byte alignment
 #[repr(C, align(16))]
-struct AlignedStack([u8; INTR_STACK_SIZE]);
+pub(crate) struct AlignedStack(pub(crate) [u8; INTR_STACK_SIZE]);
 
 impl AlignedStack {
     /// Get a pointer to the underlying stack buffer
@@ -349,46 +146,23 @@ impl AlignedStack {
     }
 }
 
-/// Per-CPU interrupt stacks
-/// Each CPU has its own dedicated interrupt stack to avoid races
-/// Uses AlignedStack wrapper to ensure 16-byte alignment for proper PtRegs access
-#[link_section = ".bss"]
-#[used]
-pub static mut PER_CPU_INTR_STACKS: [AlignedStack; MAX_CPUS] = [const { AlignedStack([0u8; INTR_STACK_SIZE]) }; MAX_CPUS];
-
 /// Initialize per-CPU interrupt stack base pointer for assembly code
-/// This must be called early in boot before any traps occur
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-14): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init_per_cpu_intr_stacks() {
-    // SAFETY: __per_cpu_intr_stacks_base is a mutable global defined in boot.S.
-    // Only called once during early boot before any traps occur, so no races.
-    unsafe {
-        // Set the assembly variable to point to our stack array
-        extern "C" {
-            static mut __per_cpu_intr_stacks_base: usize;
-        }
-        __per_cpu_intr_stacks_base = PER_CPU_INTR_STACKS.as_ptr() as usize;
-    }
+    crate::arch::arch_floor::riscv64::smp::init_per_cpu_intr_stacks()
 }
 
-/// Get current CPU's interrupt stack top address
-#[no_mangle]
-#[inline(never)]
-pub extern "C" fn get_per_cpu_intr_stack_top() -> usize {
-    let cpu = cpu_id();
-    if cpu < MAX_CPUS {
-        // SAFETY: PER_CPU_INTR_STACKS is a static array of size MAX_CPUS, indexed by
-        // a bounds-checked cpu_id. Each stack is INTR_STACK_SIZE bytes; adding that
-        // gives the stack top. Only the owning CPU accesses its own stack.
-        unsafe {
-            let stack_base = PER_CPU_INTR_STACKS[cpu].as_ptr() as usize;
-            stack_base + INTR_STACK_SIZE
-        }
-    } else {
-        // Fallback to CPU 0 stack if CPU ID is invalid
-        // SAFETY: PER_CPU_INTR_STACKS[0] always exists (MAX_CPUS >= 1).
-        unsafe {
-            let stack_base = PER_CPU_INTR_STACKS[0].as_ptr() as usize;
-            stack_base + INTR_STACK_SIZE
-        }
-    }
-}
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+// INV-ARCH note: get_per_cpu_intr_stack_top moved to arch::arch_floor::riscv64::smp (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::riscv64::smp::get_per_cpu_intr_stack_top;
+pub(crate) use crate::arch::arch_floor::riscv64::smp::PER_CPU_INTR_STACKS;
+// INV-ARCH note: secondary_cpu_entry moved to arch::arch_floor::riscv64::smp (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::riscv64::smp::secondary_cpu_entry;
+pub(crate) use crate::arch::arch_floor::riscv64::smp::BOOT_HART_SATP;

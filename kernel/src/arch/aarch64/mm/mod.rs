@@ -16,7 +16,7 @@ pub use pagetable::*;
 // MMU initialization and page mapping
 pub mod mmu_init;
 
-pub mod unsafe_edges;
+pub use crate::arch::arch_floor::aarch64::mm as unsafe_edges;
 pub use unsafe_edges::*;
 pub use mmu_init::*;
 

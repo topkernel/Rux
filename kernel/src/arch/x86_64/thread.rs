@@ -13,6 +13,11 @@
 //! and SIGILLs the process (b143: hdcd and processdump died this way
 //! in a tight respawn loop; the #UD bytes were vmovaps/vmovups VEX).
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 /// Callee-saved GPRs for __switch_to
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,136 +122,8 @@ impl ThreadStruct {
     /// struct's own typed array).
     // IRREDUCIBLE F-ROW (F-XFPU-2): xsaveopt64/xsave64/fxsave64 — same
     // class as F-XFPU-1 (kernel fpu/*.S save paths).
-    pub fn fpu_save_for_switch(&mut self) {
-        // Two encodings for one reason: XSAVE/XRSTOR #UD while
-        // CR4.OSXSAVE is clear, and the very first task switches of
-        // boot run before fpu_init has enabled it on that CPU. Until
-        // XSAVE_READY flips, use the legacy FXSAVE pair — XCR0 is
-        // clear in that window so there is no extended state to lose.
-        if !xsave_ready() {
-            // SAFETY: fxsave64 writes 512 bytes at the given address;
-            // the FxsaveArea field is 64-byte aligned.
-            unsafe {
-                core::arch::asm!(
-                    "fxsave64 ({ptr})",
-                    ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
-                    options(att_syntax, nostack, preserves_flags),
-                );
-            }
-        } else {
-            // closegap: xsaveopt64 when the CPU offers it — identical
-            // state semantics to xsave64 with the skip-untouched-write
-            // optimization (see XSAVEOPT_READY). Fall back to plain
-            // xsave64 on parts without leaf-0xD.1 support.
-            // SAFETY: writes at most the enabled components into the
-            // 4096-byte area.
-            if xsaveopt_ready() {
-                unsafe {
-                    core::arch::asm!(
-                        "xsaveopt64 ({ptr})",
-                        ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
-                        in("eax") 0xFFFF_FFFFu32,
-                        in("edx") 0xFFFF_FFFFu32,
-                        options(att_syntax, nostack, preserves_flags),
-                    );
-                }
-            } else {
-                unsafe {
-                    core::arch::asm!(
-                        "xsave64 ({ptr})",
-                        ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
-                        in("eax") 0xFFFF_FFFFu32,
-                        in("edx") 0xFFFF_FFFFu32,
-                        options(att_syntax, nostack, preserves_flags),
-                    );
-                }
-            }
-        }
-        self.fpu_valid = true;
-    }
 
-    /// Restore FPU state after a switch-in (xrstor64).
-    ///
-    /// A task with no saved image (never ran FP since fork/exec) gets the
-    /// deterministic ABI initial state instead of the previous task's
-    /// registers — cross-task numeric pollution plus information leakage
-    /// otherwise (review ARCH-H1 parity with the riscv64 twin).  fninit
-    /// fixes the x87 side but NOT MXCSR, so the fallback must also load
-    /// the default MXCSR: the live register still belongs to whichever
-    /// task ran last on this CPU. vzeroall wipes the YMM half for the
-    /// same reason.
-    ///
-    /// # Safety
-    /// Must run in the task's own context on the local CPU.
-    pub unsafe fn restore_fpu(&mut self) {
-        // SAFETY: xrstor64 reads the image written by fpu_save_for_switch
-        // (or built by mark_fpu_clean — XSTATE_BV=0 initializes every
-        // extended component); the fallback below establishes the ABI
-        // initial state when no image exists.
-        unsafe {
-            if self.fpu_valid {
-                if xsave_ready() {
-                    // SAFETY: xrstor64 reads the image written by
-                    // fpu_save_for_switch (or built by mark_fpu_clean —
-                    // XSTATE_BV=0 initializes every extended component).
-                    unsafe {
-                        core::arch::asm!(
-                            "xrstor64 ({ptr})",
-                            ptr = in(reg) self.fpu.bytes.as_ptr(),
-                            in("eax") 0xFFFF_FFFFu32,
-                            in("edx") 0xFFFF_FFFFu32,
-                            options(att_syntax, nostack, preserves_flags),
-                        );
-                    }
-                } else {
-                    // SAFETY: legacy pair for the pre-fpu_init window.
-                    unsafe {
-                        core::arch::asm!(
-                            "fxrstor64 ({ptr})",
-                            ptr = in(reg) self.fpu.bytes.as_ptr(),
-                            options(att_syntax, nostack, preserves_flags),
-                        );
-                    }
-                }
-            } else {
-                // SAFETY: register-level init (no memory operands except
-                // the constant MXCSR load).
-                unsafe {
-                core::arch::asm!(
-                    "fninit",
-                    "ldmxcsr ({mxcsr})",
-                    "pxor %xmm0, %xmm0",
-                    "pxor %xmm1, %xmm1",
-                    "pxor %xmm2, %xmm2",
-                    "pxor %xmm3, %xmm3",
-                    "pxor %xmm4, %xmm4",
-                    "pxor %xmm5, %xmm5",
-                    "pxor %xmm6, %xmm6",
-                    "pxor %xmm7, %xmm7",
-                    "pxor %xmm8, %xmm8",
-                    "pxor %xmm9, %xmm9",
-                    "pxor %xmm10, %xmm10",
-                    "pxor %xmm11, %xmm11",
-                    "pxor %xmm12, %xmm12",
-                    "pxor %xmm13, %xmm13",
-                    "pxor %xmm14, %xmm14",
-                    "pxor %xmm15, %xmm15",
-                    mxcsr = in(reg) &MXCSR_DEFAULT,
-                    options(att_syntax, nostack),
-                );
-                }
-                // Wipe the YMM half too — but only where XCR0 actually
-                // enables AVX: vzeroall on a part (or XCR0 mask) without
-                // it would itself #UD.
-                if avx_enabled() {
-                    // SAFETY: vzeroall only writes YMM registers.
-                    unsafe {
-                        core::arch::asm!("vzeroall", options(nostack, preserves_flags));
-                    }
-                }
-            }
-        }
-    }
+
 
     /// Mark the FPU area as a valid ABI-initial image (fork/exec parity
     /// with riscv64's SR_FS_CLEAN semantics).  Must NOT be a plain zeroed
@@ -273,191 +150,36 @@ impl Default for ThreadStruct {
         Self::new()
     }
 }
-
 /// Enable FPU at boot: CR4.OSFXSR + OSXMMEEXCPT + CR4.OSXSAVE set,
-/// CR0.EM cleared and CR0.MP set (the classic DOS-era emulation bits),
-/// XCR0 enabled for the user state components present (x87, SSE, AVX,
-/// OPMASK, ZMM_Hi256, Hi16_ZMM — never MPX/PT/PKRU/AMX), then a clean
-/// x87 initial state.
 ///
-/// OSXSAVE + XCR0[AVX] MUST be on: CPUID advertises AVX to userspace
-/// on every modern host, and OH's musl uses VEX-encoded instructions
-/// without a glibc-style OSXSAVE gate — with XCR0[AVX] clear every
-/// vmovaps/vmovups #UDs and SIGILLs the process (b143: hdcd and
-/// processdump died in a respawn loop this way).
-///
-/// # Safety
-/// Must be called once per CPU before any FP instruction.
+/// Collected into `arch::arch_floor` (INV-ARCH-THREAD-15): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn fpu_init() {
-    // Per-asm audited blocks: register RMWs and CPUID-gated enablement
-    // (no memory effects; the xsave area is untouched here).
-    // SAFETY: CR4 read (register-only).
-    let mut cr4: u64 = unsafe {
-        let v;
-        core::arch::asm!("mov {}, cr4", out(reg) v, options(nomem, nostack));
-        v
-    };
-    {
-        cr4 |= (1 << 9) | (1 << 10); // OSFXSR | OSXMMEEXCPT
-        // XSAVE enablement. Guard on the CAPABILITY bit only: CPUID.1:ECX
-        // bit 27 (OSXSAVE) MIRRORS CR4.OSXSAVE and reads 0 until the OS
-        // sets it — checking both bits before writing CR4 made the gate
-        // always-fail and silently skipped AVX enablement (caught by the
-        // XCR0 print: "CPU reports no OSXSAVE" with ecx=0xf7f83203 — bit
-        // 26 set, bit 27 clear). The #NM handler re-runs this on ancient
-        // parts without XSAVE.
-        let (_, _, feat_ecx, _) = crate::arch::x86_64::cpu::cpuid(1, 0);
-        let xsave_capable = feat_ecx & (1 << 26) != 0;
-        if xsave_capable {
-            cr4 |= 1 << 18; // OSXSAVE
-        }
-        // SAFETY: CR4 write (feature-bit RMW).
-        unsafe { core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags)) };
-
-        // FSGSBASE (CPUID-gated inside): per-CPU CR4 bit the context
-        // switch gates on — fpu_init runs once per CPU (BSP + every AP),
-        // exactly the arming discipline. Runs AFTER the CR4 write above
-        // (its own RMW read the pre-write value; a pre-write call here
-        // would be clobbered by the store).
-        crate::arch::x86_64::cpu::enable_fsgsbase();
-        // SMEP (CPUID-gated inside, R12): same per-CPU arming discipline —
-        // the fpu_init CR4 write above is an RMW so the bit sticks.
-        crate::arch::x86_64::cpu::enable_smep();
-
-        // SAFETY: CR0 read (register-only).
-        let mut cr0: u64 = unsafe {
-            let v;
-            core::arch::asm!("mov {}, cr0", out(reg) v, options(nomem, nostack));
-            v
-        };
-        cr0 &= !(1 << 2); // clear EM (no emulation)
-        cr0 |= 1 << 1; // set MP (monitor coprocessor)
-        // SAFETY: CR0 write (feature-bit RMW).
-        unsafe { core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags)) };
-
-        // XCR0 = every user component the CPU enumerates in leaf 0xD
-        // ANDed with the imm8-reachable set {x87, SSE, AVX, OPMASK,
-        // ZMM_Hi256, Hi16_ZMM}. Setting a bit the CPU does not support
-        // is #GP, so the CPUID mask (leaf 0xD EAX) gates each one.
-        if xsave_capable {
-            let (d_eax, _, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 0);
-            // closegap: XSAVEOPT detection (CPUID.0xD.1:EAX bit 0) — the
-            // optimized save skips writing components unmodified since the
-            // last xrstor, so FPU-less ping-pong switch-outs save nothing
-            // (the plain xsave64 the switch path used writes the full
-            // enabled set every time — 78-238 ns per switch, cctx probe).
-            let (d1_eax, _, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 1);
-            if d1_eax & 1 != 0 {
-                XSAVEOPT_READY.store(true, core::sync::atomic::Ordering::Release);
-            }
-            let mut mask: u64 = 0x3; // x87 | SSE — always
-            if d_eax & (1 << 2) != 0 {
-                mask |= 1 << 2; // YMM (AVX)
-                AVX_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
-            }
-            if d_eax & (1 << 5) != 0 {
-                mask |= 1 << 5; // OPMASK
-            }
-            if d_eax & (1 << 6) != 0 {
-                mask |= 1 << 6; // ZMM_Hi256
-            }
-            if d_eax & (1 << 7) != 0 {
-                mask |= 1 << 7; // Hi16_ZMM
-            }
-            // SAFETY: xsetbv with ECX=0 programs XCR0; EDX:EAX holds the
-            // mask. Only the bits CPUID reported are set.
-            unsafe {
-                core::arch::asm!(
-                    "xsetbv",
-                    in("eax") mask as u32,
-                    in("edx") (mask >> 32) as u32,
-                    in("ecx") 0u32,
-                    options(nostack, preserves_flags),
-                );
-            }
-            // Only now may the switch paths use the xsave/xrstor pair
-            // (they #UD while OSXSAVE is clear).
-            XSAVE_READY.store(true, core::sync::atomic::Ordering::Release);
-            // User XSAVE area size for the components just enabled —
-            // CPUID.0xD.0:EBX reports it as a function of the LIVE XCR0,
-            // so this MUST be queried after the xsetbv above. This is
-            // the size Linux's fpu__alloc_mathframe reserves below the
-            // ucontext of every rt_sigframe (the fpstate area), and
-            // signal.rs uses it for the same reservation (huks-wedge
-            // Edge-B: without it a handler's 936-byte read at
-            // rsp+0x478 walked off the sigaltstack top and SEGV'd where
-            // the reference kernel's reserve absorbs it).
-            let (_, d_ebx, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 0);
-            USER_XSTATE_SIZE.store(d_ebx, core::sync::atomic::Ordering::Release);
-            // b143 verification: the AVX #UD family (hdcd/processdump
-            // vmovaps) only dies when XCR0[AVX] failed to land — print
-            // the live register so a regression is one grep away.
-            let (lo, hi): (u32, u32);
-            // SAFETY: xgetbv reads XCR0 (OSXSAVE is set above).
-            unsafe {
-                core::arch::asm!(
-                    "xgetbv",
-                    lateout("eax") lo,
-                    lateout("edx") hi,
-                    in("ecx") 0u32,
-                    options(nostack, preserves_flags),
-                );
-            }
-            crate::pr_info!(
-                "fpu: OSXSAVE+XCR0={:#x}{} (cpu feature mask {:#x}, xsave area {:#x} = rt_sigframe fpstate reserve)",
-                ((hi as u64) << 32) | lo as u64,
-                if (((hi as u64) << 32) | lo as u64) & 4 != 0 {
-                    " AVX"
-                } else {
-                    " NO-AVX"
-                },
-                mask,
-                d_ebx,
-            );
-        } else {
-            crate::pr_warn!(
-                "fpu: CPU reports no OSXSAVE (ecx={:#x}) — AVX stays disabled",
-                feat_ecx
-            );
-        }
-
-        // fninit alone leaves MXCSR at its reset-unknown value; load the
-        // ABI default explicitly so the boot CPU starts fully masked too.
-        // (ldmxcsr is m32-only — no register form.)
-        // SAFETY: register init + constant MXCSR load.
-        unsafe {
-            core::arch::asm!(
-                "fninit",
-                "ldmxcsr [{mxcsr}]",
-                mxcsr = in(reg) &MXCSR_DEFAULT,
-                options(nostack, preserves_flags),
-            );
-        }
-    }
+    crate::arch::arch_floor::x86_64::thread::fpu_init()
 }
 
 /// ABI-default MXCSR (all exceptions masked, round-to-nearest); kept in
 /// .rodata so ldmxcsr has an m32 operand without touching the stack.
-static MXCSR_DEFAULT: u32 = 0x1F80;
+pub(crate) static MXCSR_DEFAULT: u32 = 0x1F80;
 
 /// Whether fpu_init enabled XCR0[AVX] on this machine — gates the only
 /// VEX instruction outside the xsave/xrstor pair (vzeroall in the
 /// no-image restore fallback). Set once at boot, read on every such
 /// restore; a plain bool load is fine for that.
-static AVX_ENABLED: core::sync::atomic::AtomicBool =
+pub(crate) static AVX_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Whether CR4.OSXSAVE (and XCR0) are programmed on this machine: the
 /// xsave/xrstor instructions #UD until OSXSAVE is set, and early-boot
 /// task switches can run before fpu_init — those use the legacy
 /// fxsave/fxrstor pair instead. Monotonic: once set it never clears.
-static XSAVE_READY: core::sync::atomic::AtomicBool =
+pub(crate) static XSAVE_READY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// User XSAVE area size for the components XCR0 enables (CPUID.0xD.0:EBX,
 /// captured by fpu_init right after programming XCR0 — the leaf reports
 /// the size as a function of the live register). 0 until fpu_init ran.
-static USER_XSTATE_SIZE: core::sync::atomic::AtomicU32 =
+pub(crate) static USER_XSTATE_SIZE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
 /// fpstate area size an x86_64 rt_sigframe must reserve below the
@@ -479,17 +201,17 @@ pub fn xstate_sigframe_size() -> u64 {
 /// writes the full set (tracking cold), and the saved image lives in the
 /// task's OWN buffer — a skipped write leaves the buffer holding exactly
 /// what that same task's last restore loaded (closegap lane).
-static XSAVEOPT_READY: core::sync::atomic::AtomicBool =
+pub(crate) static XSAVEOPT_READY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-fn avx_enabled() -> bool {
+pub(crate) fn avx_enabled() -> bool {
     AVX_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-fn xsave_ready() -> bool {
+pub(crate) fn xsave_ready() -> bool {
     XSAVE_READY.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-fn xsaveopt_ready() -> bool {
+pub(crate) fn xsaveopt_ready() -> bool {
     XSAVEOPT_READY.load(core::sync::atomic::Ordering::Relaxed)
 }

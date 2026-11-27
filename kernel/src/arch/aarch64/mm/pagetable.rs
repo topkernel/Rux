@@ -43,13 +43,18 @@
 //! - COW/PCACHE (mm_ops::cow_flags) = 1<<61 / 1<<62
 //! - NX = UXN (1<<54) — clear-mask users in generic code clear execute-never
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use super::memory_layout::{PAGE_SIZE, PAGE_OFFSET_MASK};
 
 // ==================== Page Table Entry ====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct PageTableEntry(u64);
+pub struct PageTableEntry(pub(crate) u64);
 
 impl PageTableEntry {
     // ---- hardware bits ----
@@ -533,22 +538,10 @@ impl Satp {
         self.mode() == Self::MODE_LONG
     }
 }
-
 /// Get the current composed "satp" (TTBR0_EL1 root + ASID). The ASID is
-/// read from TTBR0_EL1[63:48] (the TCR_EL1.A1=0 tag source), the root
-/// from TTBR0_EL1[47:1] — not CONTEXTIDR_EL1, which is a trace/debug
-/// register and does not drive TLB tags.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-PAGETABLE-1): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_satp() -> Satp {
-    let ttbr0: u64;
-    // SAFETY: reading TTBR0_EL1 is a pure system-register read, always
-    // accessible at EL1.
-    unsafe {
-        core::arch::asm!(
-            "mrs {t}, ttbr0_el1",
-            t = out(reg) ttbr0,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    let asid = ((ttbr0 >> 48) & 0xFFFF) as u16;
-    Satp::long((ttbr0 & 0x0000_FFFF_FFFF_F000) >> 12, asid)
+    crate::arch::arch_floor::aarch64::mm::pagetable::get_satp()
 }
