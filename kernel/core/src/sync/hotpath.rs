@@ -10481,15 +10481,6 @@ impl<T: ?Sized> Drop for RwSpinlockBhWriteGuard<'_, T> {
 
 // ==================== Inline helpers ====================
 
-#[inline]
-#[track_caller]
-fn rwlock_preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add_at(
-        crate::interrupt::preempt::PREEMPT_OFFSET,
-        core::panic::Location::caller(),
-    );
-}
-
 /// As `rwlock_preempt_disable`, booking the caller-of-the-lock's location (the
 /// #[track_caller] lock helpers forward their own caller down so the
 /// leakorigin shadow names the real acquire site; preempt-hunt).
