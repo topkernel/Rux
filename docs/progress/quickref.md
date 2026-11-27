@@ -1,12 +1,12 @@
 # Rux Kernel Quick Reference
 
-**Last Updated**: 2026-04-09
+**Last Updated**: 2026-11-27
 
 ## Project Structure
 
 ```
 Rux/
-├── kernel/     - Kernel source code (~102,400 lines)
+├── kernel/     - Kernel source code (375,622 lines)
 ├── userspace/  - User programs (mrsh, apps, tests, toybox)
 ├── toolchain/  - musl libc toolchain
 ├── build/      - Build tools (Makefile, menuconfig)
@@ -14,7 +14,7 @@ Rux/
 ├── docs/       - Documentation
 ├── Kernel.toml - Kernel configuration
 ├── Makefile    - Shortcut commands
-├── CLAUDE.md   - AI assistant guide
+├── AGENTS.md   - AI assistant guide
 └── LICENSE     - MIT License
 ```
 
@@ -64,17 +64,17 @@ make help            # Show help
 
 | Metric | Value |
 |--------|-------|
-| **Code Lines** | ~102,400 |
-| **Source Files** | 278 (274 Rust + 3 ASM + 1 LD) |
-| **Syscalls** | 348 dispatched |
-| **Unit Tests** | 825 cases, 58 files |
-| **proptest** | 1,088 cases, 98 modules |
-| **Kani Proofs** | 157 harnesses, 22 modules |
-| **SPIN Models** | 4 models, 8 LTL properties |
-| **Linux LTP** | 1,838 tests |
-| **Smoke Tests** | 15/15 passing |
-| **Platform** | RISC-V 64-bit (RV64GC) |
-| **Phase** | 51 — Memory Compaction |
+| **Code Lines** | 375,622 |
+| **Source Files** | 506 (492 Rust + 13 ASM + 1 LD) |
+| **Syscalls** | 394 dispatched |
+| **Unit Tests** | 1,598 cases |
+| **proptest** | 1,104 cases |
+| **Kani Proofs** | 157 harnesses |
+| **SPIN Models** | 4 models |
+| **Unsafe surface** | 1,022 lines = 0.27% — zero unsafe outside the 19 audited `unsafe.rs` files (401 files with `forbid(unsafe_code)`, machine gate rc=0) |
+| **Linux LTP** | 1,869-test list |
+| **Platform** | riscv64 + x86_64 (q35) + aarch64 — triple arch |
+| **Phase** | Unsafe-consolidation campaign landed (2026-11-27) |
 
 ## Quick Start
 

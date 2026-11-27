@@ -1102,3 +1102,32 @@ the open gap — the fire-late/hrtimer-re-arm attribution is queued (rt-r4).
   pbench adjudication), run/ab-seqw1m_buf-{base,fix2,fix3}.txt,
   run/pbench-ab.log, run/probe-instrumentation.patch (the removable
   TSC probe).
+
+## T. The audited-collection boundary: unsafe collapses to 0.27% under a compiler-enforced fence (docs lane, 2026-11-27, evidence-backed)
+
+**The design**: the whole kernel's unsafe operations live in exactly
+19 audited collection files (one `<subsystem>/unsafe.rs` per
+subsystem plus the root collection); every other file — 401 of them —
+carries `#![forbid(unsafe_code)]`, and the machine gate
+(`scripts/gate_unsafe_mainline.py`) enforces the partition repo-wide.
+This is a property a C kernel cannot state, let alone enforce: in C
+the "no new unsafe here" rule is a review convention; here it is a
+compile error plus a gate script that returns rc=0 on the landed
+tree.
+
+**Measured evidence**:
+- unsafe keyword 1,022 lines / 375,622 kernel source lines =
+  **0.27%** — the pre-campaign reference point is 6,396 ledgered
+  unsafe regions (docs/development/unsafe-5000-plan.md); the union
+  measure then read 14.0% of the tree (50,630 lines), so the
+  declared-unsafe share fell ~50x while the kernel grew.
+- SAFETY-comment coverage 65.5%; every surviving unsafe block names
+  its INV contract inline; the safe API above the collections is
+  unchanged (typed primitives keep their INV contracts — §2.0 of
+  safety-and-performance.md).
+- Gate: `scripts/gate_unsafe_mainline.py` rc=0 on the landed tree;
+  triple-arch build rc=0 (x86_64, riscv64, aarch64).
+- Six fixes banked with the same line (reboot S5 power-off, leak
+  triple fix, trap call-chain capture at 25.9% kernel-frame samples,
+  apic.rs repair, LAYOUT-8 heap window, 1000 Hz sampling carrier) —
+  see safety-and-performance.md's unsafe-consolidation round.
