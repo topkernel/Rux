@@ -332,8 +332,8 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     if crate::interrupt::preempt::in_interrupt() {
         let cache = &CACHES[ci];
         let _g = cache.lock.lock_irqsave();
-        let _aw = crate::dfx::allocwatch::guard(
-            crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        let _aw = crate::debug::allocwatch::guard(
+            crate::debug::allocwatch::SITE_SMALL_ALLOC,
             ci as u8,
         );
         let p = alloc_locked(ci, heap_start);
@@ -386,11 +386,11 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
     // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (frozen-holder naming; the
-    // holder's own tick is dead at IF=0 — see dfx/allocwatch.rs) + the
+    // holder's own tick is dead at IF=0 — see debug/allocwatch.rs) + the
     // section-duration meter (lb268: one bounded section held 300 ms of
     // real KVM execution — name the cost class).
-    let _aw = crate::dfx::allocwatch::guard(
-        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+    let _aw = crate::debug::allocwatch::guard(
+        crate::debug::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
     );
     let _t0 = crate::arch::cpu::read_time();
@@ -423,7 +423,7 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     drop(_aw);
     drop(_g);
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
-    if crate::dfx::allocwatch::armed() {
+    if crate::debug::allocwatch::armed() {
         let d = crate::arch::cpu::read_time().wrapping_sub(_t0);
         let prev = cache.slow_max_cyc.load(Ordering::Relaxed);
         if d > prev {
@@ -464,7 +464,7 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     while cur != 0 {
         walked += 1;
         if walked > 8192 {
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
             break;
         }
@@ -570,7 +570,7 @@ pub fn free(addr: usize) -> bool {
     let ci_guess = peek.cls as usize;
     if ci_guess >= CLASSES.len() {
         // Header garbage (transient or corrupt): consume, taint.
-        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+        crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
         return true;
     }
 
@@ -649,7 +649,7 @@ pub fn free(addr: usize) -> bool {
                 // hands out is page-header-validated at flush time.
                 mag.len = 0;
                 MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
-                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             }
             let mut snap: [usize; MAG_DEPTH] = [0; MAG_DEPTH];
             let mut n = 0usize;
@@ -665,7 +665,7 @@ pub fn free(addr: usize) -> bool {
             }
             if dropped > 0 {
                 MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
-                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             }
             Step::SnapFlush { snap, n }
         })
@@ -721,9 +721,9 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     let mut ret: [usize; MAG_DEPTH + 1] = [0; MAG_DEPTH + 1]; // pages to buddy-free after unlock
     let mut nret = 0usize;
     let _g = cache.lock.lock_irqsave();
-    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
-    let _aw = crate::dfx::allocwatch::guard(
-        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
+    let _aw = crate::debug::allocwatch::guard(
+        crate::debug::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
     );
     for &addr in entries {
@@ -731,7 +731,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
         let hdr = hdr_of(page);
         if hdr.magic != HDR_MAGIC || hdr.cls as usize != ci {
             // Reclaimed/re-created under us — no valid object can exist.
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             continue;
         }
         let off = addr - page - fo;
@@ -739,13 +739,13 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             // Foreign/misaligned pointer into a live slab page: consume
             // it — the buddy free would destroy the page's 500-odd
             // neighbours.
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             continue;
         }
         if hdr.free_count as usize >= objs_per_page {
             // Double free — refuse, but consume it (do not also
             // buddy-free).
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             continue;
         }
         super::edges::sa_write_u16(addr, hdr.free_head);
@@ -769,7 +769,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             while cur != 0 {
                 steps += 1;
                 if steps > 8192 {
-                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                    crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
                     cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
@@ -859,7 +859,7 @@ pub fn audit_section_peek() -> [(u64, u64); 8] {
 
 /// rux:allocwatch (retired dfx=allocwatch) probe: live lock-word state of every class lock
 /// (bit i = CACHES[i] held at sample time). A sample is not a snapshot;
-/// the caller filters transients (see dfx/allocwatch.rs STUCK detection
+/// the caller filters transients (see debug/allocwatch.rs STUCK detection
 /// — a bit set at every tick for >1 s with no matching holder stamp is
 /// a stuck/corrupt lock word, the wild-write producer's freeze face).
 pub fn audit_class_locks() -> u8 {
@@ -873,7 +873,7 @@ pub fn audit_class_locks() -> u8 {
 }
 
 pub fn census_peek(ci: usize, per_page: usize) {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
     if ci >= CLASSES.len() {
         return;
     }
@@ -895,9 +895,9 @@ pub fn census_peek(ci: usize, per_page: usize) {
     let mut nvals = 0usize;
     let mut seen_total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
-    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
-    let _aw = crate::dfx::allocwatch::guard(
-        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
+    let _aw = crate::debug::allocwatch::guard(
+        crate::debug::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
     );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
@@ -970,7 +970,7 @@ pub fn census_peek(ci: usize, per_page: usize) {
 ///               c256 record family from the sc238 census)
 ///   userva/kheap/small-first : first-qword range buckets
 pub fn census_peek3(ci: usize) {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
     if ci >= CLASSES.len() {
         return;
     }
@@ -1000,9 +1000,9 @@ pub fn census_peek3(ci: usize) {
     let (mut n_uv, mut n_kh, mut n_sm, mut n_ot) = (0u64, 0u64, 0u64, 0u64);
     let mut total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
-    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
-    let _aw = crate::dfx::allocwatch::guard(
-        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see debug/allocwatch.rs).
+    let _aw = crate::debug::allocwatch::guard(
+        crate::debug::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
     );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
@@ -1071,7 +1071,7 @@ pub fn census_peek3(ci: usize) {
 
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
     taskdump_raw_line(b"SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed\n");
     let alias = MAG_ALIAS_EVENTS.load(Ordering::Relaxed);
     if alias > 0 {

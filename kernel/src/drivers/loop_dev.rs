@@ -390,7 +390,7 @@ fn loop_request_fn(req: &mut Request) {
                     // (the first two occurrences carry the kernel backtrace
                     // — error-path diagnostic, bounded like the print).
                     if n < 2 {
-                        crate::dfx::backtrace::dump_stack();
+                        crate::debug::backtrace::dump_stack();
                     }
                 }
                 req.error.store(-35, Ordering::Release); // -EDEADLK

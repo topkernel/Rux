@@ -64,7 +64,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// This macro is the single source of truth for the catalog. It generates
 /// the enum→name mapping, the `ALL` enumeration used by the userspace
 /// control surface (the debugfs knobs under `/sys/kernel/debug/dfx/`,
-/// see `dfx/mod.rs`) and the per-switch control files. Adding a switch
+/// see `debug/mod.rs`) and the per-switch control files. Adding a switch
 /// therefore means adding one line here plus the variant — nothing else
 /// has to be kept in sync.
 macro_rules! dfx_switch_table {
@@ -131,7 +131,7 @@ pub enum DfxSwitch {
     /// kernel-#PF printer hands over rip + rbp walk + KERNPANIC dump.
     /// The canary page is also checksum-verified from the timer cadence
     /// (DMA-class writers bypass PTEs). One arming print per boot; zero
-    /// traffic until a hit. See dfx/wildwatch.rs. PERMANENT SWITCH
+    /// traffic until a hit. See debug/wildwatch.rs. PERMANENT SWITCH
     /// (dfx-migrate round 5): the detection mechanism itself mutates
     /// kernel state (PTE write-bits + CR0.WP), so arming cannot be a
     /// runtime-safe trace-event enable.

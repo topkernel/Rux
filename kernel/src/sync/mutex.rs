@@ -396,7 +396,7 @@ impl SleepMutex {
     fn lock_inner(&'static self, killable: bool) -> Option<SleepMutexGuard> {
         let pid = crate::process::current_pid();
         if self.fsw_notes {
-            crate::dfx::fsw::note_biglock();
+            crate::debug::fsw::note_biglock();
         }
 
         // Adaptive optimistic spin (reference mutex discipline): the
@@ -449,7 +449,7 @@ impl SleepMutex {
         let can_sleep = crate::sched::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
         if self.fsw_notes {
-            crate::dfx::fsw::note_biglock_contend();
+            crate::debug::fsw::note_biglock_contend();
         }
         let cur = match crate::sched::current() {
             Some(t) if can_sleep => t,
@@ -466,7 +466,7 @@ impl SleepMutex {
         };
 
         // R83b: baseline header snapshot for the waiter self-watch below.
-        let mut wait_snap = crate::dfx::r83hunt::WatchSnap {
+        let mut wait_snap = crate::debug::r83hunt::WatchSnap {
             ksp: 0, user_sp: 0, preempt: 0, pick: 0, claim: 0, flags: 0,
         };
         let mut wait_snap_set = false;
@@ -553,12 +553,12 @@ impl SleepMutex {
             // iterations of this loop is the scribbler — reported from
             // inside the exposure window itself.
             {
-                let now_snap = crate::dfx::r83hunt::watch_snap(cur as *mut _);
+                let now_snap = crate::debug::r83hunt::watch_snap(cur as *mut _);
                 if !wait_snap_set {
                     wait_snap = now_snap;
                     wait_snap_set = true;
                 } else if now_snap.ksp != wait_snap.ksp || now_snap.user_sp != wait_snap.user_sp {
-                    crate::dfx::r83hunt::waitwatch_report(
+                    crate::debug::r83hunt::waitwatch_report(
                         cur as *mut _,
                         &wait_snap,
                         &now_snap,
@@ -973,7 +973,7 @@ impl SleepMutex {
     /// D-parked). Try-locks only (taskdump context may be the watchdog);
     /// busy locks print as '?' fields, never block.
     pub fn dfx_census_line(&'static self) {
-        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         let (locked, owner, depth, waiters, epoch) = match self.state.try_lock() {
             Some(st) => (st.locked, st.owner, st.depth, st.waiters, st.handoff_epoch),
             None => (false, u32::MAX, 0, u32::MAX, u64::MAX),

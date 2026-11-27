@@ -285,7 +285,7 @@ pub fn dump(site: &str) {
         // the mapped vmemmap span; the flags atomics are the same ones
         // every other reader uses lock-free.
         let (rc, linked, reserved, _anon, _cow, _mapped, _lru) =
-            crate::dfx::forensics_edges::page_diag_read(page);
+            crate::debug::forensics_edges::page_diag_read(page);
         if rc == 0 {
             if reserved {
                 c.reserved += 1;

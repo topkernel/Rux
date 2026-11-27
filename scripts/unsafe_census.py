@@ -546,7 +546,7 @@ _LAYER_RULES = [
     ("drivers/timer/", "framework"),
     ("drivers/pci/", "framework"),
     ("drivers/", "service"),
-    ("dfx/", "diagnostics"),
+    ("debug/", "diagnostics"),
     ("tests/", "test"),
     ("console.rs", "framework"),
     ("printk.rs", "framework"),

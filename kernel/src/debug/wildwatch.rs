@@ -24,7 +24,7 @@
 //! rip + an rbp frame walk before the KERNPANIC dump — attribution
 //! without adding any per-hit infrastructure.
 //!
-//! Arming happens from dfx::init: AFTER hpet::init has published the
+//! Arming happens from debug::init: AFTER hpet::init has published the
 //! statics and BEFORE start_secondaries, so the split needs no TLB
 //! shootdown IPIs (APs load the shared kernel root afterwards).
 //!
@@ -84,16 +84,16 @@ mod x86 {
     }
 
     /// Arm all guards. Retried from the timer verify cadence until it
-    /// succeeds (observed: at dfx::init time the image PD for the guard
+    /// succeeds (observed: at debug::init time the image PD for the guard
     /// chunk still reads as zeros — parts of the kernel image mapping
-    /// settle after dfx::init; the engine only fires minutes in, so a
+    /// settle after debug::init; the engine only fires minutes in, so a
     /// 1 s-late arming loses nothing). No-op unless rux:wildwatch (retired dfx=wildwatch).
     pub fn arm() {
         static ARM_TRIES: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         static ARMED_FLAG: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
-        if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WildWatch) {
+        if !crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::WildWatch) {
             return;
         }
         if ARMED_FLAG.load(Ordering::Acquire) {
@@ -114,7 +114,7 @@ mod x86 {
         {
             // Alias 1: link-time kernel-half VAs (the statics themselves).
             for va in (start..start + len).step_by(4096) {
-                if crate::dfx::forensics_edges::protect_page_raw(va) {
+                if crate::debug::forensics_edges::protect_page_raw(va) {
                     ok_pages += 1;
                 } else {
                     fail_pages += 1;
@@ -125,16 +125,16 @@ mod x86 {
             // then guard the linear-map alias and (if under 2GB) the low
             // identity alias.
             for va in (start..start + len).step_by(4096) {
-                let Some(phys) = crate::dfx::forensics_edges::resolve_phys_raw(va) else {
+                let Some(phys) = crate::debug::forensics_edges::resolve_phys_raw(va) else {
                     continue;
                 };
                 let lin = phys
                     .wrapping_add(crate::arch::mm::memory_layout::PAGE_OFFSET as u64);
-                if lin != va as u64 && crate::dfx::forensics_edges::protect_page_raw(lin as usize) {
+                if lin != va as u64 && crate::debug::forensics_edges::protect_page_raw(lin as usize) {
                     guarded_aliases += 1;
                 }
                 if phys < 0x8000_0000 {
-                    if phys as usize != va && crate::dfx::forensics_edges::protect_page_raw(phys as usize) {
+                    if phys as usize != va && crate::debug::forensics_edges::protect_page_raw(phys as usize) {
                         guarded_aliases += 1;
                     }
                 }
@@ -169,7 +169,7 @@ mod x86 {
                 );
                 // INV-FOR-5 deliberate-smash edge onto the RO guard
                 // page — this instruction MUST page-fault.
-                crate::dfx::forensics_edges::diag_write_qword(victim, 0xdead_beef_dead_beef);
+                crate::debug::forensics_edges::diag_write_qword(victim, 0xdead_beef_dead_beef);
                 crate::pr_err!("WILDWATCH-SELFTEST(arm) FAULT NOT TAKEN");
             }
         } else if tries < 30 {
@@ -188,7 +188,7 @@ mod x86 {
     fn enable_write_protect() {
         // INV-FOR-8 CR0 edge: one CR0 read-modify-write; WP is a
         // boot-time-static bit.
-        crate::dfx::forensics_edges::cr0_set_write_protect();
+        crate::debug::forensics_edges::cr0_set_write_protect();
     }
 
     fn fill_canary(start: usize) {
@@ -203,7 +203,7 @@ mod x86 {
             };
             // INV-FOR-2 volatile-write edge: kernel .bss page, written
             // once before RO arming.
-            crate::dfx::forensics_edges::diag_write_qword(
+            crate::debug::forensics_edges::diag_write_qword(
                 (start + i * 8) as *mut u64,
                 v,
             );
@@ -233,7 +233,7 @@ mod x86 {
                 crate::pr_err!("WILDWATCH-SELFTEST firing: deliberate store to {:#x}", start + 4096);
                 // INV-FOR-5 deliberate-smash edge onto the RO guard
                 // page — this instruction MUST page-fault.
-                crate::dfx::forensics_edges::diag_write_qword(victim, 0xdead_beef_dead_beef);
+                crate::debug::forensics_edges::diag_write_qword(victim, 0xdead_beef_dead_beef);
                 // If control returns here the trap did NOT fire — the
                 // tripwire is broken; scream.
                 crate::pr_err!("WILDWATCH-SELFTEST FAULT NOT TAKEN — guard page is NOT read-only!");
@@ -259,7 +259,7 @@ mod x86 {
                 };
                 // INV-FOR-2 volatile-read edge: registered armed
                 // kernel page.
-                let v = crate::dfx::forensics_edges::diag_read_qword(su + i * 8);
+                let v = crate::debug::forensics_edges::diag_read_qword(su + i * 8);
                 if v != expect {
                     if !CANARY_REPORTED[r].swap(true, Ordering::AcqRel) {
                         crate::pr_err!(
@@ -296,7 +296,7 @@ mod x86 {
 
     /// Translate a page-table phys to a VA this walk can dereference.
     ///
-    /// The arch helper's translation is stage-dependent; at dfx::init a
+    /// The arch helper's translation is stage-dependent; at debug::init a
     /// linear-map read of an image-phys table returned 0 for an entry the
     /// MMU translates fine (PD[3] read 0x0 under a live 2MiB leaf). The
     /// boot-time tables come from the early pool INSIDE the kernel image,
@@ -307,19 +307,19 @@ mod x86 {
         let end = crate::arch::mm::mmu_init::kernel_image_phys_end();
         // INV-FOR-8 edges: the boot-constant VMA-LMA offset (written
         // once during mmu init) and the arch frame translation.
-        let offset = crate::dfx::forensics_edges::va_kernel_pa_offset_raw();
+        let offset = crate::debug::forensics_edges::va_kernel_pa_offset_raw();
         if phys >= KERNEL_ENTRY && phys < end {
             let va = phys.wrapping_add(offset);
             return va as *mut _;
         }
-        crate::dfx::forensics_edges::get_page_table_virt_raw(phys)
+        crate::debug::forensics_edges::get_page_table_virt_raw(phys)
     }
 
     /// Resolve the physical address a kernel-half VA maps to (leaf walk).
     /// Full 4-level walk: PML4 -> PDPT -> PD -> PTE.
     fn resolve_phys(va: usize) -> Option<u64> {
         // INV-FOR-8 walk edge: read-only walk of the shared kernel root.
-        crate::dfx::forensics_edges::resolve_phys_raw(va)
+        crate::debug::forensics_edges::resolve_phys_raw(va)
     }
 
     /// Clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf
@@ -327,6 +327,6 @@ mod x86 {
     /// raw walk/link lives in the audited unsafe file (INV-FOR-8,
     /// forensics_edges::protect_page_raw).
     fn protect_page(va: usize) -> bool {
-        crate::dfx::forensics_edges::protect_page_raw(va)
+        crate::debug::forensics_edges::protect_page_raw(va)
     }
 }

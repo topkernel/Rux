@@ -151,7 +151,7 @@ pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
 
 
 /// Register dump for the oops paths
-pub(crate) fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+pub(crate) fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let _ = write!(
         w,
@@ -422,9 +422,9 @@ pub(crate) fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     fault_addr as u64,
                 );
             } else {
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -455,9 +455,9 @@ pub(crate) fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             } else {
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -479,18 +479,18 @@ pub(crate) fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 );
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
             } else {
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
             }
         }
         MmFaultResult::KernelPanic => {
-            crate::dfx::oops::oops(
-                crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+            crate::debug::oops::oops(
+                crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                     oops_show_regs(w, regs);
                 },
             );

@@ -151,7 +151,7 @@ pub(crate) fn free_page_table_checked(phys_addr: u64, site: &str) {
                     // rather than wired into two live trees
         }
     }
-    crate::dfx::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     free_page_table(phys_addr)
 }
 
@@ -650,7 +650,7 @@ pub fn free_user_page_tables(
     _vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::{page_desc, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
-    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data (the corruption family
@@ -959,7 +959,7 @@ pub fn free_user_page_tables(
     // mmforensics: deep capture naming the first stale table frame (the
     // stale-tree census witness — x86_64 parity).
     if stale_count > 0 {
-        crate::dfx::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
+        crate::debug::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
     }
 
     // Free root table (L2)
@@ -1222,7 +1222,7 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-16): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn forensics_scan_trees( target_ppn: u64, out: &mut [crate::dfx::mmforensics::TreeHit], ) -> (usize, usize, usize, usize) {
+pub fn forensics_scan_trees( target_ppn: u64, out: &mut [crate::debug::mmforensics::TreeHit], ) -> (usize, usize, usize, usize) {
     crate::arch::arch_floor::riscv64::mm::mmu_init::forensics_scan_trees(target_ppn, out)
 }
 

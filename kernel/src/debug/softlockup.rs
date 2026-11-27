@@ -13,9 +13,9 @@
 #![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::MAX_CPUS;
-use crate::dfx::taint;
-use crate::dfx::backtrace;
-use crate::dfx::backtrace::ConsoleWriter;
+use crate::debug::taint;
+use crate::debug::backtrace;
+use crate::debug::backtrace::ConsoleWriter;
 use core::fmt::Write;
 
 /// Softlockup threshold in seconds (default: 10s)
@@ -42,7 +42,7 @@ fn now_ns() -> u64 {
 
 /// Initialize the softlockup detector.
 ///
-/// Called during `dfx::init()`. Sets all timestamps to current time.
+/// Called during `debug::init()`. Sets all timestamps to current time.
 pub fn init() {
     let now = now_ns();
     for i in 0..MAX_CPUS {
@@ -174,7 +174,7 @@ pub fn check() {
             // The pick slot's task is another CPU's CURRENT pick — a
             // possibly-stale handle read through the forensics edge.
             let current = crate::sched::sched::cpu_state(cpu).current;
-            if current.is_null() || crate::dfx::forensics_edges::t_pid(current) == 0 {
+            if current.is_null() || crate::debug::forensics_edges::t_pid(current) == 0 {
                 continue;
             }
         }
@@ -209,8 +209,8 @@ pub fn check() {
             // Print the stuck CPU's current task
             let stuck_task = crate::sched::sched::cpu_state(cpu).current;
             if !stuck_task.is_null() {
-                let pid = crate::dfx::forensics_edges::t_pid(stuck_task);
-                let pc = crate::dfx::forensics_edges::t_preempt_count(stuck_task);
+                let pid = crate::debug::forensics_edges::t_pid(stuck_task);
+                let pc = crate::debug::forensics_edges::t_preempt_count(stuck_task);
                 let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
                 // oh-crash 92nd (IF=0 wedge, hp91h residual): the wedged
                 // CPU cannot self-report — its tick is dead, so the
@@ -225,13 +225,13 @@ pub fn check() {
                 // the stuck task is pinned by the wedged CPU's sched slot
                 // (same read discipline as the pid above). All three are
                 // budgeted and no-op unless rux:leakhunt (retired dfx=leakhunt) is armed.
-                crate::dfx::leakorigin::report_hardirq_origin(
+                crate::debug::leakorigin::report_hardirq_origin(
                     b"LOCKUP-HARDIRQ", stuck_task,
                 );
-                crate::dfx::leakorigin::report_softirq_origin(
+                crate::debug::leakorigin::report_softirq_origin(
                     b"LOCKUP-SOFTIRQ", stuck_task,
                 );
-                crate::dfx::leakorigin::report_outermost(
+                crate::debug::leakorigin::report_outermost(
                     b"LOCKUP-OUTER", stuck_task,
                 );
             }

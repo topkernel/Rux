@@ -888,7 +888,7 @@ pub mod riscv64 {
 
             // syscost probe: pre-cli edge with call-site attribution (see the
             // x86_64 twin); no-op when off.
-            crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+            crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: csrci atomically clears the SIE bit in sstatus; safe at any time.
             unsafe {
                 asm!("csrci sstatus, 2", options(nomem, nostack));
@@ -904,7 +904,7 @@ pub mod riscv64 {
         pub fn enable_irq()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
             // syscost probe: pre-sti edge (see the x86_64 twin); no-op when off.
-            crate::dfx::syscost::irq_note_on();
+            crate::debug::syscost::irq_note_on();
             // SAFETY: csrsi atomically sets the SIE bit in sstatus; safe at any time.
             unsafe {
                 asm!("csrsi sstatus, 2", options(nomem, nostack));
@@ -2814,7 +2814,7 @@ pub mod riscv64 {
                         // (0xffffffd6...) and static idle tasks (0xffffffff...).
                         let kernel_tp = (tp >> 63) == 1;
                         use core::fmt::Write;
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         if kernel_tp {
                             let task = unsafe {
                                 &*(tp as *const crate::process::task::Task)
@@ -2904,9 +2904,9 @@ pub mod riscv64 {
                     // real panic (interrupt context, oops=panic, idle task —
                     // pstore + panic= apply) or the faulting task dies with
                     // SIGSEGV and the machine keeps running.
-                    crate::dfx::oops::oops(
-                        crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                        &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    crate::debug::oops::oops(
+                        crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                        &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                             oops_show_regs(w, regs);
                         },
                     );
@@ -3637,22 +3637,22 @@ pub mod riscv64 {
                         use core::sync::atomic::Ordering::Relaxed;
                         if regs.user_mode() {
                             (*task).utime_ticks.fetch_add(1, Relaxed);
-                            crate::dfx::syscost::tick_user();
+                            crate::debug::syscost::tick_user();
                             // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                             // interrupted PC for the softirq charger. Lock-free.
                             crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid());
                         } else {
                             (*task).stime_ticks.fetch_add(1, Relaxed);
-                            crate::dfx::syscost::tick_kern(regs.epc);
+                            crate::debug::syscost::tick_kern(regs.epc);
                             crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid());
                         }
                     } else {
-                        crate::dfx::syscost::tick_idle();
+                        crate::debug::syscost::tick_idle();
                         crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
                     }
                 }
             } else {
-                crate::dfx::syscost::tick_idle();
+                crate::debug::syscost::tick_idle();
                 crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
             }
 
@@ -3663,7 +3663,7 @@ pub mod riscv64 {
             crate::sched::scheduler_tick();
 
             // 3. Check for soft lockups
-            crate::dfx::softlockup::check();
+            crate::debug::softlockup::check();
 
             // 4. Reschedule if needed
             if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
@@ -3839,7 +3839,7 @@ pub mod riscv64 {
                             // changed but the cpu_state slot did (the s13 producer
                             // signature — bookings split across two tasks).
                             use core::fmt::Write;
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             let _ = write!(w,
                                 "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} (pid={}) cs_exit={:#x} (pid={}) when={} epc_ctx={:#x}\n",
                                 cpu_id, tp_entry,
@@ -3875,7 +3875,7 @@ pub mod riscv64 {
                                 ((*a).preempt_count(), (*b).preempt_count())
                             };
                             use core::fmt::Write;
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             let _ = write!(w,
                                 "IRQ-BRACKET-LEAK soft cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} cs_exit={:#x} when={}\n",
                                 cpu_id, tp_entry,
@@ -3905,7 +3905,7 @@ pub mod riscv64 {
                                 ((*a).preempt_count(), (*b).preempt_count())
                             };
                             use core::fmt::Write;
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             let _ = write!(w,
                                 "IRQ-BRACKET-LEAK ext cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} cs_exit={:#x} when={}\n",
                                 cpu_id, tp_entry,
@@ -3934,7 +3934,7 @@ pub mod riscv64 {
                             // to the linear-map page.
                             {
                                 use core::fmt::Write;
-                                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                 let _ = w.write_str("SR-REGS:\n");
                                 let _ = write!(w, "  epc={:#x} ra={:#x} sp={:#x}\n",
                                     regs_ref.epc, regs_ref.ra, regs_ref.sp);
@@ -3970,9 +3970,9 @@ pub mod riscv64 {
                             // panic (interrupt context / oops=panic / idle) or
                             // task death (Tranche 5); skipping the instruction
                             // was never an option either way.
-                            crate::dfx::oops::oops(
-                                crate::dfx::oops::Kind::IllegalInstruction,
-                                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                            crate::debug::oops::oops(
+                                crate::debug::oops::Kind::IllegalInstruction,
+                                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                                     oops_show_regs(w, regs_ref);
                                 },
                             );
@@ -4023,7 +4023,7 @@ pub mod riscv64 {
                 // syscall-heavy CPUs complete grace periods without waiting for
                 // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).
                 crate::sync::rcu::rcu_note_context_switch();
-                crate::dfx::leakorigin::check_user_return();
+                crate::debug::leakorigin::check_user_return();
             }
         } }
 
@@ -5247,14 +5247,14 @@ pub mod riscv64 {
                     let pc = crate::interrupt::preempt::preempt_count();
                     if pc < 0 {
                         use core::fmt::Write;
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         let _ = write!(w,
                             "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
                             crate::sched::get_current_pid(), pc);
                         // R83 (R74 producer hunt): the underflow victim's header may
                         // already carry the foreign store — dump it while it is fresh.
                         if let Some(cur) = crate::sched::current() {
-                            crate::dfx::r83hunt::dump_victim(b"PREEMPT-UF", cur as *mut _);
+                            crate::debug::r83hunt::dump_victim(b"PREEMPT-UF", cur as *mut _);
                         }
                         crate::interrupt::preempt::preempt_count_reset();
                     } else {
@@ -5383,7 +5383,7 @@ pub mod riscv64 {
                             let cross_stack = !current.is_in_kernel_stack(regs.sp as usize);
                             if dying && cross_stack {
                                 use core::fmt::Write;
-                                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                 let _ = write!(w,
                                     "trap: STALE-CONTEXT-PARK pid={} epc={:#x} sp={:#x} (dead task, foreign stack)\n",
                                     current.pid(), regs.epc, regs.sp);
@@ -6247,7 +6247,7 @@ pub mod riscv64 {
                 // mapping reference.  Without dec_mapcount the count leaks across
                 // COW cycles and eventually corrupts page reclaim / rmap decisions.
                 if let Some(op) = old_page {
-                    let after = op.put_page_site(crate::dfx::driftwatch::S_COW_RV);
+                    let after = op.put_page_site(crate::debug::driftwatch::S_COW_RV);
                     op.dec_mapcount();
                     // Stamp lifecycle (gnome-sigill): the faulting process no longer
                     // maps the OLD frame — if it owned the text stamp, drop it, or
@@ -7504,7 +7504,7 @@ pub mod riscv64 {
             /// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
             pub fn forensics_scan_trees(
                 target_ppn: u64,
-                out: &mut [crate::dfx::mmforensics::TreeHit],
+                out: &mut [crate::debug::mmforensics::TreeHit],
             ) -> (usize, usize, usize, usize)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
                 const MAX_TASKS: usize = 128;
@@ -7537,7 +7537,7 @@ pub mod riscv64 {
 
                 let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
                     if nh < out.len() {
-                        out[nh] = crate::dfx::mmforensics::TreeHit {
+                        out[nh] = crate::debug::mmforensics::TreeHit {
                             pid,
                             root_ppn: root,
                             level,
@@ -8217,7 +8217,7 @@ pub mod riscv64 {
                 // non-leaf entry that lands at vpn2[0..1] of the kernel root is cloned
                 // into EVERY future address space by copy_kernel_mappings (the
                 // exec-leak amplifier). One-shot caller chain, raw UART.
-                if vpn2 < 2 && root_ppn == root_page_table_ppn() && crate::dfx::memwatch::armed() {
+                if vpn2 < 2 && root_ppn == root_page_table_ppn() && crate::debug::memwatch::armed() {
                     static POLLUTED: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if POLLUTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
@@ -8228,26 +8228,26 @@ pub mod riscv64 {
                             core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
                             v
                         };
-                        unsafe { crate::dfx::memwatch::walk_fp_chain(s0, &mut frames) };
-                        crate::dfx::taskdump::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
+                        unsafe { crate::debug::memwatch::walk_fp_chain(s0, &mut frames) };
+                        crate::debug::taskdump::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
                         let mut sh: i32 = 64;
                         while sh > 0 {
                             sh -= 4;
                             let nb = ((virt_addr >> sh) & 0xF) as u8;
-                            crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                            crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
                         }
                         for f in frames.iter() {
                             if *f == 0 { break; }
-                            crate::dfx::taskdump::taskdump_raw_line(b" ");
+                            crate::debug::taskdump::taskdump_raw_line(b" ");
                             let mut sh2: i32 = 64;
-                            crate::dfx::taskdump::taskdump_raw_line(b"0x");
+                            crate::debug::taskdump::taskdump_raw_line(b"0x");
                             while sh2 > 0 {
                                 sh2 -= 4;
                                 let nb = ((*f >> sh2) & 0xF) as u8;
-                                crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                                crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
                             }
                         }
-                        crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                        crate::debug::taskdump::taskdump_raw_line(b"\n");
                     }
                 }
 
@@ -8380,7 +8380,7 @@ pub mod riscv64 {
                 if page.is_mapped() {
                     crate::mm::rmap::page_remove_rmap(page);
                 }
-                let new_ref = page.put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
+                let new_ref = page.put_page_site(crate::debug::driftwatch::S_TEARDOWN_RV);
                 let dying = crate::process::current_pid() as u32;
                 if stamp.is_some() {
                     crate::mm::page_desc::text_stamp_note(pfn, dying, 'T', new_ref);
@@ -8531,7 +8531,7 @@ pub mod riscv64 {
                     crate::mm::page_alloc::pcache_leaf_phantom_zero_put(pfn << 12, "rv-release-user-leaf");
                     return false;
                 }
-                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 free_pages(pfn << 12, 0);
                 true
             } }
@@ -8689,7 +8689,7 @@ pub mod riscv64 {
                     }
                     // mmforensics: deep capture at the double/foreign free refusal
                     // (x86_64 parity; own cap + switch gate).
-                    crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
+                    crate::debug::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
                     // Double-tracked frame: quarantine.
                     Self::poison_table(ppn);
                     false
@@ -8923,9 +8923,9 @@ pub mod riscv64 {
                         // (direct zone.alloc_pages above) — feed them to the page-level
                         // site table from THIS frame so the chain names the mapping
                         // path (map_page_noflush / create_user_address_space / ...).
-                        if crate::dfx::memwatch::armed() {
-                            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                                [0; crate::dfx::memwatch::SITE_FRAMES];
+                        if crate::debug::memwatch::armed() {
+                            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                                [0; crate::debug::memwatch::SITE_FRAMES];
                             // SAFETY: register-only read of s0; the chain walk is the
                             // dfx stack-forensics edge.
                             let mw_s0: u64 = unsafe {
@@ -8933,8 +8933,8 @@ pub mod riscv64 {
                                 core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
                                 v
                             };
-                            unsafe { crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames) };
-                            crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
+                            unsafe { crate::debug::memwatch::walk_fp_chain(mw_s0, &mut mw_frames) };
+                            crate::debug::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
                         }
 
                         // FORENSIC ledger: stamp every Late-stage table allocation.
@@ -10792,7 +10792,7 @@ pub mod x86_64 {
             // The post-asm stamp is parked in a per-CPU slot (the switch is
             // CPU-local with IRQs off) because prev's frame freezes
             // mid-__switch_to — the INCOMING task closes the bracket.
-            let cc_c0 = crate::dfx::cctx::now();
+            let cc_c0 = crate::debug::cctx::now();
             // R56-heal (early revoked-pick check): if the slot-capture steal
             // already revoked this pick (the picking vCPU was TCG-starved past
             // the whole GRQ-release → wrapper window), the pick state is
@@ -10826,8 +10826,8 @@ pub mod x86_64 {
                 // state is what fpu_save_for_switch reads).
                 unsafe { prev.thread_mut().fpu_save_for_switch() };
             }
-            let cc_c1 = crate::dfx::cctx::now();
-            crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUSAVE_NS, cc_c0);
+            let cc_c1 = crate::debug::cctx::now();
+            crate::debug::cctx::add(&crate::debug::cctx::CW_FPUSAVE_NS, cc_c0);
 
             // Store prev task for ret_from_fork's schedule_tail(prev)
             set_prev_task(prev as *mut Task);
@@ -10878,7 +10878,7 @@ pub mod x86_64 {
                             next_mm.alloc_asid().unwrap_or(0)
                         }
                     };
-                    crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
+                    crate::debug::cctx::bump(&crate::debug::cctx::CW_MM_N);
                     // SAFETY: next_ppn is the live mm root just resolved above
                     // (or the static kernel root below).
                     unsafe {
@@ -10898,7 +10898,7 @@ pub mod x86_64 {
                 // are only invalidated by the explicit kernel flush sites.
                 let kernel_ppn = crate::arch::x86_64::mm::mmu_init::root_page_table_ppn();
                 if crate::arch::x86_64::mm::asid::satp_to_ppn(read_cr3()) != kernel_ppn {
-                    crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
+                    crate::debug::cctx::bump(&crate::debug::cctx::CW_MM_N);
                     // LAZY MASK twin of the user branch: switching to the
                     // kernel root flushes (PCID off) — drop this CPU from the
                     // outgoing user mm's mask.
@@ -10913,8 +10913,8 @@ pub mod x86_64 {
                     unsafe { write_cr3(crate::arch::x86_64::mm::asid::build_satp(0, kernel_ppn)) };
                 }
             }
-            let cc_c2 = crate::dfx::cctx::now();
-            crate::dfx::cctx::add(&crate::dfx::cctx::CW_MM_NS, cc_c1);
+            let cc_c2 = crate::debug::cctx::now();
+            crate::debug::cctx::add(&crate::debug::cctx::CW_MM_NS, cc_c1);
 
             // Step 3: FS base (TLS pointer) and the GS shadow
             // (IA32_KERNEL_GS_BASE). thread.fs_base / thread.gs_base are the
@@ -10971,14 +10971,14 @@ pub mod x86_64 {
                     unsafe { wrmsr(MSR_KERNEL_GS_BASE, gs_next) };
                 }
             }
-            let cc_c3 = crate::dfx::cctx::now();
-            crate::dfx::cctx::add(&crate::dfx::cctx::CW_MSR_NS, cc_c2);
+            let cc_c3 = crate::debug::cctx::now();
+            crate::debug::cctx::add(&crate::debug::cctx::CW_MSR_NS, cc_c2);
 
             // Step 4: registers + stacks + per-CPU current + TSS.rsp0.
             //
             // WARNING: after this call all locals are INVALID (callee-saved
             // registers and rsp belong to the incoming task).
-            crate::dfx::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
             // SAFETY: the scheduler's switch protocol (IRQs off; both tasks valid
             // pick targets) — the one register/stack switch edge.
             unsafe { __switch_to(prev, next) };
@@ -10986,10 +10986,10 @@ pub mod x86_64 {
             // cctx: the incoming task closes the asm bracket parked by the
             // outgoing task on this CPU (IRQs stayed off across the switch).
             {
-                let t3 = crate::dfx::cctx::SW_STAMP[cpu_of()].swap(0, core::sync::atomic::Ordering::Relaxed);
-                let t4 = crate::dfx::cctx::now();
+                let t3 = crate::debug::cctx::SW_STAMP[cpu_of()].swap(0, core::sync::atomic::Ordering::Relaxed);
+                let t4 = crate::debug::cctx::now();
                 if t3 != 0 && t4 != 0 {
-                    crate::dfx::cctx::add(&crate::dfx::cctx::CW_ASM_NS, t3);
+                    crate::debug::cctx::add(&crate::debug::cctx::CW_ASM_NS, t3);
                 }
             }
 
@@ -11000,9 +11000,9 @@ pub mod x86_64 {
             // restore_fpu (fpu_valid image or the ABI-init fallback). FP-idle
             // ping-pong workloads (the scheduler-family benches) never pay the
             // xrstor at all.
-            let cc_c4 = crate::dfx::cctx::now();
+            let cc_c4 = crate::debug::cctx::now();
             crate::arch::x86_64::cpu::stts();
-            crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUREST_NS, cc_c4);
+            crate::debug::cctx::add(&crate::debug::cctx::CW_FPUREST_NS, cc_c4);
         } }
 
         // INV-ARCH-CONTEXT-21 (collected 2026-11-27 from x86_64/context.rs): verbatim body; callers use the safe
@@ -11120,31 +11120,31 @@ pub mod x86_64 {
                         core::sync::atomic::AtomicU32::new(0);
                     let n = BADRSP0_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 64 {
-                        crate::dfx::taskdump::taskdump_raw_line(b"R64-BAD-RSP0 task=0x");
+                        crate::debug::taskdump::taskdump_raw_line(b"R64-BAD-RSP0 task=0x");
                         let mut v = task.as_ref().map(|t| t.as_ptr() as u64).unwrap_or(0);
                         let mut sh: i32 = 64;
                         while sh > 0 {
                             sh -= 4;
                             let nb = ((v >> sh) & 0xF) as u8;
-                            crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                            crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 {
                                 b'0' + nb
                             } else {
                                 b'a' + nb - 10
                             })]);
                         }
-                        crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                        crate::debug::taskdump::taskdump_raw_line(b" top=0x");
                         let mut v2 = top;
                         let mut sh2: i32 = 64;
                         while sh2 > 0 {
                             sh2 -= 4;
                             let nb = ((v2 >> sh2) & 0xF) as u8;
-                            crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                            crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 {
                                 b'0' + nb
                             } else {
                                 b'a' + nb - 10
                             })]);
                         }
-                        crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                        crate::debug::taskdump::taskdump_raw_line(b"\n");
                     }
                     return; // keep the previous (valid) rsp0
                 }
@@ -11197,7 +11197,7 @@ pub mod x86_64 {
             // ownership word inside the switch-out window — name it.
             if let Some(prev) = &prev {
                 if crate::trace::EVENT_SCRIBBLE.armed() && !prev.on_cpu() {
-                    crate::dfx::scribble::switch_window_heal(prev.as_ptr() as u64);
+                    crate::debug::scribble::switch_window_heal(prev.as_ptr() as u64);
                 }
             }
             // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
@@ -11212,14 +11212,14 @@ pub mod x86_64 {
                 // self-propagating half of the x86-scribble3 cascade). Report and
                 // keep the previous current instead.
                 if crate::trace::EVENT_SCRIBBLE.armed()
-                    && !crate::dfx::scribble::task_plausible(next.as_ptr())
+                    && !crate::debug::scribble::task_plausible(next.as_ptr())
                 {
-                    crate::dfx::scribble::bad_switch_arg(
+                    crate::debug::scribble::bad_switch_arg(
                         2,
                         next.as_ptr() as u64,
                         prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
                     );
-                    crate::dfx::scribble::ring_log(
+                    crate::debug::scribble::ring_log(
                         crate::arch::cpu_id() as usize,
                         2,
                         prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
@@ -11240,7 +11240,7 @@ pub mod x86_64 {
                         // when armed, then abort — the asm repairs nothing of
                         // next and returns with prev still running.
                         if crate::trace::EVENT_SCRIBBLE.armed() {
-                            crate::dfx::scribble::double_run(
+                            crate::debug::scribble::double_run(
                                 next.pid() as u64,
                                 cpu as u64,
                                 observed as u64,
@@ -11331,12 +11331,12 @@ pub mod x86_64 {
                         // run on the static AP boot stacks (their kstack fields are
                         // never used), so a "foreign" sp here is not automatically
                         // corruption — repinning would break a mid-loop resume.
-                        crate::dfx::scribble::ring_dump();
+                        crate::debug::scribble::ring_dump();
                     }
                 }
             }
             // Scribble hunter (rux:scribble (retired dfx=scribble)): record the switch completion.
-            crate::dfx::scribble::ring_log(
+            crate::debug::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 2,
                 prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
@@ -11346,7 +11346,7 @@ pub mod x86_64 {
             // fully saved here, so any tracked field off its shadow was written
             // by someone else while it ran.
             if let Some(prev) = &prev {
-                crate::dfx::scribble::quiesce(prev.as_ptr());
+                crate::debug::scribble::quiesce(prev.as_ptr());
             }
             0 // proceed with the resume
         } }
@@ -11606,7 +11606,7 @@ pub mod x86_64 {
             // syscost probe: pre-cli edge; Location::caller() propagates
             // through the #[track_caller] chain (save_and_disable_irq /
             // irq_save / lock_irq*) to the critical-section owner.
-            crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+            crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: clearing IF is always safe.
             unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
         } }
@@ -11621,7 +11621,7 @@ pub mod x86_64 {
 
             // syscost probe: pre-sti edge (reads the flag BEFORE the asm so the
             // close/heal decision sees the pre-sti state); no-op when off.
-            crate::dfx::syscost::irq_note_on();
+            crate::debug::syscost::irq_note_on();
             // SAFETY: setting IF is safe at any point the caller wants IRQs on.
             unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
         } }
@@ -12287,7 +12287,7 @@ pub mod x86_64 {
             while BT_DONE[target].load(Ordering::Acquire) != req {
                 spins = spins.wrapping_add(1);
                 if spins > 200_000_000 {
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let _ = core::fmt::Write::write_fmt(
                         &mut w,
                         format_args!("REMOTE-BT[{}]: cpu={} TIMEOUT (not servicing IPIs)\n", why, target),
@@ -12301,7 +12301,7 @@ pub mod x86_64 {
             let rsp = BT_RSP[target].load(Ordering::Relaxed);
             let rbp = BT_RBP[target].load(Ordering::Relaxed);
             let n = BT_NFRAMES[target].load(Ordering::Relaxed) as usize;
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::backtrace::ConsoleWriter::new();
             // Target's current task pid/comm (best-effort; comm is fixed-size
             // bytes, no allocation).
             let cur = unsafe { crate::sched::sched::cpu_state(target).current };
@@ -12367,7 +12367,7 @@ pub mod x86_64 {
             if regs.kernel_mode() {
                 BT_RBP[cpu].store(regs.rbp, Ordering::Relaxed);
                 // Frame-pointer walk from the interrupted rbp — the same
-                // validation discipline as dfx::backtrace::walk_stack_trace
+                // validation discipline as debug::backtrace::walk_stack_trace
                 // (8-aligned, kernel range, strictly ascending, sane gap), but
                 // starting from the INTERRUPTED frame so the walk is the live
                 // chain of whatever the CPU was executing, not this handler's.
@@ -12424,7 +12424,7 @@ pub mod x86_64 {
                         static RIP: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
                         if RIP.fetch_add(1, Ordering::Relaxed) < 200 {
-                            use crate::dfx::taskdump::putc_brief as putchar;
+                            use crate::debug::taskdump::putc_brief as putchar;
                             for &b in b"RESCHED-IPI-RECV cpu=0 rip=0x" {
                                 putchar(b);
                             }
@@ -12859,7 +12859,7 @@ pub mod x86_64 {
                         crate::arch::x86_64::cpu::wrmsr(MSR_FS_BASE, addr);
                     }
                     // Scribble hunter: absorb this legitimate in-run write.
-                    crate::dfx::scribble::note_thread_write(current);
+                    crate::debug::scribble::note_thread_write(current);
                     0
                 }
                 ARCH_GET_FS => {
@@ -12884,7 +12884,7 @@ pub mod x86_64 {
                         crate::arch::x86_64::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
                     }
                     // Scribble hunter: absorb this legitimate in-run write.
-                    crate::dfx::scribble::note_thread_write(current);
+                    crate::debug::scribble::note_thread_write(current);
                     0
                 }
                 ARCH_GET_GS => {
@@ -12942,7 +12942,7 @@ pub mod x86_64 {
                     crate::arch::x86_64::cpu::stts();
                 }
                 // Scribble hunter: absorb this legitimate in-run write.
-                crate::dfx::scribble::note_thread_write(current);
+                crate::debug::scribble::note_thread_write(current);
             }
         } }
     }
@@ -13022,7 +13022,7 @@ pub mod x86_64 {
             // touch this CPU's watchdog so the boot-time gap (idle task created
             // on the BSP seconds ago under TCG) cannot read as a lockup.
             crate::arch::cpu::set_thread_id(crate::sched::idle_task_ptr(cpu) as u64);
-            crate::dfx::softlockup::touch(cpu);
+            crate::debug::softlockup::touch(cpu);
 
             PER_CPU[cpu].cpu_online.store(1, Ordering::Release);
             PER_CPU[cpu].started.store(1, Ordering::Release);
@@ -13551,7 +13551,7 @@ pub mod x86_64 {
         #[no_mangle]
         pub extern "C" fn x86_double_fault_dump()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
-            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+            use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
             let rsp: u64;
             // SAFETY: reading rsp is side-effect free.
             unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
@@ -13830,16 +13830,16 @@ pub mod x86_64 {
                         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
                     } else {
                         #[cfg(feature = "x86_64")]
-                        crate::dfx::scribble::crash_report(b"#PF-segv", regs);
+                        crate::debug::scribble::crash_report(b"#PF-segv", regs);
                         // The riscv64 mm layer returns KernelPanic for kernel
                         // faults; until the x86 twin grows that, do NOT silently
                         // iretq back into the faulting rip (infinite fault loop).
                         // The Oops path prints the report and applies the policy
                         // (panic in interrupt context / oops=panic / idle, task
                         // death otherwise — Tranche 5).
-                        crate::dfx::oops::oops(
-                            crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        crate::debug::oops::oops(
+                            crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                                 oops_show_regs(w, regs);
                             },
                         );
@@ -13878,12 +13878,12 @@ pub mod x86_64 {
                         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
                     } else {
                         #[cfg(feature = "x86_64")]
-                        crate::dfx::scribble::crash_report(b"#PF-perm", regs);
+                        crate::debug::scribble::crash_report(b"#PF-perm", regs);
                         // Oops path (Tranche 5): report + policy, like the
                         // Segfault arm above.
-                        crate::dfx::oops::oops(
-                            crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        crate::debug::oops::oops(
+                            crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                                 oops_show_regs(w, regs);
                             },
                         );
@@ -13923,12 +13923,12 @@ pub mod x86_64 {
                         }
                     } else {
                         #[cfg(feature = "x86_64")]
-                        crate::dfx::scribble::crash_report(b"#PF-bus", regs);
+                        crate::debug::scribble::crash_report(b"#PF-bus", regs);
                         // Oops path (Tranche 5): report + policy, like the
                         // Segfault arm above.
-                        crate::dfx::oops::oops(
-                            crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        crate::debug::oops::oops(
+                            crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                                 oops_show_regs(w, regs);
                             },
                         );
@@ -14030,7 +14030,7 @@ pub mod x86_64 {
                     // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
                     // tables live from the debugger).
                     #[cfg(feature = "x86_64")]
-                    crate::dfx::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
+                    crate::debug::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
                     // Raw serial print (printk may be wedged on a lock this CPU
                     // holds), then halt — the twin's R9 discipline.
                     // uart_putc_raw writes the serial port directly (no locks).
@@ -14236,9 +14236,9 @@ pub mod x86_64 {
                     // report, pstore capture, then either a real panic
                     // (interrupt context / oops=panic / idle) or the faulting
                     // task dies with SIGSEGV and the machine keeps running.
-                    crate::dfx::oops::oops(
-                        crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                        &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    crate::debug::oops::oops(
+                        crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                        &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                             oops_show_regs(w, regs);
                         },
                     );
@@ -15343,10 +15343,10 @@ pub mod x86_64 {
                 // corrupt execution. The Oops path prints the report and
                 // applies the policy (Tranche 5, the riscv64 twin's).
                 #[cfg(feature = "x86_64")]
-                crate::dfx::scribble::crash_report(b"#UD", regs);
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::IllegalInstruction,
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::scribble::crash_report(b"#UD", regs);
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::IllegalInstruction,
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -15455,7 +15455,7 @@ pub mod x86_64 {
                     // existed (build/.config drift). Read-only static-table
                     // binary search — IRQ-safe. Name capped to keep the
                     // direct-console line bounded.
-                    if let Some((name, base, _sz)) = crate::dfx::ksyms::lookup(regs.rip) {
+                    if let Some((name, base, _sz)) = crate::debug::ksyms::lookup(regs.rip) {
                         let msg: &[u8] = b" sym=";
                         for &b in msg {
                             putchar(b);
@@ -15541,7 +15541,7 @@ pub mod x86_64 {
                         use core::sync::atomic::Ordering::Relaxed;
                         if regs.user_mode() {
                             task.utime_ticks.fetch_add(1, Relaxed);
-                            crate::dfx::syscost::tick_user();
+                            crate::debug::syscost::tick_user();
                             // leg-40C perf rider: user-mode rip sampling for
                             // launcher-comm tasks (dfx-gated inside).
                             utime_sample_rip(regs.rip, task.comm());
@@ -15566,7 +15566,7 @@ pub mod x86_64 {
                             if comm_has_launcher(task.comm()) {
                                 STIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
                             }
-                            crate::dfx::syscost::tick_kern(regs.rip);
+                            crate::debug::syscost::tick_kern(regs.rip);
                             crate::perf::note_tick_fp(
                                 regs.rip,
                                 crate::perf::MODE_KERNEL,
@@ -15576,12 +15576,12 @@ pub mod x86_64 {
                             );
                         }
                     } else {
-                        crate::dfx::syscost::tick_idle();
+                        crate::debug::syscost::tick_idle();
                         crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
                     }
                 }
             } else {
-                crate::dfx::syscost::tick_idle();
+                crate::debug::syscost::tick_idle();
                 crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
             }
 
@@ -15630,15 +15630,15 @@ pub mod x86_64 {
             // quiescent tasks' tracked scheduling fields against their shadows +
             // scheduler-consistency scan (double-run seed detection).
             // Throttled inside; no-op unless the runtime switch is on.
-            crate::dfx::scribble::verify_gs();
-            crate::dfx::scribble::verify();
-            crate::dfx::scribble::verify_consistency();
+            crate::debug::scribble::verify_gs();
+            crate::debug::scribble::verify();
+            crate::debug::scribble::verify_consistency();
 
             // 2. Scheduler tick
             crate::sched::scheduler_tick();
 
             // 3. Check for soft lockups
-            crate::dfx::softlockup::check();
+            crate::debug::softlockup::check();
 
             // 4. Reschedule if needed (the trap-exit asm path owns the user-mode
             //    preemption; this in-IRQ switch only fires when preemptible,
@@ -15670,7 +15670,7 @@ pub mod x86_64 {
             // access below would hit arbitrary memory. Name it and halt instead
             // of corrupting.
             if cpu_id >= crate::config::MAX_CPUS {
-                use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+                use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
                 taskdump_raw_line(b"\nGS-HELL cpu_id=");
                 taskdump_dec(cpu_id as u64);
                 taskdump_raw_line(b" vector=0x");
@@ -16068,7 +16068,7 @@ pub mod x86_64 {
             if frame.user_mode() {
                 // Return-to-user quiescent state (rcu.rs; see the riscv64 twin).
                 crate::sync::rcu::rcu_note_context_switch();
-                crate::dfx::leakorigin::check_user_return();
+                crate::debug::leakorigin::check_user_return();
             }
         } }
 
@@ -16150,7 +16150,7 @@ pub mod x86_64 {
                 scribble_put_hex(t);
             }
             scribble_put_str(b"\n");
-            crate::dfx::scribble::ring_dump();
+            crate::debug::scribble::ring_dump();
         } }
 
         // INV-ARCH-TRAP-53 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16198,7 +16198,7 @@ pub mod x86_64 {
                 // SAFETY: diagnostic reads of the frame trap_exit just validated
                 // (and rejected); the memory is the current task's stack.
                 unsafe {
-                    crate::dfx::scribble::crash_report(b"BAD-FRAME", &*regs);
+                    crate::debug::scribble::crash_report(b"BAD-FRAME", &*regs);
                 }
             }
             // Route the owner out like any fatal-user-fault: SIGSEGV, default
@@ -17808,7 +17808,7 @@ pub mod x86_64 {
                                     let cow_res = unsafe {
                                         handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                                     };
-                                    crate::dfx::schb::note_cow(cow_j0);
+                                    crate::debug::schb::note_cow(cow_j0);
                                     match cow_res {
                                         crate::arch::mm::CowFaultResult::Resolved
                                         | crate::arch::mm::CowFaultResult::Retry => {
@@ -18057,7 +18057,7 @@ pub mod x86_64 {
                     // carry rip + the rbp walk into the KERNPANIC dump.
                     #[cfg(feature = "x86_64")]
                     if (access_type & FaultFlags::WRITE) != 0
-                        && crate::dfx::wildwatch::is_armed(fault_addr.bits() as usize)
+                        && crate::debug::wildwatch::is_armed(fault_addr.bits() as usize)
                     {
                         println!(
                             "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
@@ -18116,7 +18116,7 @@ pub mod x86_64 {
                         let cow_j0 = crate::drivers::timer::get_jiffies();
                         let cow_res =
                             unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
-                        crate::dfx::schb::note_cow(cow_j0);
+                        crate::debug::schb::note_cow(cow_j0);
                         match cow_res {
                             crate::arch::mm::CowFaultResult::Resolved => {
                                 MmFaultResult::Handled
@@ -18390,8 +18390,8 @@ pub mod x86_64 {
 
                     // Serialize against fork's table walk and COW faults (this mm's
                     // PTE section, INV-LOCK-7).
-                    let mp = crate::dfx::mmprof::on();
-                    let mp_tw = if mp { crate::dfx::mmprof::now() } else { 0 };
+                    let mp = crate::debug::mmprof::on();
+                    let mp_tw = if mp { crate::debug::mmprof::now() } else { 0 };
                     let _pte_guard = pte_lock_for(self).lock();
                     let mut addr = start.as_usize();
                     let end = addr.saturating_add(size);
@@ -18545,7 +18545,7 @@ pub mod x86_64 {
                                 continue;
                             }
                             if mp {
-                                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNPAGES, 1);
+                                crate::debug::mmprof::bump(crate::debug::mmprof::S_UNPAGES, 1);
                             }
                             if raw & PageTableEntry::P == 0 {
                                 // Swap entry (P=0 leaf): free the swap slot and clear
@@ -18607,7 +18607,7 @@ pub mod x86_64 {
                                 }
                                 if !leaf_is_ro {
                                     let new_ref =
-                                        page.put_page_site(crate::dfx::driftwatch::S_UNMAP_X86);
+                                        page.put_page_site(crate::debug::driftwatch::S_UNMAP_X86);
                                     if new_ref == 0 {
                                         // Cache-backed leaf: the frame still belongs to
                                         // the page cache — a zero put here is a phantom
@@ -18694,9 +18694,9 @@ pub mod x86_64 {
                     );
 
                     if mp {
-                        crate::dfx::mmprof::add(crate::dfx::mmprof::MU_WALK, mp_tw);
+                        crate::debug::mmprof::add(crate::debug::mmprof::MU_WALK, mp_tw);
                     }
-                    let mp_tt = if mp { crate::dfx::mmprof::now() } else { 0 };
+                    let mp_tt = if mp { crate::debug::mmprof::now() } else { 0 };
                     if !defer_tlb_flush {
                         crate::arch::ipi::flush_tlb_others_mm(
                             self.tlb_cpu_mask(),
@@ -18708,7 +18708,7 @@ pub mod x86_64 {
                         crate::arch::mm::asid::flush_tlb_all();
                     }
                     if mp {
-                        crate::dfx::mmprof::add(crate::dfx::mmprof::MU_TLB, mp_tt);
+                        crate::debug::mmprof::add(crate::debug::mmprof::MU_TLB, mp_tt);
                     }
 
                     Ok(())
@@ -18740,8 +18740,8 @@ pub mod x86_64 {
                     // mm writers concurrent with fork.
                     // forkprof (cmdline forkprof=1): phase split of the mm fork —
                     // snapshot / COW walk / VMA replay. One relaxed load when off.
-                    let fp = crate::dfx::forkprof::on();
-                    let fp_t_snap = if fp { crate::dfx::forkprof::now() } else { 0 };
+                    let fp = crate::debug::forkprof::on();
+                    let fp_t_snap = if fp { crate::debug::forkprof::now() } else { 0 };
                     let (cow_exempt, vma_snapshot, vma_ranges): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>, Vec<(u64, u64)>) = {
                         let parent_vma_guard = self.vma_read();
 
@@ -18780,9 +18780,9 @@ pub mod x86_64 {
                         (exempt, snapshot, ranges)
                     };
                     if fp {
-                        crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_SNAPSHOT, fp_t_snap);
-                        crate::dfx::forkprof::bump(
-                            crate::dfx::forkprof::S_FORKS_VMASES,
+                        crate::debug::forkprof::add(crate::debug::forkprof::P_MM_SNAPSHOT, fp_t_snap);
+                        crate::debug::forkprof::bump(
+                            crate::debug::forkprof::S_FORKS_VMASES,
                             vma_snapshot.len() as u64,
                         );
                     }
@@ -18792,11 +18792,11 @@ pub mod x86_64 {
                     // The walk takes the PARENT's per-mm PTE section internally per leaf
                     // table and may cond_resched between chunks (launcher wall fix — see
                     // the function's own comment for the exclusion argument).
-                    let fp_t_cow = if fp { crate::dfx::forkprof::now() } else { 0 };
+                    let fp_t_cow = if fp { crate::debug::forkprof::now() } else { 0 };
                     let new_root_ppn =
                         copy_page_table_cow(self, &cow_exempt, &vma_ranges).ok_or(MapError::OutOfMemory)?;
                     if fp {
-                        crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_COW, fp_t_cow);
+                        crate::debug::forkprof::add(crate::debug::forkprof::P_MM_COW, fp_t_cow);
                     }
 
                     // new_root_ppn was just returned from copy_page_table_cow, so it
@@ -18811,7 +18811,7 @@ pub mod x86_64 {
                     {
                         // Everything after this point only touches the CHILD's manager
                         // (the snapshot was taken before the walk — no parent lock held).
-                        let fp_t_replay = if fp { crate::dfx::forkprof::now() } else { 0 };
+                        let fp_t_replay = if fp { crate::debug::forkprof::now() } else { 0 };
                         if !vma_snapshot.is_empty() {
                             let mut new_vma_mgr = new_space.vma_write();
                             for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
@@ -18850,7 +18850,7 @@ pub mod x86_64 {
                             }
                         }
                         if fp {
-                            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_REPLAY, fp_t_replay);
+                            crate::debug::forkprof::add(crate::debug::forkprof::P_MM_REPLAY, fp_t_replay);
                         }
                     }
 
@@ -18932,7 +18932,7 @@ pub mod x86_64 {
             /// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
             pub fn forensics_scan_trees(
                 target_ppn: u64,
-                out: &mut [crate::dfx::mmforensics::TreeHit],
+                out: &mut [crate::debug::mmforensics::TreeHit],
             ) -> (usize, usize, usize, usize)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
                 const MAX_TASKS: usize = 128;
@@ -18966,7 +18966,7 @@ pub mod x86_64 {
 
                 let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
                     if nh < out.len() {
-                        out[nh] = crate::dfx::mmforensics::TreeHit {
+                        out[nh] = crate::debug::mmforensics::TreeHit {
                             pid,
                             root_ppn: root,
                             level,
@@ -19695,7 +19695,7 @@ pub mod x86_64 {
                             // which path is mapping now. The frame walk names the
                             // actual caller — b86 lost render_service to a 2-page
                             // heap overwrite at 0x1f000 whose ctx label was useless.
-                            crate::dfx::backtrace::dump_stack();
+                            crate::debug::backtrace::dump_stack();
                         }
                     }
                 }
@@ -19877,7 +19877,7 @@ pub mod x86_64 {
                     // mmforensics: deep capture at the double/foreign free refusal
                     // (own report cap + switch gate; no locks needed here — the
                     // refusal path runs before any frame-state transition).
-                    crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
+                    crate::debug::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
                     // Double-tracked frame: quarantine.
                     Self::poison_table(ppn);
                     false
@@ -20053,9 +20053,9 @@ pub mod x86_64 {
                         // (direct zone.alloc_pages above) — feed them to the page-level
                         // site table from THIS frame so the chain names the mapping path
                         // (map_page / create_user_address_space / ...).
-                        if crate::dfx::memwatch::armed() {
-                            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                                [0; crate::dfx::memwatch::SITE_FRAMES];
+                        if crate::debug::memwatch::armed() {
+                            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                                [0; crate::debug::memwatch::SITE_FRAMES];
                             // SAFETY: reading rbp is register-only; the frame-pointer
                             // chain walk is the dfx edge (guarded against wild frames).
                             let mw_bp: u64 = unsafe {
@@ -20065,8 +20065,8 @@ pub mod x86_64 {
                             };
                             // SAFETY: the chain walk is the dfx stack-forensics edge;
                             // mw_bp is this frame's own frame pointer.
-                            unsafe { crate::dfx::memwatch::walk_fp_chain(mw_bp, &mut mw_frames) };
-                            crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
+                            unsafe { crate::debug::memwatch::walk_fp_chain(mw_bp, &mut mw_frames) };
+                            crate::debug::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
                         }
 
                         // FORENSIC ledger: stamp every Late-stage table allocation.
@@ -22822,7 +22822,7 @@ pub mod aarch64 {
         #[track_caller]
         pub fn disable_irq()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
-            crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+            crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: msr daifset atomically sets the DAIF mask bits; safe at any
             /// time.
             unsafe {
@@ -22838,7 +22838,7 @@ pub mod aarch64 {
         #[track_caller]
         pub fn enable_irq()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
-            crate::dfx::syscost::irq_note_on();
+            crate::debug::syscost::irq_note_on();
             // SAFETY: msr daifclr atomically clears the DAIF mask bits; safe at
             /// any time.
             unsafe {
@@ -23826,20 +23826,20 @@ pub mod aarch64 {
                         use core::sync::atomic::Ordering::Relaxed;
                         if regs.user_mode() {
                             (*task).utime_ticks.fetch_add(1, Relaxed);
-                            crate::dfx::syscost::tick_user();
+                            crate::debug::syscost::tick_user();
                             crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
                         } else {
                             (*task).stime_ticks.fetch_add(1, Relaxed);
-                            crate::dfx::syscost::tick_kern(regs.pc);
+                            crate::debug::syscost::tick_kern(regs.pc);
                             crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
                         }
                     } else {
-                        crate::dfx::syscost::tick_idle();
+                        crate::debug::syscost::tick_idle();
                         crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
                     }
                 }
             } else {
-                crate::dfx::syscost::tick_idle();
+                crate::debug::syscost::tick_idle();
                 crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
             }
 
@@ -23850,7 +23850,7 @@ pub mod aarch64 {
             crate::sched::scheduler_tick();
 
             // 3. Check for soft lockups
-            crate::dfx::softlockup::check();
+            crate::debug::softlockup::check();
 
             // 4. Reschedule if needed
             if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
@@ -23927,9 +23927,9 @@ pub mod aarch64 {
                         "aarch64: unexpected HVC at pc={:#x} (PSCI runs through EL2 and should not land here)",
                         regs_ref.pc
                     );
-                    crate::dfx::oops::oops(
-                        crate::dfx::oops::Kind::UnknownException { cause: esr },
-                        &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    crate::debug::oops::oops(
+                        crate::debug::oops::Kind::UnknownException { cause: esr },
+                        &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                             oops_show_regs(w, regs_ref);
                         },
                     );
@@ -23982,9 +23982,9 @@ pub mod aarch64 {
                         "aarch64: SError at pc={:#x} far={:#x} esr={:#x}",
                         regs_ref.pc, regs_ref.far, esr
                     );
-                    crate::dfx::oops::oops(
-                        crate::dfx::oops::Kind::UnknownException { cause: esr },
-                        &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    crate::debug::oops::oops(
+                        crate::debug::oops::Kind::UnknownException { cause: esr },
+                        &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                             oops_show_regs(w, regs_ref);
                         },
                     );
@@ -23996,9 +23996,9 @@ pub mod aarch64 {
                     if regs_ref.user_mode() {
                         handle_illegal_instruction(regs_ref);
                     } else {
-                        crate::dfx::oops::oops(
-                            crate::dfx::oops::Kind::IllegalInstruction,
-                            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        crate::debug::oops::oops(
+                            crate::debug::oops::Kind::IllegalInstruction,
+                            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                                 oops_show_regs(w, regs_ref);
                             },
                         );
@@ -24014,9 +24014,9 @@ pub mod aarch64 {
                     if regs_ref.user_mode() {
                         handle_illegal_instruction(regs_ref);
                     } else {
-                        crate::dfx::oops::oops(
-                            crate::dfx::oops::Kind::UnknownException { cause: esr },
-                            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        crate::debug::oops::oops(
+                            crate::debug::oops::Kind::UnknownException { cause: esr },
+                            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                                 oops_show_regs(w, regs_ref);
                             },
                         );
@@ -24030,7 +24030,7 @@ pub mod aarch64 {
             // Leak-origin tripwire (riscv64 twin): a user-return frame must
             // carry preempt_count == 0.
             if regs_ref.user_mode() {
-                crate::dfx::leakorigin::check_user_return();
+                crate::debug::leakorigin::check_user_return();
             }
         } }
 
@@ -25844,7 +25844,7 @@ pub mod aarch64 {
                                     if (*page).is_mapped() {
                                         crate::mm::rmap::page_remove_rmap(&*page);
                                     }
-                                    (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_RV);
+                                    (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_RV);
                                 }
                                 // PCACHE mapping pin drop (kept for parity with the
                                 // twin's filemap port; no aarch64 PCACHE producers
@@ -26105,7 +26105,7 @@ pub mod aarch64 {
                         use core::fmt::Write;
                         let ttbr1: u64;
                         unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) };
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         let _ = write!(
                             w,
                             "devmap: phys {:#x}+{:#x} -> va {:#x}: {} blocks (pools l1/l2/l3 {}/{}/{}, ttbr1={:#x})\n",

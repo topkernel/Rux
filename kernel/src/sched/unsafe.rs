@@ -1225,9 +1225,9 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // forkprof: first Rust code in the newborn's frame — splits the
     // switch machinery (context_switch entry -> here) from the
     // return-to-user tail (here -> first syscall entry).
-    if crate::dfx::forkprof::trace_on() {
+    if crate::debug::forkprof::trace_on() {
         let pid = crate::sched::get_current_pid();
-        crate::dfx::forkprof::trace(12, pid); // T_NEWBORN_TAIL
+        crate::debug::forkprof::trace(12, pid); // T_NEWBORN_TAIL
     }
     // Called after context_switch in the new task's context (ret_from_fork).
     // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
@@ -1448,7 +1448,7 @@ pub fn poison_and_dealloc_task(task_ptr: *mut Task) {
             while off < 0x100 {
                 core::ptr::write_volatile(
                     slot.add(off) as *mut u64,
-                    crate::dfx::r83hunt::R83_FREED_PAINT,
+                    crate::debug::r83hunt::R83_FREED_PAINT,
                 );
                 off += 8;
             }

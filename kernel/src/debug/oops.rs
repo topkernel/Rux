@@ -47,8 +47,8 @@
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::dfx::backtrace::ConsoleWriter;
-use crate::dfx::taint;
+use crate::debug::backtrace::ConsoleWriter;
+use crate::debug::taint;
 
 /// What class of kernel fault produced the oops — selects the head
 /// line's wording (the reference derives the same distinction from the
@@ -115,7 +115,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     // nesting forever.
     if OOPS_ENTERED.swap(true, Ordering::Relaxed) {
         // INV-FOR-6 raw-console edge (panic path, locks down).
-    let mut put = |b: u8| crate::dfx::forensics_edges::console_put_raw(b);
+    let mut put = |b: u8| crate::debug::forensics_edges::console_put_raw(b);
         for &b in b"trap: oops re-entered during report; halting\n" {
             put(b);
         }
@@ -140,7 +140,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
     // Stage every report byte for the pstore record, like the panic
     // handler does FIRST (one relaxed load per byte on every other
     // boot).
-    crate::dfx::pstore::arm_sink();
+    crate::debug::pstore::arm_sink();
 
     {
         let mut w = ConsoleWriter::new();
@@ -209,7 +209,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
 
     // ---- Call Trace (the shared symbolized walker; prints its own
     // header) ----
-    crate::dfx::backtrace::dump_stack();
+    crate::debug::backtrace::dump_stack();
 
     // ---- footer (the reference's dump_stack end marker) ----
     {
@@ -253,7 +253,7 @@ pub fn oops(kind: Kind, regs_dump: &dyn Fn(&mut ConsoleWriter)) -> ! {
             // region here (a policy-escalated oops does not: the panic
             // handler writes its own console record right after, and
             // the staged sink bytes — the oops report — ride inside it).
-            crate::dfx::pstore::oops_capture(n);
+            crate::debug::pstore::oops_capture(n);
             crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
         }
     }

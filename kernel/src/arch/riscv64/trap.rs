@@ -317,7 +317,7 @@ pub(crate) fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
 /// x-order, then the status/badaddr/cause line. Rendered from the trap
 /// frame, not `save_regs()` — the SR-PROBE lesson: a save_regs capture
 /// shows the printer's frame, not the faulting one.
-pub(crate) fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+pub(crate) fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let cells: [(&str, u64); 32] = [
         ("epc", regs.epc),
@@ -393,9 +393,9 @@ pub(crate) fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         // corrupts state. The Oops path prints the report and applies
         // the policy (panic in interrupt context / oops=panic / idle;
         // task death otherwise — Tranche 5).
-        crate::dfx::oops::oops(
-            crate::dfx::oops::Kind::UnknownException { cause: cause as u64 },
-            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        crate::debug::oops::oops(
+            crate::debug::oops::Kind::UnknownException { cause: cause as u64 },
+            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                 oops_show_regs(w, regs);
             },
         );

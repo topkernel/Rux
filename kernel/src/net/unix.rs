@@ -1322,7 +1322,7 @@ fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
                 sock as *const _ as usize,
                 prev,
                 v,
-                crate::dfx::backtrace::caller_return_address() as usize
+                crate::debug::backtrace::caller_return_address() as usize
             );
         }
     }
@@ -1398,7 +1398,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     // unconditional per-bind print of every /run/ socket name (15 lines
     // per ub2404 boot, unbounded on a busy /run). Behind the existing OH
     // hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
-    if crate::dfx::switches::oh_hunt_prints_on()
+    if crate::debug::switches::oh_hunt_prints_on()
         && addr.key.len() > 1
         && !addr.key.starts_with("\0")
         && addr.key.contains("/run/")
@@ -1546,7 +1546,7 @@ pub fn unix_connect(
     // every /run/ socket name (338 lines per ub2404 boot: journal,
     // nscd, userdb). Behind the existing OH hunt-print master gate
     // (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
-    if crate::dfx::switches::oh_hunt_prints_on()
+    if crate::debug::switches::oh_hunt_prints_on()
         && addr.key.len() > 1
         && !addr.key.starts_with(' ')
         && addr.key.contains("/run/")
@@ -1870,7 +1870,7 @@ impl ErrLatch {
                         self as *const _ as usize,
                         prev,
                         v,
-                        crate::dfx::backtrace::caller_return_address() as usize
+                        crate::debug::backtrace::caller_return_address() as usize
                     );
                 }
             }
@@ -3142,7 +3142,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
     // queue at close time are about to be released — the receiver died
     // (or stopped reading) before the ancillary segment was touched.
-    if crate::dfx::scmtap::enabled() {
+    if crate::debug::scmtap::enabled() {
         let q = sock.recv_queue.lock();
         let mut nfds = 0usize;
         let mut segs = 0usize;
@@ -3154,7 +3154,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
         }
         drop(q);
         if nfds > 0 {
-            crate::dfx::scmtap::tap_orphan(nfds, segs);
+            crate::debug::scmtap::tap_orphan(nfds, segs);
         }
     }
     // unix_release_sock: wake_up_interruptible_all(&u->peer_wait) —
@@ -3238,10 +3238,10 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
 pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     use crate::arch::uaccess::copy_from_user;
     // cctx probe (closegap lane): whole-op send sum for lat_unix.
-    let cc_t = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::UW_N);
+    let cc_t = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::UW_N);
     let cc_out = |r: isize| -> isize {
-        crate::dfx::cctx::add(&crate::dfx::cctx::UW_NS, cc_t);
+        crate::debug::cctx::add(&crate::debug::cctx::UW_NS, cc_t);
         r
     };
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
@@ -3388,10 +3388,10 @@ const READ_BOUNCE: usize = 1024;
 pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op recv sum for lat_unix (the
     // body has many return points — wrap instead of threading stamps).
-    let cc_t = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::UR_N);
+    let cc_t = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::UR_N);
     let r = unix_read_user_inner(file, dst, count);
-    crate::dfx::cctx::add(&crate::dfx::cctx::UR_NS, cc_t);
+    crate::debug::cctx::add(&crate::debug::cctx::UR_NS, cc_t);
     r
 }
 
@@ -3429,8 +3429,8 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if r.len == 0 {
                     return 0; // EOF
                 }
-                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
-                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                if crate::debug::scmtap::enabled() && !r.files.is_empty() {
+                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // dst was access_ok-validated by the caller;
                 // r.len <= stage <= count.
@@ -3475,8 +3475,8 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 // read is the dbus "message refers to more unix fds
                 // than were sent" corruption shape, so make the loss
                 // visible when hunting (rux:scmtap (retired dfx=scmtap)).
-                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
-                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                if crate::debug::scmtap::enabled() && !r.files.is_empty() {
+                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv
@@ -3613,8 +3613,8 @@ fn unix_recv_stream_user(
                 }
             }
             if !files.is_empty() {
-                if crate::dfx::scmtap::enabled() {
-                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", files.len());
+                if crate::debug::scmtap::enabled() {
+                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", files.len());
                 }
                 let _ = cred;
             }

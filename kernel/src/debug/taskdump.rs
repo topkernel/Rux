@@ -254,7 +254,7 @@ pub fn dump_syscall_ring_for(pid: u32) {    use crate::syscall::dispatch::{SYSCA
 #[cfg(feature = "dfx-futex-trace")]
 fn dfx_task_read_u32(t: &crate::process::Task, va: u64) -> Option<u32> {
     let as_arc = t.address_space_arc()?;
-    crate::dfx::walk_read::<u32>(as_arc.root_ppn(), va)
+    crate::debug::walk_read::<u32>(as_arc.root_ppn(), va)
 }
 
 /// DFX: one-line periodic snapshot of a tracked user word.
@@ -291,8 +291,8 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
     let root = as_arc.root_ppn();
     // Read one user u32 through the task's page tables.
     // Diagnostic walk + linear-map reads through the family's one edge.
-    let read_u32 = |va: u64| -> Option<u32> { crate::dfx::walk_read::<u32>(root, va) };
-    let read_u64 = |va: u64| -> Option<u64> { crate::dfx::walk_read::<u64>(root, va) };
+    let read_u32 = |va: u64| -> Option<u32> { crate::debug::walk_read::<u32>(root, va) };
+    let read_u64 = |va: u64| -> Option<u64> { crate::debug::walk_read::<u64>(root, va) };
     // Xorg input-thread globals: guard ptr @0x1c9a58, input_mutex @0x1c81f0,
     // lock counter @0x206598.
     if let Some(p) = read_u64(0x1c9a58) {
@@ -322,7 +322,7 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
         {
             // Diagnostic walk + linear-map read (one edge for the family);
             // per-word walks keep the original skip-unmapped semantics.
-            let v = match crate::dfx::walk_read::<u64>(root, addr) {
+            let v = match crate::debug::walk_read::<u64>(root, addr) {
                 Some(v) => v,
                 None => {
                     addr = (addr + 0x1000) & !0xfffu64;
@@ -459,7 +459,7 @@ pub fn dump_all_tasks(reason: &str) {
             } else {
                 // INV-FOR-1 adopt edge: the per-CPU current Task stays
                 // allocated; pid is a stable field read.
-                put_dec(crate::dfx::forensics_edges::task_borrow(cur)
+                put_dec(crate::debug::forensics_edges::task_borrow(cur)
                     .map(|t| t.pid() as u64)
                     .unwrap_or(999999));
             }
@@ -506,7 +506,7 @@ pub fn dump_all_tasks(reason: &str) {
             // INV-FOR-1 adopt edge: the per-CPU current snapshot's Task
             // stays allocated (idle tasks and hash-invisible exiting
             // tasks are still valid Task objects); stable-field reads.
-            let tk = match crate::dfx::forensics_edges::task_borrow(t) {
+            let tk = match crate::debug::forensics_edges::task_borrow(t) {
                 Some(tk) => tk,
                 None => continue,
             };
@@ -549,7 +549,7 @@ pub fn dump_all_tasks(reason: &str) {
                 if (sp >> 48) == 0xffff
                     && (sp & 7) == 0
                     && sp > 0x1000
-                    && crate::dfx::memwatch::kernel_va_readable(sp as usize)
+                    && crate::debug::memwatch::kernel_va_readable(sp as usize)
                 {
                     puts(" sp=");
                     put_hex(sp);
@@ -793,7 +793,7 @@ pub fn dump_all_tasks(reason: &str) {
                 if (sp >> 48) == 0xffff
                     && (sp & 7) == 0
                     && sp > 0x1000
-                    && crate::dfx::memwatch::kernel_va_readable(sp as usize)
+                    && crate::debug::memwatch::kernel_va_readable(sp as usize)
                 {
                     puts("     sp=");
                     put_hex(sp);
@@ -846,7 +846,7 @@ pub fn dump_all_tasks(reason: &str) {
         // task snapshot — the b148 shape (whole OH cohort D-parked, lock
         // apparently free, zero STALL prints) was invisible without it.
         crate::fs::ext4::EXT4_BIG_LOCK.dfx_census_line();
-        crate::dfx::memwatch::dump_mem();
+        crate::debug::memwatch::dump_mem();
         // pa16 (magazine): the packing layer's per-class op counts and
         // class-lock acquisitions on the same cadence — locks vs
         // obj_allocs+obj_frees is the magazine's live traffic-ratio
@@ -958,7 +958,7 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
     // INV-FOR-4 gs-data edge: %gs:PC_MAGIC reads this CPU's
     // PerCpu.magic — a plain data read of the active GS base, exactly
     // what the trap stubs do.
-    let gs_magic_q = crate::dfx::forensics_edges::percpu_magic_read();
+    let gs_magic_q = crate::debug::forensics_edges::percpu_magic_read();
     a.gs_cpu.store(gs_cpu, Ordering::Relaxed);
     a.gs_magic.store(gs_magic_q, Ordering::Relaxed);
 
@@ -974,7 +974,7 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
         // INV-FOR-3 raw-ref edge: CURRENT_PT_REGS[cpu] was swapped to
         // this IPI's live frame by trap_handler before dispatch — the
         // one frame edge.
-        let frame = crate::dfx::forensics_edges::raw_ref(pr);
+        let frame = crate::debug::forensics_edges::raw_ref(pr);
         let (rip, rsp) = (frame.rip, frame.rsp);
         a.int_rip.store(rip, Ordering::Relaxed);
         a.int_rsp.store(rsp, Ordering::Relaxed);
@@ -1074,7 +1074,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
             if !t.is_null() {
                 // INV-FOR-1 adopt edge: as the per-CPU walk — the
                 // current Task stays allocated; stable-field reads.
-                let tk = match crate::dfx::forensics_edges::task_borrow(t) {
+                let tk = match crate::debug::forensics_edges::task_borrow(t) {
                     Some(tk) => tk,
                     None => return,
                 };
@@ -1269,7 +1269,7 @@ pub fn parked_kstack_syms(t: &crate::process::task::Task) -> alloc::string::Stri
             None => break,
         };
         if v >= lo && v < hi && (v & 1) == 0 {
-            let sym = crate::dfx::ksyms::format_symbol(v);
+            let sym = crate::debug::ksyms::format_symbol(v);
             if seg_len + sym.len() + 1 > 230 {
                 flush(&mut seg, &mut s);
                 let _ = write!(seg, "parkstk+: tid {}:", t.pid());

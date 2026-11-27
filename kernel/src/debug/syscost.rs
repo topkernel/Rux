@@ -8,7 +8,7 @@
 //!
 //! Everything here is armed by the kernel cmdline `syscost=1` and costs
 //! nothing when off (one cached atomic load per syscall exit; the tick
-//! hooks are two relaxed adds). No `dfx/switches.rs` bit is consumed —
+//! hooks are two relaxed adds). No `debug/switches.rs` bit is consumed —
 //! that file belongs to the wild-write line; this probe owns its own
 //! cmdline key so the branches can merge without coordination.
 //!
@@ -706,7 +706,7 @@ pub fn open_cli_segment(cpu: usize) -> Option<(&'static str, u32, u64)> {
     }
     // Keys are &'static Location references stored at open time by the
     // disable hook on this kernel's own code (INV-FOR-3 edge).
-    let l = crate::dfx::forensics_edges::location(key as usize);
+    let l = crate::debug::forensics_edges::location(key as usize);
     let (file, line) = (l.file(), l.line());
     Some((file, line, age))
 }
@@ -1660,10 +1660,10 @@ pub fn dump() {
 
     // 39th: AF_UNIX hot-path phase anatomy rides the same dump cadence
     // (no-op unless the unixrd=1 cmdline param is armed).
-    crate::dfx::unixrd::dump();
+    crate::debug::unixrd::dump();
     // hilog-flood lane: OH log-fabric per-caller census (no-op unless
     // the hilogcensus=1 cmdline param is armed).
-    crate::dfx::hilogcensus::dump();
+    crate::debug::hilogcensus::dump();
     // rt-r4: per-caller binder WORLD section maxima (all WORLD sections
     // share one REST_SITES row — this splits the 6-8 ms class by caller).
     {
@@ -1961,7 +1961,7 @@ pub fn dump() {
             let key = REST_SITES[i].loc.load(Ordering::Relaxed);
             let n = REST_SITES[i].n.load(Ordering::Relaxed).max(1);
             // INV-FOR-3 edge.
-            let l = crate::dfx::forensics_edges::location(key as usize);
+            let l = crate::debug::forensics_edges::location(key as usize);
             let (file, line) = (l.file(), l.line());
             crate::pr_warn!(
                 "SYSCOST t={}s rest-site {:2}: {}:{} n={} tot={}ms avg={}ns max={}us",

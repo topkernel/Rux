@@ -3827,8 +3827,8 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 /// name (what trap.S calls) is unchanged.
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     // forkprof trace: the trap-exit signal gate (every user return).
-    if crate::dfx::forkprof::trace_on() {
-        crate::dfx::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
+    if crate::debug::forkprof::trace_on() {
+        crate::debug::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
     }
     use crate::sched;
 

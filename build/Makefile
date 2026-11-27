@@ -72,7 +72,7 @@ endif
 build:
 	@echo "Building Rux kernel (platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
-	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(KERNEL_BIN) $(CARGO_TARGET) kernel/src/dfx/ksyms_generated.rs
+	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(KERNEL_BIN) $(CARGO_TARGET) kernel/src/debug/ksyms_generated.rs
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(KERNEL_BIN) $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/bzImage
@@ -89,7 +89,7 @@ endif
 build-release:
 	@echo "Building Rux kernel (Release, platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
-	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(CARGO_TARGET) kernel/src/dfx/ksyms_generated.rs
+	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(CARGO_TARGET) kernel/src/debug/ksyms_generated.rs
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage

@@ -57,7 +57,7 @@ fn exit_robust_list(t: &Task) {
     }
     #[cfg(feature = "dfx-futex-trace")]
     {
-        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ROBUST-EXIT pid=");
         taskdump_dec(t.pid() as u64);
         taskdump_raw_line(b" head=");
@@ -178,7 +178,7 @@ fn exit_clear_child_tid(t: &mut Task) {
     let mm_id = crate::sync::futex::task_futex_mm_id(t);
     #[cfg(feature = "dfx-futex-trace")]
     {
-        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX CLEARTID-EXIT pid=");
         taskdump_dec(t.pid() as u64);
         taskdump_raw_line(b" u=");
@@ -233,9 +233,9 @@ pub fn kill_other_threads(current: &Task) {
             if crate::trace::EVENT_WWCENSUS.armed()
                 && m_raw as *const Task != current as *const Task
             {
-                use crate::dfx::taskdump::putc_brief as putchar;
+                use crate::debug::taskdump::putc_brief as putchar;
                 fn pd(mut v: u64) {
-                    use crate::dfx::taskdump::putc_brief as p;
+                    use crate::debug::taskdump::putc_brief as p;
                     let mut buf = [0u8; 20];
                     let mut n = 0;
                     if v == 0 { p(b'0'); return; }
@@ -597,19 +597,19 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
         {
             if spins == 0 {
                 let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
-                crate::dfx::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
-                crate::dfx::taskdump::taskdump_dec(cur_pid as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b" member=");
-                crate::dfx::taskdump::taskdump_dec(m.pid() as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b" state=0x");
+                crate::debug::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
+                crate::debug::taskdump::taskdump_dec(cur_pid as u64);
+                crate::debug::taskdump::taskdump_raw_line(b" member=");
+                crate::debug::taskdump::taskdump_dec(m.pid() as u64);
+                crate::debug::taskdump::taskdump_raw_line(b" state=0x");
                 let st = m.state().bits() as u64;
                 let mut sh: i32 = 32;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((st >> sh) & 0xF) as u8;
-                    crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                    crate::debug::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
                 }
-                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                crate::debug::taskdump::taskdump_raw_line(b"\n");
             }
             if crate::drivers::timer::get_jiffies()
                 .wrapping_sub(armed_at)
@@ -644,13 +644,13 @@ fn free_dead_member(claim: crate::sched::reapdrain::ReapClaim) -> Option<crate::
             let claim = m
                 .running_on_cpu
                 .load(core::sync::atomic::Ordering::Acquire);
-            crate::dfx::taskdump::taskdump_raw_line(b"FDM-DEFER #");
-            crate::dfx::taskdump::taskdump_dec((n + 1) as u64);
-            crate::dfx::taskdump::taskdump_raw_line(b" member=");
-            crate::dfx::taskdump::taskdump_dec(m.pid() as u64);
-            crate::dfx::taskdump::taskdump_raw_line(b" claim=");
-            crate::dfx::taskdump::taskdump_dec(claim as u64);
-            crate::dfx::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
+            crate::debug::taskdump::taskdump_raw_line(b"FDM-DEFER #");
+            crate::debug::taskdump::taskdump_dec((n + 1) as u64);
+            crate::debug::taskdump::taskdump_raw_line(b" member=");
+            crate::debug::taskdump::taskdump_dec(m.pid() as u64);
+            crate::debug::taskdump::taskdump_raw_line(b" claim=");
+            crate::debug::taskdump::taskdump_dec(claim as u64);
+            crate::debug::taskdump::taskdump_raw_line(b" (owner live/ambiguous; free deferred to next sweep)\n");
         }
         return Some(claim);
     }
@@ -1222,27 +1222,27 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
                 core::sync::atomic::AtomicU32::new(0);
             let n = RTS_DEFER_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 64 {
-                crate::dfx::taskdump::taskdump_raw_line(
+                crate::debug::taskdump::taskdump_raw_line(
                     b"RTS-DEFER (storage free deferred; owner still switching) pid=",
                 );
-                crate::dfx::taskdump::taskdump_dec(t.pid() as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b" on_cpu=");
-                crate::dfx::taskdump::taskdump_dec(t.on_cpu() as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b" swout=");
-                crate::dfx::taskdump::taskdump_dec(
+                crate::debug::taskdump::taskdump_dec(t.pid() as u64);
+                crate::debug::taskdump::taskdump_raw_line(b" on_cpu=");
+                crate::debug::taskdump::taskdump_dec(t.on_cpu() as u64);
+                crate::debug::taskdump::taskdump_raw_line(b" swout=");
+                crate::debug::taskdump::taskdump_dec(
                     crate::sched::sched::switching_out_names(task) as u64,
                 );
-                crate::dfx::taskdump::taskdump_raw_line(b" tsd=");
-                crate::dfx::taskdump::taskdump_dec(
+                crate::debug::taskdump::taskdump_raw_line(b" tsd=");
+                crate::debug::taskdump::taskdump_dec(
                     t.terminal_switch_done.load(core::sync::atomic::Ordering::Acquire) as u64,
                 );
-                crate::dfx::taskdump::taskdump_raw_line(b" pac=");
-                crate::dfx::taskdump::taskdump_dec(
+                crate::debug::taskdump::taskdump_raw_line(b" pac=");
+                crate::debug::taskdump::taskdump_dec(
                     t.terminal_pacing.load(core::sync::atomic::Ordering::Acquire) as u64,
                 );
-                crate::dfx::taskdump::taskdump_raw_line(b" st=");
-                crate::dfx::taskdump::taskdump_dec(t.state().bits() as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b" slot=");
+                crate::debug::taskdump::taskdump_raw_line(b" st=");
+                crate::debug::taskdump::taskdump_dec(t.state().bits() as u64);
+                crate::debug::taskdump::taskdump_raw_line(b" slot=");
                 let mut slot_pid = u32::MAX;
                 for c in 0..crate::config::MAX_CPUS {
                     let cur = crate::sched::sched::cpu_state(c).current;
@@ -1251,8 +1251,8 @@ fn release_task_storage(claim: crate::sched::reapdrain::ReapClaim) {
                         break;
                     }
                 }
-                crate::dfx::taskdump::taskdump_dec(slot_pid as u64);
-                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+                crate::debug::taskdump::taskdump_dec(slot_pid as u64);
+                crate::debug::taskdump::taskdump_raw_line(b"\n");
             }
             // Hand the retry the reaper's ownership: re-park the task on
             // the reaping task's dead_threads list. The drain ladder
@@ -1389,7 +1389,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 // line stages and flushes atomically instead of per-byte
                 // uart_putc_raw, which the OH kmsg flood spliced mid-line
                 // on SMP8.
-                crate::dfx::taskdump::taskdump_raw_line(line.as_bytes());
+                crate::debug::taskdump::taskdump_raw_line(line.as_bytes());
             }
         }
     }
@@ -1824,10 +1824,10 @@ pub fn do_exit(exit_code: i32) -> ! {
     // forkprof (cmdline forkprof=1): leader-arm phase timings. The probe
     // rig's children are single-threaded, so the leader arm is the exit
     // cost lmbench attributes to fork+exit.
-    let fp = crate::dfx::forkprof::on() && dying_pid == cur.tgid();
-    let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
+    let fp = crate::debug::forkprof::on() && dying_pid == cur.tgid();
+    let fp_t0 = if fp { crate::debug::forkprof::now() } else { 0 };
     if fp {
-        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_EXIT_ENTRY, dying_pid);
+        crate::debug::forkprof::trace(crate::debug::forkprof::T_EXIT_ENTRY, dying_pid);
     }
 
     // The sched:sched_process_exit tracepoint, recorded at do_exit entry
@@ -2100,7 +2100,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 
         #[cfg(feature = "dfx-futex-trace")]
         {
-            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+            use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
             taskdump_raw_line(b"FTX EXIT pid=");
             taskdump_dec(current_pid as u64);
             taskdump_raw_line(b" code=");
@@ -2194,7 +2194,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         if cur.address_space_arc().is_some() {
             crate::process::edges::switch_to_kernel_root_on_exit();
         }
-        let fp_t_mmdrop = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp_t_mmdrop = if fp { crate::debug::forkprof::now() } else { 0 };
         cur.set_address_space(None);
         cur.clear_active_mm();
         // (fork-frag lane) exit is the other natural table-churn point:
@@ -2203,8 +2203,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         // without the protocol).
         crate::arch::mm::pt_pending_drain();
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_MMDROP, fp_t_mmdrop);
-            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_MMDROP_DONE, dying_pid);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_MMDROP, fp_t_mmdrop);
+            crate::debug::forkprof::trace(crate::debug::forkprof::T_MMDROP_DONE, dying_pid);
         }
 
         // Wake vfork parent (if any) — child has dropped the shared address
@@ -2253,10 +2253,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         // never reaped — the PID space leaks monotonically.
         // Applies to threads too: a thread may have fork()ed children.
         // Process-tree mutations take PROCESS_TREE_LOCK inside.
-        let fp_t_rep = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp_t_rep = if fp { crate::debug::forkprof::now() } else { 0 };
         reparent_children_to_init(cur);
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_REPARENT, fp_t_rep);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_REPARENT, fp_t_rep);
         }
 
         // ===== Thread-group split =====
@@ -2439,7 +2439,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // notify — a timer IRQ landing here would schedule() us out with
         // state != RUNNING, and lines below (the notify arm) would never
         // run: the parent's only wake source lost.
-        let fp_t_notify = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp_t_notify = if fp { crate::debug::forkprof::now() } else { 0 };
         crate::interrupt::preempt::preempt_count_add(1);
         // Set process state to Zombie
         cur.set_state(TaskState::new(TaskState::ZOMBIE));
@@ -2495,10 +2495,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         // leader ZOMBIE (exit time, decoded status, parent, SPAWN age,
         // last-syscall latch) so the REAP4/REAPW arms can time the reap
         // and ZLINGER can catch the never-reaped case. rux:schedtrace (retired dfx=schedtrace)-
-        // gated (dfx/reaper.rs). Non-leaders never reach ZOMBIE (the
+        // gated (debug/reaper.rs). Non-leaders never reach ZOMBIE (the
         // deferred-release tail above), so this fires per process.
-        if crate::dfx::reaper::on() {
-            crate::dfx::reaper::on_zombie(
+        if crate::debug::reaper::on() {
+            crate::debug::reaper::on_zombie(
                 current_pid,
                 exit_code,
                 notify_parent,
@@ -2508,9 +2508,9 @@ pub fn do_exit(exit_code: i32) -> ! {
             );
         }
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_NOTIFY, fp_t_notify);
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_TOTAL, fp_t0);
-            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_NOTIFY_DONE, dying_pid);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_NOTIFY, fp_t_notify);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_TOTAL, fp_t0);
+            crate::debug::forkprof::trace(crate::debug::forkprof::T_NOTIFY_DONE, dying_pid);
         }
 
         // ===== do_task_dead: Final schedule, never returns =====
@@ -3321,11 +3321,11 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Release task resources (kernel stack, Arc refs, PID)
                 // Note: remove_child is done inside release_task()
                 let fp_t_reap =
-                    if crate::dfx::forkprof::on() { crate::dfx::forkprof::now() } else { 0 };
+                    if crate::debug::forkprof::on() { crate::debug::forkprof::now() } else { 0 };
                 release_task(child_ptr);
                 if fp_t_reap != 0 {
-                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_REAP, fp_t_reap);
-                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_REAP_DONE, child_pid);
+                    crate::debug::forkprof::add(crate::debug::forkprof::P_WT_REAP, fp_t_reap);
+                    crate::debug::forkprof::trace(crate::debug::forkprof::T_REAP_DONE, child_pid);
                 }
 
                 return Ok(child_pid);
@@ -3485,14 +3485,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // forkprof: this schedule() returns only after the child
                 // ran + exited + woke us — it IS the fork->exit handoff.
                 let fp_t_ws =
-                    if crate::dfx::forkprof::on() { crate::dfx::forkprof::now() } else { 0 };
+                    if crate::debug::forkprof::on() { crate::debug::forkprof::now() } else { 0 };
                 if fp_t_ws != 0 {
-                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SCHED_SLEEP, current_pid);
+                    crate::debug::forkprof::trace(crate::debug::forkprof::T_SCHED_SLEEP, current_pid);
                 }
                 crate::sched::schedule();
                 if fp_t_ws != 0 {
-                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_SCHED, fp_t_ws);
-                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SCHED_WAKE, current_pid);
+                    crate::debug::forkprof::add(crate::debug::forkprof::P_WT_SCHED, fp_t_ws);
+                    crate::debug::forkprof::trace(crate::debug::forkprof::T_SCHED_WAKE, current_pid);
                 }
 
                 // After wakeup: state is RUNNING (set by wake_up_process).

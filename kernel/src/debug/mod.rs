@@ -30,14 +30,14 @@ pub mod taint;
 /// Allocator class-lock holder watch (cmdline `rux:allocwatch (retired dfx=allocwatch)`): cross-CPU
 /// naming of a small_alloc/slab/buddy class-lock holder frozen mid-section
 /// (IF=0 kills its own tick; only the other CPU's tick can see it);
-/// see dfx/allocwatch.rs.
+/// see debug/allocwatch.rs.
 pub mod allocwatch;
 pub mod backtrace;
 pub mod bug;
 
 pub mod softlockup;
 pub mod hung_task;
-// (round-5: dfx/sbi_debug.rs DELETED — the SBI low-level print helpers
+// (round-5: debug/sbi_debug.rs DELETED — the SBI low-level print helpers
 // had zero consumers anywhere in the tree; same dead-hunt-module class
 // as round-4D's hexdump.rs.)
 // NOTE (2026-11-27 consolidation): this file deliberately carries NO
@@ -56,7 +56,7 @@ pub mod taskdump;
 /// renamed to `unsafe.rs` on disk per the 2026-11-25 edges->unsafe.rs
 /// naming decision (git mv keeps history); the #[path] keeps the FILE
 /// name the gate requires while the module keeps its historical
-/// `forensics_edges` identifier, so every crate::dfx::forensics_edges
+/// `forensics_edges` identifier, so every crate::debug::forensics_edges
 /// call site stays stable. The irreducibility proofs in
 /// docs/architecture/safety-and-performance.md name this file as the
 /// owner of the stale-handle read family; the hunt modules' absorbed
@@ -80,92 +80,92 @@ pub mod r83hunt;
 pub mod monowatch;
 /// Wild-write attribution tripwire (rux:wildwatch (retired dfx=wildwatch), x86_64): RO-guards
 /// the hpet quiet-statics cluster in every page-table alias; see
-/// dfx/wildwatch.rs (wildwrite-hunt line).
+/// debug/wildwatch.rs (wildwrite-hunt line).
 pub mod wildwatch;
 /// Buddy-meta shadow scan (rux:metawatch (retired dfx=metawatch)): periodic lock-confirmed
 /// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
-/// dfx/metawatch.rs (wildwrite-hunt line).
+/// debug/metawatch.rs (wildwrite-hunt line).
 pub mod metawatch;
 /// Whole-syscall cost table + tick-mode accounting + kernel-rip page
-/// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
+/// histogram (perf-audit line, cmdline `syscost=1`); see debug/syscost.rs.
 pub mod syscost;
 /// Cached-file read(2) cost anatomy (perf-filerd lane, cmdline
 /// `rux:filerd (retired dfx=filerd)`): RDTSC phase counters around the ext4 read fast path,
-/// reported via /proc/filerd; see dfx/filerd.rs.
+/// reported via /proc/filerd; see debug/filerd.rs.
 pub mod filerd;
 /// pstore-lite: the last panic's record in reserved RAM, re-exposed as
 /// /sys/fs/pstore/console-ramoops-0 after the reboot (Tranche 5); see
-/// dfx/pstore.rs.
+/// debug/pstore.rs.
 pub mod pstore;
 /// The non-fatal Oops path: Linux-shaped report, pstore dmesg capture,
-/// task-death policy (Tranche 5); see dfx/oops.rs.
+/// task-death policy (Tranche 5); see debug/oops.rs.
 pub mod oops;
 /// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
-/// hunt, cmdline `rux:schb (retired dfx=schb)`); see dfx/schb.rs.
+/// hunt, cmdline `rux:schb (retired dfx=schb)`); see debug/schb.rs.
 pub mod schb;
 /// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
-/// see dfx/fsw.rs.
+/// see debug/fsw.rs.
 pub mod fsw;
 /// AF_UNIX hot-path per-op phase anatomy (39th lane, cmdline `unixrd=1`):
 /// monotonic-ns phase brackets around the recvmsg/recvfrom/writev unix
 /// branches — names where the hilogd storm's 28-58 us per-op wall goes;
-/// see dfx/unixrd.rs.
+/// see debug/unixrd.rs.
 pub mod unixrd;
 /// OH log-fabric per-caller census (hilog-flood lane, cmdline
 /// `hilogcensus=1`): counts unix DGRAM writev sends (the libhilog record
 /// path) per sender pid with a tag histogram, and /dev/kmsg writes per
-/// caller; dumped on the syscost cadence; see dfx/hilogcensus.rs.
+/// caller; dumped on the syscost cadence; see debug/hilogcensus.rs.
 pub mod hilogcensus;
 /// Rapid zero-event epoll-return census (hilog-flood lane, cmdline
 /// `spinwatch=1`): counts a task's zero-event epoll_wait returns and
 /// dumps the interest set with live poll verdicts when a spinner is
-/// caught; see dfx/spinwatch.rs.
+/// caught; see debug/spinwatch.rs.
 pub mod spinwatch;
 /// Leak-origin probe (cmdline `rux:leakhunt (retired dfx=leakhunt)`): records the call site of
 /// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
 /// moment a task returns to userspace (or is seen parked) with a nonzero
 /// preempt_count — names the producer of the leaked-count wake-strand
-/// family; see dfx/leakorigin.rs.
+/// family; see debug/leakorigin.rs.
 pub mod leakorigin;
 /// Last-open path stash for TXN-HANG (rux:txnhunt (retired dfx=txnhunt)): sys_openat stashes
 /// the resolved path at entry so the 1 Hz audit can name the file a
 /// hung server thread is stuck opening (leg-28 item 2: storage_daemon
-/// D-state open family); see dfx/pathstash.rs.
+/// D-state open family); see debug/pathstash.rs.
 pub mod pathstash;
 /// Process-tree invariant validator (rux:treehunt (retired dfx=treehunt), leg-29A): catches a
 /// live task whose parent pointer names released memory — the E8-REPAR
 /// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
-/// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
+/// plus stale thread-group parent snapshots; see debug/treehunt.rs.
 pub mod treehunt;
 /// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
 /// same syscall entry for >= 8 s get a line with args and the parked
 /// kernel-stack chain — attributes the leaf of nested-call cascades
-/// (fs stalls behind binder reader exhaustion). See dfx/slowtask.rs.
+/// (fs stalls behind binder reader exhaustion). See debug/slowtask.rs.
 pub mod slowtask;
 /// SCM_RIGHTS relay tap (rux:scmtap (retired dfx=scmtap), gdm session-fifo hunt): one line
 /// per unix-fd hop/drop plus the fifo last-writer-close line; see
-/// dfx/scmtap.rs.
+/// debug/scmtap.rs.
 pub mod scmtap;
 /// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
-/// dfx/forkprof.rs.
+/// debug/forkprof.rs.
 pub mod forkprof;
 /// mmap/mprotect stage profiler (cmdline mmprof=1, oh-launcher perf
 /// handoff): TSC deltas per vm-op stage + issuer attribution, dumped
-/// from the timer heartbeat; see dfx/mmprof.rs.
+/// from the timer heartbeat; see debug/mmprof.rs.
 pub mod mmprof;
 /// Lost-park event ring (rux:lostpark (retired dfx=lostpark), fix-lostpark lane): last-64
 /// scheduling events around an SMP lost-park wedge, dumped by the
-/// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
+/// wakewatch heartbeat when the system freezes; see debug/lostpark.rs.
 pub mod lostpark;
 /// Context-switch / wake / IPC-syscall cost anatomy (cctx=1, closegap
 /// lane): NS-sum brackets for the __schedule, context_switch, wake and
-/// semop/pipe/unix bodies, dumped at shutdown; see dfx/cctx.rs.
+/// semop/pipe/unix bodies, dumped at shutdown; see debug/cctx.rs.
 pub mod cctx;
 /// Reaper forensics (rux:schedtrace (retired dfx=schedtrace), reaper-waitid lane): SPAWN/ZEXIT/
 /// REAP4/REAP4N/REAPW/ZLINGER — who reaps the OH launcher/systemui
 /// app-cycle children, and whether they linger un-reaped; see
-/// dfx/reaper.rs.
+/// debug/reaper.rs.
 pub mod reaper;
 
 /// Initialize the DFX subsystem.
@@ -284,7 +284,7 @@ pub fn register_debugfs_knobs() -> usize {
                     // INV-FOR-5 deliberate-fault edge: read address 0x10
                     // (a NULL-adjacent page with no mapping and no fixup
                     // entry on this instruction); the fault is the point.
-                    crate::dfx::forensics_edges::provoke_null_page_read();
+                    crate::debug::forensics_edges::provoke_null_page_read();
                     // Unreachable when the oops policy runs; if the
                     // fault was fixed up somehow, report it.
                     crate::pr_err!("dfx: provoke-oops fault did not fire");
@@ -295,11 +295,11 @@ pub fn register_debugfs_knobs() -> usize {
                     #[cfg(feature = "riscv64")]
                     // INV-FOR-5 deliberate-fault edge: machine-mode CSR
                     // access from S-mode traps IllegalInstruction.
-                    crate::dfx::forensics_edges::provoke_illegal_insn_riscv();
+                    crate::debug::forensics_edges::provoke_illegal_insn_riscv();
                     #[cfg(feature = "x86_64")]
                     // INV-FOR-5 deliberate-fault edge: ud2 is reserved
                     // for traps (the BUG instruction).
-                    crate::dfx::forensics_edges::provoke_illegal_insn_x86();
+                    crate::debug::forensics_edges::provoke_illegal_insn_x86();
                     crate::pr_err!("dfx: provoke-oops illegal did not fire");
                     crate::errno::Errno::IOError.as_neg_i32()
                 }
@@ -332,7 +332,7 @@ pub fn register_debugfs_knobs() -> usize {
 macro_rules! warn_on {
     ($cond:expr) => {{
         if $cond {
-            $crate::dfx::bug::warn(file!(), line!(), stringify!($cond));
+            $crate::debug::bug::warn(file!(), line!(), stringify!($cond));
             true
         } else {
             false
@@ -348,8 +348,8 @@ macro_rules! warn_on {
 macro_rules! warn_on_once {
     ($cond:expr) => {{
         static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-        if $cond && $crate::dfx::bug::warn_on_once_check(&ONCE) {
-            $crate::dfx::bug::warn(file!(), line!(), stringify!($cond));
+        if $cond && $crate::debug::bug::warn_on_once_check(&ONCE) {
+            $crate::debug::bug::warn(file!(), line!(), stringify!($cond));
             true
         } else {
             false
@@ -365,7 +365,7 @@ macro_rules! warn_on_once {
 macro_rules! bug_on {
     ($cond:expr) => {
         if $cond {
-            $crate::dfx::bug::bug(file!(), line!());
+            $crate::debug::bug::bug(file!(), line!());
         }
     };
 }
@@ -376,7 +376,7 @@ macro_rules! bug_on {
 #[macro_export]
 macro_rules! bug {
     () => {
-        $crate::dfx::bug::bug(file!(), line!());
+        $crate::debug::bug::bug(file!(), line!());
     };
 }
 
@@ -387,5 +387,5 @@ macro_rules! bug {
 pub(crate) fn walk_read<T: Copy>(root: u64, va: u64) -> Option<T> {
     // INV-DFXWALK-1 unchanged; the raw body is the audited edge
     // (forensics_edges::dfx_walk_read_raw).
-    crate::dfx::forensics_edges::dfx_walk_read_raw(root, va)
+    crate::debug::forensics_edges::dfx_walk_read_raw(root, va)
 }

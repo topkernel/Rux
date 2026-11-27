@@ -1391,7 +1391,7 @@ mod rtt_census {
     /// ConsoleWriter print.
     pub fn snapshot() {
         use core::fmt::Write as _;
-        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let mut w = crate::debug::backtrace::ConsoleWriter::new();
         let mut line = |tag: char, c: &Comp| {
             let n = c.n.load(core::sync::atomic::Ordering::Relaxed);
             let ms = c.sum_us.load(core::sync::atomic::Ordering::Relaxed) / 1000;
@@ -1740,7 +1740,7 @@ fn stage_thread_error(
         static DUP_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::backtrace::ConsoleWriter::new();
             use core::fmt::Write as _;
             let _ = writeln!(
                 w,
@@ -3149,7 +3149,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     }
     // rux:schb (retired dfx=schb): record the new proc for the heartbeat's SC-PROC drain
     // (no-op unless the switch is armed; never any I/O on this path).
-    crate::dfx::schb::note_proc_open(pid);
+    crate::debug::schb::note_proc_open(pid);
     // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
     // once per binder-using process start — on OH boots that is nearly
     // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
@@ -3323,7 +3323,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                         printed = deaths.clone();
                     }
                     for (desc, cookie) in printed {
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         use core::fmt::Write as _;
                         let _ = writeln!(
                             w,
@@ -3560,7 +3560,7 @@ fn dead_reply_to_sender(
             // symbol) and wedged lb48/lb50/lb51. All death-event taps
             // that run under WORLD print through the lockless batched
             // ConsoleWriter instead (same discipline as SLOW-TXN).
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::backtrace::ConsoleWriter::new();
             use core::fmt::Write as _;
             let _ = writeln!(
                 w,
@@ -3604,7 +3604,7 @@ fn dead_reply_to_sender(
                 static DRS2_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if DRS2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     use core::fmt::Write as _;
                     let _ = writeln!(
                         w,
@@ -3639,7 +3639,7 @@ fn dead_reply_to_sender(
             static DRS3_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if DRS3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                let mut w = crate::debug::backtrace::ConsoleWriter::new();
                 use core::fmt::Write as _;
                 let _ = writeln!(
                     w,
@@ -3706,7 +3706,7 @@ fn send_failed_reply(
                 static SFR_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if SFR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     use core::fmt::Write as _;
                     let _ = writeln!(
                         w,
@@ -4283,7 +4283,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                             .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                             < 120
                                         {
-                                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                             use core::fmt::Write as _;
                                             let _ = writeln!(
                                                 w,
@@ -4884,7 +4884,7 @@ pub fn dump_latched_maps_taskctx() {
         }
         drop(vm);
         if dumped_ok {
-            crate::dfx::taskdump::defer_emit_line(outf);
+            crate::debug::taskdump::defer_emit_line(outf);
             // Same insert-by-value discipline as the softirq path.
             let mut dslot = (tgid as usize) % VMA_DUMPED_DONE.len();
             for (i, d) in VMA_DUMPED_DONE.iter().enumerate() {
@@ -5464,7 +5464,7 @@ pub fn sleep_snapshot() {
                         }
                     }
                 }
-                let stk = crate::dfx::taskdump::parked_kstack_syms(tk);
+                let stk = crate::debug::taskdump::parked_kstack_syms(tk);
                 if !stk.is_empty() {
                     out.push_str(&stk);
                 }
@@ -5538,7 +5538,7 @@ pub fn sleep_snapshot() {
                 }
             }
             let (chunk, tail) = rest.split_at(cut);
-            crate::dfx::taskdump::defer_emit_line(alloc::string::String::from(chunk));
+            crate::debug::taskdump::defer_emit_line(alloc::string::String::from(chunk));
             rest = tail;
         }
     }
@@ -5899,7 +5899,7 @@ pub fn txn_hang_audit() {
                 let samgr = binder_sareg_samgr_pid();
                 if samgr != 0 {
                     use core::fmt::Write;
-                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                     let mut n = 0usize;
                     crate::sched::for_each_task_try(|task| {
                         // SAFETY: diagnostic reads under the
@@ -6071,7 +6071,7 @@ pub fn txn_hang_audit() {
             .unwrap_or("?")
             .trim_end_matches('\0')
     };
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
     for h in &hung {
         let srv = crate::process::find_task_by_pid(h.stid);
@@ -6273,7 +6273,7 @@ pub fn txn_hang_audit() {
                     )
                     .is_ok()
             {
-                crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+                crate::debug::taskdump::dump_all_tasks("txn-hang-20s");
                 // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
                 // -> wait_for_used_interruptible, 441 s): capture the
                 // virtio ring state at the hang moment — at_device vs
@@ -6297,38 +6297,38 @@ pub fn txn_hang_audit() {
         // entry frame mislabels the file (seen on sc314A wave-1).
         #[cfg(feature = "x86_64")]
         let fam = if matches!(sys, 2 | 257 | 437) {
-            Some(crate::dfx::pathstash::OP_OPEN)
+            Some(crate::debug::pathstash::OP_OPEN)
         } else if matches!(sys, 1 | 20) {
-            Some(crate::dfx::pathstash::OP_WRITE)
+            Some(crate::debug::pathstash::OP_WRITE)
         } else if matches!(sys, 74 | 75) {
-            Some(crate::dfx::pathstash::OP_SYNC)
+            Some(crate::debug::pathstash::OP_SYNC)
         } else if matches!(sys, 77 | 76) {
             // x86_64 ABI: 77 ftruncate, 76 truncate (leg-36B).
-            Some(crate::dfx::pathstash::OP_TRUNC)
+            Some(crate::debug::pathstash::OP_TRUNC)
         } else {
             None
         };
         #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         let fam = if matches!(sys, 56 | 24) {
-            Some(crate::dfx::pathstash::OP_OPEN)
+            Some(crate::debug::pathstash::OP_OPEN)
         } else if matches!(sys, 64 | 66) {
-            Some(crate::dfx::pathstash::OP_WRITE)
+            Some(crate::debug::pathstash::OP_WRITE)
         } else if matches!(sys, 82 | 83) {
-            Some(crate::dfx::pathstash::OP_SYNC)
+            Some(crate::debug::pathstash::OP_SYNC)
         } else if matches!(sys, 46 | 45) {
             // asm-generic: 46 ftruncate, 45 truncate (leg-36B).
-            Some(crate::dfx::pathstash::OP_TRUNC)
+            Some(crate::debug::pathstash::OP_TRUNC)
         } else {
             None
         };
         if let Some(want) = fam {
-            if let Some((op, p)) = crate::dfx::pathstash::lookup_file(h.stid) {
+            if let Some((op, p)) = crate::debug::pathstash::lookup_file(h.stid) {
                 if op == want {
                     let opn = match op {
-                        crate::dfx::pathstash::OP_OPEN => "open",
-                        crate::dfx::pathstash::OP_WRITE => "write",
-                        crate::dfx::pathstash::OP_SYNC => "sync",
-                        crate::dfx::pathstash::OP_TRUNC => "truncate",
+                        crate::debug::pathstash::OP_OPEN => "open",
+                        crate::debug::pathstash::OP_WRITE => "write",
+                        crate::debug::pathstash::OP_SYNC => "sync",
+                        crate::debug::pathstash::OP_TRUNC => "truncate",
                         _ => "?",
                     };
                     let _ = writeln!(
@@ -6753,7 +6753,7 @@ pub fn bwr_park_audit() {
         let (_, sys, a0, a1, a2) = entry_frame(top);
         Some((sys, a0, a1, a2))
     };
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
     let mut printed = 0usize;
     let mut idle_readers = 0usize;
@@ -7123,7 +7123,7 @@ pub fn bwr_park_audit() {
                                     "FUXWATCH2-CHAIN word={:#x} (live contended FFRT mutex)",
                                     w2
                                 );
-                                crate::dfx::taskdump::ensure_defer_thread();
+                                crate::debug::taskdump::ensure_defer_thread();
                             }
                         }
                         alloc::format!(" mscan[{}]", t)
@@ -7857,7 +7857,7 @@ fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// Writes through the caller's ConsoleWriter — pr_warn from the censusd
 /// audit context is dropped (the missing FUXPARK-ARM prints class).
 fn user_task_park_stack(task: *mut crate::process::Task) {
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     user_task_park_stack_w(task, &mut w);
 }
 
@@ -7905,7 +7905,7 @@ fn census_tgid_due(gate: usize, tgid: u32, now: u32, interval: u32) -> bool {
 
 fn user_task_park_stack_w(
     task: *mut crate::process::Task,
-    w: &mut crate::dfx::backtrace::ConsoleWriter,
+    w: &mut crate::debug::backtrace::ConsoleWriter,
 ) {
     use core::fmt::Write as _;
     if task.is_null() {
@@ -10040,7 +10040,7 @@ fn binder_thread_write(
                                             .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                             .map(|q| q.pid)
                                             .unwrap_or(0);
-                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                         use core::fmt::Write as _;
                                         let _ = writeln!(
                                             w,
@@ -10088,7 +10088,7 @@ fn binder_thread_write(
                                         .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                         .map(|q| q.pid)
                                         .unwrap_or(0);
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,
@@ -10347,7 +10347,7 @@ fn binder_transaction(
                     static M7_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if M7_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         use core::fmt::Write as _;
                         let _ = writeln!(
                             w,
@@ -10427,7 +10427,7 @@ fn binder_transaction(
                                     None => "?",
                                 }
                             }
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
@@ -10742,7 +10742,7 @@ fn binder_transaction(
                         static GUARD_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let depth = st.txn_stack.len();
                             // SAFETY: reads of the top txn under WORLD.
@@ -12213,7 +12213,7 @@ fn binder_transaction(
                                 if RP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                     < 20
                                 {
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     // SAFETY: reads under WORLD.
                                     let top = rth.txn_stack.last();
@@ -12257,7 +12257,7 @@ fn binder_transaction(
                         static RPUSH_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if RPUSH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800 {
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
@@ -13735,7 +13735,7 @@ fn binder_thread_read(
                                             parcel = s;
                                         }
                                     }
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,
@@ -13764,7 +13764,7 @@ fn binder_thread_read(
                                 static IRD_N: core::sync::atomic::AtomicUsize =
                                     core::sync::atomic::AtomicUsize::new(0);
                                 if IRD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,

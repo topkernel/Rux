@@ -948,9 +948,9 @@ pub(crate) fn handle_syscall(regs: &mut PtRegs) {
     // forkprof trace: first Rust code of a syscall (entry side). The
     // nr rides a second event (site 15, pid field = nr) so the timeline
     // names each child-side call.
-    if crate::dfx::forkprof::trace_on() {
-        crate::dfx::forkprof::trace(14, crate::sched::get_current_pid()); // T_SYSENTRY
-        crate::dfx::forkprof::trace(15, regs.rax as u32); // T_SYSNR
+    if crate::debug::forkprof::trace_on() {
+        crate::debug::forkprof::trace(14, crate::sched::get_current_pid()); // T_SYSENTRY
+        crate::debug::forkprof::trace(15, regs.rax as u32); // T_SYSNR
     }
     // Re-enable interrupts before entering the syscall handler.  SYSCALL
     // entered with IF=0 (FMASK cleared it); running the whole syscall
@@ -1045,7 +1045,7 @@ pub(crate) fn handle_general_protection(regs: &mut PtRegs) {
         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::crash_report(b"#GP", regs);
+        crate::debug::scribble::crash_report(b"#GP", regs);
         panic!(
             "trap: #GP in kernel mode at rip={:#x}, error={:#x}",
             regs.rip, regs.orig_rax
@@ -1277,13 +1277,13 @@ pub(crate) fn handle_page_fault(regs: &mut PtRegs) {
 /// 5.15): the RIP line with the symbolized ip, the RSP/EFLAGS line,
 /// then the GPRs three per row. The CS column prints 0010/0018 from
 /// the frame's segment selectors.
-pub(crate) fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+pub(crate) fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let _ = write!(
         w,
         "RIP: {:04x}:{}\n",
         regs.cs & 0xffff,
-        crate::dfx::ksyms::format_symbol(regs.rip)
+        crate::debug::ksyms::format_symbol(regs.rip)
     );
     let _ = write!(
         w,
@@ -1339,9 +1339,9 @@ pub(crate) fn handle_unknown_exception(regs: &mut PtRegs, vector: u64) {
         // Kernel-mode unknown exceptions indicate a kernel bug; skipping
         // the instruction corrupts state. The Oops path prints the
         // report and applies the policy (Tranche 5).
-        crate::dfx::oops::oops(
-            crate::dfx::oops::Kind::UnknownException { cause: vector },
-            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        crate::debug::oops::oops(
+            crate::debug::oops::Kind::UnknownException { cause: vector },
+            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                 oops_show_regs(w, regs);
             },
         );

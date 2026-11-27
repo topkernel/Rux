@@ -343,7 +343,7 @@ pub fn try_to_free_pages(order: i32) -> usize {
     if r > 0 {
         super::page_alloc::gate_note_round_done(r as u64);
     }
-    crate::dfx::schb::note_drct(j0);
+    crate::debug::schb::note_drct(j0);
     r
 }
 
@@ -769,7 +769,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
+                    let refcount = p.put_page_site(crate::debug::driftwatch::S_VMSCAN_SWAP);
                     // R14-1 (F10): free ONLY when WE took it to zero.
                     if refcount == 0 {
                         free_page(phys);
@@ -838,7 +838,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
+                    let refcount = p.put_page_site(crate::debug::driftwatch::S_VMSCAN_SWAP);
                     if refcount == 0 {
                         free_page(phys);
                         reclaimed += 1;

@@ -12,7 +12,7 @@
 //! (counter delta) x (per-event cost implied by the syscall table),
 //! instead of guessing from code reading.
 //!
-//! Discipline: same contract as dfx/syscost.rs — own cmdline key (`fsw=1`),
+//! Discipline: same contract as debug/syscost.rs — own cmdline key (`fsw=1`),
 //! lazy-armed after cmdline init, one dump every FSW_DUMP_SECS from the
 //! timer softirq, zero traffic when off, Relaxed atomics only (the counts
 //! are statistics, not invariants).
@@ -346,12 +346,12 @@ pub fn on() -> bool {
 
 macro_rules! bump {
     ($c:expr) => {
-        if crate::dfx::fsw::on() {
+        if crate::debug::fsw::on() {
             $c.fetch_add(1, Ordering::Relaxed);
         }
     };
     ($c:expr, $n:expr) => {
-        if crate::dfx::fsw::on() {
+        if crate::debug::fsw::on() {
             $c.fetch_add($n as u64, Ordering::Relaxed);
         }
     };
@@ -380,7 +380,7 @@ pub fn note_sync_dirty_skip() {
 }
 #[inline]
 pub fn note_evict(dirty: bool) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         EVICT.fetch_add(1, Ordering::Relaxed);
         if dirty {
             EVICT_DIRTY.fetch_add(1, Ordering::Relaxed);
@@ -393,14 +393,14 @@ pub fn note_sync_all() {
 }
 #[inline]
 pub fn note_pub_flush(records: usize) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         PUB_FLUSH.fetch_add(1, Ordering::Relaxed);
         PUB_RECORDS.fetch_add(records as u64, Ordering::Relaxed);
     }
 }
 #[inline]
 pub fn note_pub_scoped(records: usize) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         PUB_SCOPED.fetch_add(1, Ordering::Relaxed);
         PUB_SCOPED_RECORDS.fetch_add(records as u64, Ordering::Relaxed);
     }
@@ -420,7 +420,7 @@ pub fn note_pub_batch() {
 /// Record one whole-bracket ext4_mkdir duration (microseconds).
 #[inline]
 pub fn note_mkdir_us(delta_us: u64) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         MKDIR_US_N.fetch_add(1, Ordering::Relaxed);
         MKDIR_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
         let mut cur = MKDIR_US_MAX.load(Ordering::Relaxed);
@@ -455,7 +455,7 @@ pub fn note_drop_block() {
 /// only; rmdir/unlink report sum/max.
 #[inline]
 pub fn note_rmdir_us(delta_us: u64) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         RMDIR_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
         let mut cur = RMDIR_US_MAX.load(Ordering::Relaxed);
         while delta_us > cur {
@@ -474,7 +474,7 @@ pub fn note_rmdir_us(delta_us: u64) {
 /// Record one whole-bracket ext4_unlink duration (microseconds).
 #[inline]
 pub fn note_unlink_us(delta_us: u64) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         UNLINK_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
         let mut cur = UNLINK_US_MAX.load(Ordering::Relaxed);
         while delta_us > cur {
@@ -505,7 +505,7 @@ pub static RMD_PHASE_MAX_US: [AtomicU64; 5] = [
 ];
 #[inline]
 pub fn note_rmdir_phases(p1: u64, p2: u64, p3: u64, p4: u64, p5: u64) {
-    if !crate::dfx::fsw::on() {
+    if !crate::debug::fsw::on() {
         return;
     }
     RMD_PHASE1_NS.fetch_add(p1, Ordering::Relaxed);
@@ -533,7 +533,7 @@ pub fn note_pub_lazy() {
 }
 #[inline]
 pub fn note_pub_qmax(len: usize) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         // Relaxed max (statistics only).
         let mut cur = PUB_QMAX.load(Ordering::Relaxed);
         let l = len as u64;
@@ -562,7 +562,7 @@ pub fn note_write_inode() {
 }
 #[inline]
 pub fn note_dir_lookup(blocks: usize) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         DIR_LOOKUP.fetch_add(1, Ordering::Relaxed);
         DIR_BLOCKS.fetch_add(blocks as u64, Ordering::Relaxed);
     }
@@ -599,7 +599,7 @@ pub fn note_j_lazy() {
 }
 #[inline]
 pub fn note_j_commit_fast(bufs: usize) {
-    if crate::dfx::fsw::on() {
+    if crate::debug::fsw::on() {
         J_COMMIT_FAST.fetch_add(1, Ordering::Relaxed);
         J_COMMIT_FAST_BUFS.fetch_add(bufs as u64, Ordering::Relaxed);
     }

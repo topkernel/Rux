@@ -11,9 +11,9 @@
 
 #![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::dfx::taint;
-use crate::dfx::backtrace;
-use crate::dfx::backtrace::ConsoleWriter;
+use crate::debug::taint;
+use crate::debug::backtrace;
+use crate::debug::backtrace::ConsoleWriter;
 use core::fmt::Write;
 
 /// Hung task timeout in seconds (default: 120s)
@@ -219,7 +219,7 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
         // caller's softirq context — TaskBorrow's short-read contract.
         let vfork_ppid = t
             .vfork_parent_ptr()
-            .and_then(|p| crate::dfx::forensics_edges::task_borrow(p as *mut crate::process::task::Task))
+            .and_then(|p| crate::debug::forensics_edges::task_borrow(p as *mut crate::process::task::Task))
             .map(|p| p.pid())
             .unwrap_or(0);
         let _ = write!(

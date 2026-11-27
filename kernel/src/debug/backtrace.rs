@@ -103,7 +103,7 @@ impl fmt::Write for ConsoleWriter {
 /// family (forensics_edges::fp_read_raw).
 #[inline]
 pub fn current_frame_pointer() -> u64 {
-    crate::dfx::forensics_edges::fp_read_raw()
+    crate::debug::forensics_edges::fp_read_raw()
 }
 
 /// Return address of the calling function (for "current" trace
@@ -111,7 +111,7 @@ pub fn current_frame_pointer() -> u64 {
 /// (forensics_edges::caller_ra_read_raw).
 #[inline]
 pub(crate) fn caller_return_address() -> u64 {
-    crate::dfx::forensics_edges::caller_ra_read_raw()
+    crate::debug::forensics_edges::caller_ra_read_raw()
 }
 
 /// Unwind one frame: given a frame pointer, return (return_addr, next_fp).
@@ -121,7 +121,7 @@ pub(crate) fn caller_return_address() -> u64 {
 /// The frame-word reads are the audited edge's INV-FOR-2 arm.
 #[inline]
 fn unwind_frame(fp: u64) -> Option<(u64, u64)> {
-    crate::dfx::forensics_edges::unwind_frame_raw(fp)
+    crate::debug::forensics_edges::unwind_frame_raw(fp)
 }
 
 /// Walk frame pointers and call the callback for each frame.
@@ -183,7 +183,7 @@ pub fn dump_stack() {
         w,
         "  [<{:016x}>] {} (current)\n",
         ra,
-        crate::dfx::ksyms::format_symbol(ra)
+        crate::debug::ksyms::format_symbol(ra)
     );
 
     walk_stack_trace(&mut |pc, _fp| {
@@ -191,7 +191,7 @@ pub fn dump_stack() {
             w,
             "  [<{:016x}>] {}\n",
             pc,
-            crate::dfx::ksyms::format_symbol(pc)
+            crate::debug::ksyms::format_symbol(pc)
         );
     });
 
@@ -235,7 +235,7 @@ const REG_NAMES: [&str; 31] = [
 #[cfg(feature = "aarch64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    crate::dfx::forensics_edges::save_regs_raw(&mut regs);
+    crate::debug::forensics_edges::save_regs_raw(&mut regs);
     regs
 }
 
@@ -246,7 +246,7 @@ pub fn save_regs() -> [u64; 31] {
 #[cfg(feature = "riscv64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    crate::dfx::forensics_edges::save_regs_raw(&mut regs);
+    crate::debug::forensics_edges::save_regs_raw(&mut regs);
     regs
 }
 
@@ -256,7 +256,7 @@ pub fn save_regs() -> [u64; 31] {
 #[cfg(feature = "x86_64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
-    crate::dfx::forensics_edges::save_regs_raw(&mut regs);
+    crate::debug::forensics_edges::save_regs_raw(&mut regs);
     regs
 }
 
@@ -290,7 +290,7 @@ pub fn dump_regs(regs: &[u64; 31]) {
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
 
-    let (sstatus, scause, stval, sepc) = crate::dfx::forensics_edges::trap_regs_read_raw();
+    let (sstatus, scause, stval, sepc) = crate::debug::forensics_edges::trap_regs_read_raw();
 
     let _ = write!(w, "Sstatus: {:016x}\n", sstatus);
     let _ = write!(w, "Scause : {:016x}\n", scause);
@@ -311,7 +311,7 @@ pub fn dump_csrs() {
 #[cfg(feature = "aarch64")]
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
-    let (esr, elr, far, spsr) = crate::dfx::forensics_edges::trap_regs_read_raw();
+    let (esr, elr, far, spsr) = crate::debug::forensics_edges::trap_regs_read_raw();
     let _ = write!(w, "ESR    : {:016x}\n", esr);
     let _ = write!(w, "ELR    : {:016x}\n", elr);
     let _ = write!(w, "FAR    : {:016x}\n", far);

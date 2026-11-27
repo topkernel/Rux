@@ -394,13 +394,13 @@ impl MmStruct {
             // with MAP_FIXED's multi-phase surgery dropped a live VMA
             // piece. Pick AND insert under ONE guard, like the hint path
             // below and the riscv64 twin.
-            let mp = crate::dfx::mmprof::on();
-            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tl = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = self.vma_write();
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_LOCKWAIT, mp_tl);
             }
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let chosen = if map_flags & map::MAP_32BIT != 0 {
                 // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces
                 // the mapping into the FIRST 2GB, bottom-up from 1GB
@@ -414,9 +414,9 @@ impl MmStruct {
                 self.find_free_area_locked(&vma_mgr, aligned_size)?
             };
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_FINDFREE, mp_tf);
             }
-            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_ta = if mp { crate::debug::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -428,7 +428,7 @@ impl MmStruct {
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             self.update_highest_vm_end(chosen.as_usize() + aligned_size);
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_ADD, mp_ta);
             }
             vma_installed = true;
             chosen
@@ -455,13 +455,13 @@ impl MmStruct {
             // an unaligned hint used to reach Vma::new and trip its
             // page-alignment assert (Vma::new asserts; Linux masks the
             // hint instead).
-            let mp = crate::dfx::mmprof::on();
-            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tl = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = self.vma_write();
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_LOCKWAIT, mp_tl);
             }
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let chosen = if addr.as_usize() != 0 {
                 let hint = addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
                 let hint_end = hint.checked_add(aligned_size);
@@ -490,9 +490,9 @@ impl MmStruct {
                 self.find_free_area_locked(&vma_mgr, aligned_size)?
             };
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_FINDFREE, mp_tf);
             }
-            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_ta = if mp { crate::debug::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -504,7 +504,7 @@ impl MmStruct {
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             self.update_highest_vm_end(chosen.as_usize() + aligned_size);
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_ADD, mp_ta);
             }
             vma_installed = true;
             chosen
@@ -543,8 +543,8 @@ impl MmStruct {
             // kernel permits any interleaving there too). The b89
             // piece-drop hole cannot recur: pieces are never held across
             // a guard drop by the chunked loop.
-            let mp = crate::dfx::mmprof::on();
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut attempts = 0;
             loop {
                 self.munmap(start, aligned_size)?;
@@ -569,7 +569,7 @@ impl MmStruct {
                 self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
                 self.update_highest_vm_end(end.as_usize());
                 if mp {
-                    crate::dfx::mmprof::add(crate::dfx::mmprof::M_FIXEDMUN, mp_tf);
+                    crate::debug::mmprof::add(crate::debug::mmprof::M_FIXEDMUN, mp_tf);
                 }
                 vma_installed = true;
                 break;
@@ -782,8 +782,8 @@ impl MmStruct {
         // Whole-range fast path — see the block after the mp declarations
         // (mp/mp_t0 must exist before the fast path can record timings).
 
-        let mp = crate::dfx::mmprof::on();
-        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp = crate::debug::mmprof::on();
+        let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
 
         // Whole-range fast path (gb-opt lane, 2026-11-15): glibc allocator
         // churn (large malloc/free pairs, thread-stack teardown, arena
@@ -856,7 +856,7 @@ impl MmStruct {
                 );
                 crate::arch::mm::asid::flush_tlb_all();
                 if mp {
-                    crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+                    crate::debug::mmprof::add(crate::debug::mmprof::MU_BODY, mp_t0);
                 }
                 // (fork-frag) post-flush drain: single-CPU mms' pending
                 // entries (targets empty) free right here.
@@ -869,8 +869,8 @@ impl MmStruct {
             // path, which frees the pages piece by piece.
         }
 
-        let mp = crate::dfx::mmprof::on();
-        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp = crate::debug::mmprof::on();
+        let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
 
         let mut cur = addr_us;
         while cur < end_addr {
@@ -900,8 +900,8 @@ impl MmStruct {
             let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
 
             if mp {
-                crate::dfx::mmprof::bump(
-                    crate::dfx::mmprof::S_MUNLOOPS,
+                crate::debug::mmprof::bump(
+                    crate::debug::mmprof::S_MUNLOOPS,
                     1,
                 );
             }
@@ -949,7 +949,7 @@ impl MmStruct {
         super::mmu_init::pt_pending_drain();
 
         if mp {
-            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+            crate::debug::mmprof::add(crate::debug::mmprof::MU_BODY, mp_t0);
         }
         Ok(())
     }
@@ -1255,7 +1255,7 @@ impl MmStruct {
                     }
                     if !leaf_is_ro {
                         let new_ref =
-                            page.put_page_site(crate::dfx::driftwatch::S_UNMAP_X86);
+                            page.put_page_site(crate::debug::driftwatch::S_UNMAP_X86);
                         if new_ref == 0 {
                             // Cache-backed leaf: leak, never hand the live
                             // cache frame to the zone (pcachewedge lane).
@@ -1330,7 +1330,7 @@ impl MmStruct {
             }
             if !leaf_is_ro {
                 let new_ref =
-                    page.put_page_site(crate::dfx::driftwatch::S_UNMAP_X86);
+                    page.put_page_site(crate::debug::driftwatch::S_UNMAP_X86);
                 if new_ref == 0 {
                     // Cache-backed leaf: leak, never hand the live cache
                     // frame to the zone (pcachewedge lane).
@@ -2263,7 +2263,7 @@ pub fn copy_page_table_cow(
     use crate::mm::page_desc::page_desc;
 
     // forkprof scalars (armed check hoisted out of the PTE loop).
-    let fp_count = crate::dfx::forkprof::on();
+    let fp_count = crate::debug::forkprof::on();
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked — mirror of the
@@ -2427,7 +2427,7 @@ pub fn copy_page_table_cow(
                         let child_pt_phys = alloc_page_table()?;
                         let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
                         if fp_count {
-                            crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_TABLES, 1);
+                            crate::debug::forkprof::bump(crate::debug::forkprof::S_COW_TABLES, 1);
                         }
                         child_pmd_ref.set(
                             vpn2,
@@ -2589,7 +2589,7 @@ pub fn copy_page_table_cow(
                     // forkprof scalar: PTEs copied (hoisted armed check —
                     // one relaxed load when off).
                     if fp_count {
-                        crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_PTES, 1);
+                        crate::debug::forkprof::bump(crate::debug::forkprof::S_COW_PTES, 1);
                     }
                     pte_install_log(
                         child_root_ppn,
@@ -2816,7 +2816,7 @@ pub fn handle_cow_fault(
     // across COW cycles and eventually corrupts page reclaim / rmap
     // decisions.
     if let Some(p) = old_page {
-        p.put_page_site(crate::dfx::driftwatch::S_COW_X86);
+        p.put_page_site(crate::debug::driftwatch::S_COW_X86);
         p.dec_mapcount();
     }
 
