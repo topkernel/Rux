@@ -745,7 +745,7 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
         if busy.load(Ordering::Relaxed) {
             return;
         }
-        let task = unsafe { &*t };
+        let task =  &*t ;
         // Open descriptors: any file whose dentry sits in the subtree.
         if let Some(fdtable) = task.try_fdtable() {
             fdtable.for_each_file(|_fd, file| {
@@ -5436,9 +5436,8 @@ pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, 
     // close the descriptor and surface the error instead.
     if let Err(e) = vfs_unlink(&full) {
         // SAFETY: fd was just installed in the current task's table.
-        unsafe {
-            let _ = crate::fs::close_file_fd(fd);
-        }
+                    let _ = crate::fs::close_file_fd(fd);
+        
         return Err(e);
     }
     Ok(fd)
@@ -7565,7 +7564,7 @@ pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
     inode.private_data = Some(pid as *mut u8);
 
     let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
-    crate::fs::r#unsafe::file_inode_install(&file, alloc::sync::Arc::new(inode));
+    crate::fs::edges::file_inode_install(&file, alloc::sync::Arc::new(inode));
 
     get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
 }

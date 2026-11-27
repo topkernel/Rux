@@ -45,7 +45,7 @@ fn zone_name(zone: crate::mm::zone::ZoneType) -> &'static str {
 fn nr_free_pages() -> u64 {
     let mut total = 0u64;
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+    if let Some(node) =  crate::mm::pglist::first_online_node()  {
         for zt in ZONE_ORDER {
             if let Some(zone) = node.zone(zt) {
                 if zone.is_initialized() {
@@ -148,7 +148,7 @@ pub fn generate() -> Vec<u8> {
 pub fn generate_buddyinfo() -> Vec<u8> {
     let mut out = String::new();
     // SAFETY: diagnostic read-only node access.
-    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+    if let Some(node) =  crate::mm::pglist::first_online_node()  {
         for zt in ZONE_ORDER {
             let zone = match node.zone(zt) {
                 Some(z) if z.is_initialized() => z,

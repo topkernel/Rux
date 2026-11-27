@@ -190,7 +190,7 @@ fn rootfs_count_links(ino: u64) -> u32 {
     }
     // sb_ptr was set once at rootfs init and lives for the boot
     // (INV-FS-GLOBALSB-1).
-    let root = crate::fs::r#unsafe::static_ref_unchecked(sb_ptr);
+    let root = crate::fs::edges::static_ref_unchecked(sb_ptr);
     let mut count = 0u32;
     count_links_in(&root.root_node, ino, &mut count);
     count.max(1)
@@ -239,7 +239,7 @@ pub fn get_rootfs_sb() -> Option<*mut RootFSSuperBlock> {
 /// global-sb pointer resolved through the framework edge instead of a
 /// raw pointer handoff.
 pub fn get_rootfs_sb_ref() -> Option<&'static RootFSSuperBlock> {
-    crate::fs::r#unsafe::static_ref(GLOBAL_ROOTFS_SB.load(Ordering::Acquire))
+    crate::fs::edges::static_ref(GLOBAL_ROOTFS_SB.load(Ordering::Acquire))
 }
 
 pub fn get_root_mount() -> Option<*mut VfsMount> {
@@ -1293,7 +1293,7 @@ pub fn init_rootfs() -> Result<(), i32> {
 
     // Create essential directories on rootfs (fallback when ext4 is unavailable)
     // INV-FS-GLOBALSB-1: rootfs_sb_ptr was installed at mount init.
-    let rootfs = crate::fs::r#unsafe::static_ref_unchecked(rootfs_sb_ptr);
+    let rootfs = crate::fs::edges::static_ref_unchecked(rootfs_sb_ptr);
     for dir in &["/tmp", "/proc", "/dev", "/etc", "/root"] {
         let _ = rootfs.mkdir(dir);
     }
@@ -1306,7 +1306,7 @@ pub fn get_root_node() -> Option<&'static RootFSNode> {
     if sb_ptr.is_null() {
         return None;
     }
-    crate::fs::r#unsafe::static_ref(sb_ptr).map(|sb| sb.root_node.as_ref())
+    crate::fs::edges::static_ref(sb_ptr).map(|sb| sb.root_node.as_ref())
 }
 
 pub fn get_rootfs() -> *const RootFSSuperBlock {
@@ -1319,7 +1319,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
     let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     let root_node = if !sb_ptr.is_null() {
         // INV-FS-GLOBALSB-1
-        crate::fs::r#unsafe::static_ref_unchecked(sb_ptr).root_node.clone()
+        crate::fs::edges::static_ref_unchecked(sb_ptr).root_node.clone()
     } else {
         // Fallback: create a minimal root node
         alloc::sync::Arc::new(RootFSNode::new_dir(b"/".to_vec(), 1))
@@ -1341,7 +1341,7 @@ use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     // Get RootFSNode from inode's private_data
-    let node = crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory)?;
+    let node = crate::fs::edges::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory)?;
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1360,7 +1360,7 @@ fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync
     let _ = mode; // Mode not used in RootFS
 
     // Get RootFSNode from inode's private_data
-    let node = crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = crate::fs::edges::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1376,7 +1376,7 @@ fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync
     if sb_ptr.is_null() {
         return Err(errno::Errno::IOError);
     }
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(sb_ptr);
+    let sb = crate::fs::edges::static_ref_unchecked(sb_ptr);
     let ino = sb.alloc_ino();
 
     // Create new directory node
@@ -1397,7 +1397,7 @@ fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
     // Get RootFSNode from inode's private_data
-    let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir) {
+    let node = match crate::fs::edges::privdata_ref::<RootFSNode>(dir) {
             Some(v) => v,
             None => return errno::Errno::NotADirectory.as_neg_i32(),
         };
@@ -1426,7 +1426,7 @@ fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
             // sb_back is valid for the node's lifetime (see the
             // field's VALIDITY contract) — resolved through the
             // framework edge (INV-FS-GLOBALSB-1 shape).
-            crate::fs::r#unsafe::static_ref_unchecked(sb).path_cache_flush();
+            crate::fs::edges::static_ref_unchecked(sb).path_cache_flush();
         }
         0
     } else {
@@ -1438,7 +1438,7 @@ fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
     // Get RootFSNode from inode's private_data
-    let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir) {
+    let node = match crate::fs::edges::privdata_ref::<RootFSNode>(dir) {
             Some(v) => v,
             None => return errno::Errno::NotADirectory.as_neg_i32(),
         };
@@ -1471,7 +1471,7 @@ fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
             // sb_back is valid for the node's lifetime (see the
             // field's VALIDITY contract) — resolved through the
             // framework edge (INV-FS-GLOBALSB-1 shape).
-            crate::fs::r#unsafe::static_ref_unchecked(sb).path_cache_flush();
+            crate::fs::edges::static_ref_unchecked(sb).path_cache_flush();
         }
         0
     } else {
@@ -1485,7 +1485,7 @@ fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::syn
     let _ = mode; // Mode not used in RootFS
 
     // Get RootFSNode from inode's private_data
-    let node = crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = crate::fs::edges::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1501,7 +1501,7 @@ fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::syn
     if sb_ptr.is_null() {
         return Err(errno::Errno::IOError);
     }
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(sb_ptr);
+    let sb = crate::fs::edges::static_ref_unchecked(sb_ptr);
     let ino = sb.alloc_ino();
 
     // Create new file node
@@ -1521,7 +1521,7 @@ fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::syn
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     // Get RootFSNode from inode's private_data
-    let node = crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = crate::fs::edges::privdata_ref::<RootFSNode>(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1537,7 +1537,7 @@ fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync
     if sb_ptr.is_null() {
         return Err(errno::Errno::IOError);
     }
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(sb_ptr);
+    let sb = crate::fs::edges::static_ref_unchecked(sb_ptr);
     let ino = sb.alloc_ino();
 
     // Create new symlink node
@@ -1557,7 +1557,7 @@ fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     // Get target node
-    let target_node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(target) {
+    let target_node = match crate::fs::edges::privdata_ref::<RootFSNode>(target) {
         Some(v) => v,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     };
@@ -1568,7 +1568,7 @@ fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     }
 
     // Get parent directory
-    let dir_node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(dir) {
+    let dir_node = match crate::fs::edges::privdata_ref::<RootFSNode>(dir) {
         Some(v) => v,
         None => return errno::Errno::NotADirectory.as_neg_i32(),
     };
@@ -1604,7 +1604,7 @@ fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
         // sb_back is valid for the node's lifetime (see the field's
         // VALIDITY contract) — resolved through the framework edge
         // (INV-FS-GLOBALSB-1 shape).
-        crate::fs::r#unsafe::static_ref_unchecked(sb).path_cache_flush();
+        crate::fs::edges::static_ref_unchecked(sb).path_cache_flush();
     }
 
     0
@@ -1614,7 +1614,7 @@ fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     // Get old directory
-    let old_dir_node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(old_dir) {
+    let old_dir_node = match crate::fs::edges::privdata_ref::<RootFSNode>(old_dir) {
         Some(v) => v,
         None => return errno::Errno::NotADirectory.as_neg_i32(),
     };
@@ -1630,7 +1630,7 @@ fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[
     };
 
     // Get new directory
-    let new_dir_node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(new_dir) {
+    let new_dir_node = match crate::fs::edges::privdata_ref::<RootFSNode>(new_dir) {
         Some(v) => v,
         None => return errno::Errno::NotADirectory.as_neg_i32(),
     };
@@ -1667,7 +1667,7 @@ fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[
         // sb_back is valid for the node's lifetime (see the field's
         // VALIDITY contract) — resolved through the framework edge
         // (INV-FS-GLOBALSB-1 shape).
-        crate::fs::r#unsafe::static_ref_unchecked(sb).path_cache_flush();
+        crate::fs::edges::static_ref_unchecked(sb).path_cache_flush();
     }
     0
 }
@@ -1675,7 +1675,7 @@ fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[
 /// RootFS readlink operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
-    let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
+    let node = match crate::fs::edges::privdata_ref::<RootFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
         };
@@ -1699,7 +1699,7 @@ fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
-    let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
+    let node = match crate::fs::edges::privdata_ref::<RootFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
         };
@@ -1742,7 +1742,7 @@ fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i32 {
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
-    let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
+    let node = match crate::fs::edges::privdata_ref::<RootFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
         };
@@ -1780,7 +1780,7 @@ fn rootfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             Some(i) => i,
             None => return -9,
         };
-        let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
+        let node = match crate::fs::edges::privdata_ref::<RootFSNode>(inode) {
             Some(n) => n,
             None => return -9,
         };
@@ -1805,7 +1805,7 @@ fn rootfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
             Some(i) => i,
             None => return -9,
         };
-        let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
+        let node = match crate::fs::edges::privdata_ref::<RootFSNode>(inode) {
             Some(n) => n,
             None => return -9,
         };
@@ -1828,7 +1828,7 @@ fn rootfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
         Some(i) => i,
         None => return -9,
     };
-    let node = match crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode) {
+    let node = match crate::fs::edges::privdata_ref::<RootFSNode>(inode) {
         Some(n) => n,
         None => return -9,
     };
@@ -1874,7 +1874,7 @@ fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOp
 fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
 
-    let node = crate::fs::r#unsafe::privdata_ref::<RootFSNode>(inode)?;
+    let node = crate::fs::edges::privdata_ref::<RootFSNode>(inode)?;
     if !node.is_dir() {
         return None;
     }
@@ -1941,7 +1941,7 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
 /// We find the child by name and create a VFS Inode.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
-    let node = crate::fs::r#unsafe::privdata_ref::<RootFSNode>(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = crate::fs::edges::privdata_ref::<RootFSNode>(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     // Find child by name
     let child = node.find_child(name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;

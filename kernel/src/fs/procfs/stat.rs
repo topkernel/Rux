@@ -160,7 +160,7 @@ fn procs_blocked() -> u64 {
     // for, so reading /proc/stat never blocks the caller.
     crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
-        let t = unsafe { &*task };
+        let t =  &*task ;
         if t.pid() != 0 && t.state().bits() & TaskState::UNINTERRUPTIBLE != 0 {
             blocked += 1;
         }

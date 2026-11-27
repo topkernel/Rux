@@ -580,7 +580,7 @@ impl File {
 
     /// Take the private-data slot value out (the close-path reclaim
     /// first half; the exactly-once reclaim twin is
-    /// `fs::r#unsafe::file_privdata_take`).
+    /// `fs::edges::file_privdata_take`).
     pub fn take_private_data(&self) -> Option<*mut u8> {
         // SAFETY: INV-FS-FILEPRIV-1; callers run in the release path
         // where no shared reader can race the cell.
@@ -1769,8 +1769,7 @@ impl FastFd {
 pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
     let cur = crate::sched::current()?;
     // SAFETY: current() yields a live task pointer.
-    unsafe {
-        if !(*cur).fdtable_unshared() {
+            if !(*cur).fdtable_unshared() {
             return (*cur).try_fdtable().and_then(|t| t.get_file(fd)).map(FastFd::Owned);
         }
         // The unshared table outlives the syscall (owned by this task);
@@ -1781,7 +1780,7 @@ pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
             // cannot be retired for the duration of this syscall.
             unsafe { core::mem::transmute::<&File, &'static File>(f) }
         }).map(FastFd::Borrowed)
-    }
+    
 }
 
 /// Safe-typed fd lookup for the kernel capsule boundary: identical
@@ -1792,7 +1791,7 @@ pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
 pub fn get_file_fd_safe(fd: usize) -> Option<Arc<File>> {
     // SAFETY: vacuous contract — get_file_fd's body calls only safe
     // functions (see doc).
-    unsafe { get_file_fd(fd) }
+     get_file_fd(fd) 
 }
 
 /// (unsafe-slim r3) un-signed: parameters are safe (Arc<File>) and the

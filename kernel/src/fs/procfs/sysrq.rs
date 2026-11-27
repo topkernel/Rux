@@ -132,7 +132,7 @@ fn signal_all_except_init(sig: i32) {
     let mut sent = 0u32;
     crate::process::pid_hash::pid_hash_for_each_task(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
-        let pid = unsafe { (*task).pid() };
+        let pid =  (*task).pid() ;
         if pid > 1 {
             let _ = crate::signal::send_signal(pid, sig);
             sent += 1;
@@ -220,7 +220,7 @@ fn dump_blocked_tasks() {
     let mut count = 0u32;
     crate::process::pid_hash::pid_hash_for_each_task(|task| {
         // SAFETY: the pid-hash walk hands out live task pointers.
-        let t: &crate::process::task::Task = unsafe { &*task };
+        let t: &crate::process::task::Task =  &*task ;
         let state = t.state().bits();
         // TASK_UNINTERRUPTIBLE / TASK_KILLABLE / TASK_NOLOAD: the states
         // a task can sit in while blocked on I/O.

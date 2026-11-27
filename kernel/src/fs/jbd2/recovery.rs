@@ -74,12 +74,11 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 
     // Read journal superblock to get s_start and s_sequence
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-    let sb_bh = unsafe {
-        match bio::bread(device, journal.jmap(0)) {
+    let sb_bh =         match bio::bread(device, journal.jmap(0)) {
             Some(b) => b,
             None => return Err(EIO),
         }
-    };
+    ;
 
     // SAFETY: sb_bh is a valid BufferHead; the superblock is at the start of the block.
     let (start_block, start_seq) = unsafe {
@@ -125,12 +124,11 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
             break; // unmapped hole between journal extents
         }
         // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
+        let bh =             match bio::bread(device, abs_block) {
                 Some(b) => b,
                 None => break,
             }
-        };
+        ;
 
         // SAFETY: bh is a valid BufferHead; b_data starts with a journal_header_t;
         // magic check below validates the contents before use.
@@ -222,12 +220,11 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
             break; // unmapped hole between journal extents
         }
         // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
+        let bh =             match bio::bread(device, abs_block) {
                 Some(b) => b,
                 None => break,
             }
-        };
+        ;
 
         // SAFETY: bh is valid; b_data starts with journal_header_t; magic check validates.
         let (magic, blocktype, sequence) = unsafe {
@@ -307,12 +304,11 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
         .j_bio_device
         .expect("jbd2: bio device used before ext4 install");
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-    let sb_bh = unsafe {
-        match bio::bread(device, journal.jmap(0)) {
+    let sb_bh =         match bio::bread(device, journal.jmap(0)) {
             Some(b) => b,
             None => return Err(EIO),
         }
-    };
+    ;
     // SAFETY: sb_bh is a valid BufferHead; the superblock is at the start of the block.
     unsafe {
         let r = &mut *sb_bh;
@@ -496,7 +492,7 @@ fn replay_data(
         return; // unmapped hole — nothing to replay from
     }
     // SAFETY: bio::bread returns a valid BufferHead or None (handled by returning).
-    let data_bh = unsafe { match bio::bread(device, data_abs) { Some(b) => b, None => return } };
+    let data_bh =  match bio::bread(device, data_abs) { Some(b) => b, None => return } ;
     if let Some(csum) = tag_csum {
         // SAFETY: data_bh spans the journal block; the slice covers exactly it.
         let ok = unsafe {
@@ -513,7 +509,7 @@ fn replay_data(
         }
     }
     // SAFETY: bio::bread returns a valid BufferHead or None; data_bh released on None.
-    let fs_bh = unsafe { match bio::bread(device, fs_block) { Some(b) => b, None => { bio::brelse(data_bh); return } } };
+    let fs_bh =  match bio::bread(device, fs_block) { Some(b) => b, None => { bio::brelse(data_bh); return } } ;
     // SAFETY: both bh pointers are valid BufferHeads from bio::bread above.
     let len = unsafe { core::cmp::min((*data_bh).b_data.len(), (*fs_bh).b_data.len()) };
     // SAFETY: both bh pointers are valid; len is the minimum of both buffer sizes;

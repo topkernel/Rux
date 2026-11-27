@@ -182,7 +182,7 @@ impl TmpfsNode {
         let (uid, gid) = match crate::sched::current() {
             Some(task) => {
                 // SAFETY: sched::current() yields a valid task reference.
-                let cred = unsafe { (*task).cred() };
+                let cred =  (*task).cred() ;
                 (cred.fsuid, cred.fsgid)
             }
             None => (0, 0),
@@ -888,7 +888,7 @@ pub fn ensure_registered() {
 // SAFETY: private_data was installed by tmpfs_make_inode / tmpfs_iget as an
 // Arc::into_raw reference; it stays alive at least as long as the inode.
 fn node_of<'a>(inode: &'a Inode) -> Result<&'a TmpfsNode, i32> {
-    match crate::fs::r#unsafe::privdata_ref::<TmpfsNode>(inode) {
+    match crate::fs::edges::privdata_ref::<TmpfsNode>(inode) {
         Some(node) => Ok(node),
         None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
     }
@@ -950,7 +950,7 @@ fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>,
     }
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    let sb = crate::fs::edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let file = sb.new_node(name.to_vec(), TmpfsType::RegularFile);
     // Honor the caller's permission bits (umask is applied by the VFS layer).
@@ -970,7 +970,7 @@ fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, 
     }
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    let sb = crate::fs::edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let d = sb.new_node(name.to_vec(), TmpfsType::Directory);
     *d.mode.lock() = InodeMode::S_IFDIR | (mode.bits() & 0o7777);
@@ -989,7 +989,7 @@ fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, 
     }
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    let sb = crate::fs::edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let link = sb.new_node(name.to_vec(), TmpfsType::SymbolicLink);
     // SAFETY: link is exclusively owned here (not yet in the tree).
@@ -1031,7 +1031,7 @@ fn tmpfs_mknod(
 
     // sb is a leaked mount-lifetime superblock (INV-FS-GLOBALSB-1
     // provenance; resolved through the framework edge).
-    let sb = crate::fs::r#unsafe::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
+    let sb = crate::fs::edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     // Device nodes are stored as RegularFile nodes whose MODE word carries
     // the type (the same representation the ATTR_MODE retype path uses for
@@ -1386,7 +1386,7 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // holds an Arc<Inode> keeping the node reference alive.
     {
 
-    let inode = match crate::fs::r#unsafe::file_inode(file) {
+    let inode = match crate::fs::edges::file_inode(file) {
         Some(i) => i,
         None => return -9,
         };
@@ -1439,7 +1439,7 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: see tmpfs_file_read.
     {
 
-    let inode = match crate::fs::r#unsafe::file_inode(file) {
+    let inode = match crate::fs::edges::file_inode(file) {
         Some(i) => i,
         None => return -9,
         };
@@ -1487,7 +1487,7 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 }
 
 fn tmpfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
-    let file_size = match crate::fs::r#unsafe::file_inode(file) {
+    let file_size = match crate::fs::edges::file_inode(file) {
         Some(inode) => match node_of(inode) {
             Ok(node) => node.file_size() as isize,
             Err(_) => return -9,
@@ -1543,7 +1543,7 @@ pub fn is_tmpfs_file(file: &crate::fs::File) -> bool {
 fn tmpfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> isize {
     {
 
-    let inode = match crate::fs::r#unsafe::file_inode(file) {
+    let inode = match crate::fs::edges::file_inode(file) {
         Some(i) => i,
         None => return -9,
         };

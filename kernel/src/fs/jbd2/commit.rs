@@ -297,8 +297,7 @@ pub fn jbd2_journal_commit_transaction(
             // fast path above).
             // SAFETY: bread on a valid device returns a cached (or
             // freshly-read) buffer head for any valid block number.
-            let src_bh = unsafe {
-                match bio::bread(device, blocknr) {
+            let src_bh =                 match bio::bread(device, blocknr) {
                     Some(b) => b,
                     None => {
                         journal.abort(EIO);
@@ -306,7 +305,7 @@ pub fn jbd2_journal_commit_transaction(
                         return Err(EIO);
                     }
                 }
-            };
+            ;
 
             // ext4-persist P0 fix: journal blocks resolve through the
             // extent map (Journal::jmap), never the contiguous
@@ -321,8 +320,7 @@ pub fn jbd2_journal_commit_transaction(
                 return Err(EIO);
             }
             // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-            let data_bh = unsafe {
-                match bio::bread(device, data_abs_block) {
+            let data_bh =                 match bio::bread(device, data_abs_block) {
                     Some(b) => b,
                     None => {
                         bio::brelse(src_bh);
@@ -331,7 +329,7 @@ pub fn jbd2_journal_commit_transaction(
                         return Err(EIO);
                     }
                 }
-            };
+            ;
 
             // SAFETY: data_bh is a valid BufferHead; b_data is block_size
             // bytes on both heads; the copy length is the journal block
@@ -373,8 +371,7 @@ pub fn jbd2_journal_commit_transaction(
             return Err(EIO);
         }
         // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
+        let bh =             match bio::bread(device, abs_block) {
                 Some(b) => b,
                 None => {
                     journal.abort(EIO);
@@ -382,7 +379,7 @@ pub fn jbd2_journal_commit_transaction(
                     return Err(EIO);
                 }
             }
-        };
+        ;
 
         // Build descriptor: header + tags + tail
         let header = journal_header_t::new(JBD2_DESCRIPTOR_BLOCK, tid);
@@ -505,8 +502,7 @@ pub fn jbd2_journal_commit_transaction(
         return Err(EIO);
     }
     // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
-    let commit_bh = unsafe {
-        match bio::bread(device, commit_abs_block) {
+    let commit_bh =         match bio::bread(device, commit_abs_block) {
             Some(b) => b,
             None => {
                 journal.abort(EIO);
@@ -514,7 +510,7 @@ pub fn jbd2_journal_commit_transaction(
                 return Err(EIO);
             }
         }
-    };
+    ;
 
     let commit_hdr = commit_header {
         h_magic: JBD2_MAGIC_NUMBER.to_be(),
@@ -647,12 +643,11 @@ fn write_journal_superblock(
     new_sequence: u32,
 ) -> Result<(), i32> {
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
-    let bh = unsafe {
-        match bio::bread(device, sb_block) {
+    let bh =         match bio::bread(device, sb_block) {
             Some(b) => b,
             None => return Err(EIO),
         }
-    };
+    ;
 
     // SAFETY: bh is a valid BufferHead; the superblock fits within a block;
     // bh_ref.b_data contains the on-disk journal_superblock_t.

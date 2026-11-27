@@ -483,7 +483,7 @@ fn read_target_user_mm(
     while remaining > 0 {
         // SAFETY: root_ppn belongs to the pinned target mm (callers hold
         // a PinnedTask or are the current task); walk is read-only.
-        let Some((ppn, _pte)) = (unsafe { PageTableWalker::walk(root_ppn, va) }) else {
+        let Some((ppn, _pte)) = ( PageTableWalker::walk(root_ppn, va) ) else {
             break; // unmapped — truncated content, not a kernel error
         };
         let in_page_off = (va & 0xFFF) as usize;
@@ -844,9 +844,8 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
             let mut p = start & !(crate::mm::page::PAGE_SIZE - 1);
             while p < end {
                 // SAFETY: read-only walk of this task's own page tables.
-                if unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, p as u64)
-                }
+                if                     crate::arch::mm::mm_ops::PageTableWalker::walk(root, p as u64)
+                
                 .is_some()
                 {
                     rss_pages += 1;
@@ -1020,7 +1019,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                     // down already; maps paths then show no path (Linux
                     // shows the empty path for such VMAs too).
                     let file = match task.try_fdtable() {
-                        Some(ft) => unsafe { ft.get_file(fd as usize) },
+                        Some(ft) =>  ft.get_file(fd as usize) ,
                         None => None,
                     };
                     if let Some(file) = file {
@@ -1219,7 +1218,7 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
         })
         .unwrap_or(0);
 
-    let score = unsafe { crate::mm::oom_kill::oom_badness(&*task, totalpages) };
+    let score =  crate::mm::oom_kill::oom_badness(&*task, totalpages) ;
     format!("{}\n", score).into_bytes()
 }
 
@@ -1241,7 +1240,7 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
         None => return b"0\n".to_vec(),
     };
 
-    let adj = unsafe { (*task).oom_score_adj() };
+    let adj =  (*task).oom_score_adj() ;
     format!("{}\n", adj).into_bytes()
 }
 

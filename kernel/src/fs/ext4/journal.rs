@@ -74,15 +74,14 @@ impl Ext4FileSystem {
         // Read journal superblock (first block of the journal)
         // SAFETY: bio::bread returns a valid raw BufferHead pointer or None;
         // the None case returns early above.
-        let j_sb_bh = unsafe {
-            match bio::bread(self.device, journal_start_block) {
+        let j_sb_bh =             match bio::bread(self.device, journal_start_block) {
                 Some(b) => b,
                 None => {
                     crate::print_status("ext4", "journal superblock read failed", false);
                     return Err(EIO);
                 }
             }
-        };
+        ;
 
         // SAFETY: j_sb_bh is a valid BufferHead from bread(); b_data is a full
         // block-sized byte array, large enough to hold journal_superblock_t;

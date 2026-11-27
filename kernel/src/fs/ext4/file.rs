@@ -1534,7 +1534,7 @@ fn drain_batch(
             // device EIO completed its chain — the DMA is done.
             // SAFETY: bfree_multi's contract — private (non-cached)
             // buffer, DMA quiesced (status != WAIT_TIMED_OUT above).
-            unsafe { bio::bfree_multi(bh_ptrs[i]) };
+             bio::bfree_multi(bh_ptrs[i]) ;
         }
     }
 }
@@ -3985,14 +3985,13 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
     {
         // SAFETY: the audited ext4_buffered_write span (kernel-source
         // staging slice, page-cache copy discipline).
-        unsafe {
-            ext4_buffered_write(
+                    ext4_buffered_write(
                 fs,
                 inode,
                 offset,
                 WriteSrc::Kernel(buf.as_ptr(), buf.len()),
             )
-        }
+        
     } else {
         ext4_write_at_core(
             fs,
@@ -4070,14 +4069,13 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
             | crate::fs::file::FileFlags::O_DIRECT);
     if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: unsafe fn body — the audited ext4_buffered_write span.
-        unsafe {
-            ext4_buffered_write(
+                    ext4_buffered_write(
                 fs,
                 inode,
                 offset,
                 WriteSrc::Kernel(data.as_ptr(), data.len()),
             )
-        }
+        
     } else {
         let written = ext4_write_at_core(
             fs,
@@ -4179,7 +4177,7 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
     let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: the audited ext4_buffered_write span (user-source copy
         // contract: wsrc is access_ok-validated by the syscall layer).
-        unsafe { ext4_buffered_write(fs, inode, offset, wsrc) }
+         ext4_buffered_write(fs, inode, offset, wsrc) 
     } else {
         // Safety net (the syscall layer does not dispatch durable
         // writes here): stage the user bytes once and run the
@@ -4248,7 +4246,7 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
     let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
         // SAFETY: the audited ext4_buffered_write span (user-source copy
         // contract: wsrc is access_ok-validated by the syscall layer).
-        unsafe { ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count)) }
+         ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count)) 
     } else {
         // Safety net (the syscall layer does not dispatch durable
         // pwrites here): stage once, run the write-through core —

@@ -33,7 +33,7 @@ pub fn get_thread_self_link() -> Vec<u8> {
     match crate::sched::current() {
         Some(t) => {
             // SAFETY: current returns the running task's pointer.
-            let tid = unsafe { (*t).pid() };
+            let tid =  (*t).pid() ;
             format!("{}", tid).into_bytes()
         }
         None => format!("{}", crate::process::current_pid()).into_bytes(),

@@ -1872,7 +1872,7 @@ pub fn ext4_fallocate_on(
     // it) or the boot GLOBAL (INV-EXT4-GLOBALFS) — both valid for the
     // mount; resolved through the framework edges.
     let fs: &Ext4FileSystem = if let Some(hint) = fs_hint {
-        crate::fs::r#unsafe::static_ref_unchecked(hint as *mut Ext4FileSystem)
+        crate::fs::edges::static_ref_unchecked(hint as *mut Ext4FileSystem)
     } else {
         mounted_ext4_fs().ok_or(errno::Errno::IOError.as_neg_i32())?
     };
@@ -4041,7 +4041,7 @@ pub fn mount_loop_instance(
     // never outlive the registry row.
     loop_instance_publish(disk, fs_ptr);
     // fs_ptr is a leaked, valid instance pointer (registry-proven).
-    let fs_ref = crate::fs::r#unsafe::static_ref_unchecked(fs_ptr);
+    let fs_ref = crate::fs::edges::static_ref_unchecked(fs_ptr);
     match fs_ref.read_inode(2) {
         Ok(ext4_inode) => Ok((create_vfs_inode_in(fs_ref, 2, &ext4_inode), fs_ref.read_only)),
         Err(_) => {

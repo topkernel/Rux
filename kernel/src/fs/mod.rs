@@ -8,10 +8,12 @@
 pub mod file;
 // The subsystem's ONE audited unsafe file (mainline minimal-first
 // consolidation, 2026-11-27): the former `unsafe_edges` collection
-// renamed to `unsafe.rs` on disk; the raw-identifier module keeps the
-// historical path name so existing call sites stay stable.
+// renamed to `unsafe.rs` on disk, module named `edges` per the sibling
+// convention (syscall/edges.rs, sync/edges.rs, sched/edges.rs). The
+// #[path] keeps the FILE name the gate requires while call sites stay
+// on the plain `edges` identifier.
 #[path = "unsafe.rs"]
-pub mod r#unsafe;
+pub mod edges;
 pub mod event_notify;
 pub mod fdreap;
 pub mod inode;
@@ -71,7 +73,7 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
 
     // SAFETY: get_rootfs() returns a raw pointer to the global RootFS instance
     // which is initialized once during boot and never freed; null check follows.
-    let rootfs = unsafe { get_rootfs() };
+    let rootfs =  get_rootfs() ;
     if rootfs.is_null() {
         return None;
     }

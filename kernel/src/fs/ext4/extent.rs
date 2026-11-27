@@ -337,9 +337,8 @@ fn find_run_in_external_extent(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
     // SAFETY: bh is pinned by bread; b_data is a block-sized slice.
-    let bh = unsafe {
-        bio::bread(fs.device, block_num).ok_or(errno::Errno::IOError.as_neg_i32())?
-    };
+    let bh =         bio::bread(fs.device, block_num).ok_or(errno::Errno::IOError.as_neg_i32())?
+    ;
     let data = unsafe { &(*bh).b_data };
     {
         let header = node_header(data);
@@ -413,7 +412,7 @@ fn ext4_ext_get_block_ex_inner(
             return Ok((0, false));
         }
         // SAFETY: child is a valid extent-tree block (walker discipline).
-        return unsafe { find_block_in_external_extent_ex(fs, child, logical_block, 0) };
+        return  find_block_in_external_extent_ex(fs, child, logical_block, 0) ;
     }
 
     let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
@@ -1643,7 +1642,7 @@ fn append_node(
         let ext_cap = external_node_cap(fs);
         init_node_header(&mut nd, 0, ext_cap as u16);
         // SAFETY: fresh block-size buffer with ext_cap entries fitting.
-        unsafe { node_extents_mut(&mut nd, ext_cap)[0] = e.to_disk() };
+         node_extents_mut(&mut nd, ext_cap)[0] = e.to_disk() ;
         node_header_mut(&mut nd).eh_entries = 1;
         // SAFETY: blk was just allocated (valid fs block).
         write_node(fs, blk, &nd, csum_seed)?;
@@ -1654,12 +1653,10 @@ fn append_node(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         // SAFETY: index entries fit per the buffer contract.
-        let (last_child, _last_ei) = unsafe {
-            let idxs = node_indices(data, cap);
-            (idxs[n - 1].leaf_block(), idxs[n - 1].ei_block)
-        };
+        let idxs = node_indices(data, cap);
+        let (last_child, _last_ei) = (idxs[n - 1].leaf_block(), idxs[n - 1].ei_block);
         // SAFETY: last_child is a valid fs block read from the index node.
-        let mut child = unsafe { read_node(fs, last_child)? };
+        let mut child =  read_node(fs, last_child)? ;
         match append_node(fs, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors, csum_seed)? {
             None => {
                 // SAFETY: last_child valid.
@@ -1669,13 +1666,12 @@ fn append_node(
             Some(split) => {
                 if n < cap {
                     // SAFETY: slot n < cap within contract.
-                    unsafe {
-                        let slot = &mut node_indices_mut(data, cap)[n];
+                                            let slot = &mut node_indices_mut(data, cap)[n];
                         slot.ei_block = split.ei_block;
                         slot.ei_leaf_lo = split.child as u32;
                         slot.ei_leaf_hi = (split.child >> 32) as u16;
                         slot.ei_unused = 0;
-                    }
+                    
                     node_header_mut(data).eh_entries = (n + 1) as u16;
                     Ok(None)
                 } else {
@@ -1688,13 +1684,12 @@ fn append_node(
                     let ext_cap = external_node_cap(fs);
                     init_node_header(&mut nd, depth, ext_cap as u16);
                     // SAFETY: fresh block-size buffer, ext_cap entries fit.
-                    unsafe {
-                        let slot = &mut node_indices_mut(&mut nd, ext_cap)[0];
+                                            let slot = &mut node_indices_mut(&mut nd, ext_cap)[0];
                         slot.ei_block = split.ei_block;
                         slot.ei_leaf_lo = split.child as u32;
                         slot.ei_leaf_hi = (split.child >> 32) as u16;
                         slot.ei_unused = 0;
-                    }
+                    
                     node_header_mut(&mut nd).eh_entries = 1;
                     // SAFETY: blk just allocated.
                     write_node(fs, blk, &nd, csum_seed)?;
@@ -1746,8 +1741,7 @@ pub fn ext4_ext_append(
             let new_depth = old_depth + 1;
             init_node_header(&mut root, new_depth, old_cap);
             // SAFETY: root 60B holds 4 index entries per contract.
-            unsafe {
-                let first_ei = if old_depth == 0 {
+                            let first_ei = if old_depth == 0 {
                     // Downgraded leaf: first index key = first extent's ee_block.
                     let n = node_header(&down_data).eh_entries as usize;
                     if n == 0 { e.ee_block } else { node_extents(&down_data, external_node_cap(fs))[0].ee_block }
@@ -1765,7 +1759,7 @@ pub fn ext4_ext_append(
                 slot2.ei_leaf_lo = split.child as u32;
                 slot2.ei_leaf_hi = (split.child >> 32) as u16;
                 slot2.ei_unused = 0;
-            }
+            
             node_header_mut(&mut root).eh_entries = 2;
             // rux:exthunt (retired dfx=exthunt): the tree just grew one level — the event the
             // ftest04/zzprobe4 all-zeros family correlates with.
@@ -1809,9 +1803,8 @@ pub fn ext4_ext_gather(
         return Ok(out);
     }
     // SAFETY: root node access bounded by ROOT_NODE_CAP (60 bytes).
-    unsafe {
-        gather_node(fs, root, ROOT_NODE_CAP, h.eh_depth, &mut out)?;
-    }
+            gather_node(fs, root, ROOT_NODE_CAP, h.eh_depth, &mut out)?;
+    
     Ok(out)
 }
 
@@ -2022,7 +2015,7 @@ fn find_covering_leaf_blk(
         return Ok(0);
     }
     // SAFETY: root holds up to ROOT_NODE_CAP index entries.
-    let idxs = unsafe { node_indices(root, n) };
+    let idxs =  node_indices(root, n) ;
     let mut child = 0u64;
     for idx in idxs {
         if logical_block >= idx.ei_block as u64 {
@@ -2039,7 +2032,7 @@ fn find_covering_leaf_blk(
     let mut depth = h.eh_depth;
     while depth > 1 {
         // SAFETY: child is a valid fs block read from an index node.
-        let data = unsafe { read_node(fs, child)? };
+        let data =  read_node(fs, child)? ;
         let ch = node_header(&data);
         if ch.eh_magic != EXT4_EXT_MAGIC || ch.eh_depth != depth - 1 {
             return Err(errno::Errno::IOError.as_neg_i32());
@@ -2049,7 +2042,7 @@ fn find_covering_leaf_blk(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         // SAFETY: cn bounded by capacity.
-        let cidxs = unsafe { node_indices(&data, cn) };
+        let cidxs =  node_indices(&data, cn) ;
         let mut next = cidxs[0].leaf_block();
         for idx in cidxs {
             if logical_block >= idx.ei_block as u64 {
@@ -2193,7 +2186,7 @@ pub fn ext4_ext_convert_unwritten(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         // SAFETY: n bounded by ROOT_NODE_CAP (root 60-byte contract).
-        let entries: &[Ext4Extent] = unsafe { node_extents(root, n) };
+        let entries: &[Ext4Extent] =  node_extents(root, n) ;
         let Some(spliced) =
             splice_converted(entries.iter().map(|e| RawExtent::from_disk(e)), start, len)
         else {
@@ -2235,7 +2228,7 @@ pub fn ext4_ext_convert_unwritten(
             break;
         }
         // SAFETY: leaf_blk from the tree index walk.
-        let mut node = unsafe { read_node(fs, leaf_blk)? };
+        let mut node =  read_node(fs, leaf_blk)? ;
         let cap = external_node_cap(fs);
         let lh = node_header(&node);
         let n = lh.eh_entries as usize;
@@ -2243,7 +2236,7 @@ pub fn ext4_ext_convert_unwritten(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         // SAFETY: n bounded by cap.
-        let entries: &[Ext4Extent] = unsafe { node_extents(&node, n) };
+        let entries: &[Ext4Extent] =  node_extents(&node, n) ;
         let leaf_end = entries
             .last()
             .map(|e| RawExtent::from_disk(e).end())
@@ -2265,13 +2258,12 @@ pub fn ext4_ext_convert_unwritten(
                 let h = node_header_mut(&mut node);
                 h.eh_entries = spliced.len() as u16;
                 // SAFETY: spliced.len() <= cap fits the node buffer.
-                unsafe {
-                    let disk: alloc::vec::Vec<_> =
+                                    let disk: alloc::vec::Vec<_> =
                         spliced.iter().map(|e| e.to_disk()).collect();
                     node_extents_mut(&mut node, cap)[..spliced.len()].copy_from_slice(&disk);
-                }
+                
                 // SAFETY: leaf_blk from the tree walk.
-                unsafe { write_node(fs, leaf_blk, &node, csum_seed)? };
+                 write_node(fs, leaf_blk, &node, csum_seed)? ;
                 lb = leaf_end;
             }
         }
@@ -2321,7 +2313,7 @@ pub fn ext4_ext_materialize_block(
             return Ok(None); // hole (left of the first leaf's key)
         }
         // SAFETY: blk comes from the tree index walk.
-        (unsafe { read_node(fs, blk)? }, Some(blk), external_node_cap(fs))
+        ( read_node(fs, blk)? , Some(blk), external_node_cap(fs))
     };
     let lh = node_header(&node);
     let n = lh.eh_entries as usize;
@@ -2329,7 +2321,7 @@ pub fn ext4_ext_materialize_block(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
     // SAFETY: n bounded by cap per the node contract.
-    let entries = unsafe { node_extents(&node, n) }.to_vec();
+    let entries =  node_extents(&node, n) .to_vec();
     let mut hit: Option<usize> = None;
     for (i, e) in entries.iter().enumerate() {
         let start = e.ee_block as u64;
@@ -2367,11 +2359,11 @@ pub fn ext4_ext_materialize_block(
         let h = node_header_mut(&mut node);
         h.eh_entries = new_entries.len() as u16;
         // SAFETY: new_entries.len() <= cap fits the node buffer.
-        unsafe { node_extents_mut(&mut node, cap)[..new_entries.len()].copy_from_slice(&new_entries) };
+         node_extents_mut(&mut node, cap)[..new_entries.len()].copy_from_slice(&new_entries) ;
         match node_blk {
             Some(blk) => {
                 // SAFETY: blk from the tree walk.
-                unsafe { write_node(fs, blk, &node, csum_seed)? };
+                 write_node(fs, blk, &node, csum_seed)? ;
             }
             None => {
                 // Root: copy the 60-byte image back.
@@ -2461,7 +2453,7 @@ pub fn ext4_ext_insert_written(
         return insert_written_inline(i_block, ee_block, phys, len);
     }
     // SAFETY: leaf_blk from the tree walk.
-    let mut leaf = unsafe { read_node(fs, leaf_blk)? };
+    let mut leaf =  read_node(fs, leaf_blk)? ;
     let cap = external_node_cap(fs);
     let lh = node_header(&leaf);
     let n = lh.eh_entries as usize;
@@ -2469,7 +2461,7 @@ pub fn ext4_ext_insert_written(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
     // SAFETY: n bounded by cap.
-    let entries = unsafe { node_extents(&leaf, n) }.to_vec();
+    let entries =  node_extents(&leaf, n) .to_vec();
     // Merge with the last entry when contiguous. Guard like append_node
     // (review EXT4-MERGE): (a) the unwritten states must MATCH — merging a
     // written insert into a trailing UNWRITTEN extent cleared bit 15 of
@@ -2492,9 +2484,9 @@ pub fn ext4_ext_insert_written(
             let h = node_header_mut(&mut leaf);
             h.eh_entries = ne.len() as u16;
             // SAFETY: ne.len() <= cap.
-            unsafe { node_extents_mut(&mut leaf, cap)[..ne.len()].copy_from_slice(&ne) };
+             node_extents_mut(&mut leaf, cap)[..ne.len()].copy_from_slice(&ne) ;
             // SAFETY: leaf_blk valid.
-            unsafe { write_node(fs, leaf_blk, &leaf, csum_seed)? };
+             write_node(fs, leaf_blk, &leaf, csum_seed)? ;
             return Ok(());
         }
     }
@@ -2512,9 +2504,9 @@ pub fn ext4_ext_insert_written(
         let h = node_header_mut(&mut leaf);
         h.eh_entries = new_entries.len() as u16;
         // SAFETY: new_entries.len() <= cap.
-        unsafe { node_extents_mut(&mut leaf, cap)[..new_entries.len()].copy_from_slice(&new_entries) };
+         node_extents_mut(&mut leaf, cap)[..new_entries.len()].copy_from_slice(&new_entries) ;
         // SAFETY: leaf_blk valid.
-        unsafe { write_node(fs, leaf_blk, &leaf, csum_seed)? };
+         write_node(fs, leaf_blk, &leaf, csum_seed)? ;
         Ok(())
     } else {
         // Leaf full: whole-tree rebuild with the entry inserted sorted.

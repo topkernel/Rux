@@ -282,9 +282,8 @@ pub fn ext4_new_inode(
         };
         // SAFETY: i_block is a [u32; 15] = 60 bytes; a 12-byte header at
         // its start is in-bounds.
-        unsafe {
-            *crate::fs::ext4::extent::iblock_header_mut(&mut inode.i_block) = hdr;
-        }
+                    *crate::fs::ext4::extent::iblock_header_mut(&mut inode.i_block) = hdr;
+        
     }
     // Fresh inodes are born "now" (wall-clock epoch seconds —
     // drivers::rtc::wall_secs), as in Linux's ext4_new_inode.
@@ -1141,7 +1140,7 @@ unsafe fn write_entry_block_ordered(
 ) -> Result<(), i32> {
     // SAFETY: fs is the enclosing filesystem; blocknr is the block about
     // to be written.
-    unsafe { defer_entry_publication(fs, blocknr) };
+     defer_entry_publication(fs, blocknr) ;
     // SAFETY: fs.device is a valid GenDisk pointer; write_block_from_vec
     // handles the buffer lifecycle. Under a journal handle its sync is
     // deferred (the entry block stays dirty until a drain point); without

@@ -415,7 +415,7 @@ pub fn notify_file(file: &File, mask: u32) {
     }
     // inode and dentry are written once at open time and never mutated
     // afterwards (the FILEINODE/FILEPRIV write-once cells).
-    let inode = match crate::fs::r#unsafe::file_inode_arc(file) {
+    let inode = match crate::fs::edges::file_inode_arc(file) {
         Some(i) => i,
         None => return,
     };

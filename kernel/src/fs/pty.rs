@@ -359,7 +359,7 @@ fn pair_of<'a>(file: &'a File) -> Option<&'a PtyPair> {
     // private_data is either null or an Arc::into_raw(PtyPair) installed
     // by ptmx_open/slave_open; the Arc ref held by the File keeps it
     // alive (INV-FS-FILEPRIV-1, the framework edge).
-    crate::fs::r#unsafe::file_privdata_arc_ref::<PtyPair>(file)
+    crate::fs::edges::file_privdata_arc_ref::<PtyPair>(file)
 }
 
 /// Clone the File's PtyPair Arc without consuming the slot's reference
@@ -507,7 +507,7 @@ fn ptmx_poll(file: &File, events: u16) -> u16 {
 fn ptmx_close(file: &File) -> i32 {
     // Reclaim the Arc installed by ptmx_open (INV-FS-FILEPRIV-1),
     // dropping one ref.
-    if let Some(pair) = crate::fs::r#unsafe::file_privdata_arc_take::<PtyPair>(file) {
+    if let Some(pair) = crate::fs::edges::file_privdata_arc_take::<PtyPair>(file) {
 
         if pair.master_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last master description closed.
@@ -671,7 +671,7 @@ fn pty_slave_poll(file: &File, events: u16) -> u16 {
 fn pty_slave_close(file: &File) -> i32 {
     // Reclaim the Arc installed by slave_open (INV-FS-FILEPRIV-1),
     // dropping one ref.
-    if let Some(pair) = crate::fs::r#unsafe::file_privdata_arc_take::<PtyPair>(file) {
+    if let Some(pair) = crate::fs::edges::file_privdata_arc_take::<PtyPair>(file) {
 
         if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last slave description closed.

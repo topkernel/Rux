@@ -68,7 +68,7 @@ pub struct PidFdData {
 /// when the pid is absent.
 fn pin_leader(pid: u32) -> Option<*mut Task> {
     // SAFETY: pid_hash_lookup_pinned returns a pinned, valid Task.
-    let t = unsafe { crate::process::pid_hash::pid_hash_lookup_pinned(pid) };
+    let t =  crate::process::pid_hash::pid_hash_lookup_pinned(pid) ;
     if t.is_null() {
         return None;
     }
@@ -144,7 +144,7 @@ pub fn fdinfo_pid_of(file: &crate::fs::File) -> Option<u32> {
     }
     // SAFETY: PIDFD_OPS files carry a PidFdData from attach(); the ops
     // check above proves the private_data slot is that box.
-    Some(unsafe { data_of(file)?.pid })
+    Some( data_of(file)?.pid )
 }
 
 /// Resolve a pidfd's process with pid-reuse protection.
@@ -154,7 +154,7 @@ pub fn fdinfo_pid_of(file: &crate::fs::File) -> Option<u32> {
 pub fn resolve_alive(data: &PidFdData) -> Option<&'static Task> {
     // SAFETY: lookup runs under RCU; equality with the pinned pointer
     // proves identity without dereferencing the result.
-    let now = unsafe { crate::process::pid_hash::pid_hash_lookup(data.pid) };
+    let now =  crate::process::pid_hash::pid_hash_lookup(data.pid) ;
     if now.is_null() || (now as *const Task) != (data.task as *const Task) {
         return None;
     }
@@ -172,7 +172,7 @@ pub fn target_exited(data: &PidFdData) -> bool {
         return true;
     }
     // Reaped and hash-removed: exited by definition.
-    unsafe { crate::process::pid_hash::pid_hash_lookup(data.pid).is_null() }
+     crate::process::pid_hash::pid_hash_lookup(data.pid).is_null() 
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ pub fn target_exited(data: &PidFdData) -> bool {
 fn pidfd_poll(_file: &crate::fs::File, _events: u16) -> u16 {
     // SAFETY: identity-checked dispatcher contract (poll only installed
     // on PIDFD_OPS files, whose private_data came from attach()).
-    match unsafe { data_of(_file) } {
+    match  data_of(_file)  {
         Some(d) if target_exited(d) => EPOLLIN_U16,
         _ => 0,
     }

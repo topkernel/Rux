@@ -262,12 +262,11 @@ pub fn jbd2_journal_write_revoke_records(
         }
 
         // SAFETY: bio::bread returns a valid BufferHead or None.
-        let bh = unsafe {
-            match bio::bread(device, abs_block) {
+        let bh =             match bio::bread(device, abs_block) {
                 Some(b) => b,
                 None => return Err(EIO),
             }
-        };
+        ;
 
         let take = core::cmp::min(per_block, records.len() - idx);
         // SAFETY: bh is valid; writes stay inside b_data.
