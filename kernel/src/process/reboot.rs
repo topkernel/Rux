@@ -7,6 +7,7 @@
 //! signal) — the crate-plan rule. The arch reset repertoire lives in
 //! boot_edges.rs (INV-SYSC-4); this module orchestrates.
 
+#![forbid(unsafe_code)]
 /// reboot(2) CAD mode: false = send SIGINT to init (Linux default),
 /// true = reboot immediately (LINUX_REBOOT_CMD_CAD_ON).
 static CAD_IMMEDIATE: core::sync::atomic::AtomicBool =

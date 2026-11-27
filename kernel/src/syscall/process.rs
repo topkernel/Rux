@@ -7,7 +7,7 @@
 //! Includes: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname, etc.
 //!
 //! unsafe-slim L7: this service file is safe by construction —
-//! task-pointer borrows go through `process::unsafe_edges`
+//! task-pointer borrows go through `process::edges`
 //! (INV-PROC-BORROW-1), user-memory copies through
 //! `crate::arch::uaccess_safe`, byte views through `safety::bytes`,
 //! and the reboot/panic + filetyped-subsystem edges live in
@@ -358,7 +358,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 // leader is live
                                                 // (INV-PROC-BORROW-1).
                                                 core::str::from_utf8(
-                                                    crate::process::unsafe_edges::borrow_task(
+                                                    crate::process::edges::borrow_task(
                                                         t.group_leader_ptr()
                                                     )
                                                     .comm()
@@ -1903,7 +1903,7 @@ pub fn sys_getpid(_args: SyscallArgs) -> i64 {
         // the process's pid in the caller's namespace (typed current;
         // the leader pointer stays raw).
         let leader = current.group_leader_ptr();
-        crate::process::unsafe_edges::borrow_task(leader).ns_pid_local() as i64
+        crate::process::edges::borrow_task(leader).ns_pid_local() as i64
     } else {
         0
     }
@@ -1940,7 +1940,7 @@ pub fn sys_getppid(_args: SyscallArgs) -> i64 {
         // uses (a non-leader's parent field can be an unlinked snapshot).
         {
             let current = current;
-            let leader = crate::process::unsafe_edges::borrow_task(current.group_leader_ptr());
+            let leader = crate::process::edges::borrow_task(current.group_leader_ptr());
             let parent = leader.parent_task_ptr();
             if parent.is_null() {
                 return 0;
@@ -1950,7 +1950,7 @@ pub fn sys_getppid(_args: SyscallArgs) -> i64 {
             // alive (ppid()'s discipline — INV-PROC-BORROW-1). Read-only
             // use.
             let parent =
-                crate::process::unsafe_edges::borrow_task(parent as *mut crate::process::task::Task);
+                crate::process::edges::borrow_task(parent as *mut crate::process::task::Task);
             if crate::process::ns::task_same_pid_ns(leader, parent) {
                 // Same pid namespace: the ns-local pid is a plain field
                 // read (task_tgid_vnr fast case).
@@ -2084,13 +2084,13 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         }
 
         if sig > 0 {
-            let target_task = crate::process::unsafe_edges::borrow_task(target);
+            let target_task = crate::process::edges::borrow_task(target);
             if !crate::security::can_send_signal(target_task.cred()) {
                 return -(errno::EPERM as i64);
             }
             // Collect the group's member pids (leader's ring), then send
             // outside the ring lock. Skips dead members; zombies ignore.
-            let leader = crate::process::unsafe_edges::borrow_task(target_task.group_leader_ptr());
+            let leader = crate::process::edges::borrow_task(target_task.group_leader_ptr());
             let mut members: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
             leader.for_each_group_member(|m| {
                 if !m.state().is_dead() {
@@ -2290,7 +2290,7 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
         {
             // SAFETY: task is the caller's task (valid for this
             // syscall; the cred mutation is serialized by the syscall).
-            let cred = crate::process::unsafe_edges::borrow_task_mut(task).cred_mut();
+            let cred = crate::process::edges::borrow_task_mut(task).cred_mut();
             if crate::security::capable(crate::security::CAP_SETUID) {
                 // CAP_SETUID: set all uid fields
                 cred.uid = uid;
@@ -2338,7 +2338,7 @@ pub fn sys_setgid(args: SyscallArgs) -> i64 {
         {
             // SAFETY: task is the caller's task (valid for this
             // syscall; the cred mutation is serialized by the syscall).
-            let cred = crate::process::unsafe_edges::borrow_task_mut(task).cred_mut();
+            let cred = crate::process::edges::borrow_task_mut(task).cred_mut();
             if crate::security::capable(crate::security::CAP_SETGID) {
                 // CAP_SETGID: set all gid fields
                 cred.gid = gid;
@@ -2373,7 +2373,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
         {
             // SAFETY: task is the caller's task (valid for this
             // syscall; the cred mutation is serialized by the syscall).
-            let cred = crate::process::unsafe_edges::borrow_task_mut(task).cred_mut();
+            let cred = crate::process::edges::borrow_task_mut(task).cred_mut();
             let old_ruid = cred.uid;
             let old_euid = cred.euid;
             let old_suid = cred.suid;
@@ -2446,7 +2446,7 @@ pub fn sys_setregid(args: SyscallArgs) -> i64 {
         {
             // SAFETY: task is the caller's task (valid for this
             // syscall; the cred mutation is serialized by the syscall).
-            let cred = crate::process::unsafe_edges::borrow_task_mut(task).cred_mut();
+            let cred = crate::process::edges::borrow_task_mut(task).cred_mut();
             let old_rgid = cred.gid;
             let old_egid = cred.egid;
             let old_sgid = cred.sgid;
@@ -2501,7 +2501,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
         {
             // SAFETY: task is the caller's task (valid for this
             // syscall; the cred mutation is serialized by the syscall).
-            let cred = crate::process::unsafe_edges::borrow_task_mut(task).cred_mut();
+            let cred = crate::process::edges::borrow_task_mut(task).cred_mut();
             let old_euid = cred.euid;
 
             // Determine new ruid
@@ -2587,7 +2587,7 @@ pub fn sys_getresuid(args: SyscallArgs) -> i64 {
 
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
-        let cred = crate::process::unsafe_edges::borrow_task(task).cred();
+        let cred = crate::process::edges::borrow_task(task).cred();
         // SAFETY: task is valid; user pointers are validated with access_ok before each write.
         // write_user is the exception-table copy path.
         {
@@ -2632,7 +2632,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> i64 {
         {
             // SAFETY: task is the caller's task (valid for this
             // syscall; the cred mutation is serialized by the syscall).
-            let cred = crate::process::unsafe_edges::borrow_task_mut(task).cred_mut();
+            let cred = crate::process::edges::borrow_task_mut(task).cred_mut();
 
             // Determine new rgid
             let new_rgid = if rgid == -1 {
@@ -2697,7 +2697,7 @@ pub fn sys_getresgid(args: SyscallArgs) -> i64 {
 
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
-        let cred = crate::process::unsafe_edges::borrow_task(task).cred();
+        let cred = crate::process::edges::borrow_task(task).cred();
         // SAFETY: task is valid; user pointers validated with access_ok before each write.
         // write_user is the exception-table copy path.
         {
@@ -2883,7 +2883,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
             if pgid as u32 != current_pid {
                 let leader = crate::sched::find_task_by_pid(pgid as u32);
                 if leader.is_null()
-                    || crate::process::unsafe_edges::borrow_task(leader).sid() != current.sid()
+                    || crate::process::edges::borrow_task(leader).sid() != current.sid()
                 {
                     return -(errno::EPERM as i64);
                 }
@@ -2899,7 +2899,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
             return -(errno::ESRCH as i64);
         }
         {
-            let target = crate::process::unsafe_edges::borrow_task_mut(target);
+            let target = crate::process::edges::borrow_task_mut(target);
             // Target must be a child of current process
             if target.ppid() != current_pid {
                 return -(errno::ESRCH as i64);
@@ -2942,7 +2942,7 @@ pub fn sys_getpgid(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
     // target validated non-null above (INV-PROC-BORROW-1).
-    crate::process::unsafe_edges::borrow_task(target).pgid() as i64
+    crate::process::edges::borrow_task(target).pgid() as i64
 }
 
 /// sys_setsid - Create a new session
@@ -2993,7 +2993,7 @@ pub fn sys_getsid(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
     // target validated non-null above (INV-PROC-BORROW-1).
-    crate::process::unsafe_edges::borrow_task(target).sid() as i64
+    crate::process::edges::borrow_task(target).sid() as i64
 }
 
 /// sys_prlimit64 - Get/set resource limits (NR 261)
@@ -3518,7 +3518,7 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
     // SAFETY: target validated non-null above.
-    let target_task = crate::process::unsafe_edges::borrow_task(target);
+    let target_task = crate::process::edges::borrow_task(target);
     // tgid must match: a stale tgid with a live tid is ESRCH (Linux).
     if target_task.tgid() != tgid {
         return -(errno::ESRCH as i64);
@@ -3575,7 +3575,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
     // SAFETY: target validated non-null above.
-    let target_task = crate::process::unsafe_edges::borrow_task(target);
+    let target_task = crate::process::edges::borrow_task(target);
     if !crate::security::can_send_signal(target_task.cred()) {
         return -(errno::EPERM as i64);
     }
@@ -3673,7 +3673,7 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
     // SAFETY: target validated non-null above.
-    let target_task = crate::process::unsafe_edges::borrow_task(target);
+    let target_task = crate::process::edges::borrow_task(target);
     if target_task.tgid() != tgid {
         return -(errno::ESRCH as i64);
     }
@@ -4299,8 +4299,8 @@ pub fn sys_kcmp(args: SyscallArgs) -> i64 {
         _ => return -(errno::ESRCH as i64),
     };
     let (t1, t2) = (
-        crate::process::unsafe_edges::borrow_task(t1 as *mut crate::process::task::Task),
-        crate::process::unsafe_edges::borrow_task(t2 as *mut crate::process::task::Task),
+        crate::process::edges::borrow_task(t1 as *mut crate::process::task::Task),
+        crate::process::edges::borrow_task(t2 as *mut crate::process::task::Task),
     );
 
     if ktype < 0 || ktype >= KCMP_TYPES {
@@ -4552,7 +4552,7 @@ fn process_vm_rw_locked(
     };
     if target != current {
         // SAFETY: cred() is immutable after task creation.
-        let target_cred = crate::process::unsafe_edges::borrow_task(target).cred();
+        let target_cred = crate::process::edges::borrow_task(target).cred();
         if !crate::process::ptrace::ptrace_may_access(target_cred) {
             return -(errno::EPERM as i64);
         }
@@ -5219,7 +5219,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
             return -(errno::ESRCH as i64);
         }
         // ptr validated non-null above (INV-PROC-BORROW-1).
-        crate::process::unsafe_edges::borrow_task(ptr)
+        crate::process::edges::borrow_task(ptr)
     };
 
     let cred = target.cred();

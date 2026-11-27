@@ -246,7 +246,7 @@ pub fn reclaim_gate_census() {
             (0xFFFFFFFFu32, 0xFFFFu32)
         } else {
             // INV-PROC-BORROW-1 census arm (racy best-effort read).
-            let t = crate::process::unsafe_edges::borrow_task(t);
+            let t = crate::process::edges::borrow_task(t);
             (t.state().bits(), t.ti_cpu() as u32)
         }
     };

@@ -23,7 +23,14 @@ pub mod kthread;
 pub mod ptrace;
 pub mod coredump;
 pub mod ns;
-pub mod unsafe_edges;
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): the former `unsafe_edges` collection
+// renamed to `unsafe.rs` on disk, module named `edges` per the sibling
+// convention (fs/unsafe.rs, syscall/edges.rs, sync/edges.rs,
+// sched/edges.rs). The #[path] keeps the FILE name the mainline gate
+// requires while call sites stay on the plain `edges` identifier.
+#[path = "unsafe.rs"]
+pub mod edges;
 
 pub use task::Task;
 pub use fork::do_fork;
@@ -76,24 +83,7 @@ pub fn thread_set_entry(
 /// x86_64: FS base restored on switch-in; aarch64: TPIDR_EL0 saved in
 /// thread.tp_value and re-installed at switch-in).
 pub fn set_user_tls(task: &mut Task, tls: u64) {
-    #[cfg(feature = "riscv64")]
-    {
-        // SAFETY: pt_regs() returns the task's outermost trap frame.
-        unsafe {
-            let regs = task.pt_regs();
-            if !regs.is_null() {
-                (*regs).tp = tls;
-            }
-        }
-    }
-    #[cfg(feature = "x86_64")]
-    {
-        task.thread_mut().fs_base = tls;
-    }
-    #[cfg(feature = "aarch64")]
-    {
-        task.thread_mut().tp_value = tls;
-    }
+    crate::process::edges::set_task_user_tls(task, tls)
 }
 
 /// Get current process ID
@@ -108,8 +98,7 @@ pub fn current_ppid() -> u32 {
 
 /// Get current process group ID
 pub fn current_pgid() -> u32 {
-    // SAFETY: sched::current() returns a valid pointer to the currently running task.
-    crate::sched::current().map_or(0, |t| unsafe { (*t).pgid() })
+    crate::sched::current().map_or(0, |t| t.pgid())
 }
 
 /// Get current task reference
@@ -128,8 +117,8 @@ pub fn find_task_by_pid(pid: u32) -> Option<&'static mut Task> {
     if ptr.is_null() {
         None
     } else {
-        // SAFETY: pid_hash_lookup returns a valid Task pointer from the PID hash table.
-        // The pointer remains valid as long as the task is alive (not reaped).
-        Some(unsafe { &mut *ptr })
+        // INV-PROC-BORROW-1: the pid-hash entry keeps the task alive
+        // (not reaped) for this borrow; the borrow itself is the edge.
+        Some(crate::process::edges::borrow_task_mut(ptr))
     }
 }

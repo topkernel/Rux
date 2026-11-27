@@ -505,14 +505,14 @@ fn notify_parent_if_any(parent_pid: u32, child_pid: u32) {
 /// `release_task_storage` with both waits removed (their conditions
 /// are the ladder's completion predicates).
 fn reap_storage_free(task: *mut Task) -> (u32, u32) {
-    let t = crate::process::unsafe_edges::borrow_task_mut(task);
+    let t = crate::process::edges::borrow_task_mut(task);
     // The wake arm's inputs, read BEFORE the page may leave our hands
     // (task_put's last-pin free): the parent (tree edge) and the
     // child's own pid (the notify's subject).
-    let parent_pid = t.parent_ptr().map(|p: *const Task| crate::process::unsafe_edges::borrow_task(p as *mut Task).pid()).unwrap_or(0);
+    let parent_pid = t.parent_ptr().map(|p: *const Task| crate::process::edges::borrow_task(p as *mut Task).pid()).unwrap_or(0);
     let child_pid = t.pid();
     t.free_kernel_stack();
-    crate::process::unsafe_edges::free_fork_pt_regs(t);
+    crate::process::edges::free_fork_pt_regs(t);
     t.set_address_space(None);
     t.set_fdtable(None);
     t.signal = None;

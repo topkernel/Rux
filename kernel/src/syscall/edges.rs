@@ -14,7 +14,7 @@
 //! call site). User-memory copies do not live here at all: they route
 //! through the already-safe `crate::arch::uaccess_safe` entries, and
 //! task-pointer borrows reuse
-//! [`crate::process::unsafe_edges::borrow_task`].
+//! [`crate::process::edges::borrow_task`].
 //!
 //! INV registry:
 //!
@@ -183,7 +183,7 @@ pub fn boxed_drop<T>(p: *mut T) {
 /// this thread and re-taken, or never parked).
 #[inline]
 pub fn task_park_unwind(task: *mut Task) {
-    let t = crate::process::unsafe_edges::borrow_task(task);
+    let t = crate::process::edges::borrow_task(task);
     t.set_state(crate::process::task::TaskState::new(
         crate::process::task::TaskState::RUNNING,
     ));

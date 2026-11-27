@@ -128,14 +128,14 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                 // register image (INV-PROC-FORK-FPU-1: current task,
                 // syscall context). The child-side copies are plain
                 // struct operations.
-                crate::process::unsafe_edges::fork_save_parent_fpu(parent_task);
+                crate::process::edges::fork_save_parent_fpu(parent_task);
                 let pfpu = parent_task.thread().fpu;
                 let ct = task.thread_mut();
                 ct.fpu.copy_from_slice(&pfpu);
                 ct.mark_fpu_clean();
                 // Vector state inherits the same way (POSIX: the
                 // child observes the parent's vector values).
-                crate::process::unsafe_edges::fork_save_parent_vstate(parent_task);
+                crate::process::edges::fork_save_parent_vstate(parent_task);
                 let pvs = parent_task.thread().vstate_valid;
                 let pvcsrs = parent_task.thread().vcsrs;
                 let pvregs = parent_task.thread().vregs;
@@ -157,7 +157,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                 if !crate::arch::cpu::ts_set() {
                     // fpu_save_for_switch xsave's into this task's own
                     // image; TS is clear (INV-PROC-FORK-FPU-1).
-                    crate::process::unsafe_edges::fork_save_parent_fpu(parent_task);
+                    crate::process::edges::fork_save_parent_fpu(parent_task);
                 }
                 let pfpu = parent_task.thread().fpu;
                 let ct = task.thread_mut();
@@ -221,7 +221,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         #[cfg(feature = "aarch64")]
         {
             let live_tp: u64 =
-                crate::process::unsafe_edges::read_user_tp_register();
+                crate::process::edges::read_user_tp_register();
             task.thread_mut().tp_value = live_tp;
         }
 
@@ -514,7 +514,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // typed exclusive reference here; pointer-taking APIs receive
         // `child as *mut Task`, and enqueue_task takes the exclusive
         // borrow back (after it, reads go through one shared re-borrow).
-        let child: &'static mut Task = crate::process::unsafe_edges::borrow_task_mut(task_ptr);
+        let child: &'static mut Task = crate::process::edges::borrow_task_mut(task_ptr);
         let pid = child.pid();
         if fp {
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_ALLOC, fp_t_alloc);
@@ -537,10 +537,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // parent task; the five ops run in the R33-pre order on live
             // slots (INV-PROC-BORROW-1).
             {
-                crate::process::unsafe_edges::borrow_task(parent_handle).remove_child(slot);
-                let slot_pid = crate::process::unsafe_edges::borrow_task(slot).pid();
+                crate::process::edges::borrow_task(parent_handle).remove_child(slot);
+                let slot_pid = crate::process::edges::borrow_task(slot).pid();
                 crate::process::pid_hash::pid_hash_remove(slot_pid);
-                crate::process::unsafe_edges::borrow_task_mut(slot).free_kernel_stack();
+                crate::process::edges::borrow_task_mut(slot).free_kernel_stack();
                 crate::process::pid::free_pid(slot_pid);
                 crate::sched::free_task_slot(slot);
             }
@@ -561,7 +561,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // The parent link is fixed at construction time and the
                 // grandparent slot is live (R33-pre: children are
                 // unlinked before their slot is freed).
-                crate::process::unsafe_edges::borrow_task(grandparent as *mut Task)
+                crate::process::edges::borrow_task(grandparent as *mut Task)
                     .add_child(child as *mut Task);
             } else {
                 current.add_child(child as *mut Task);
@@ -707,7 +707,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // The arch walk/COW backend's guarantees hold here:
             // child_root is the child's fresh root ppn and va is a
             // validated user pointer (INV-PROC-FORK-COW-1).
-            let cow = crate::process::unsafe_edges::fork_handle_cow_fault(
+            let cow = crate::process::edges::fork_handle_cow_fault(
                 &child_mm,
                 child_root,
                 va,
@@ -720,14 +720,14 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
             // Re-walk and write through the linear map
             // (INV-PROC-FORK-WALK-1).
-            let walk = crate::process::unsafe_edges::fork_pt_walk(child_root, va);
+            let walk = crate::process::edges::fork_pt_walk(child_root, va);
             match walk {
                 Some((ppn, _bits)) => {
                     let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
                     // The linear-map byte at (ppn, va offset) is the
                     // child's page holding child_tid
                     // (INV-PROC-FORK-TIDWRITE-1).
-                    crate::process::unsafe_edges::fork_write_child_tid(
+                    crate::process::edges::fork_write_child_tid(
                         base.as_usize() + (va & 0xfff) as usize,
                         tid,
                     );
@@ -802,8 +802,8 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             let p_root = parent_as.root_ppn();
                             let c_root = child_arc.root_ppn();                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
                                 {
-                                    let p = crate::process::unsafe_edges::fork_pt_walk(p_root, va);
-                                    let c = crate::process::unsafe_edges::fork_pt_walk(c_root, va);
+                                    let p = crate::process::edges::fork_pt_walk(p_root, va);
+                                    let c = crate::process::edges::fork_pt_walk(c_root, va);
                                     taskdump_raw_line(b"FTX-COWCHK parent=");
                                     taskdump_dec(current.pid() as u64);
                                     taskdump_raw_line(b" child=");
@@ -821,7 +821,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                                     taskdump_raw_line(b" refcnt=");
                                     let rf = p.and_then(|x| {
                                         let pg = crate::mm::page_desc::pfn_to_page(x.0 as usize);
-                                        crate::process::unsafe_edges::page_refcount(pg)
+                                        crate::process::edges::page_refcount(pg)
                                     });
                                     taskdump_dec(rf.unwrap_or(-1i32) as i64 as u64);
                                     taskdump_raw_line(b"\n");
@@ -928,7 +928,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             let leader = current.group_leader_ptr();
             // Leader's ring is well-formed (the join/leave invariant); the
             // child slot is fully constructed and not yet runnable.
-            crate::process::unsafe_edges::borrow_task_mut(leader)
+            crate::process::edges::borrow_task_mut(leader)
                 .thread_group_join(child as *mut Task);
         }
         // else: tgid = pid, single-member self-ring (already set at construction)
@@ -1096,7 +1096,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // observe it (INV-PROC-BORROW-1).
                 {
                     Task::thread_group_leave(task_ptr);
-                    crate::process::unsafe_edges::borrow_task_mut(task_ptr).free_kernel_stack();
+                    crate::process::edges::borrow_task_mut(task_ptr).free_kernel_stack();
                     crate::process::pid::free_pid(pid);
                     crate::sched::free_task_slot(task_ptr);
                 }
@@ -1109,7 +1109,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Post-enqueue: the scheduler holds the exclusive borrow; the
         // remaining reads (trace rows, vfork bookkeeping) go through ONE
         // shared re-borrow of the live slot.
-        let child_ref: &Task = crate::process::unsafe_edges::borrow_task(task_ptr);
+        let child_ref: &Task = crate::process::edges::borrow_task(task_ptr);
 
         // The sched:sched_process_fork and sched:sched_wakeup_new
         // tracepoints: the child is fully built and linked, exactly the

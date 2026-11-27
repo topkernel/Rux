@@ -591,7 +591,7 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
     // Serial-cleanliness: opt-in via rux:sfddbg (retired dfx=sfddbg).
-    if crate::process::unsafe_edges::task_pid_of(task) == 1
+    if crate::process::edges::task_pid_of(task) == 1
         && crate::trace::EVENT_SFDDBG.armed()
     {
         static NT_N: core::sync::atomic::AtomicUsize =

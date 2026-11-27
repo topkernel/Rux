@@ -746,7 +746,7 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
     // (Linux do_tkill → check_kill_permission). Task is non-null and
     // stable while referenced (syscall-context short read).
     // SAFETY: non-null checked above; short read contract.
-    if !crate::security::can_send_signal(crate::process::unsafe_edges::borrow_task(task).cred()) {
+    if !crate::security::can_send_signal(crate::process::edges::borrow_task(task).cred()) {
         return -(errno::EPERM as i64);
     }
 

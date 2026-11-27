@@ -31,6 +31,7 @@
 //! currently owns it or under the locks the callers already hold —
 //! exactly what the per-call-site SAFETY comments said before).
 
+#![forbid(unsafe_code)]
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
@@ -71,11 +72,12 @@ impl TaskBorrow {
     /// (INV-TASKREF-1 hatch row: adopt-once under the caller's
     /// liveness proof.)
     ///
-    /// # Safety
-    /// `p` must point at a live task (the caller's borrow/pin/tree-lock
-    /// keeps the slot alive for the borrow's duration) and must not be
-    /// adopted twice into handles that outlive that proof.
-    pub unsafe fn from_raw(p: *mut Task) -> Option<Self> {
+    /// The caller keeps the obligation `lookup` documents: a short
+    /// read/write in syscall context on this CPU, no yield, no store —
+    /// a short read/write in syscall context on this CPU, no yield, no
+    /// store; the deref edges (`TaskBorrow`'s Deref/DerefMut) are the
+    /// audited INV-PROC-BORROW-1 hatch in `process::edges`.
+    pub fn from_raw(p: *mut Task) -> Option<Self> {
         NonNull::new(p).map(TaskBorrow)
     }
 }
@@ -84,21 +86,20 @@ impl Deref for TaskBorrow {
     type Target = Task;
 
     fn deref(&self) -> &Task {
-        // SAFETY: syscall-context contract (type doc): the reaper
-        // cannot run on this CPU while the borrower executes, so the
-        // task page cannot be freed under this reference for the
-        // duration of the short read.
-        unsafe { self.0.as_ref() }
+        // INV-PROC-BORROW-1 hatch row: syscall-context contract (type
+        // doc) — the reaper cannot run on this CPU while the borrower
+        // executes; the audited edge performs the borrow.
+        crate::process::edges::borrow_task(self.0.as_ptr())
     }
 }
 
 impl DerefMut for TaskBorrow {
     fn deref_mut(&mut self) -> &mut Task {
-        // SAFETY: same contract as Deref; mutation additionally relies
-        // on the caller's existing exclusion (this CPU owns the task,
-        // or the caller holds the lock that serializes the write) —
-        // the same argument the pre-conversion call sites made.
-        unsafe { self.0.as_mut() }
+        // INV-PROC-BORROW-1 mutable hatch row: same contract as Deref;
+        // mutation exclusion is the caller's (this CPU owns the task,
+        // or the caller holds the lock that serializes the write) — the
+        // audited edge performs the borrow.
+        crate::process::edges::borrow_task_mut(self.0.as_ptr())
     }
 }
 
@@ -152,18 +153,19 @@ impl Deref for TaskRef {
     type Target = Task;
 
     fn deref(&self) -> &Task {
-        // SAFETY: the pin defers `free_task_slot` (task_put) until
-        // after this handle is dropped, so the task page stays alive
-        // and mapped for the whole lifetime of the handle.
-        unsafe { self.0.as_ref() }
+        // INV-PROC-BORROW-1 hatch row: the pin defers `free_task_slot`
+        // (task_put) until after this handle is dropped, so the task
+        // page stays alive; the audited edge performs the borrow.
+        crate::process::edges::borrow_task(self.0.as_ptr())
     }
 }
 
 impl DerefMut for TaskRef {
     fn deref_mut(&mut self) -> &mut Task {
-        // SAFETY: same liveness as Deref; mutation exclusion is the
-        // caller's (the pin serializes freeing, not writing).
-        unsafe { self.0.as_mut() }
+        // INV-PROC-BORROW-1 mutable hatch row: same liveness as Deref;
+        // mutation exclusion is the caller's (the pin serializes
+        // freeing, not writing); the audited edge performs the borrow.
+        crate::process::edges::borrow_task_mut(self.0.as_ptr())
     }
 }
 

@@ -590,7 +590,7 @@ fn epoll_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
     // Ops identity (EPOLL_OPS) was verified by the dispatch that selected
     // this fn; private_data holds the EpollFile installed by
     // sys_epoll_create (INV-PROC-NSFILE-1). Read-only probe below.
-    let epoll = match crate::process::unsafe_edges::file_private_data_ref::<EpollFile>(file) {
+    let epoll = match crate::process::edges::file_private_data_ref::<EpollFile>(file) {
         Some(e) => e,
         None => return 0,
     };
@@ -626,7 +626,7 @@ pub fn oh67_fd_ready(file: &crate::fs::File) -> Option<alloc::string::String> {
     if core::ptr::eq(ops as *const _, &EVENTFD_OPS as *const _) {
         // Dispatcher identity-checked against EVENTFD_OPS; private_data
         // came from Box::into_raw in sys_eventfd2 (INV-PROC-NSFILE-1).
-        let efd = crate::process::unsafe_edges::file_private_data_ref::<EventFd>(file)?;
+        let efd = crate::process::edges::file_private_data_ref::<EventFd>(file)?;
         return Some(alloc::format!(
             "eventfd cnt={}",
             efd.counter.load(Relaxed)
@@ -635,7 +635,7 @@ pub fn oh67_fd_ready(file: &crate::fs::File) -> Option<alloc::string::String> {
     if core::ptr::eq(ops as *const _, &TIMERFD_OPS as *const _) {
         // Dispatcher identity-checked against TIMERFD_OPS; private_data
         // came from Box::into_raw in sys_timerfd_create.
-        let tfd = crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(file)?;
+        let tfd = crate::process::edges::file_private_data_ref::<TimerFd>(file)?;
         return Some(alloc::format!(
             "timerfd exp={} interval_j={} tmr={}",
             tfd.expiration_count.load(Relaxed),
@@ -1329,7 +1329,7 @@ fn poll_event_wait_round(
     //    returns without sleeping (dequeue_task undoes the racing enqueue).
     // task is the current task (INV-PROC-BORROW-1 CPU-ownership arm).
     {
-        let t = crate::process::unsafe_edges::borrow_task(task);
+        let t = crate::process::edges::borrow_task(task);
         t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
 
@@ -1396,7 +1396,7 @@ fn poll_event_wait_round(
                 jiffies_covering_deadline(dl),
                 deadline_ns_to_hres_ticks(dl),
                 // task is the current task; pid() is a read.
-                crate::process::unsafe_edges::task_pid_of(task),
+                crate::process::edges::task_pid_of(task),
             );
             // We are on the CPU that is about to sleep: re-arm the local
             // timer so the precise deadline is not delayed to the next
@@ -1411,7 +1411,7 @@ fn poll_event_wait_round(
         unwait_all(task);
         // See above.
         {
-            let t = crate::process::unsafe_edges::borrow_task(task);
+            let t = crate::process::edges::borrow_task(task);
             t.set_state(TaskState::new(TaskState::RUNNING));
         }
         return PollEventWait::NotWired;
@@ -1431,7 +1431,7 @@ fn poll_event_wait_round(
     unwait_all(task);
     // task is the current task (INV-PROC-BORROW-1).
     {
-        let t = crate::process::unsafe_edges::borrow_task(task);
+        let t = crate::process::edges::borrow_task(task);
         if t.state().is_sleeping() {
             t.set_state(TaskState::new(TaskState::RUNNING));
         }
@@ -2768,7 +2768,7 @@ pub fn param_stall_dump() {
                 continue;
             }
             // SAFETY: read-only diagnostic fd walk of the found leader.
-            let tk = crate::process::unsafe_edges::borrow_task(leader);
+            let tk = crate::process::edges::borrow_task(leader);
             // Collect rows under the walk (diag takes recv_queue inside
             // the fdtable walk's callback context; printing there also
             // nests console locks) — print AFTER, from a plain Vec.
@@ -2804,7 +2804,7 @@ pub fn param_stall_dump() {
     // behavior at the stall (needs rux:sysforensic (retired dfx=sysforensic) to be recording).
     crate::dfx::taskdump::dump_syscall_ring_for(1);
     // SAFETY: read-only diagnostic walk of pid 1's fdtable.
-    let tk = crate::process::unsafe_edges::borrow_task(task);
+    let tk = crate::process::edges::borrow_task(task);
     let fdtable = match tk.try_fdtable_mut() {
         Some(f) => f,
         None => return,
@@ -2874,7 +2874,7 @@ pub fn param_stall_dump() {
             // pinned by ww_watch_add and tasks on the watch list are
             // never freed past a note_task_freed barrier (sched.rs) —
             // INV-PROC-BORROW-1 watch-pin arm.
-            let watched = crate::process::unsafe_edges::borrow_task(t as *mut crate::process::task::Task);
+            let watched = crate::process::edges::borrow_task(t as *mut crate::process::task::Task);
             let (pid, comm) = (watched.pid(), watched.comm());
             let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
             let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
@@ -2906,7 +2906,7 @@ pub fn param_stall_dump() {
         crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
             let t = t as *const crate::process::task::Task
                 as *mut crate::process::task::Task;
-            let tk = crate::process::unsafe_edges::borrow_task(t);
+            let tk = crate::process::edges::borrow_task(t);
             if tk.tgid() != 1 {
                 return;
             }
@@ -2959,7 +2959,7 @@ pub fn param_sender_dump() {
         return;
     }
     let mut init_socks: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-    if let Some(ft) = crate::process::unsafe_edges::borrow_task(init_task).try_fdtable() {
+    if let Some(ft) = crate::process::edges::borrow_task(init_task).try_fdtable() {
         ft.for_each_file(|_fd, f| {
             if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
                 init_socks.push(alloc::sync::Arc::into_raw(s) as usize);
@@ -3053,7 +3053,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
         return;
     }
     // SAFETY: task is a live task pointer from the scheduler registry.
-    let tk = crate::process::unsafe_edges::borrow_task(task);
+    let tk = crate::process::edges::borrow_task(task);
     let fdtable = match tk.try_fdtable_mut() {
         Some(f) => f,
         None => return,
@@ -3180,7 +3180,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 // which registered fd never saw a connection arrive.
                 {
                     let t1 = crate::sched::find_task_by_pid(1);
-                    let tk1 = if t1.is_null() { None } else { Some(crate::process::unsafe_edges::borrow_task(t1)) };
+                    let tk1 = if t1.is_null() { None } else { Some(crate::process::edges::borrow_task(t1)) };
                     let p = tk1
                         .and_then(|tk| {
                             tk.try_fdtable().and_then(|fdt| {
@@ -4206,7 +4206,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // Ops identity was checked by the dispatcher; private_data
     // holds the Box::into_raw EventFd from the create path
     // (INV-PROC-NSFILE-1).
-    let efd = match crate::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match crate::process::edges::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4273,7 +4273,7 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // Ops identity was checked by the dispatcher; private_data
     // holds the Box::into_raw EventFd from the create path
     // (INV-PROC-NSFILE-1).
-    let efd = match crate::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match crate::process::edges::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4332,7 +4332,7 @@ fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     let mut ready = 0u16;
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let efd = match crate::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match crate::process::edges::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return POLLERR,
     };
@@ -4356,7 +4356,7 @@ fn eventfd_close(file: &crate::fs::File) -> i32 {
     // last Arc reference, so no read/write/poll can be using it.
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference.
-    if let Some(efd) = crate::process::unsafe_edges::file_private_data_take_boxed::<EventFd>(file) {
+    if let Some(efd) = crate::process::edges::file_private_data_take_boxed::<EventFd>(file) {
         // Reclaimed: the constructor's Box::into_raw, consumed exactly
         // once on this last-reference close (INV-PROC-NSFILE-2); the box
         // drops at the end of this scope.
@@ -4411,7 +4411,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         return -errno::EINVAL as isize;
     }
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match crate::process::edges::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4462,7 +4462,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 fn timerfd_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match crate::process::edges::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return 0,
     };
@@ -4483,7 +4483,7 @@ fn timerfd_close(file: &crate::fs::File) -> i32 {
     // worse.
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference, so no timerfd_read/settime/gettime can be using it.
-    if let Some(tfd) = crate::process::unsafe_edges::file_private_data_take_boxed::<TimerFd>(file) {
+    if let Some(tfd) = crate::process::edges::file_private_data_take_boxed::<TimerFd>(file) {
         // Reclaimed exactly once on this last-reference close
         // (INV-PROC-NSFILE-2); the box drops at the end of this scope.
         let _ = tfd;
@@ -4496,7 +4496,7 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     let mut ready = 0u16;
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match crate::process::edges::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return POLLERR,
     };
@@ -4589,7 +4589,7 @@ fn timerfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Ta
     // SAFETY: the dispatcher identity-checked the File against TIMERFD_OPS;
     // private_data was installed by sys_timerfd_create as Box::into_raw and
     // stays valid while the File exists.
-    let tfd = match crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    let tfd = match crate::process::edges::file_private_data_ref::<TimerFd>(file) {
         Some(v) => v,
         None => return false,
     };
@@ -4601,7 +4601,7 @@ fn timerfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Ta
 /// Remove a registration added by timerfd_poll_wait.
 fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
     // SAFETY: same contract as timerfd_poll_wait.
-    if let Some(tfd) = crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(file) {
+    if let Some(tfd) = crate::process::edges::file_private_data_ref::<TimerFd>(file) {
         tfd.wait_queue.remove(task);
     }
 }
@@ -4618,7 +4618,7 @@ fn eventfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Ta
     // SAFETY: the dispatcher identity-checked the File against EVENTFD_OPS;
     // private_data was installed by sys_eventfd2 as Box::into_raw and stays
     // valid while the File exists.
-    let efd = match crate::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    let efd = match crate::process::edges::file_private_data_ref::<EventFd>(file) {
         Some(v) => v,
         None => return false,
     };
@@ -4630,7 +4630,7 @@ fn eventfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Ta
 /// Remove a registration added by eventfd_poll_wait.
 fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
     // SAFETY: same contract as eventfd_poll_wait.
-    if let Some(efd) = crate::process::unsafe_edges::file_private_data_ref::<EventFd>(file) {
+    if let Some(efd) = crate::process::edges::file_private_data_ref::<EventFd>(file) {
         efd.wait_queue.remove(task);
     }
 }
@@ -4641,7 +4641,7 @@ fn signalfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::T
     // SAFETY: the dispatcher identity-checked the File against SIGNALFD_OPS;
     // private_data was installed by sys_signalfd4_impl as Box::into_raw and
     // stays valid while the File exists.
-    let sfd = match crate::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    let sfd = match crate::process::edges::file_private_data_ref::<SignalFd>(file) {
         Some(v) => v,
         None => return false,
     };
@@ -4653,7 +4653,7 @@ fn signalfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::T
 /// Remove a registration added by signalfd_poll_wait.
 fn signalfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
     // SAFETY: same contract as signalfd_poll_wait.
-    if let Some(sfd) = crate::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    if let Some(sfd) = crate::process::edges::file_private_data_ref::<SignalFd>(file) {
         sfd.wait_queue.remove(task);
     }
 }
@@ -4697,7 +4697,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
     // mutable access.
-    let sfd = match crate::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    let sfd = match crate::process::edges::file_private_data_ref::<SignalFd>(file) {
         Some(v) => v,
         None => return -errno::EBADF as isize,
     };
@@ -4786,7 +4786,7 @@ fn signalfd_poll(file: &crate::fs::File, events: u16) -> u16 {
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
     // mutable access.
-    let sfd = match crate::process::unsafe_edges::file_private_data_ref::<SignalFd>(file) {
+    let sfd = match crate::process::edges::file_private_data_ref::<SignalFd>(file) {
         Some(v) => v,
         None => return POLLERR,
     };
@@ -4810,7 +4810,7 @@ fn signalfd_close(file: &crate::fs::File) -> i32 {
     // the queue address).
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference.
-    if let Some(sfd) = crate::process::unsafe_edges::file_private_data_take_boxed::<SignalFd>(file) {
+    if let Some(sfd) = crate::process::edges::file_private_data_take_boxed::<SignalFd>(file) {
         // Reclaimed exactly once on this last-reference close
         // (INV-PROC-NSFILE-2): purge the registry entry keyed on the
         // queue address BEFORE the box drops at the end of this scope.
@@ -4879,7 +4879,7 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
         }
         // SAFETY: private_data is an UnsafeCell; we hold &File so no
         // concurrent mutable access.
-        let sfd = match crate::process::unsafe_edges::file_private_data_ref::<SignalFd>(&file) {
+        let sfd = match crate::process::edges::file_private_data_ref::<SignalFd>(&file) {
         Some(v) => v,
         None => return -(errno::EBADF as i64),
     };
@@ -5325,7 +5325,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // Ops identity verified above; private_data holds the Box::into_raw
     // TimerFd from sys_timerfd_create (INV-PROC-NSFILE-1 mutable arm —
     // settime is the only mutator and the File's Arc pins the box).
-    let tfd = match crate::process::unsafe_edges::file_private_data_mut::<TimerFd>(&file) {
+    let tfd = match crate::process::edges::file_private_data_mut::<TimerFd>(&file) {
         Some(t) => t,
         None => return -(errno::EBADF as i64),
     };
@@ -5549,7 +5549,7 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
-    let tfd = match crate::process::unsafe_edges::file_private_data_ref::<TimerFd>(&file) {
+    let tfd = match crate::process::edges::file_private_data_ref::<TimerFd>(&file) {
         Some(v) => v,
         None => return -(errno::EBADF as i64),
     };

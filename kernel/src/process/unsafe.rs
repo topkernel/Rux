@@ -72,6 +72,53 @@ pub fn borrow_task_mut<'a>(p: *mut Task) -> &'a mut Task {
     unsafe { &mut *p }
 }
 
+/// Borrow a live task immutably through a shared (`*const`) pointer —
+/// the read-only half of INV-PROC-BORROW-1 for callers holding only a
+/// `*const Task` (e.g. `Task::parent_ptr`). Same liveness discipline
+/// as [`borrow_task`]; the reference is read-only so no exclusion
+/// argument is required beyond the pin/lock/CPU-ownership that keeps
+/// the page alive.
+#[inline]
+pub fn borrow_task_shared<'a>(p: *const Task) -> &'a Task {
+    debug_assert!(!p.is_null());
+    // SAFETY: INV-PROC-BORROW-1 (caller-proven liveness); the raw
+    // pointer is reinterpreted as a shared reference — no write occurs
+    // through it, so no exclusion argument is needed.
+    unsafe { &*p }
+}
+
+/// Set the task's user TLS pointer into its outermost trap frame
+/// (riscv64: `tp` register slot in pt_regs; x86_64: FS base restored on
+/// switch-in; aarch64: TPIDR_EL0 saved in thread.tp_value and
+/// re-installed at switch-in).
+///
+/// INV-PROC-TLS-1: `task.pt_regs()` returns the task's own outermost
+/// trap frame (allocated with the task, freed only by the task
+/// teardown path); the `&mut Task` borrow proves exclusivity for the
+/// write, and the frame cannot be freed while the task is borrowed.
+pub fn set_task_user_tls(task: &mut Task, tls: u64) {
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: INV-PROC-TLS-1 — the frame lives as long as the task
+        // and the &mut borrow excludes concurrent writers; the null
+        // check covers not-yet-framed kthreads.
+        unsafe {
+            let regs = task.pt_regs();
+            if !regs.is_null() {
+                (*regs).tp = tls;
+            }
+        }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        task.thread_mut().fs_base = tls;
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        task.thread_mut().tp_value = tls;
+    }
+}
+
 /// Placement-new of a `Task` value into a task slot.
 ///
 /// INV-PROC-PLACE-1: `ptr` is non-null, aligned to `align_of::<Task>()`

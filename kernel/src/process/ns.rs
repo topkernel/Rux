@@ -1140,7 +1140,7 @@ struct NsFileContent {
 
 fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // private_data is the NsFileContent installed by open_ns_file.
-    match super::unsafe_edges::file_private_data_ref::<NsFileContent>(file) {
+    match super::edges::file_private_data_ref::<NsFileContent>(file) {
         Some(content) => {
             let offset = file.get_pos() as usize;
             let available = content.data.len().saturating_sub(offset);
@@ -1159,7 +1159,7 @@ fn ns_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 fn ns_file_close(file: &crate::fs::File) -> i32 {
     // The exactly-once reclaim of the constructor's Box (see ns_file_read).
-    drop(super::unsafe_edges::file_private_data_take_boxed::<NsFileContent>(file));
+    drop(super::edges::file_private_data_take_boxed::<NsFileContent>(file));
     0
 }
 
