@@ -628,8 +628,3 @@ pub fn signalfd_unregister(wq: *const crate::process::wait::WaitQueueHead) {
     registry.bindings.retain(|(_, q)| *q != wq);
 }
 
-// Send proofs for the raw-pointer registry types (moved from
-// syscall/edges.rs with the types; same contracts: access only under
-// the shard/registry locks).
-unsafe impl Send for EpollWakeShard {}
-unsafe impl Send for SignalfdWakeRegistry {}

@@ -81,9 +81,6 @@ pub struct SuperBlock {
     pub s_fs_info: Option<*mut u8>,
 }
 
-unsafe impl Send for SuperBlock {}
-unsafe impl Sync for SuperBlock {}
-
 impl SuperBlock {
     /// Create new superblock
     pub fn new(blocksize: usize, magic: u32) -> Self {
@@ -211,13 +208,10 @@ impl FileSystemType {
     }
 }
 
-struct FsRegistry {
+pub(super) struct FsRegistry {
     /// Filesystem type list
     fs_types: Spinlock<[Option<&'static FileSystemType>; 32]>,
 }
-
-unsafe impl Send for FsRegistry {}
-unsafe impl Sync for FsRegistry {}
 
 impl FsRegistry {
     pub const fn new() -> Self {

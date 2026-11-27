@@ -442,11 +442,6 @@ pub struct TtyDevice {
     output_fn: TtyOutputFn,
 }
 
-// SAFETY: all mutable state is behind Spinlock/atomics; fn pointers are
-// Send+Sync.
-unsafe impl Sync for TtyDevice {}
-unsafe impl Send for TtyDevice {}
-
 impl TtyDevice {
     pub const fn new(output_fn: TtyOutputFn, output_ctx: usize) -> Self {
         Self {

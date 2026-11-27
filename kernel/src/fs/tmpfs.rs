@@ -102,11 +102,6 @@ impl Drop for TmpfsPage {
     }
 }
 
-// SAFETY: the raw superblock pointer is a leaked mount-lifetime
-// allocation (Box::into_raw in create_mount_instance); Drop only
-// touches an atomic through it.
-unsafe impl Send for TmpfsPage {}
-
 // ============================================================================
 // Node
 // ============================================================================
@@ -162,12 +157,6 @@ pub struct TmpfsNode {
     uid: AtomicU32,
     gid: AtomicU32,
 }
-
-// SAFETY: mutable fields (pages/size/mode/children/atime/mtime) are protected
-// by Spinlocks or atomics; name uses UnsafeCell mutated only under the
-// parent's children lock.
-unsafe impl Send for TmpfsNode {}
-unsafe impl Sync for TmpfsNode {}
 
 impl TmpfsNode {
     /// Build a node of the given type with default modes (root-owned).
@@ -793,12 +782,9 @@ pub(crate) fn parse_size_pages(data: Option<&str>) -> u64 {
 
 /// Wrapper so the raw-pointer registry is `Send` (access only under the
 /// Spinlock; pointers are leaked mount-lifetime allocations, never freed).
-struct TmpfsInstances {
+pub(super) struct TmpfsInstances {
     list: Vec<*const TmpfsSuperBlock>,
 }
-// SAFETY: the raw pointers are leaked superblocks (mount lifetime); they are
-// only copied out and dereferenced under the registry lock.
-unsafe impl Send for TmpfsInstances {}
 
 static TMPFS_INSTANCES: Spinlock<TmpfsInstances> =
     Spinlock::new(TmpfsInstances { list: Vec::new() });

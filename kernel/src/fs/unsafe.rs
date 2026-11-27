@@ -216,3 +216,160 @@ impl<T> AsDerefRefExt<T> for Option<alloc::sync::Arc<T>> {
         self.as_ref().map(|a| &**a)
     }
 }
+
+
+// ===========================================================================
+// Send/Sync commitments (moved verbatim from their home files by the
+// 2026-11-27 mainline consolidation; each carries its original SAFETY
+// note — the per-field lock/cell discipline arguments live with the
+// type definitions, and these impls add no field access of their own).
+// ===========================================================================
+
+// SAFETY: BufferHead's mutable state (b_data) is protected by BufferState spinlock;
+// other fields are atomic or only accessed under lock.
+unsafe impl Send for crate::fs::bio::BufferHead {}
+
+// SAFETY: all shared mutable state is protected by the BufferState spinlock;
+// b_data is only mutated under lock or from a single thread.
+unsafe impl Sync for crate::fs::bio::BufferHead {}
+
+// SAFETY: BlockCache is only accessed via &self methods that use internal locking
+// (per-bucket Spinlock and LRU Spinlock) and atomic count; raw pointers are
+// confined to cache internals and never exposed without locks.
+unsafe impl Send for crate::fs::bio::BlockCache {}
+
+// SAFETY: all shared mutable state (hash buckets, LRU list) is protected by
+// Spinlocks; raw pointer access is always under the appropriate bucket lock.
+unsafe impl Sync for crate::fs::bio::BlockCache {}
+
+// SAFETY: every mutable field sits behind a Spinlock; the closures are
+// required to be Send + Sync at construction.
+unsafe impl Send for crate::fs::debugfs::DebugFsNode {}
+
+unsafe impl Sync for crate::fs::debugfs::DebugFsNode {}
+
+unsafe impl Send for crate::fs::dentry::VfsMountInternal {}
+
+unsafe impl Sync for crate::fs::dentry::VfsMountInternal {}
+
+// SAFETY: the table's slots are shared-memory seqlock cells exactly like
+// the inline `memo` array inside Sync Dentry; cross-thread access goes
+// through the seqlock/children-lock protocol.
+unsafe impl Send for crate::fs::dentry::BigMemoTable {}
+
+unsafe impl Sync for crate::fs::dentry::BigMemoTable {}
+
+// (INV-DENTRY-SEND-1: Dentry/VfsMountInternal/BigMemoTable Sync/Send
+// are carried per-field — children/memo under their locks and seqlock,
+// the retirement banks under the drain lock; no field races through
+// a shared reference.)
+unsafe impl Send for crate::fs::dentry::Dentry {}
+
+unsafe impl Sync for crate::fs::dentry::Dentry {}
+
+unsafe impl Send for crate::fs::dentry::DentryCache {}
+
+unsafe impl Sync for crate::fs::dentry::DentryCache {}
+
+// Send proofs for the raw-pointer registry types (moved from
+// syscall/edges.rs with the types; same contracts: access only under
+// the shard/registry locks).
+unsafe impl Send for crate::fs::event_notify::EpollWakeShard {}
+
+unsafe impl Send for crate::fs::event_notify::SignalfdWakeRegistry {}
+
+// SAFETY: Ext4FileSystem is only accessed via &self methods that use bio layer
+// locking; device is a raw pointer but only used for I/O through the bio cache.
+unsafe impl Send for crate::fs::ext4::Ext4FileSystem {}
+
+// SAFETY: all mutable access goes through bio::bread/brelse which uses internal
+// locking; device pointer is read-only after initialization.
+unsafe impl Sync for crate::fs::ext4::Ext4FileSystem {}
+
+// SAFETY: File is only shared across threads when referenced through Arc,
+// and all mutable access goes through Spinlock or UnsafeCell fields that
+// are synchronized with IRQ-safe locking.
+// (INV-FILE-SEND-1: File's Sync/Send are carried per-field — cells are
+// write-once (INV-FILE-CELL-1), pos/cloexec/dirent_cache behind their
+// locks, flags/f_owner/f_signum atomics, io_lock a real mutex. No
+// field admits a data race through &File.)
+unsafe impl Sync for crate::fs::file::File {}
+
+unsafe impl Send for crate::fs::file::File {}
+
+unsafe impl Send for crate::fs::fs_struct::FsStruct {}
+
+unsafe impl Sync for crate::fs::fs_struct::FsStruct {}
+
+unsafe impl Send for crate::fs::inode::Inode {}
+
+unsafe impl Sync for crate::fs::inode::Inode {}
+
+unsafe impl Send for crate::fs::inode::InodeCache {}
+
+unsafe impl Sync for crate::fs::inode::InodeCache {}
+
+unsafe impl Send for crate::fs::mount::VfsMount {}
+
+unsafe impl Sync for crate::fs::mount::VfsMount {}
+
+// SAFETY: ProcFSNode's mutable fields (children, data) are protected by Spinlocks;
+// name is a &'static str and other fields are atomic or read-only after creation.
+unsafe impl Send for crate::fs::procfs::ProcFSNode {}
+
+// SAFETY: all shared mutable state is protected by internal Spinlocks;
+// no data races are possible across threads/CPUs.
+unsafe impl Sync for crate::fs::procfs::ProcFSNode {}
+
+// SAFETY: RootFSPathCache uses internal Spinlock for mutable access;
+// all fields are either locked or atomic.
+unsafe impl Send for crate::fs::rootfs::RootFSPathCache {}
+
+// SAFETY: all shared mutable state is protected by the internal Spinlock;
+// no data races are possible across threads/CPUs.
+unsafe impl Sync for crate::fs::rootfs::RootFSPathCache {}
+
+// SAFETY: RootFSNode's mutable fields (data, children) are protected by Spinlocks;
+// name uses UnsafeCell with callers ensuring exclusive access via parent-lock.
+unsafe impl Send for crate::fs::rootfs::RootFSNode {}
+
+// SAFETY: all shared mutable state is protected by internal Spinlocks or UnsafeCell;
+// no data races are possible across threads/CPUs.
+unsafe impl Sync for crate::fs::rootfs::RootFSNode {}
+
+unsafe impl Send for crate::fs::superblock::SuperBlock {}
+
+unsafe impl Sync for crate::fs::superblock::SuperBlock {}
+
+unsafe impl Send for crate::fs::superblock::FsRegistry {}
+
+unsafe impl Sync for crate::fs::superblock::FsRegistry {}
+
+// SAFETY: all mutable state (children/attributes/parent) sits behind
+// Spinlocks; closures are required to be Send + Sync at construction.
+unsafe impl Send for crate::fs::sysfs::KObject {}
+
+unsafe impl Sync for crate::fs::sysfs::KObject {}
+
+// SAFETY: the raw superblock pointer is a leaked mount-lifetime
+// allocation (Box::into_raw in create_mount_instance); Drop only
+// touches an atomic through it.
+unsafe impl Send for crate::fs::tmpfs::TmpfsPage {}
+
+// SAFETY: mutable fields (pages/size/mode/children/atime/mtime) are protected
+// by Spinlocks or atomics; name uses UnsafeCell mutated only under the
+// parent's children lock.
+unsafe impl Send for crate::fs::tmpfs::TmpfsNode {}
+
+unsafe impl Sync for crate::fs::tmpfs::TmpfsNode {}
+
+// SAFETY: the raw pointers are leaked superblocks (mount lifetime); they are
+// only copied out and dereferenced under the registry lock.
+unsafe impl Send for crate::fs::tmpfs::TmpfsInstances {}
+
+// SAFETY: all mutable state is behind Spinlock/atomics; fn pointers are
+// Send+Sync.
+unsafe impl Sync for crate::fs::tty::TtyDevice {}
+
+unsafe impl Send for crate::fs::tty::TtyDevice {}
+

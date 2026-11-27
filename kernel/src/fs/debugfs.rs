@@ -80,11 +80,6 @@ pub struct DebugFsNode {
     pub streaming: bool,
 }
 
-// SAFETY: every mutable field sits behind a Spinlock; the closures are
-// required to be Send + Sync at construction.
-unsafe impl Send for DebugFsNode {}
-unsafe impl Sync for DebugFsNode {}
-
 static ROOT: Spinlock<Option<Arc<DebugFsNode>>> = Spinlock::new(None);
 static INO_COUNTER: AtomicU64 = AtomicU64::new(2);
 

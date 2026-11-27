@@ -251,5 +251,3 @@ impl Default for FsStruct {
     }
 }
 
-unsafe impl Send for FsStruct {}
-unsafe impl Sync for FsStruct {}

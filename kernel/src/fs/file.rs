@@ -434,16 +434,6 @@ impl FileOwner {
     }
 }
 
-// SAFETY: File is only shared across threads when referenced through Arc,
-// and all mutable access goes through Spinlock or UnsafeCell fields that
-// are synchronized with IRQ-safe locking.
-// (INV-FILE-SEND-1: File's Sync/Send are carried per-field — cells are
-// write-once (INV-FILE-CELL-1), pos/cloexec/dirent_cache behind their
-// locks, flags/f_owner/f_signum atomics, io_lock a real mutex. No
-// field admits a data race through &File.)
-unsafe impl Sync for File {}
-unsafe impl Send for File {}
-
 // Compile-time checks for File structure alignment
 const _: () = assert!(core::mem::align_of::<File>() >= 16);
 const _: () = {

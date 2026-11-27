@@ -192,13 +192,6 @@ pub struct Ext4FileSystem {
     pub read_only: bool,
 }
 
-// SAFETY: Ext4FileSystem is only accessed via &self methods that use bio layer
-// locking; device is a raw pointer but only used for I/O through the bio cache.
-unsafe impl Send for Ext4FileSystem {}
-// SAFETY: all mutable access goes through bio::bread/brelse which uses internal
-// locking; device pointer is read-only after initialization.
-unsafe impl Sync for Ext4FileSystem {}
-
 impl Ext4FileSystem {
     /// Create new ext4 filesystem instance
     pub fn new(device: &'static blkdev::GenDisk) -> Self {

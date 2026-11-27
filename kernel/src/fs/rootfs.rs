@@ -58,7 +58,7 @@ impl RootFSPathCacheEntry {
     }
 }
 
-struct RootFSPathCache {
+pub(super) struct RootFSPathCache {
     /// Hash table buckets
     buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE],
     /// Cache hit count
@@ -66,13 +66,6 @@ struct RootFSPathCache {
     /// Cache miss count
     misses: AtomicU64,
 }
-
-// SAFETY: RootFSPathCache uses internal Spinlock for mutable access;
-// all fields are either locked or atomic.
-unsafe impl Send for RootFSPathCache {}
-// SAFETY: all shared mutable state is protected by the internal Spinlock;
-// no data races are possible across threads/CPUs.
-unsafe impl Sync for RootFSPathCache {}
 
 /// Per-superblock path-cache methods. Linux dcache alignment: the cache
 /// lives on the RootFSSuperBlock instance (like the reference's dentry
@@ -302,13 +295,6 @@ pub struct RootFSNode {
     /// the end of the test fn and flushes happen only while it does).
     pub(crate) sb_back: AtomicPtr<RootFSSuperBlock>,
 }
-
-// SAFETY: RootFSNode's mutable fields (data, children) are protected by Spinlocks;
-// name uses UnsafeCell with callers ensuring exclusive access via parent-lock.
-unsafe impl Send for RootFSNode {}
-// SAFETY: all shared mutable state is protected by internal Spinlocks or UnsafeCell;
-// no data races are possible across threads/CPUs.
-unsafe impl Sync for RootFSNode {}
 
 impl RootFSNode {
     /// Create new node

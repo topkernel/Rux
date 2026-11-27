@@ -736,9 +736,6 @@ pub struct Inode {
     ref_count: AtomicU64,
 }
 
-unsafe impl Send for Inode {}
-unsafe impl Sync for Inode {}
-
 impl Drop for Inode {
     fn drop(&mut self) {
         // R20-FS4: reclaim filesystem-private data when the last Arc<Inode>
@@ -1211,7 +1208,7 @@ impl Clone for InodeHashBucket {
 }
 
 /// Inode hash table
-struct InodeCache {
+pub(super) struct InodeCache {
     /// Hash table (heap-allocated to avoid large stack allocation)
     buckets: alloc::boxed::Box<[InodeHashBucket]>,
     /// Number of entries in cache
@@ -1221,9 +1218,6 @@ struct InodeCache {
     /// Statistics
     stats: InodeCacheStats,
 }
-
-unsafe impl Send for InodeCache {}
-unsafe impl Sync for InodeCache {}
 
 /// Global Inode cache
 static ICACHE: Spinlock<Option<InodeCache>> = Spinlock::new(None);

@@ -86,13 +86,6 @@ pub struct BufferHead {
     b_count: AtomicU32,
 }
 
-// SAFETY: BufferHead's mutable state (b_data) is protected by BufferState spinlock;
-// other fields are atomic or only accessed under lock.
-unsafe impl Send for BufferHead {}
-// SAFETY: all shared mutable state is protected by the BufferState spinlock;
-// b_data is only mutated under lock or from a single thread.
-unsafe impl Sync for BufferHead {}
-
 impl BufferHead {
     /// Create new buffer head
     pub fn new(blocknr: u64, size: u32) -> Self {
@@ -366,14 +359,6 @@ pub struct BlockCache {
     /// Block size
     block_size: u32,
 }
-
-// SAFETY: BlockCache is only accessed via &self methods that use internal locking
-// (per-bucket Spinlock and LRU Spinlock) and atomic count; raw pointers are
-// confined to cache internals and never exposed without locks.
-unsafe impl Send for BlockCache {}
-// SAFETY: all shared mutable state (hash buckets, LRU list) is protected by
-// Spinlocks; raw pointer access is always under the appropriate bucket lock.
-unsafe impl Sync for BlockCache {}
 
 /// Leg-52 dfx counter: sync_all/sync_all_excluding walked a LINKED
 /// cache entry whose bh was NULL (the R11-1 crash family's read side).

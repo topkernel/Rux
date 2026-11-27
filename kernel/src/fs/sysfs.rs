@@ -181,11 +181,6 @@ pub struct KObject {
     pub attributes: Spinlock<BTreeMap<String, Arc<Attribute>>>,
 }
 
-// SAFETY: all mutable state (children/attributes/parent) sits behind
-// Spinlocks; closures are required to be Send + Sync at construction.
-unsafe impl Send for KObject {}
-unsafe impl Sync for KObject {}
-
 impl KObject {
     /// Create a root object (ino 1).
     pub fn new_root() -> Arc<Self> {

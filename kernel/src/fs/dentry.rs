@@ -97,9 +97,6 @@ impl VfsMountInternal {
     }
 }
 
-unsafe impl Send for VfsMountInternal {}
-unsafe impl Sync for VfsMountInternal {}
-
 // ============================================================================
 // Reader banks + deferred retirement (gap-fs lane)
 // ============================================================================
@@ -381,16 +378,10 @@ const CHILD_MEMO_BIG_MAX_SLOTS: usize = 2048;
 /// (old base + new count would read past the old table). `nslots` is
 /// immutable after construction — the base pointer alone identifies a
 /// consistent (slots, len) pair.
-struct BigMemoTable {
+pub(super) struct BigMemoTable {
     nslots: usize,
     slots: alloc::vec::Vec<ChildMemoSlot>,
 }
-
-// SAFETY: the table's slots are shared-memory seqlock cells exactly like
-// the inline `memo` array inside Sync Dentry; cross-thread access goes
-// through the seqlock/children-lock protocol.
-unsafe impl Send for BigMemoTable {}
-unsafe impl Sync for BigMemoTable {}
 
 /// Plain (non-atomic) slot payload — read/written through the enclosing
 /// slot's seqlock (the sync::seqlock UnsafeCell discipline).
@@ -547,13 +538,6 @@ pub struct Dentry {
     /// protocol comment).
     inode_ptr: AtomicPtr<Inode>,
 }
-
-// (INV-DENTRY-SEND-1: Dentry/VfsMountInternal/BigMemoTable Sync/Send
-// are carried per-field — children/memo under their locks and seqlock,
-// the retirement banks under the drain lock; no field races through
-// a shared reference.)
-unsafe impl Send for Dentry {}
-unsafe impl Sync for Dentry {}
 
 impl Dentry {
     /// Create new dentry
@@ -1389,7 +1373,7 @@ impl Clone for DentryHashBucket {
 }
 
 /// Dentry hash table
-struct DentryCache {
+pub(super) struct DentryCache {
     /// Hash table (heap-allocated to avoid large stack allocation)
     buckets: alloc::boxed::Box<[DentryHashBucket]>,
     /// Number of entries in cache
@@ -1399,9 +1383,6 @@ struct DentryCache {
     /// Statistics
     stats: DentryCacheStats,
 }
-
-unsafe impl Send for DentryCache {}
-unsafe impl Sync for DentryCache {}
 
 /// Global Dentry cache
 static DCACHE: Spinlock<Option<DentryCache>> = Spinlock::new(None);

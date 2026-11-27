@@ -559,13 +559,6 @@ impl ProcFSNode {
     }
 }
 
-// SAFETY: ProcFSNode's mutable fields (children, data) are protected by Spinlocks;
-// name is a &'static str and other fields are atomic or read-only after creation.
-unsafe impl Send for ProcFSNode {}
-// SAFETY: all shared mutable state is protected by internal Spinlocks;
-// no data races are possible across threads/CPUs.
-unsafe impl Sync for ProcFSNode {}
-
 /// ProcFS superblock
 pub struct ProcFSSuperBlock {
     /// Base superblock
