@@ -1038,7 +1038,7 @@ pub(crate) fn current_jbd2_handle() -> Option<*mut crate::fs::jbd2::Handle> {
 pub(crate) fn jbd2_handle_set(handle: *mut crate::fs::jbd2::Handle) {
     if let Some(task) = crate::sched::current() {
         // SAFETY: INV-EXT4-JHANDLE-1 (same-task cell write).
-        crate::process::unsafe_edges::borrow_task_mut(task).journal_handle.set(handle);
+        crate::process::edges::borrow_task_mut(task).journal_handle.set(handle);
     }
 }
 
@@ -1046,7 +1046,7 @@ pub(crate) fn jbd2_handle_set(handle: *mut crate::fs::jbd2::Handle) {
 pub(crate) fn jbd2_handle_clear() {
     if let Some(task) = crate::sched::current() {
         // SAFETY: INV-EXT4-JHANDLE-1.
-        crate::process::unsafe_edges::borrow_task_mut(task).journal_handle.set(core::ptr::null_mut());
+        crate::process::edges::borrow_task_mut(task).journal_handle.set(core::ptr::null_mut());
     }
 }
 
@@ -1054,7 +1054,7 @@ pub(crate) fn jbd2_handle_clear() {
 pub(crate) fn jbd2_handle_get() -> Option<*mut crate::fs::jbd2::Handle> {
     let task = crate::sched::current()?;
     // SAFETY: INV-EXT4-JHANDLE-1.
-    let ptr = crate::process::unsafe_edges::borrow_task(task).journal_handle.get();
+    let ptr = crate::process::edges::borrow_task(task).journal_handle.get();
     if ptr.is_null() { None } else { Some(ptr) }
 }
 

@@ -154,7 +154,7 @@ impl PinnedTask {
         // pinned at construction; released only in Drop. The
         // 'static lifetime mirrors find_task_by_pid's contract — the pin
         // extends the slot's validity for the whole borrow.
-        crate::process::unsafe_edges::borrow_task_mut(self.ptr)
+        crate::process::edges::borrow_task_mut(self.ptr)
     }
 }
 impl core::ops::Drop for PinnedTask {
@@ -319,7 +319,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     // count — single-threaded processes report 1, CLONE_THREAD groups
     // report the leader's nr_threads).
     let threads = {
-        let leader = crate::process::unsafe_edges::borrow_task(task.group_leader_ptr());
+        let leader = crate::process::edges::borrow_task(task.group_leader_ptr());
         leader.nr_threads().max(1)
     };
 
@@ -624,7 +624,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
             let nice = t.nice();
             let prio = 120 - nice;
             let threads = {
-                let leader = crate::process::unsafe_edges::borrow_task(t.group_leader_ptr());
+                let leader = crate::process::edges::borrow_task(t.group_leader_ptr());
                 leader.nr_threads().max(1)
             };
             // SchedPolicy already uses Linux's SCHED_* numbering

@@ -3204,7 +3204,7 @@ fn publication_capture_note_dirty(
     };
     // journal_handle is set/cleared by this task around the
     // enclosing ext4 operation; it is null outside one.
-    let hptr = { crate::process::unsafe_edges::borrow_task(task).journal_handle.get() };
+    let hptr = { crate::process::edges::borrow_task(task).journal_handle.get() };
     if hptr.is_null() {
         return;
     }

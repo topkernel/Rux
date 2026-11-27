@@ -158,7 +158,7 @@ fn dump_all_cpu_stacks() {
             continue;
         }
         // SAFETY: per-CPU current task pointer, read-only diagnostics.
-        let t: &crate::process::task::Task = crate::process::unsafe_edges::borrow_task(*task);
+        let t: &crate::process::task::Task = crate::process::edges::borrow_task(*task);
         crate::println!(
             "CPU{}: pid={} state={:#x} on_cpu={} idle={}",
             cpu,

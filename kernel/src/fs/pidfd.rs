@@ -74,12 +74,12 @@ fn pin_leader(pid: u32) -> Option<*mut Task> {
         return None;
     }
     // t is pinned for the duration of this function.
-    let leader = crate::process::unsafe_edges::borrow_task(t).group_leader_ptr();
+    let leader = crate::process::edges::borrow_task(t).group_leader_ptr();
     if (leader as *const Task) != (t as *const Task) && !leader.is_null() {
         // Pin the leader too; drop the intermediate pin.
         // group_leader_ptr() of a pinned task is in the same
         // thread ring (kept alive by the ring linkage discipline).
-        crate::process::unsafe_edges::borrow_task(leader)
+        crate::process::edges::borrow_task(leader)
             .task_refcnt
             .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         Task::task_put(t);
