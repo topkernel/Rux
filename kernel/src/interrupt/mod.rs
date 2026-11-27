@@ -17,6 +17,12 @@
 //! - irqthread: per-IRQ threaded service primitive (RT-plan R5)
 
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub mod edges;
+
 pub mod irqdesc;
 pub mod irqchip;
 pub mod irqthread;
