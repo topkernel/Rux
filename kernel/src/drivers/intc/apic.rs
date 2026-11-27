@@ -295,7 +295,7 @@ fn send_icr(dest: u32, cmd: u32) {
         // posted; back-to-back MSR writes serialize sufficiently.
         let icr = ((dest as u64) << 32) | cmd as u64;
         // SAFETY: x2APIC ICR write.
-        crate::drivers::edges::msr_write(X2APIC_ICR, icr) };
+        crate::drivers::edges::msr_write(X2APIC_ICR, icr);
     } else {
         // Wait for Delivery Status (bit 12) to clear.
         while reg_read(XAPIC_ICR_LO, X2APIC_ICR) & (1 << 12) != 0 {
@@ -1260,7 +1260,7 @@ fn init_x2apic_or_mmio() -> bool {
         // to it: any functioning APIC reads SVR nonzero (reset 0xFF);
         // an unbacked range reads 0.
         // SAFETY: x2APIC MSR read gated on the EXTD write above.
-        let svr = crate::drivers::edges::msr_read(X2APIC_SVR) };
+        let svr = crate::drivers::edges::msr_read(X2APIC_SVR);
         if svr == 0 {
             // Fall back to MMIO xAPIC: clear EXTD, keep global enable.
             // IA32_APIC_BASE programming of this CPU (INV-DRV-MSR edge).
