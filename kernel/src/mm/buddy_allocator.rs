@@ -883,7 +883,7 @@ impl BuddyAllocator {
             });
             if let Some((pid, bottom, top)) = hit {
                 let mut frames = [0u64; 8];
-                let s0 = crate::dfx::backtrace::current_frame_pointer();
+                let s0 = crate::debug::backtrace::current_frame_pointer();
                 crate::mm::edges::walk_fp_chain(s0, &mut frames);
                 crate::println!(
                     "KSTACK-COLLIDE-FREE va={:#x} sz={:#x} stack=[{:#x},{:#x}) pid={} f0={:#x} f1={:#x} f2={:#x}",

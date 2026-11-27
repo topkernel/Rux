@@ -2896,7 +2896,7 @@ pub mod riscv64 {
                             putfrag(b" flags=0x");
                             puthex(pg.flags().raw() as u64);
                             use core::fmt::Write;
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             let _ = write!(
                                 w,
                                 " rc={} mc={} ord={} free={}\n",

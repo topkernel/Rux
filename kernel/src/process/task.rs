@@ -4143,7 +4143,7 @@ impl Task {
             let st = self.state();
             if st.is_running() {
                 let mut frames = [0u64; 8];
-                let s0 = crate::dfx::backtrace::current_frame_pointer();
+                let s0 = crate::debug::backtrace::current_frame_pointer();
                 crate::mm::edges::walk_fp_chain(s0, &mut frames);
                 crate::println!(
                     "STACKFREE-LIVE pid={} state=RUNNING top={:#x} f0={:#x} f1={:#x} f2={:#x}",
