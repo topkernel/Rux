@@ -4131,6 +4131,30 @@ impl Task {
     ///
     /// Free current task's kernel stack (returns to cache)
     pub fn free_kernel_stack(&mut self) {
+        // LANE PROBE (ubu-dbg wild-jump hunt): the victim of the CPU1
+        // idle-jump family is a LIVE kernel-stack block whose memory is
+        // subsequently reused (the all-zero restored context = the
+        // fresh-stack zeroing pass writing over the live frame). Fire
+        // when a NON-dead task's stack is freed: legal call sites are
+        // zombie/dead exits and never-enqueued fork/kthread unwind
+        // failures — a Running/Runnable task here is the wrongful free.
+        // Prints only on the anomaly; zero cost otherwise.
+        {
+            let st = self.state();
+            if st.is_running() {
+                let mut frames = [0u64; 8];
+                let s0 = crate::debug::backtrace::current_frame_pointer();
+                crate::mm::edges::walk_fp_chain(s0, &mut frames);
+                crate::println!(
+                    "STACKFREE-LIVE pid={} state=RUNNING top={:#x} f0={:#x} f1={:#x} f2={:#x}",
+                    self.pid(),
+                    self.kernel_stack.map(|p| p as usize).unwrap_or(0),
+                    frames.get(0).copied().unwrap_or(0),
+                    frames.get(1).copied().unwrap_or(0),
+                    frames.get(2).copied().unwrap_or(0),
+                );
+            }
+        }
         if let Some(stack_top) = self.kernel_stack {
             // Calculate stack bottom address (stack top - stack size):
             // kernel_stack was set by alloc_kernel_stack() as bottom +
