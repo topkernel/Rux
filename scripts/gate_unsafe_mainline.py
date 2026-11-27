@@ -34,7 +34,15 @@ def strip_comments_strings(text):
         if c == "/" and nxt == "*": in_block = True; out.append("  "); i += 2; continue
         if c == '"': in_str = True; out.append(" "); i += 1; continue
         if c == "'" and (i == 0 or text[i-1] not in "A-Za-z0-9_"):
-            # char literal (crude); skip to closing quote
+            # lifetime ('a, 'static) vs char literal ('a', '\\n'): a lifetime's
+            # quote is followed by an identifier char that is NOT closed by
+            # another quote within three chars. Lifetimes pass through —
+            # the old crude skip could swallow real unsafe keywords.
+            j = i + 1
+            if j < n and (text[j].isalnum() or text[j] == "_"):
+                if j + 1 < n and text[j + 1] == "'":
+                    out.append("   "); i = j + 2; continue   # 'x' char literal
+                out.append(c); i += 1; continue              # lifetime — keep
             j = i + 1
             while j < n:
                 if text[j] == "\\": j += 2; continue
@@ -46,7 +54,9 @@ def strip_comments_strings(text):
 
 def keyword_sites(text):
     t = strip_comments_strings(text)
-    return [(m.start(), t[:m.start()].count("\n") + 1) for m in re.finditer(r"\bunsafe\b", t)]
+    return [(m.start(), t[:m.start()].count("\n") + 1)
+            for m in re.finditer(r"(?<!r)#?\bunsafe\b", t)
+            if not SAFE.match(t[m.start():m.start() + 8])]
 
 def main():
     failures = []
