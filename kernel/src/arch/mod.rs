@@ -43,6 +43,14 @@ pub mod aarch64;
 /// `#![forbid(unsafe_code)]` service files are allowed to call.
 pub mod uaccess_safe;
 
+// The arch unsafe floor: every unsafe site of this subsystem lives in this
+// one file (merged edges + collected scatter); all other arch files are
+// `#![forbid(unsafe_code)]`-enforced. See the file head for the map.
+// (The module is spelled `arch_floor`; the file it maps to is unsafe.rs —
+// the unsafe keyword itself may not appear in this non-exempt file.)
+#[path = "unsafe.rs"]
+pub mod arch_floor;
+
 #[cfg(feature = "riscv64")]
 pub use riscv64::{
     arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
