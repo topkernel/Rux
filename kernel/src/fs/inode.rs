@@ -313,7 +313,7 @@ pub struct INodeOps {
 /// already holds, and every other argument is a plain
 /// reference/scalar. Implementations that need raw access (ext4's
 /// block edges, per-FS private_data views) keep narrow inner audited
-/// blocks at their own bottoms — see fs/unsafe_edges.rs.
+/// blocks at their own bottoms — see fs/unsafe.rs.
 /// `None` slots are mapped to the caller's
 /// `unsupported` errno so each call site keeps its LTP-observed error
 /// precedence (mkdir-family sites answer EROFS, mknod EOPNOTSUPP,

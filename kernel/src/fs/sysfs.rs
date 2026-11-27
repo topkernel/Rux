@@ -1959,7 +1959,7 @@ fn sysfs_kill_sb(sb: *mut SuperBlock) {
 
 /// Get the sysfs superblock (if initialized).
 pub fn get_sysfs_sb() -> Option<&'static SysfsSuperBlock> {
-    crate::fs::unsafe_edges::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
+    crate::fs::r#unsafe::static_ref(GLOBAL_SYSFS_SB.load(Ordering::Acquire))
 }
 
 /// Initialize sysfs: register the filesystem type and build the KObject
@@ -2071,7 +2071,7 @@ pub struct SysfsEntryData {
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from sysfs_iget/create_root_inode.
 fn entry_of<'a>(inode: &'a Inode) -> Option<&'a SysfsEntryData> {
-    crate::fs::unsafe_edges::privdata_ref::<SysfsEntryData>(inode)
+    crate::fs::r#unsafe::privdata_ref::<SysfsEntryData>(inode)
 }
 
 /// Resolve a child of `dir` to (kobj, attr, link) for lookup/iget.
@@ -2393,7 +2393,7 @@ pub struct SysfsFileContent {
 /// read: serve from the open-time snapshot at the file position.
 fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by sysfs_open under this File.
-    let content = match crate::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+    let content = match crate::fs::r#unsafe::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2441,7 +2441,7 @@ fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 /// lseek within the snapshot.
 fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: see sysfs_file_read.
-    let content = match crate::fs::unsafe_edges::file_privdata_ref::<SysfsFileContent>(file) {
+    let content = match crate::fs::r#unsafe::file_privdata_ref::<SysfsFileContent>(file) {
         Some(c) => c,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
@@ -2463,7 +2463,7 @@ fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize
 fn sysfs_file_close(file: &crate::fs::File) -> i32 {
     // The take empties the cell first (no UAF window); the Box reclaim
     // rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(crate::fs::unsafe_edges::file_privdata_take::<SysfsFileContent>(file));
+    drop(crate::fs::r#unsafe::file_privdata_take::<SysfsFileContent>(file));
     0
 }
 

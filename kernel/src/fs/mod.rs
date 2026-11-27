@@ -6,7 +6,12 @@
 //! Virtual File System (VFS)
 
 pub mod file;
-pub mod unsafe_edges;
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): the former `unsafe_edges` collection
+// renamed to `unsafe.rs` on disk; the raw-identifier module keeps the
+// historical path name so existing call sites stay stable.
+#[path = "unsafe.rs"]
+pub mod r#unsafe;
 pub mod event_notify;
 pub mod fdreap;
 pub mod inode;

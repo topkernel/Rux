@@ -676,7 +676,7 @@ fn leak_ino_data(node: Arc<CgroupNode>, kind: CgroupFileKind) -> *mut u8 {
 /// Read the private data back.
 // SAFETY: pointer came from leak_ino_data and is never freed.
 fn ino_data<'a>(inode: &'a Inode) -> Option<&'a CgroupInoData> {
-    crate::fs::unsafe_edges::privdata_ref::<CgroupInoData>(inode)
+    crate::fs::r#unsafe::privdata_ref::<CgroupInoData>(inode)
 }
 
 // ============================================================================
@@ -952,7 +952,7 @@ fn cgroupfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // cgroupfs_open; it is only freed by cgroupfs_file_close
     // (INV-FS-FILEPRIV-1, resolved through the framework edge).
     {
-        let content = match crate::fs::unsafe_edges::file_privdata_ref::<CgroupFileContent>(file) {
+        let content = match crate::fs::r#unsafe::file_privdata_ref::<CgroupFileContent>(file) {
             Some(c) => c,
             None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
         };
@@ -992,7 +992,7 @@ fn cgroupfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 fn cgroupfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // See cgroupfs_file_read (INV-FS-FILEPRIV-1).
     {
-        let content = match crate::fs::unsafe_edges::file_privdata_ref::<CgroupFileContent>(file) {
+        let content = match crate::fs::r#unsafe::file_privdata_ref::<CgroupFileContent>(file) {
             Some(c) => c,
             None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
         };
@@ -1014,7 +1014,7 @@ fn cgroupfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> is
 fn cgroupfs_file_close(file: &crate::fs::File) -> i32 {
     // The take empties the cell first; the Box::from_raw reclaim is the
     // framework edge's exactly-once drop (INV-FS-FILEPRIV-1).
-    if let Some(content) = crate::fs::unsafe_edges::file_privdata_take::<CgroupFileContent>(file) {
+    if let Some(content) = crate::fs::r#unsafe::file_privdata_take::<CgroupFileContent>(file) {
         drop(content);
     }
     0

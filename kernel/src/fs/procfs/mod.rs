@@ -1243,7 +1243,7 @@ fn procfs_kill_sb(sb: *mut SuperBlock) {
 
 /// Get ProcFS superblock
 pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
-    crate::fs::unsafe_edges::static_ref(GLOBAL_PROCFS_SB.load(Ordering::Acquire))
+    crate::fs::r#unsafe::static_ref(GLOBAL_PROCFS_SB.load(Ordering::Acquire))
 }
 
 /// Rewind-regeneration hook for the procfs MOUNT TABLES served through
@@ -1458,7 +1458,7 @@ pub fn init_procfs() -> Result<(), i32> {
 
     // 3. Initialize default files (the box is alive in hand; the raw
     // word below is only its address).
-    let sb_ref = crate::fs::unsafe_edges::static_ref_unchecked(procfs_sb_ptr);
+    let sb_ref = crate::fs::r#unsafe::static_ref_unchecked(procfs_sb_ptr);
     sb_ref.init_default_files();
 
     // 4. Store global pointer
@@ -1611,7 +1611,7 @@ fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
         return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
-    let node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(dir).ok_or(errno::Errno::NotADirectory)?;
+    let node = crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(dir).ok_or(errno::Errno::NotADirectory)?;
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1714,7 +1714,7 @@ fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 
     // /proc/[pid]/attr label files: owned by the target task (see the
     // matching iget branch).
-    if let Some(node) = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+    if let Some(node) = crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode) {
         if matches!(
             node.pid_file_kind,
             Some(
@@ -1779,7 +1779,7 @@ fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         return 0;
     }
 
-    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+    let node = match crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
         };
@@ -1870,7 +1870,7 @@ fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
         return errno::Errno::InvalidArgument.as_neg_i32() as isize;
     }
 
-    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+    let node = match crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
         };
@@ -2127,7 +2127,7 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
         return Ok(Arc::new(inode));
     }
 
-    let parent_node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(parent).ok_or(errno::Errno::NotADirectory)?;
+    let parent_node = crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(parent).ok_or(errno::Errno::NotADirectory)?;
 
     // Check for PID directory
     if pid::is_pid_dir(name) {
@@ -2179,7 +2179,7 @@ pub struct ProcfsFileContent {
 fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // The content box is this description's private data
     // (INV-FS-FILEPRIV-1, the framework edge).
-    if let Some(content) = crate::fs::unsafe_edges::file_privdata_ref::<ProcfsFileContent>(file) {
+    if let Some(content) = crate::fs::r#unsafe::file_privdata_ref::<ProcfsFileContent>(file) {
         let offset = file.get_pos() as usize;
         let available = content.data.len().saturating_sub(offset);
         let to_read = buf.len().min(available);
@@ -2205,7 +2205,7 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         Some(i) => i,
         None => return -22, // EINVAL
     };
-    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(&inode) {
+    let node = match crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(&inode) {
         Some(n) => n,
         None => return -22,
     };
@@ -2293,7 +2293,7 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
     // The content box is this description's private data
     // (INV-FS-FILEPRIV-1, mut twin: lseek and read on one description
     // are serialized the same way the pre-edge direct store was).
-    if let Some(content) = crate::fs::unsafe_edges::file_privdata_ref_mut::<ProcfsFileContent>(file) {
+    if let Some(content) = crate::fs::r#unsafe::file_privdata_ref_mut::<ProcfsFileContent>(file) {
         {
             let file_size = content.data.len() as isize;
             let new_offset = match whence {
@@ -2322,7 +2322,7 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             if new_offset == 0 {
                 let mut kind = None;
                 if let Some(inode) = file.get_inode() {
-                    if let Some(node) = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+                    if let Some(node) = crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode) {
                         kind = node.pid_file_kind;
                     }
                 }
@@ -2346,7 +2346,7 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
 fn procfs_file_close(file: &crate::fs::File) -> i32 {
     // The take empties the cell first (no use-after-free window); the
     // Box reclaim rides the framework edge (INV-FS-FILEPRIV-1).
-    drop(crate::fs::unsafe_edges::file_privdata_take::<ProcfsFileContent>(file));
+    drop(crate::fs::r#unsafe::file_privdata_take::<ProcfsFileContent>(file));
     0
 }
 
@@ -2362,7 +2362,7 @@ fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
-    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+    let node = match crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode) {
             Some(v) => v,
             None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
         };
@@ -2452,7 +2452,7 @@ fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOp
         // — the node is created with create_dynamic_file("kmsg",
         // printk::generate_kmsg); procfs_open applies the matching
         // special case (single-reader gate, no snapshot Box).
-        let node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode);
+        let node = crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode);
         if let Some(node) = node {
             if node.content_generator == Some(crate::printk::generate_kmsg) {
                 return Some(&crate::printk::PROC_KMSG_OPS);
@@ -2494,7 +2494,7 @@ fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         }
         return 0;
     }
-    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+    let node = match crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode) {
             Some(v) => v,
             None => return 0,
         };
@@ -2660,7 +2660,7 @@ fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::Vfs
         return Some(entries);
     }
 
-    let node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode)?;
+    let node = crate::fs::r#unsafe::privdata_ref::<ProcFSNode>(inode)?;
     if !node.is_dir() {
         return None;
     }

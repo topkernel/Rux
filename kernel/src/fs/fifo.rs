@@ -221,7 +221,7 @@ fn fifo_file_close(file: &File) -> i32 {
 
     // Registry-side bookkeeping (open-wait counters), wakeups outside the
     // lock. SAFETY: inode is written once at open time; read-only access.
-    let inode_opt = crate::fs::unsafe_edges::file_inode_arc(file);
+    let inode_opt = crate::fs::r#unsafe::file_inode_arc(file);
     let wake_peer = inode_opt.as_ref().and_then(|inode| {
         let peer = FIFO_REGISTRY.lock().get(&(inode.fs_id, inode.ino)).cloned();
         if let Some(ref p) = peer {
@@ -244,7 +244,7 @@ fn fifo_file_close(file: &File) -> i32 {
     // private_data was installed by fifo_open_file as Arc::into_raw(Pipe)
     // — the take-arc edge owns the exactly-once reclaim (INV-FS-FILEPRIV-2).
     {
-        if let Some(pipe) = crate::fs::unsafe_edges::file_privdata_take_arc::<Pipe>(file) {
+        if let Some(pipe) = crate::fs::r#unsafe::file_privdata_take_arc::<Pipe>(file) {
             let last_reader =
                 is_reader && pipe.fifo_readers.fetch_sub(1, Ordering::AcqRel) == 1;
             let last_writer =

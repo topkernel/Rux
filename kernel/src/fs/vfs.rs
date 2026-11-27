@@ -7565,7 +7565,7 @@ pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
     inode.private_data = Some(pid as *mut u8);
 
     let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
-    crate::fs::unsafe_edges::file_inode_install(&file, alloc::sync::Arc::new(inode));
+    crate::fs::r#unsafe::file_inode_install(&file, alloc::sync::Arc::new(inode));
 
     get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
 }
