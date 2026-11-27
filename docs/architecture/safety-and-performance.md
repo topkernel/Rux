@@ -297,6 +297,30 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   nestings (futex bucket→GRQ), and the cost side (tick-quantized
   wake→run ~10 ms behind an incumbent, both hog regimes) is banked in
   the same table — the ledger keeps the cost next to the win.
+- Consolidation-layout A/B (release/LTO same-rig, perf-opt lane
+  2026-11-27, pbench_boot q35 KVM smp2 2G, ABAB interleaved r1/r2 plus
+  one reversed-order r3, main a6d1cdc2a vs archive f1900270e — both
+  release+LTO): IPC family p5a_pipe 0.276→0.180 µs (−34.7%), p5c_stream_write
+  0.331→0.220 (−33.5%), p5c2_stream_send 0.286→0.230 (−19.4%),
+  p5c3_stream_wrecv 0.290→0.230 (−20.8%), p5e_stream_send 0.276→0.220
+  (−20.1%), p5b_dgram_send 0.266→0.210 (−20.9%), p5b_dgram_recv_peek
+  0.536→0.471 (−12.1%); fs family p6_stat 0.356→0.281 µs (−21.1%),
+  p6_unlink 11.030→9.317 µs (−15.5%), p6_getdents 33.888→32.150 µs
+  (−5.1%, boundary). Attribution: base..main carries ONLY
+  consolidation commits in process/ipc/net/sched/sync/timer/mm/fs, so
+  the family win is the code-move second order (layout/inline), no
+  single wrapper to name — disassembly proof: base's 11 surviving
+  non-inlined PtTable::from_phys wrapper calls on the page-fault path
+  are ZERO on main, and the syscall-entry chain is fully inlined in
+  both kernels. The ledger keeps the cost next to the win: the same
+  board's p6_write_fsync +13.6% is a reproduced regression (min
+  parity → wait-latency distribution shift, not wrapper cost —
+  disassembly shows zero surviving consolidation-wrapper call sites on
+  the commit/flush path; hunt continues); p2_ctxsw +2.0% is below
+  threshold, recorded as flat. Safety pairing: the moved code is the
+  same audited-unsafe collection, INV contracts unchanged — the win
+  costs no audit surface (the inlining is the compiler doing more with
+  the same contracts).
 - TLB-shootdown lazy mm_cpumask (x86_64, OH boot lane 2026-11-12):
   every munmap/fork-COW/mprotect/COW-fault used to BROADCAST a
   full-TLB-flush IPI to all 8 CPUs — /proc/interrupts on a pristine
