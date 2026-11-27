@@ -10,6 +10,11 @@
 //! - Mounting the root filesystem
 //! - Starting system services
 //! - Running shell
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the
+//! static-init-task storage family lives behind the audited edges in
+//! kernel/src/unsafe.rs (INV-INIT-TASKSTORAGE-1).
+#![forbid(unsafe_code)]
 
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
 use crate::fs::char_dev::CharDev;
@@ -21,9 +26,9 @@ use crate::cmdline;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 
-// Static storage: init process and user context
-// Use MaybeUninit to avoid auto-initialization issues
-static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
+// The init task's static storage lives in the root audited unsafe file
+// (crate::unsafe.rs, module boot_edges — INV-INIT-TASKSTORAGE-1); this
+// module keeps only safe delegates.
 
 /// E8-REPAR: address of the boot init task's static storage — the ONE
 /// Task that lives outside the kernel linear map (Task::is_plausible_
@@ -31,9 +36,7 @@ static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUni
 /// window, so the pointer screen needs no unmapped image-range holes).
 #[inline]
 pub fn init_task_storage_addr() -> usize {
-    // SAFETY: only the address of the static is read; the storage may be
-    // uninitialized at call time.
-    unsafe { core::ptr::addr_of!(INIT_TASK_STORAGE) as usize }
+    crate::boot_edges::init_task_addr()
 }
 
 /// Initialize init process (PID 1)
@@ -185,83 +188,86 @@ fn create_and_start_init_process(
     init_path: &str,
     rootfs_first: bool,
 ) -> Option<*mut Task> {
-    unsafe {
-        let task_ptr = INIT_TASK_STORAGE.as_mut_ptr();
+    // INV-INIT-TASKSTORAGE-1 (through the audited edges): construct PID 1
+    // in place on its static storage, then set it up through the single
+    // deref edge — single-threaded early boot, pre-enqueue.
+    let task_ptr = crate::boot_edges::init_task_ptr();
 
-        // Create init task, PID is fixed to 1
-        // Note: new_task_at already allocates kernel stack internally
-        let _ = Task::new_task_at(task_ptr, 1, SchedPolicy::Normal); // boot init: 32MB heap, cannot fail meaningfully
+    // Create init task, PID is fixed to 1
+    // Note: new_task_at already allocates kernel stack internally
+    let _ = Task::new_task_at(task_ptr, 1, SchedPolicy::Normal); // boot init: 32MB heap, cannot fail meaningfully
 
-        (*task_ptr).set_parent(core::ptr::null_mut());
+    let task = crate::boot_edges::init_task_mut();
 
-        // PID 1 is its own session and process-group leader (Linux init:
-        // sid == pgid == 1). The boot task starts with pgid/sid zeroed,
-        // which made getpgid(1) report 0 (LTP getpgid01).
-        (*task_ptr).set_sid(1);
-        (*task_ptr).set_pgid(1);
+    task.set_parent(core::ptr::null_mut());
 
-        // cgroup v2 (U1b): track PID 1 in the root cgroup so its (and its
-        // children's) membership and memory usage are visible from
-        // /sys/fs/cgroup from the first moment; systemd later moves itself
-        // into /init.scope by writing cgroup.procs.
-        crate::sched::cgroup::attach_init_to_root(task_ptr);
+    // PID 1 is its own session and process-group leader (Linux init:
+    // sid == pgid == 1). The boot task starts with pgid/sid zeroed,
+    // which made getpgid(1) report 0 (LTP getpgid01).
+    task.set_sid(1);
+    task.set_pgid(1);
 
-        // Create and initialize file descriptor table
-        let fdtable = alloc::sync::Arc::new(FdTable::new());
-        (*task_ptr).set_fdtable(Some(fdtable));
+    // cgroup v2 (U1b): track PID 1 in the root cgroup so its (and its
+    // children's) membership and memory usage are visible from
+    // /sys/fs/cgroup from the first moment; systemd later moves itself
+    // into /init.scope by writing cgroup.procs.
+    crate::sched::cgroup::attach_init_to_root(task_ptr);
 
-        // Create and initialize signal handling structure
-        let signal_struct = alloc::sync::Arc::new(crate::signal::SignalStruct::new());
-        (*task_ptr).signal = Some(signal_struct);
+    // Create and initialize file descriptor table
+    let fdtable = alloc::sync::Arc::new(FdTable::new());
+    task.set_fdtable(Some(fdtable));
 
-        // Create and initialize filesystem info (cwd, root, umask)
-        let fs_struct = alloc::sync::Arc::new(crate::fs::FsStruct::new());
-        (*task_ptr).set_fs(Some(fs_struct));
+    // Create and initialize signal handling structure
+    let signal_struct = alloc::sync::Arc::new(crate::signal::SignalStruct::new());
+    task.signal = Some(signal_struct);
 
-        // Initialize standard file descriptors
-        // Note: FdTable has interior mutability, so &FdTable is sufficient
-        if let Some(fdtable) = (*task_ptr).try_fdtable() {
-            init_std_fds_for_task(fdtable);
-        } else {
-            return None;
-        }
+    // Create and initialize filesystem info (cwd, root, umask)
+    let fs_struct = alloc::sync::Arc::new(crate::fs::FsStruct::new());
+    task.set_fs(Some(fs_struct));
 
-        // Load ELF program into memory and set up user context
-        if let Err(e) = load_and_setup_elf(task_ptr, program_data, init_path, rootfs_first) {
-            crate::print_status(
-                "init",
-                &alloc::format!("{} ELF load failed", init_path),
-                false,
-            );
-            // Error detail (broken-boot diagnostic; not part of the
-            // normal boot table).
-            println!("init: ELF load failed err={:?} path={} len={} first8={:02x}{:02x}{:02x}{:02x}",
-                e, init_path, program_data.len(),
-                program_data.get(0).copied().unwrap_or(0),
-                program_data.get(1).copied().unwrap_or(0),
-                program_data.get(2).copied().unwrap_or(0),
-                program_data.get(3).copied().unwrap_or(0));
-            return None;
-        }
-
-        // R52: init stays TASK_NEW (from new_task_at) through hash-insert
-        // until the enqueue's class insert flips it to RUNNING — same
-        // discipline as fork/kthread. (The old explicit RUNNING write
-        // here re-opened the wakeable-half-built-task window.)
-
-        // Register init process in PID hash table (required for find_task_by_pid)
-        crate::process::pid_hash::pid_hash_insert(task_ptr);
-
-        // Add init process to run queue
-        // R52: check the insert. INIT_TASK_STORAGE is a static (not heap)
-        // and the pid is fixed — on refusal just fail boot; nothing to free.
-        if !sched::sched::enqueue_task(&mut *task_ptr) {
-            println!("init: enqueue refused for pid 1 (R52 tripwire)");
-            return None;
-        }
-
-        Some(task_ptr)
+    // Initialize standard file descriptors
+    // Note: FdTable has interior mutability, so &FdTable is sufficient
+    if let Some(fdtable) = task.try_fdtable() {
+        init_std_fds_for_task(fdtable);
+    } else {
+        return None;
     }
+
+    // Load ELF program into memory and set up user context
+    if let Err(e) = load_and_setup_elf(task, program_data, init_path, rootfs_first) {
+        crate::print_status(
+            "init",
+            &alloc::format!("{} ELF load failed", init_path),
+            false,
+        );
+        // Error detail (broken-boot diagnostic; not part of the
+        // normal boot table).
+        println!("init: ELF load failed err={:?} path={} len={} first8={:02x}{:02x}{:02x}{:02x}",
+            e, init_path, program_data.len(),
+            program_data.get(0).copied().unwrap_or(0),
+            program_data.get(1).copied().unwrap_or(0),
+            program_data.get(2).copied().unwrap_or(0),
+            program_data.get(3).copied().unwrap_or(0));
+        return None;
+    }
+
+    // R52: init stays TASK_NEW (from new_task_at) through hash-insert
+    // until the enqueue's class insert flips it to RUNNING — same
+    // discipline as fork/kthread. (The old explicit RUNNING write
+    // here re-opened the wakeable-half-built-task window.)
+
+    // Register init process in PID hash table (required for find_task_by_pid)
+    crate::process::pid_hash::pid_hash_insert(task_ptr);
+
+    // Add init process to run queue
+    // R52: check the insert. INIT_TASK_STORAGE is a static (not heap)
+    // and the pid is fixed — on refusal just fail boot; nothing to free.
+    if !sched::sched::enqueue_task(crate::boot_edges::init_task_mut()) {
+        println!("init: enqueue refused for pid 1 (R52 tripwire)");
+        return None;
+    }
+
+    Some(task_ptr)
 }
 
 /// Load the init ELF image and set up the user context for PID 1.
@@ -286,7 +292,7 @@ fn create_and_start_init_process(
 /// ret_from_exception with thread.sp at the task's pt_regs so the first
 /// __switch_to lands in user mode.
 fn load_and_setup_elf(
-    task_ptr: *mut Task,
+    task: &mut Task,
     program_data: &[u8],
     init_path: &str,
     rootfs_first: bool,
@@ -375,8 +381,7 @@ fn load_and_setup_elf(
     // do_execve_elf switches this hart's satp to the new (init) address
     // space; capture the kernel root so boot continues on the kernel page
     // table afterwards, exactly as before this call existed.
-    // SAFETY: reads the boot-time root PPN, no invariants to uphold.
-    let kernel_root_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
+    let kernel_root_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
 
     // Pinned vm_file identities for the PID-1 segment VMAs (vm_file
     // semantics — same as sys_execve): best-effort VFS opens; a None
@@ -386,13 +391,12 @@ fn load_and_setup_elf(
         .and_then(|p| core::str::from_utf8(p).ok())
         .and_then(crate::fs::vfs::open_file_arc_nofd);
 
-    // SAFETY: task_ptr points to the freshly built PID 1 task (static
-    // INIT_TASK_STORAGE) — one typed-borrow edge for the loader call; the
-    // task is not runnable yet and nothing else holds a borrow of it.
-    // do_execve_elf only needs it to carry a valid kernel stack + pt_regs,
-    // both allocated by Task::new_task_at.
+    // The task is the freshly built PID 1 (static storage, through the
+    // audited edge); it is not runnable yet and nothing else holds a
+    // borrow of it. do_execve_elf only needs it to carry a valid kernel
+    // stack + pt_regs, both allocated by Task::new_task_at.
     let result = crate::process::exec::do_execve_elf(
-        unsafe { &mut *task_ptr },
+        task,
         program_data,
         &argv,
         &envp,
@@ -414,48 +418,41 @@ fn load_and_setup_elf(
     }
 
     // Restore the kernel page table on this hart (do_execve_elf left the
-    // init mm active). ASID_KERNEL = 0.
-    // SAFETY: kernel_root_ppn is the boot page-table root; the switch
-    // only activates it on this CPU.
-    unsafe {
-        crate::mm::switch_address_space(kernel_root_ppn, 0);
-    }
+    // init mm active). ASID_KERNEL = 0. crate::mm::switch_address_space is
+    // the audited safe wrapper (INV-MM-10 lives in mm/unsafe.rs).
+    crate::mm::switch_address_space(kernel_root_ppn, 0);
 
     // First entry into user mode happens through ret_from_exception with
     // the frame do_execve_elf just wrote at the task's pt_regs.
-    // SAFETY: task_ptr is the init task; pt_regs() is the outermost frame
-    // on its kernel stack (allocated by Task::new_task_at).
-    unsafe {
-        let child_regs = (*task_ptr).pt_regs();
-        if child_regs.is_null() {
-            return Err(ElfError::OutOfMemory);
-        }
-        extern "C" {
-            /// riscv64 user-return trampoline; the x86_64 trap contract
-            /// exposes the same behavior as ret_from_fork.
-            #[cfg(feature = "riscv64")]
-            fn ret_from_exception();
-            #[cfg(feature = "x86_64")]
-            fn ret_from_fork();
-            /// aarch64 fork user-return trampoline (trap.S): schedule_tail
-            /// then the user-exit loop into the seeded pt_regs frame.
-            #[cfg(feature = "aarch64")]
-            fn ret_from_fork();
-        }
-        // Kernel is linked at KERNEL_LINK_ADDR, so function pointers are
-        // already virtual addresses.
-        #[cfg(feature = "riscv64")]
-        let entry = ret_from_exception as u64;
-        #[cfg(feature = "x86_64")]
-        let entry = ret_from_fork as u64;
-        // (aarch64 previously fell through with the ELF `entry` PARAMETER
-        // as the switch target — the first switch-in "returned" straight
-        // into the user image at EL1.)
-        #[cfg(feature = "aarch64")]
-        let entry = ret_from_fork as u64;
-        let thread = (*task_ptr).thread_mut();
-        crate::process::thread_set_entry(thread, entry, child_regs as u64);
+    let child_regs = task.pt_regs();
+    if child_regs.is_null() {
+        return Err(ElfError::OutOfMemory);
     }
+    extern "C" {
+        /// riscv64 user-return trampoline; the x86_64 trap contract
+        /// exposes the same behavior as ret_from_fork.
+        #[cfg(feature = "riscv64")]
+        fn ret_from_exception();
+        #[cfg(feature = "x86_64")]
+        fn ret_from_fork();
+        /// aarch64 fork user-return trampoline (trap.S): schedule_tail
+        /// then the user-exit loop into the seeded pt_regs frame.
+        #[cfg(feature = "aarch64")]
+        fn ret_from_fork();
+    }
+    // Kernel is linked at KERNEL_LINK_ADDR, so function pointers are
+    // already virtual addresses.
+    #[cfg(feature = "riscv64")]
+    let entry = ret_from_exception as u64;
+    #[cfg(feature = "x86_64")]
+    let entry = ret_from_fork as u64;
+    // (aarch64 previously fell through with the ELF `entry` PARAMETER
+    // as the switch target — the first switch-in "returned" straight
+    // into the user image at EL1.)
+    #[cfg(feature = "aarch64")]
+    let entry = ret_from_fork as u64;
+    let thread = task.thread_mut();
+    crate::process::thread_set_entry(thread, entry, child_regs as u64);
 
     Ok(())
 }

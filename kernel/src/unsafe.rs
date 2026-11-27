@@ -225,3 +225,88 @@ pub fn sbi_shutdown_ecall() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// INV-BOOT-STACKSWITCH-1: the x86_64 boot stack switch (lib.rs's one
+// unsafe construct — a context-entry primitive, the Round-D floor;
+// moved here by the root-file unsafe collection, 2026-11-27).
+// ---------------------------------------------------------------------------
+
+/// Switch to the heap-backed boot kernel stack and continue the boot.
+///
+/// INV-BOOT-STACKSWITCH-1: runs exactly once, on the BSP, from
+/// `rust_main` — before any other CPU or task exists, so nothing can
+/// observe the mid-switch `rsp`. The stack is the caller's leaked 4 MiB
+/// box (`core::mem::forget` right before the call) — machine lifetime,
+/// no lifetime to uphold. The continuation is
+/// `crate::boot_stack_continuation` (`-> !`), matching the `noreturn`
+/// asm option: control never comes back to this frame.
+#[cfg(feature = "x86_64")]
+pub fn x86_boot_stack_switch(top: usize) -> ! {
+    // SAFETY: INV-BOOT-STACKSWITCH-1 — one-shot BSP context entry onto
+    // the machine-lifetime stack; the continuation never returns.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {0}",
+            "jmp {1}",
+            in(reg) top,
+            sym crate::boot_stack_continuation,
+            options(noreturn)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INV-INIT-TASKSTORAGE-1: the boot init task's static storage (moved from
+// init.rs by the root-file unsafe collection, 2026-11-27). The ONE Task
+// that lives outside the kernel linear map — E8-REPAR names its address
+// to the pointer screen.
+// ---------------------------------------------------------------------------
+
+/// Static storage of the init (PID 1) task — `MaybeUninit` to avoid
+/// auto-initialization issues; built in place by
+/// `init::create_and_start_init_process` through [`init_task_mut`].
+pub static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<crate::process::task::Task> =
+    core::mem::MaybeUninit::uninit();
+
+/// Address of the boot init task's static storage (E8-REPAR:
+/// `Task::is_plausible_task_ptr` accepts exactly this address in
+/// addition to the linear-map window, so the pointer screen needs no
+/// unmapped image-range holes).
+///
+/// INV-INIT-TASKSTORAGE-1 (address arm): only the symbol's ADDRESS is
+/// read — the storage may be uninitialized at call time; nothing is
+/// loaded through the pointer.
+pub fn init_task_addr() -> usize {
+    // SAFETY: INV-INIT-TASKSTORAGE-1 (address arm) — address-of a
+    // static; no memory at it is touched.
+    unsafe { core::ptr::addr_of!(INIT_TASK_STORAGE) as usize }
+}
+
+/// The init task's storage as a raw pointer — the construction edge
+/// (`Task::new_task_at` builds PID 1 in place).
+///
+/// INV-INIT-TASKSTORAGE-1 (pointer arm): only the pointer is taken; the
+/// storage may be uninitialized until `new_task_at` runs on it.
+pub fn init_task_ptr() -> *mut crate::process::task::Task {
+    // SAFETY: INV-INIT-TASKSTORAGE-1 (pointer arm) — pointer-of a
+    // static; no memory is touched through it here.
+    unsafe { INIT_TASK_STORAGE.as_mut_ptr() }
+}
+
+/// The init task as a `&'static mut` — the single deref edge for the
+/// boot-time setup of PID 1 (parent/sid/pgid, fdtable, signal/fs
+/// structs, the execve loader borrow, the enqueue).
+///
+/// INV-INIT-TASKSTORAGE-1 (deref arm): called only on the single-thread
+/// early-boot path (`init::create_and_start_init_process`), AFTER
+/// `Task::new_task_at` has constructed the task in place and before it
+/// is enqueued — no other CPU or task exists yet, so the writes race
+/// nothing; every later reader reaches the task through the
+/// scheduler/pid-hash handles the enqueue publishes.
+#[allow(static_mut_refs)]
+pub fn init_task_mut() -> &'static mut crate::process::task::Task {
+    // SAFETY: INV-INIT-TASKSTORAGE-1 (deref arm) — post-construction,
+    // single-threaded early boot, pre-publication.
+    unsafe { INIT_TASK_STORAGE.assume_init_mut() }
+}
