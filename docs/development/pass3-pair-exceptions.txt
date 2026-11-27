@@ -751,3 +751,15 @@ x86_acpi_power_off$
 # the call. The service-crate disambiguator hash is build-dependent.
 rux::arch::x86_64::cpu::outw$
 process\[[0-9a-f]+\]::reboot::shutdown_cascade$
+
+# --- net shrink gate (p23-shrink-net, 2026-11-27): the allocation table's
+# MOVE-FREE pair. alloc_skb / kfree_skb moved verbatim from the framework's
+# net/hotpath.rs into the net service crate (src/buffer.rs, re-exported at
+# the crate root) — the pass2 strip normalizes only rux-headed paths, so the
+# core->crate head change pairs them as base missing / current extra. Sizes
+# identical both sides on every arch (33 / 38 bytes, x86 debug): the move
+# itself, recorded per the current exception mode.
+^rux::net::alloc_skb$
+^rux::net::kfree_skb$
+net\[[0-9a-f]+\]::buffer::alloc_skb$
+net\[[0-9a-f]+\]::buffer::kfree_skb$
