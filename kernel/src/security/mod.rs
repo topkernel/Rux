@@ -9,6 +9,12 @@
 //! - A minimal LSM (Linux Security Module) hook framework
 //! - The `capable()` and `has_capability()` public API
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub mod edges;
+
 pub mod capability;
 pub mod lsm;
 pub mod cap_lsm;
@@ -89,12 +95,11 @@ pub fn can_send_signal(target_cred: &crate::process::task::Cred) -> bool {
 /// Called during early boot to register the capability LSM.
 /// Must be called before any user processes are created.
 pub fn security_init() {
-    static mut INIT_DONE: bool = false;
-    unsafe {
-        if INIT_DONE {
-            return;
-        }
-        INIT_DONE = true;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static INIT_DONE: AtomicBool = AtomicBool::new(false);
+    // The init-once latch: swap so a concurrent/repeated init returns.
+    if INIT_DONE.swap(true, Ordering::AcqRel) {
+        return;
     }
 
     lsm::register_lsm(&cap_lsm::CapLsm);

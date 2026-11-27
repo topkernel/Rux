@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -82,7 +83,7 @@ impl MmioRegion {
         // SAFETY: INV-MMIO-1/2 — the address is inside the mapped
         // window and readable for the machine's lifetime; volatile so
         // the device access happens exactly once (INV-MMIO-3).
-        unsafe { core::ptr::read_volatile(addr) }
+        super::edges::volatile_read(addr)
     }
 
     /// Volatile u16 read (INV-MMIO-2/3).
@@ -90,7 +91,7 @@ impl MmioRegion {
     pub fn read_u16(&self, off: usize) -> u16 {
         let addr = self.check(off, 2, "read_u16") as *const u16;
         // SAFETY: INV-MMIO-1/2/3 — bounds-checked mapped window; volatile.
-        unsafe { core::ptr::read_volatile(addr) }
+        super::edges::volatile_read(addr)
     }
 
     /// Volatile u32 read (INV-MMIO-2/3).
@@ -101,7 +102,7 @@ impl MmioRegion {
         // MMIO regions are not required to be aligned-mod-4 by
         // hardware spec in all cases, but every window Rux maps is
         // naturally aligned; volatile per INV-MMIO-3.
-        unsafe { core::ptr::read_volatile(addr) }
+        super::edges::volatile_read(addr)
     }
 
     /// Volatile u64 read (INV-MMIO-2/3).
@@ -109,7 +110,7 @@ impl MmioRegion {
     pub fn read_u64(&self, off: usize) -> u64 {
         let addr = self.check(off, 8, "read_u64") as *const u64;
         // SAFETY: INV-MMIO-1/2/3 — as read_u32, width 8.
-        unsafe { core::ptr::read_volatile(addr) }
+        super::edges::volatile_read(addr)
     }
 
     /// Byte-composed u32 read for PACKED firmware-table fields (little
@@ -146,7 +147,7 @@ impl MmioRegion {
         let addr = self.check(off, 1, "write_u8") as *mut u8;
         // SAFETY: INV-MMIO-1/2/3 — bounds-checked mapped window;
         // volatile write reaches the device exactly once.
-        unsafe { core::ptr::write_volatile(addr, val) }
+        super::edges::volatile_write(addr, val)
     }
 
     /// Volatile u16 write (INV-MMIO-2/3).
@@ -154,7 +155,7 @@ impl MmioRegion {
     pub fn write_u16(&self, off: usize, val: u16) {
         let addr = self.check(off, 2, "write_u16") as *mut u16;
         // SAFETY: INV-MMIO-1/2/3 — as read_u16, write direction.
-        unsafe { core::ptr::write_volatile(addr, val) }
+        super::edges::volatile_write(addr, val)
     }
 
     /// Volatile u32 write (INV-MMIO-2/3).
@@ -162,7 +163,7 @@ impl MmioRegion {
     pub fn write_u32(&self, off: usize, val: u32) {
         let addr = self.check(off, 4, "write_u32") as *mut u32;
         // SAFETY: INV-MMIO-1/2/3 — as read_u32, write direction.
-        unsafe { core::ptr::write_volatile(addr, val) }
+        super::edges::volatile_write(addr, val)
     }
 
     /// Volatile u64 write (INV-MMIO-2/3).
@@ -170,7 +171,7 @@ impl MmioRegion {
     pub fn write_u64(&self, off: usize, val: u64) {
         let addr = self.check(off, 8, "write_u64") as *mut u64;
         // SAFETY: INV-MMIO-1/2/3 — as read_u64, write direction.
-        unsafe { core::ptr::write_volatile(addr, val) }
+        super::edges::volatile_write(addr, val)
     }
 
     /// Typed sub-window pointer (escape hatch for register-file

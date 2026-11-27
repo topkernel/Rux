@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -718,11 +719,11 @@ pub fn irq_threads_boot_spawn() -> usize {
 // ==================== NMI ====================
 
 /// Maximum number of NMI handler slots
-const NR_NMI: usize = 4;
+pub(super) const NR_NMI: usize = 4;
 
 /// NMI handler function type — no arguments, no return value.
 /// NMI handlers must be lock-free and non-blocking.
-type NmiHandler = fn();
+pub(super) type NmiHandler = fn();
 
 /// NMI handler slots (write-once at init, read-only during dispatch).
 /// Protected by NMI_LOCK during registration; no lock needed during dispatch.
@@ -770,10 +771,9 @@ pub fn handle_fasteoi_nmi() {
     for i in 0..NR_NMI {
         let word = NMI_HANDLERS[i].load(Ordering::Acquire);
         if word != 0 {
-            // SAFETY: the word was stored by request_nmi from a live
-            // NmiHandler fn pointer (round-trip; usize casts back are
-            // not primitive-castable, hence the transmute).
-            let handler: NmiHandler = unsafe { core::mem::transmute(word) };
+            // Transmute edge lives in the audited unsafe.rs
+            // (INV-IRQ-NMIHANDLER-1).
+            let handler = super::edges::nmi_handler_from_word(word);
             handler();
         }
     }

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -557,19 +558,16 @@ pub fn __do_softirq() -> bool {
     let tp_exit = crate::arch::cpu::get_thread_id() as usize;
     if tp_entry != tp_exit {
         // Forensics edge (SOFTIRQ-BRACKET-LEAK): raw reads of tasks that
-        // may already be gone — no typed handle can prove liveness here.
-        let a = tp_entry as *mut crate::process::task::Task;
-        let b = tp_exit as *mut crate::process::task::Task;
-        let (pa, pb) = unsafe {
-            ((*a).preempt_count(), (*b).preempt_count())
-        };
+        // may already be gone — the audited unsafe.rs carries the read
+        // (INV-IRQ-BRACKET-LEAK-1).
+        let (pid_a, pa, pid_b, pb) = super::edges::bracket_task_fields(tp_entry, tp_exit);
         use core::fmt::Write;
         let mut w = crate::dfx::backtrace::ConsoleWriter::new();
         let _ = write!(w,
             "SOFTIRQ-BRACKET-LEAK cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) first_pending={:#x}\n",
             cpu, tp_entry,
-            unsafe { (*a).pid() }, pa,
-            tp_exit, unsafe { (*b).pid() }, pb,
+            pid_a, pa,
+            tp_exit, pid_b, pb,
             first_pending);
     }
     crate::dfx::syscost::zone_softirq_exit(); // syscost probe

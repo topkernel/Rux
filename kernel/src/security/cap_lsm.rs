@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -27,10 +28,9 @@ impl LsmHooks for CapLsm {
     fn call(&self, hook: HookId, args: &mut HookArgs) -> LsmResult {
         match hook {
             HookId::Capable => {
-                if args.cred.is_null() {
+                let Some(cred) = super::edges::cred_ref(args) else {
                     return -errno::EPERM;
-                }
-                let cred = unsafe { &*args.cred };
+                };
                 if cred.cap_effective.has(args.cap) {
                     0
                 } else {
@@ -39,10 +39,9 @@ impl LsmHooks for CapLsm {
             }
             HookId::SignalSend => {
                 // CAP_KILL bypasses all signal permission checks.
-                if args.cred.is_null() {
+                let Some(cred) = super::edges::cred_ref(args) else {
                     return 0; // No opinion — let caller handle null
-                }
-                let cred = unsafe { &*args.cred };
+                };
                 if cred.cap_effective.has(CAP_KILL) {
                     0 // Allowed
                 } else {

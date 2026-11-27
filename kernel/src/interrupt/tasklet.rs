@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -21,9 +22,9 @@ use core::mem::offset_of;
 // ============================================================================
 
 /// Tasklet is scheduled (queued on a per-CPU list)
-const TASKLET_STATE_SCHED: u32 = 0;
+pub(super) const TASKLET_STATE_SCHED: u32 = 0;
 /// Tasklet is currently running
-const TASKLET_STATE_RUN: u32 = 1;
+pub(super) const TASKLET_STATE_RUN: u32 = 1;
 
 // ============================================================================
 // TaskletStruct
@@ -38,11 +39,11 @@ pub struct TaskletStruct {
     /// Intrusive list node for per-CPU queue linkage
     pub list: ListHead,
     /// State bitmask (TASKLET_STATE_SCHED, TASKLET_STATE_RUN)
-    state: AtomicU32,
+    pub(super) state: AtomicU32,
     /// Disable count. Tasklet runs only when count == 0.
     count: AtomicU32,
     /// The callback function
-    func: Option<fn(*mut TaskletStruct)>,
+    pub(super) func: Option<fn(*mut TaskletStruct)>,
 }
 
 impl TaskletStruct {
@@ -115,15 +116,15 @@ impl TaskletStruct {
 // ============================================================================
 
 /// Per-CPU tasklet list head for normal priority (TASKLET_SOFTIRQ).
-static mut TASKLET_VEC: [ListHead; MAX_CPUS] = [const { ListHead::new() }; MAX_CPUS];
+pub(super) static mut TASKLET_VEC: [ListHead; MAX_CPUS] = [const { ListHead::new() }; MAX_CPUS];
 
 /// Per-CPU tasklet list head for high priority (HI_SOFTIRQ).
-static mut TASKLET_HI_VEC: [ListHead; MAX_CPUS] = [const { ListHead::new() }; MAX_CPUS];
+pub(super) static mut TASKLET_HI_VEC: [ListHead; MAX_CPUS] = [const { ListHead::new() }; MAX_CPUS];
 
 /// Per-CPU spinlocks protecting tasklet list manipulation.
-static TASKLET_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
+pub(super) static TASKLET_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
 
-static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
+pub(super) static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
 
 // ============================================================================
 // Scheduling
@@ -132,22 +133,8 @@ static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) };
 /// Schedule a tasklet for execution.
 /// Adds to the per-CPU TASKLET_SOFTIRQ list and raises TASKLET_SOFTIRQ.
 pub fn tasklet_schedule(t: *mut TaskletStruct) {
-    // SAFETY: caller must pass a valid, live pointer to a TaskletStruct that
-    // remains valid for the duration of this call (typical: embedded in a
-    // driver-private structure allocated for the device lifetime).
-    unsafe {
-        let tasklet = &mut *t;
-        // Already scheduled? Skip.
-        if tasklet.state.fetch_or(
-            1u32 << TASKLET_STATE_SCHED, Ordering::AcqRel
-        ) & (1u32 << TASKLET_STATE_SCHED) != 0 {
-            return;
-        }
-
-        let cpu = crate::arch::cpu_id() as usize;
-        let _lock = TASKLET_LOCK[cpu].lock_irqsave();
-        tasklet.list.add_tail(&mut TASKLET_VEC[cpu] as *mut ListHead);
-    }
+    // Raw-pointer edge lives in the audited unsafe.rs (INV-IRQ-TASKLET-PTR-1).
+    super::edges::tasklet_schedule(t);
 
     crate::interrupt::softirq::raise_softirq_irqoff(
         crate::interrupt::softirq::SoftirqIndex::Tasklet as usize
@@ -157,19 +144,8 @@ pub fn tasklet_schedule(t: *mut TaskletStruct) {
 /// Schedule a high-priority tasklet.
 /// Adds to the per-CPU HI_SOFTIRQ list and raises HI_SOFTIRQ.
 pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
-    // SAFETY: caller must pass a valid, live pointer to a TaskletStruct.
-    unsafe {
-        let tasklet = &mut *t;
-        if tasklet.state.fetch_or(
-            1u32 << TASKLET_STATE_SCHED, Ordering::AcqRel
-        ) & (1u32 << TASKLET_STATE_SCHED) != 0 {
-            return;
-        }
-
-        let cpu = crate::arch::cpu_id() as usize;
-        let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
-        tasklet.list.add_tail(&mut TASKLET_HI_VEC[cpu] as *mut ListHead);
-    }
+    // Raw-pointer edge lives in the audited unsafe.rs (INV-IRQ-TASKLET-PTR-1).
+    super::edges::tasklet_hi_schedule(t);
 
     crate::interrupt::softirq::raise_softirq_irqoff(
         crate::interrupt::softirq::SoftirqIndex::Hi as usize
@@ -183,101 +159,17 @@ pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
 /// Kill a tasklet: ensure it is not scheduled and wait for it to finish.
 /// Used during driver teardown.
 pub fn tasklet_kill(t: *mut TaskletStruct) {
-    // SAFETY: caller must pass a valid pointer to a TaskletStruct that is not
-    // concurrently freed; used during driver teardown when the struct is still live.
-    unsafe {
-        let tasklet = &mut *t;
-        // Repeatedly clear SCHED and wait for RUN to clear
-        loop {
-            tasklet.state.fetch_and(
-                !(1u32 << TASKLET_STATE_SCHED), Ordering::AcqRel
-            );
-            if !tasklet.is_running() {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-    }
+    // Raw-pointer edge lives in the audited unsafe.rs (INV-IRQ-TASKLET-PTR-1).
+    super::edges::tasklet_kill(t);
 }
 
 // ============================================================================
 // Softirq action handlers
 // ============================================================================
 
-/// Splice the whole per-CPU list onto `dst` (caller holds the source's
-/// per-CPU lock with IRQs disabled — the single audited splice edge of
-/// the intrusive tasklet list).
-unsafe fn splice_all(dst: &mut ListHead, src: &mut ListHead) {
-    // SAFETY: per-CPU list is accessed only under its own lock with IRQs
-    // disabled, so no concurrent modification; nodes were placed by
-    // tasklet_schedule under the same lock.
-    unsafe {
-        if !src.is_empty() {
-            dst.next = src.next;
-            dst.prev = src.prev;
-            (*dst.next).prev = dst;
-            (*dst.prev).next = dst;
-            src.init();
-        }
-    }
-}
-
-/// Walk a privately-spliced tasklet list: CAS-clear SCHED/set RUN, run
-/// the enabled callbacks, clear RUN. The offset_of! calculation
-/// recovers the enclosing TaskletStruct pointer (the container_of
-/// edge — one audited walk, shared by both action handlers since
-/// round-5).
-unsafe fn drain_tasklet_list(local_head: &mut ListHead) {
-    // SAFETY: local_head was spliced from the per-CPU list under its
-    // lock; all list nodes are valid TaskletStruct::list entries, and
-    // we hold no references into the list that could alias the mutable
-    // derefs below.
-    unsafe {
-        let mut pos = local_head.next;
-        while pos != local_head as *mut ListHead {
-            let next = (*pos).next;
-            let tasklet = (pos as usize - offset_of!(TaskletStruct, list)) as *mut TaskletStruct;
-
-            // CAS (review batch 8): atomically clear SCHED and set RUN in
-            // one swap — the Linux tasklet_trylock() +
-            // test_and_clear_bit(SCHED) pair. This closes the double-link
-            // race of the old plain store: an interrupt re-scheduling the
-            // tasklet DURING func() sets SCHED (0->1) and links it once;
-            // re-linking here as well left the tasklet on the per-CPU
-            // list twice (double run + corruption on the second dequeue).
-            let old_state = (*tasklet).state.swap(
-                1u32 << TASKLET_STATE_RUN,
-                Ordering::AcqRel
-            );
-            if old_state & (1u32 << TASKLET_STATE_SCHED) == 0 {
-                // SCHED was cleared while queued (tasklet_kill): do not run.
-                (*tasklet).state.fetch_and(
-                    !(1u32 << TASKLET_STATE_RUN),
-                    Ordering::AcqRel,
-                );
-                pos = next;
-                continue;
-            }
-
-            // Run if enabled
-            if !(*tasklet).is_disabled() {
-                if let Some(func) = (*tasklet).func {
-                    func(tasklet);
-                }
-            }
-
-            // Clear RUN only. If the tasklet was re-scheduled during
-            // func(), THAT path (tasklet_schedule's fetch_or SCHED 0->1)
-            // already linked it — do NOT link again here.
-            (*tasklet).state.fetch_and(
-                !(1u32 << TASKLET_STATE_RUN),
-                Ordering::AcqRel
-            );
-
-            pos = next;
-        }
-    }
-}
+// splice_all / drain_tasklet_list (the intrusive splice and the
+// container_of walk) live in the audited unsafe.rs
+// (INV-IRQ-TASKLET-VEC-1 / INV-IRQ-TASKLET-DRAIN-1).
 
 /// TASKLET_SOFTIRQ action handler: detach the per-CPU list, then drain.
 fn tasklet_action(_vec: usize) {
@@ -288,13 +180,11 @@ fn tasklet_action(_vec: usize) {
     local_head.init();
     {
         let _lock = TASKLET_LOCK[cpu].lock_irqsave();
-        // SAFETY: splice edge — see splice_all.
-        unsafe { splice_all(&mut local_head, &mut TASKLET_VEC[cpu]) };
+        super::edges::splice_tasklet_vec(&mut local_head, cpu);
     }
 
     // 2. Process local list (no lock needed — local to this context)
-    // SAFETY: the shared walk edge.
-    unsafe { drain_tasklet_list(&mut local_head) };
+    super::edges::drain_tasklet_list(&mut local_head);
 }
 
 /// HI_SOFTIRQ action handler — identical path on the HI vector.
@@ -305,12 +195,10 @@ fn tasklet_hi_action(_vec: usize) {
     local_head.init();
     {
         let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
-        // SAFETY: splice edge — see splice_all.
-        unsafe { splice_all(&mut local_head, &mut TASKLET_HI_VEC[cpu]) };
+        super::edges::splice_tasklet_hi_vec(&mut local_head, cpu);
     }
 
-    // SAFETY: the shared walk edge.
-    unsafe { drain_tasklet_list(&mut local_head) };
+    super::edges::drain_tasklet_list(&mut local_head);
 }
 
 // ============================================================================
@@ -320,15 +208,9 @@ fn tasklet_hi_action(_vec: usize) {
 /// Initialize the tasklet subsystem.
 /// Registers tasklet_action and tasklet_hi_action as softirq handlers.
 pub fn init() {
-    // Init per-CPU list heads
-    for cpu in 0..MAX_CPUS {
-        // SAFETY: called once during subsystem init before any tasklet is
-        // scheduled; no concurrent access to these per-CPU list heads yet.
-        unsafe {
-            TASKLET_VEC[cpu].init();
-            TASKLET_HI_VEC[cpu].init();
-        }
-    }
+    // Init per-CPU list heads (edge in the audited unsafe.rs,
+    // INV-IRQ-TASKLET-VEC-1)
+    super::edges::tasklet_vecs_init();
 
     // Register softirq handlers
     crate::interrupt::softirq::open_softirq(

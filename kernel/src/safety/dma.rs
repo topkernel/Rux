@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -64,7 +65,7 @@ impl DmaBlock {
         let layout = core::alloc::Layout::from_size_align(len, align).ok()?;
         // SAFETY: INV-DMA-1 — non-zero size layout; the raw block is
         // adopted exclusively by this DmaBlock; null-checked below.
-        let raw = unsafe { alloc::alloc::alloc(layout) };
+        let raw = super::edges::alloc_layout(layout);
         Some(DmaBlock {
             ptr: NonNull::new(raw)?,
             len,
@@ -115,7 +116,7 @@ impl DmaBlock {
         // SAFETY: INV-DMA-2 — off+size bounds-checked above; off is
         // aligned; [off, end) is disjoint from all earlier carves
         // because the frontier only advances.
-        let base = unsafe { self.ptr.as_ptr().add(off) } as *mut T;
+        let base = super::edges::ptr_add_mut(self.ptr.as_ptr(), off) as *mut T;
         let ptr = NonNull::slice_from_raw_parts(NonNull::new(base)?, count);
         Some((DmaSlot { ptr, _tag: PhantomData }, off))
     }
@@ -139,7 +140,7 @@ impl DmaBlock {
         self.frontier = end;
         // SAFETY: INV-DMA-2 — bounds/alignment/disjointness proven
         // above (explicit align variant).
-        let base = unsafe { self.ptr.as_ptr().add(off) } as *mut T;
+        let base = super::edges::ptr_add_mut(self.ptr.as_ptr(), off) as *mut T;
         let ptr = NonNull::slice_from_raw_parts(NonNull::new(base)?, count);
         Some((DmaSlot { ptr, _tag: PhantomData }, off))
     }
@@ -201,7 +202,7 @@ impl DmaBlock {
         // SAFETY: INV-DMA-1/3 — live allocation, bounds-checked
         // offset, volatile because the device writes concurrently;
         // T is Copy so no partial-drop hazard.
-        unsafe { core::ptr::read_volatile(self.ptr.as_ptr().add(off) as *const T) }
+        super::edges::volatile_read_at(self.ptr.as_ptr() as *const T, off)
     }
 
     /// Bounds-checked volatile write (INV-DMA-3 mirror).
@@ -225,7 +226,7 @@ impl DmaBlock {
 
     fn write_volatile_at_inner<T: Copy>(&self, off: usize, val: T) {
         // SAFETY: as read_volatile_at, write direction.
-        unsafe { core::ptr::write_volatile(self.ptr.as_ptr().add(off) as *mut T, val) }
+        super::edges::volatile_write_at(self.ptr.as_ptr() as *mut T, off, val)
     }
 
     /// Declare the pkey-protected byte range (MPK phase 1) and tag its
@@ -264,7 +265,7 @@ impl DmaBlock {
     /// None when unguarded.
     pub fn pkey_target(&self) -> Option<*mut u64> {
         self.pkey_range
-            .map(|(lo, _)| unsafe { self.ptr.as_ptr().add(lo) } as *mut u64)
+            .map(|(lo, _)| super::edges::ptr_add_mut(self.ptr.as_ptr(), lo) as *mut u64)
     }
 }
 
@@ -272,7 +273,7 @@ impl Drop for DmaBlock {
     fn drop(&mut self) {
         // SAFETY: INV-DMA-1 — dealloc with the exact layout stored at
         // construction (never mutated).
-        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+        super::edges::dealloc(self.ptr.as_ptr(), self.layout)
     }
 }
 
@@ -313,7 +314,7 @@ impl<T> DmaSlot<T> {
     {
         // SAFETY: INV-DMA-2 — live, disjoint, correctly-typed range;
         // volatile for device concurrency; T: Copy.
-        unsafe { core::ptr::read_volatile(self.ptr.as_ptr()) }
+        super::edges::volatile_read(self.ptr.as_ptr() as *const T)
     }
 
     /// Volatile write of the whole slot value (INV-DMA-3 mirror).
@@ -323,7 +324,7 @@ impl<T> DmaSlot<T> {
     {
         // SAFETY: as read_volatile; the slot's range is owned by this
         // slot (INV-DMA-2), volatility is for the device reader.
-        unsafe { core::ptr::write_volatile(self.ptr.as_ptr(), val) }
+        super::edges::volatile_write(self.ptr.as_ptr() as *mut T, val)
     }
 }
 
@@ -333,7 +334,7 @@ impl<T: ?Sized> Deref for DmaSlot<T> {
     fn deref(&self) -> &T {
         // SAFETY: INV-DMA-2 — the slot's range is live for the owning
         // block's lifetime and disjoint from every other slot.
-        unsafe { self.ptr.as_ref() }
+        super::edges::nonnull_ref(self.ptr)
     }
 }
 
@@ -341,6 +342,6 @@ impl<T: ?Sized> DerefMut for DmaSlot<T> {
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: INV-DMA-2 — &mut self proves this slot's exclusive
         // access within its disjoint range.
-        unsafe { self.ptr.as_mut() }
+        super::edges::nonnull_mut(self.ptr)
     }
 }

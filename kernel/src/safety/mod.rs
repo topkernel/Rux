@@ -35,6 +35,12 @@
 //!    queue/DMA internals that still live on raw addresses; their docs
 //!    name the obligation that transfers to the caller.
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub(crate) mod edges;
+
 pub mod bytes;
 pub mod call;
 pub mod dma;
