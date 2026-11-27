@@ -200,22 +200,6 @@ pub fn enabled(switch: DfxSwitch) -> bool {
     SWITCHES[switch.index()].load(Ordering::Relaxed)
 }
 
-/// OH hunt-print master gate (110th): the always-on hunt probes that
-/// rode every perf boot — mtprobe / bindwalk / bindrec / sbxbind /
-/// devopen-probe / mntslow / appclone / the drm ioctl census — printed
-/// ~1.7k lines per boot at LOGLEVEL=4, and every line costs TWICE (the
-/// busy-poll UART emit charged to the printing task, plus hilogd's
-/// /dev/kmsg drain). They had only the `sprobe=0` silencer before, so
-/// the default was ON. This gate flips the default: armed ONLY when
-/// the unified-framework event `rux:ohhunt` is armed (`trace_event=`,
-/// `set_event`, or the retired `rux:ohhunt (token dfx=ohhunt)` boot token — see
-/// or the legacy `sprobe=1` opt-in. Hunt
-/// rigs that still want the prints add one of those tokens.
-pub fn oh_hunt_prints_on() -> bool {
-    crate::trace::EVENT_OHHUNT.armed()
-        || crate::cmdline::get_param("sprobe").map(|v| v == "1").unwrap_or(false)
-}
-
 /// The retired dfx= tokens — the dfx-migrate migration ledger.
 ///
 /// Rounds 4/4b/5 of the dfx-trace migration moved the switch families

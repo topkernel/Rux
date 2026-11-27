@@ -290,31 +290,6 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // (28th successor) BMS scan-leg probe: watched open attempt.
     bmsscan_watch_open(full_path, flags);
 
-    // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
-    // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
-    // RETIRED (probe-retire): the trace was unconditional (19 lines per
-    // ub2404 boot) — it now lives behind the existing OH hunt-print
-    // master gate (rux:ohhunt (retired dfx=ohhunt)), budget unchanged.
-    if crate::debug::switches::oh_hunt_prints_on() {
-        const O_PATH_X: u32 = 0x200000;
-        if (flags & O_PATH_X) != 0 {
-            static OPATH_TRACE_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let pid = crate::process::current_pid();
-            let n = if pid >= 300 {
-                OPATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-            } else {
-                OPATH_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
-            };
-            if n < 20 && pid >= 300 {
-                // HOTPATH-PRINT: O_PATH hunt; budget OPATH_TRACE_N<20, pid>=300 filter
-                crate::pr_info!(
-                    "o-path open: '{}' flags={:#x} pid={}",
-                    full_path, flags, pid
-                );
-            }
-        }
-    }
 
 
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
@@ -520,82 +495,6 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     };
     crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_TAIL_NS, pc_tail);
 
-    // sc33/sc34 hunt: the pivoted appspawn child dies at
-    // appspawn_common.c:350 'open dev_null error: 2'. The first 60-line
-    // budget was eaten by boot noise (param-service, cpuset/memcg
-    // walkers — all with the 3-segment SYSTEM sandbox root); gate to
-    // processes rooted in a 4+-segment APP sandbox root
-    // ('/mnt/sandbox/<uid>/<pkg>') so only appspawn children print.
-    // sc36: also resolve the path OURSELVES and print the inode — the
-    // walk trails were silent for the failing opens, so the ENOENT is
-    // post-lookup; name what the lookup found.
-    // sc109/sc112: these lines fire in the LAUNCHER's own context and
-    // drain to the busy-poll UART (~87us/byte charged as launcher
-    // stime). 110th: default flipped — the probe block (a second
-    // path_lookup + String formatting per /dev open, ~227 lines/boot)
-    // arms only via rux:ohhunt (retired dfx=ohhunt) (or legacy sprobe=1).
-    if full_path.starts_with("/dev/") && crate::debug::switches::oh_hunt_prints_on() {
-        let root = crate::sched::current()
-            .and_then(|t| t.fs_arc())
-            .map(|fs| fs.get_root())
-            .unwrap_or_default();
-        let root_str = core::str::from_utf8(&root).unwrap_or("?");
-        let deep_root = root_str
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .count() >= 4;
-        if deep_root {
-            let mut detail = alloc::string::String::new();
-            match crate::fs::vfs::path_lookup(&full_path, 0) {
-                Ok(vp) => {
-                    if let Some(i) = vp.inode.as_ref() {
-                        detail.push_str(&alloc::format!(
-                            "lookup OK ino={:#x} mode={:#o} fs_id={} ops={}",
-                            i.ino,
-                            i.mode.bits(),
-                            i.fs_id,
-                            i.ops.is_some()
-                        ));
-                    } else {
-                        detail.push_str("lookup OK but NO inode");
-                    }
-                }
-                Err(e) => {
-                    detail.push_str(&alloc::format!("lookup ERR {}", e));
-                }
-            }
-            // sc37 lesson: per-spawn probes x appspawn retry storms
-            // flooded the UART; 400 lines name every distinct gate.
-            static PROBE_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                crate::pr_debug!(
-                "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
-                    full_path,
-                    flags,
-                    root_str,
-                    detail,
-                    crate::process::current_pid()
-                );
-            }
-            if let Err(e) = &result {
-                static DEVOPEN_FAIL_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                let n = DEVOPEN_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if n < 200 {
-                    crate::pr_debug!(
-                "devopen-fail[{}] '{}' flags {:#x} -> errno {} root='{}' (pid {})",
-                        n,
-                        full_path,
-                        flags,
-                        -e,
-                        root_str,
-                        crate::process::current_pid()
-                    );
-                }
-            }
-        }
-    }
 
     // OH DRM bring-up (rs-egl): the composer HDI's DrmDevice::Create
     // (drm_device.cpp:90, passthrough-loaded into render_service) logs
@@ -1200,64 +1099,6 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
         }
     }
 
-    // OH DRM bring-up (rs-egl): the composer VDI's FindAndOpenKmsCard
-    // opendir()s /dev/dri then openat()s "card0" per readdir entry; a
-    // getdents that returns no entries (or errors) leaves the loop empty
-    // and the composer reports "can't open drm card device" with no drm
-    // ioctl ever issued. Name the /dev/dri getdents result directly.
-    // 110th: rides the ohhunt gate with the drm census.
-    if crate::debug::switches::oh_hunt_prints_on() {
-        let path = crate::sched::get_current_fdtable()
-            .and_then(|ft| ft.get_file(fd))
-            .and_then(|f| {
-                let p = f.path();
-                if p.is_empty() { None } else { Some(p) }
-            });
-        if let Some(p) = path {
-            if p.ends_with("dri") {
-                static DRIDENTS_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                let n = DRIDENTS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if n < 24 {
-                    match &result {
-                        Ok(b) => {
-                            // Entry dump (the composer's FindAndOpenKmsCard
-                            // strncmp()s d_name against "card" — if the
-                            // names/reclens are wrong the loop skips every
-                            // entry and "can't open drm card device" follows
-                            // with no openat ever issued; the raw bytes name
-                            // that directly).
-                            let mut txt = alloc::string::String::with_capacity(96);
-                            for &byte in buffer.iter().take((*b).min(96)) {
-                                if byte >= 0x20 && byte < 0x7f {
-                                    txt.push(byte as char);
-                                } else {
-                                    txt.push('.');
-                                }
-                            }
-                            // HOTPATH-PRINT: dri getdents census; oh_hunt_prints_on gate + DRIDENTS_N<24 + /dev/dri filter
-                            crate::pr_warn!(
-                                "dri-getdents[{}] '{}' -> {} bytes: {} (pid {})",
-                                n,
-                                p,
-                                b,
-                                txt,
-                                crate::process::current_pid()
-                            );
-                        }
-                        // HOTPATH-PRINT: dri getdents errno arm; same oh_hunt gate + DRIDENTS_N<24 budget
-                        Err(e) => crate::pr_warn!(
-                            "dri-getdents[{}] '{}' -> errno {} (pid {})",
-                            n,
-                            p,
-                            -e,
-                            crate::process::current_pid()
-                        ),
-                    }
-                }
-            }
-        }
-    }
 
     match result {
         Ok(bytes_read) => {
@@ -2193,8 +2034,7 @@ pub fn sys_umask(args: SyscallArgs) -> i64 {
 /// breakdown measured vfs_bind_mount at 40-80us — a 160x gap. This
 /// wrapper times the WHOLE syscall (string copies, target path_lookup,
 /// bind/clone, registry update) with RDTSC and prints one line per call
-/// over 2 ms so the missing time gets attributed. `sprobe=0` silences
-/// (the print lands on the busy-poll UART in the child's stime).
+/// over 2 ms so the missing time gets attributed.
 /// Per-phase wall-clock (TSC) accumulator for the sys_mount shell —
 /// mntslow attribution probe (sc116 follow-up, execution item 1).
 /// sc116 measured the whole syscall at 3.5-9.2 ms for every caller
@@ -2294,45 +2134,6 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     let t0 = crate::arch::cpu::read_counter();
     let mut ph = MntPhases::new();
     let r = sys_mount_inner(args, &mut ph);
-    // 110th: mntslow rides the ohhunt gate (was sprobe-default-on,
-    // ~120 lines in the early mount phase of every perf boot).
-    if crate::debug::switches::oh_hunt_prints_on() {
-        let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
-        // >2 ms at a ~2.5 GHz TSC. TSC_CYCLES_PER_MS would be nicer but
-        // the timer lane owns the calibration; 5M cycles is a floor that
-        // only real stalls cross (normal mounts are 40-100us).
-        if dt > 5_000_000 {
-            static N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                let comm = crate::sched::current()
-                    .map(|t| t.comm())
-                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
-                    .unwrap_or("")
-                    .trim_end_matches('\0');
-                // Phase breakdown in us (cyc/2500): names match the
-                // MntPhases index map above; unread phases stay 0 for
-                // early-return paths (EFAULT before capable, ...).
-                let p = ph.0;
-                // HOTPATH-PRINT: mntslow stall report; oh_hunt_prints_on gate + >2ms TSC filter + N budget (see above)
-                crate::pr_warn!(
-                    "mntslow: {} cyc (~{} us) comm='{}' -> {} | us: src={} cap={} tgt={} cwd={} fst={} lkp={} op={} reg={}",
-                    dt,
-                    dt / 2500,
-                    comm,
-                    r,
-                    p[0] / 2500,
-                    p[1] / 2500,
-                    p[2] / 2500,
-                    p[3] / 2500,
-                    p[4] / 2500,
-                    p[5] / 2500,
-                    p[6] / 2500,
-                    p[7] / 2500
-                );
-            }
-        }
-    }
     r
 }
 
@@ -2463,24 +2264,6 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             }
         }
         Err(e) => {
-            // lb-lane hunt (switch_root): OH's switch_root MS_MOVE loop got
-            // err=2 here with NO kernel mount-tap line (this early return
-            // sits before the tap), hiding which move failed and why. Ring
-            // every ENOENT-before-mount so the switch_root move map is
-            // complete on serial.
-            // RETIRED (probe-retire): the tap was unconditional and
-            // unbounded; it now lives behind the existing OH hunt-print
-            // master gate (rux:ohhunt (retired dfx=ohhunt)).
-            if args[3] & 8192 != 0 && crate::debug::switches::oh_hunt_prints_on() {
-                // HOTPATH-PRINT: mount precheck-fail trace; oh_hunt_prints_on gate + MS_MOVE-only filter
-                crate::pr_warn!(
-                    "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
-                    source,
-                    target,
-                    e,
-                    crate::process::current_pid()
-                );
-            }
             return e as i64;
         }
     };
@@ -2539,27 +2322,6 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         // fd-target/symlink canonicalization on the SOURCE side too
         // (same discipline as the target above).
         let source_abs = canonical_mount_path(&source_abs, &source_abs);
-        // lb-lane hunt (switch_root): every MS_MOVE and its result on
-        // serial — the OH switch_root loop's successes are LOGV-silent
-        // userspace-side, and this branch returns before the generic
-        // mount tap, so the move map is otherwise invisible.
-        // RETIRED (probe-retire): 21 lines per ub2404 boot; behind the
-        // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-        if crate::debug::switches::oh_hunt_prints_on() {
-            static MSMV_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if MSMV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                // HOTPATH-PRINT: MSMOVE trace; oh_hunt_prints_on gate + MSMV_N<60 budget
-                crate::pr_info!(
-                    "MSMOVE[{}] '{}' -> '{}' initns={} (pid {})",
-                    MSMV_N.load(core::sync::atomic::Ordering::Relaxed),
-                    source_abs,
-                    target,
-                    crate::process::ns::in_init_mnt_ns(),
-                    crate::process::current_pid()
-                );
-            }
-        }
         // Virtual switch_root: a namespace child MS_MOVEs its crafted
         // rootfs clone onto "/" (systemd 255's mount_switch_root after
         // building the clone under /run/systemd/mount-rootfs). Inside a
@@ -2612,26 +2374,6 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     if args[3] & MS_REMOUNT != 0 {
         let new_flags =
             crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
-        // Bring-up instrumentation (rate-limited, the mount-tap family):
-        // remounts flip live mounts — the generator-protection RO walk
-        // rides this path and aborts midway on any EINVAL row.
-        // RETIRED (probe-retire): 116 lines per ub2404 boot (systemd
-        // remounts / for ro, then every sandbox re-flag); behind the
-        // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-        if crate::debug::switches::oh_hunt_prints_on() {
-            static RMNT_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if RMNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                // HOTPATH-PRINT: remount trace; oh_hunt_prints_on gate + RMNT_N<120 budget
-                crate::pr_info!(
-                    "remount[{}] '{}' flags {:#x} (pid {})",
-                    RMNT_N.load(core::sync::atomic::Ordering::Relaxed),
-                    target,
-                    args[3],
-                    crate::process::current_pid()
-                );
-            }
-        }
         // REMOUNT THROUGH A MAGIC-LINK TARGET (rewritten_dentry set):
         // re-flag the mount at the RESOLVED dentry, not the mount a
         // global string walk finds under the canonical alias — see
@@ -2849,19 +2591,6 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
                         ret
                     );
                 }
-            } else if (n < 128 || always)
-                && crate::debug::switches::oh_hunt_prints_on()
-            {
-                // HOTPATH-PRINT: mount success trace; oh_hunt_prints_on gate + n<128 budget
-                crate::pr_info!(
-                    "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
-                    n,
-                    source,
-                    target,
-                    fs_type_str,
-                    args[3],
-                    ret
-                );
             }
             return ret as i64;
         }
@@ -4626,21 +4355,6 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         && !crate::fs::vfs::process_rooted()
         && cleaned.starts_with("/proc/")
     {
-        if cleaned.contains("cgroup")
-            && crate::process::current_pid() == 1
-            && crate::debug::switches::oh_hunt_prints_on()
-        {
-            // RETIRED (probe-retire): the 24.04 bring-up probe was
-            // unconditional (one line per pid-1 cgroup openat2); behind
-            // the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and
-            // budgeted.
-            static NOBLEDBG2_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if NOBLEDBG2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                // HOTPATH-PRINT: NOBLEDBG tap; budget NOBLEDBG2_N<64
-                crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
-            }
-        }
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
             // Mount tables regenerate on rewind (seq_file semantics) —
             // see mount_table_regen's doc for the systemd reader this
@@ -7048,26 +6762,6 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                 if readonly { "ro" } else { "rw" },
             );
             {
-                // Bring-up instrumentation (the mount-tap family): the
-                // new-API attaches are otherwise invisible on serial —
-                // systemd 255's namespace prep uses them exclusively.
-                // RETIRED (probe-retire): unconditional; behind the
-                // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-                if crate::debug::switches::oh_hunt_prints_on() {
-                    static MOVE_OK_N: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if MOVE_OK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                        // HOTPATH-PRINT: movemount trace; oh_hunt_prints_on gate + MOVE_OK_N<120 budget
-                        crate::pr_info!(
-                            "movemount[{}] '{}' -> '{}' flags {:#x} (pid {})",
-                            MOVE_OK_N.load(core::sync::atomic::Ordering::Relaxed),
-                            device,
-                            target,
-                            mnt.flags.lock().bits(),
-                            crate::process::current_pid()
-                        );
-                    }
-                }
             }
             // open_tree(AT_RECURSIVE) clones: materialize inside the
             // now-attached root (with the recorded source subtree root
@@ -7809,27 +7503,6 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
     let new_flags = fapi::mount_attr_apply(cur, attr_set, attr_clr);
     *mnt.flags.lock() = new_flags;
     {
-        // Bring-up instrumentation (rate-limited): flag flips on mounts
-        // are the Protect*/namespace knob — needed them visible.
-        // RETIRED (probe-retire): 71 lines per ub2404 boot (systemd
-        // resets the namespace flags on every mount); behind the existing
-        // OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-        if crate::debug::switches::oh_hunt_prints_on() {
-            static MSA_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if MSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-                // HOTPATH-PRINT: mount_setattr trace; oh_hunt_prints_on gate + MSA_N<80 budget
-                crate::pr_info!(
-                    "mount_setattr[{}] set={:#x} clr={:#x}: flags {:#x} -> {:#x} (pid {})",
-                    MSA_N.load(core::sync::atomic::Ordering::Relaxed),
-                    attr_set,
-                    attr_clr,
-                    cur.bits(),
-                    new_flags.bits(),
-                    crate::process::current_pid()
-                );
-            }
-        }
     }
     0
 }

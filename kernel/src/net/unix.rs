@@ -1394,21 +1394,6 @@ pub fn unix_recvmsg_user_ctl(
 
 /// bind(): register this socket under a name.
 pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
-    // UNIXBIND trace (noble-desktop dbus hunt) — retired: an
-    // unconditional per-bind print of every /run/ socket name (15 lines
-    // per ub2404 boot, unbounded on a busy /run). Behind the existing OH
-    // hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
-    if crate::debug::switches::oh_hunt_prints_on()
-        && addr.key.len() > 1
-        && !addr.key.starts_with("\0")
-        && addr.key.contains("/run/")
-    {
-        static UNIXBIND_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if UNIXBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-            crate::pr_warn!("UNIXBIND: {}", addr.key);
-        }
-    }
     if sock.bound_name.lock().is_some() || sock.reg_name.lock().is_some() {
         return Err(-22); // EINVAL — already bound
     }
@@ -1542,21 +1527,6 @@ pub fn unix_connect(
     addr: &UnixAddr,
     nonblock: bool,
 ) -> Result<(), i32> {
-    // UNIXCONNECT trace — retired: an unconditional per-connect print of
-    // every /run/ socket name (338 lines per ub2404 boot: journal,
-    // nscd, userdb). Behind the existing OH hunt-print master gate
-    // (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
-    if crate::debug::switches::oh_hunt_prints_on()
-        && addr.key.len() > 1
-        && !addr.key.starts_with(' ')
-        && addr.key.contains("/run/")
-    {
-        static UNIXCONNECT_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if UNIXCONNECT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-            crate::pr_warn!("UNIXCONNECT: {}", addr.key);
-        }
-    }
     if *sock.shut_wr.lock() {
         return Err(-32); // EPIPE
     }

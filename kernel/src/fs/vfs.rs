@@ -1249,85 +1249,6 @@ pub fn vfs_bind_mount(
     let src = match path_lookup(source, 0) {
         Ok(p) => p,
         Err(e) => {
-            // b20: sources that demonstrably exist at runtime (SetBundleQuota
-            // opened /data/app/el2/0/base/com.ohos.systemui one minute before
-            // the child's bind of the same path failed ENOENT) — name the
-            // deepest prefix that DOES resolve so the break is one glance.
-            // b22: also print the prefix's INODE — baked-image inodes are
-            // known (debugfs), so a mismatch proves the runtime shadowed or
-            // recreated the dir rather than the lookup being broken.
-            if e == -2 {
-                // sc160: the launcher crash-retry loop re-runs the whole
-                // sandbox bind set on every respawn — 4153 of these in
-                // sc159, each a printk under the UART irqsave lock and
-                // part of the IRQ-OFF storm that trips foundation's
-                // XCollie. First 300 carry the diagnosis; the rest are
-                // repeats of the same paths.
-                // 110th: the walk + print now ride the ohhunt gate
-                // (~229 lines on every perf boot, each costing UART
-                // emit + hilogd drain; the prefix probe walk itself
-                // allocates and re-lookups paths).
-                if !crate::debug::switches::oh_hunt_prints_on() {
-                    return Err(e);
-                }
-                static BINDWALK_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if BINDWALK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 300 {
-                    return Err(e);
-                }
-                let mut ok_until = String::from("/");
-                let mut ok_ino: u64 = 0;
-                let mut comps: Vec<&str> =
-                    source.split('/').filter(|s| !s.is_empty()).collect();
-                while !comps.is_empty() {
-                    let probe = format!("/{}", comps.join("/"));
-                    if let Ok(p) = path_lookup(&probe, 0) {
-                        if let Some(i) = p.inode.as_ref() {
-                            ok_ino = i.ino;
-                        }
-                        ok_until = probe;
-                        break;
-                    }
-                    comps.pop();
-                }
-                crate::pr_debug!(
-                "bindwalk: '{}' ENOENT, resolves until '{}' ino={}",
-                    source,
-                    ok_until,
-                    ok_ino
-                );
-                // datatap (el2/100 hunt): dump the kernel's cached children
-                // of the deepest resolved dir — with the baked-image inos
-                // known from debugfs, a divergence here separates "guest
-                // mutated the tree" (runtime inodes) from "dcache went
-                // stale/wrong" (baked inos but lookup still misses).
-                if crate::trace::EVENT_DATATAP.armed()
-                    && source.starts_with("/data/")
-                {
-                    if let Ok(p) = path_lookup(&ok_until, 0) {
-                        if let Some(ref d) = p.dentry {
-                            let kids: Vec<String> = d
-                                .children
-                                .lock()
-                                .iter()
-                                .map(|(n, c)| {
-                                    if c.is_negative() {
-                                        format!("{n}=NEG")
-                                    } else {
-                                        let ino = c.get_inode().map(|i| i.ino).unwrap_or(0);
-                                        format!("{n}={ino}")
-                                    }
-                                })
-                                .collect();
-                            crate::pr_warn!(
-                                "apptap dcache '{}': [{}]",
-                                ok_until,
-                                kids.join(" ")
-                            );
-                        }
-                    }
-                }
-            }
             return Err(e);
         }
     };
@@ -1351,28 +1272,6 @@ pub fn vfs_bind_mount(
     } else {
         mnt_flags
     };
-    // sc31 hunt: what did the sandbox's own mounts actually capture? The
-    // '/'-bind at the sandbox's /mnt decides what /mnt/sandbox means for
-    // every pivoted process — print the resolved source dentry's GLOBAL
-    // path so the captured tree is unambiguous. Rate-limited alongside
-    // bindrec (sc37: per-spawn prints x retry storms flooded the UART).
-    // 110th: rides the ohhunt gate with the rest of the mount hunt
-    // family (build_path walks the dentry chain per line).
-    if sbx_want(target) && crate::debug::switches::oh_hunt_prints_on() {
-        if let Some(ref sd) = src.dentry {
-            static SBXBIND_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if SBXBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                crate::pr_info!(
-                    "sbxbind '{}' -> '{}': src dentry global='{}' ino={:#x}",
-                    source,
-                    target,
-                    sd.build_path(),
-                    inode.ino
-                );
-            }
-        }
-    }
     let fresh_root = vfs_mount(target, inode.clone(), mnt_flags);
     #[cfg(feature = "x86_64")]
     let t2 = crate::arch::x86_64::cpu::read_counter();
@@ -1452,25 +1351,6 @@ pub fn vfs_bind_mount(
             // forever). The clone list is visible in the first 200.
             static BINDREC_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if BINDREC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                // 97th (hp97): pr_warn, not pr_info — the hunt rigs run
-                // LOGLEVEL=4 and these sandbox-clone records (the face-C
-                // spawn-path evidence: which child cloned which mounts)
-                // were dropped before the ring. Rate-capped at 200/boot;
-                // sprobe=0 silences the sibling mtprobe but not this —
-                // bindrec rides every boot by design (appclone forensics).
-                // 110th: "by design" reversed — ~90 lines on every perf
-                // boot, each costing UART emit + hilogd drain; rides the
-                // ohhunt gate with the rest of the mount hunt family.
-                if crate::debug::switches::oh_hunt_prints_on() {
-                    crate::pr_warn!(
-                        "bindrec: cloned '/{}' under '{}' (flags {:#x})",
-                        rel.join("/"),
-                        target,
-                        flags.bits()
-                    );
-                }
-            }
             bind_clone_attach(&fresh_root, &anc, &rel, &root, flags);
         }
         #[cfg(feature = "x86_64")]
@@ -1478,27 +1358,6 @@ pub fn vfs_bind_mount(
             let t4 = crate::arch::x86_64::cpu::read_counter();
             static MTPROBE_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            // sc108: the print itself was the launcher killer — UART TX
-            // is a busy THRE poll (115200 baud ≈ 87us/byte), so each
-            // ~150-byte line burns ~13ms of stime in the MOUNTING task's
-            // context; the post-exec launcher child mounts its sandbox
-            // and paid its whole 3s appspawn watchdog to this probe (the
-            // sc37 bindrec lesson, replayed). 110th: default flipped —
-            // arms only via rux:ohhunt (retired dfx=ohhunt) (or legacy sprobe=1).
-            if crate::debug::switches::oh_hunt_prints_on()
-                && MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
-            {
-                crate::pr_debug!(
-                "mtprobe: bind '{}' -> '{}': lookup+attach={}cyc clone-scan={}cyc clone-attach={}cyc nmounts={} nclones={}",
-                    source,
-                    target,
-                    t2 - t0,
-                    t3 - t2,
-                    t4 - t3,
-                    n_mounts,
-                    nclones
-                );
-            }
         }
     }
     Ok(())
@@ -2745,42 +2604,6 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     if normalized.as_ref() == "/storage/media" || normalized.as_ref() == "/mnt/sandbox" {
         static WALKPRB_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        // 110th: rides the ohhunt gate (the probe takes VFS_STATE +
-        // walks root children per hit).
-        if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6
-            && crate::debug::switches::oh_hunt_prints_on()
-        {
-            let (vfs_root_ptr, vfs_root_has_storage, vfs_root_has_mnt) = {
-                let st = VFS_STATE.lock();
-                let r = st.root_dentry.clone();
-                match r {
-                    Some(r) => (
-                        Arc::as_ptr(&r) as usize,
-                        r.lookup_child("storage")
-                            .map(|c| c.vfsmount.lock().is_some())
-                            .unwrap_or(false),
-                        r.lookup_child("mnt")
-                            .map(|c| c.vfsmount.lock().is_some())
-                            .unwrap_or(false),
-                    ),
-                    None => (0, false, false),
-                }
-            };
-            let task_root_ptr = crate::sched::current()
-                .and_then(|t| t.fs_arc())
-                .and_then(|fs| fs.root_dentry())
-                .map(|d| Arc::as_ptr(&d) as usize)
-                .unwrap_or(0);
-            crate::pr_warn!(
-                "WALKPROBE '{}' vfsroot={:#x} taskroot={:#x} procroot='{}' vfsroot-storage-mount={} vfsroot-mnt-mount={}",
-                normalized,
-                vfs_root_ptr,
-                task_root_ptr,
-                get_process_root(),
-                vfs_root_has_storage,
-                vfs_root_has_mnt
-            );
-        }
     }
 
     // Get VFS root dentry

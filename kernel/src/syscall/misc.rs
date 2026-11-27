@@ -2211,54 +2211,6 @@ fn epoll_chain_depth(
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
-    // uevent hunt (serial-getty chain): every epoll registration of a
-    // KOBJECT_UEVENT netlink socket — did udevd arm the socket-activation
-    // monitor fd at all, and as which fd number? Budgeted.
-    //
-    // RETIRED (probe-retire): unconditional (3 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) like the
-    // rest of the uevent-hunt family.
-    if crate::debug::switches::oh_hunt_prints_on() {
-        static UEC_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-            if let Some(ft) = crate::sched::get_current_fdtable() {
-                if let Some(f) = ft.get_file(args[2] as usize) {
-                    if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
-                        if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
-                            // events mask (ADD/MOD only — DEL passes none)
-                            let mut evs = 0u32;
-                            if (args[1] as i32) == 1 || (args[1] as i32) == 3 {
-                                let p = args[3] as *const u8;
-                                if !p.is_null()
-                                    && crate::arch::uaccess::access_ok(p as usize, 12)
-                                {
-                                    let mut b = [0u8; 12];
-                                    if crate::arch::uaccess_safe::copy_in(&mut b, p as usize)
-                                        == 0
-                                    {
-                                        evs = u32::from_le_bytes(
-                                            b[0..4].try_into().unwrap(),
-                                        );
-                                    }
-                                }
-                            }
-                            crate::pr_info!(
-                                "UEEPCTL[{}] pid={} op={} fd={} sock={:#x} qlen={} events={:#x}",
-                                UEC_N.load(core::sync::atomic::Ordering::Relaxed),
-                                crate::process::current_pid(),
-                                args[1] as i32,
-                                args[2] as i32,
-                                alloc::sync::Arc::as_ptr(&nl) as usize,
-                                nl.recv_queue_len(),
-                                evs
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
     // 120th input hunt: evdev-backed fds entering/leaving an epoll — the
     // datum that says whether the input framework's reader is armed.
     {

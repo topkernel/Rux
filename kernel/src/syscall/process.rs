@@ -242,233 +242,6 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         // field separates the parent's fork (SIGCHLD, no CLONE_VM) from
         // the child's engine thread creation (CLONE_VM|CLONE_THREAD).
         let is_spawn = comm == "appspawn";
-        // 110th: the whole census block (print + the binder-tracer child
-        // registration, which only feeds rux:bindertrace (retired dfx=bindertrace) print filters)
-        // rides the ohhunt gate — ~120 lines per perf boot; the
-        // fall-through below does the identical do_clone + parent-ns
-        // translation.
-        if (is_app || is_spawn) && crate::debug::switches::oh_hunt_prints_on() {
-            static N3: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                return match do_clone(clone_args) {
-                    Ok(pid) => {
-                        crate::pr_warn!(
-                            "appclone: comm='{}' flags={:#x} -> pid {}",
-                            comm,
-                            flags,
-                            pid
-                        );
-                        // sc140: let the binder tracer see transactions
-                        // targeting forked appspawn children.
-                        if flags & 0x00000100 == 0 && flags & 0x00010000 == 0 {
-                            crate::ipc::binder::register_app_child_pid(pid as u32);
-                        }
-                        // sc139 (Session Q): the WORKING reference — the
-                        // appspawn daemon's own filtered init ring, dumped
-                        // in the forking thread's context at a real fork
-                        // (no CLONE_VM). The daemon reaches pthread_create
-                        // and runs its whole loader cascade; APP-PARK shows
-                        // the parked child's ring. The diff of the two is
-                        // the divergence hunt. Budget 2 (first two forks).
-                        if flags & 0x00000100 == 0 {
-                            use core::fmt::Write;
-                            use core::sync::atomic::Ordering::Relaxed;
-                            static NPAR: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            if NPAR.fetch_add(1, Relaxed) < 2 {
-                                if let Some(t) = crate::sched::current() {
-                                    {
-                                        const RL: usize =
-                                            crate::process::task::INIT_CALLS_LEN;
-                                        let cur = t.init_calls_cur.load(Relaxed);
-                                        let mut s2 = alloc::string::String::new();
-                                        let _ = write!(
-                                            s2,
-                                            "APP-PAR: tgid {} comm='{}' init:",
-                                            t.tgid(),
-                                            core::str::from_utf8(t.comm())
-                                                .unwrap_or("")
-                                                .trim_end_matches('\0')
-                                        );
-                                        for k in 0..RL {
-                                            let i = (cur + RL - k) % RL;
-                                            let v = t.init_calls[i].load(Relaxed);
-                                            if v != 0 {
-                                                let _ = write!(s2, " {}", v);
-                                            }
-                                        }
-                                        crate::pr_warn!("{}", s2);
-                                        let mut s3 = alloc::string::String::new();
-                                        let _ = write!(s3, "APP-PAR: initA:");
-                                        for k in 0..RL {
-                                            let i = (cur + RL - k) % RL;
-                                            let v = t.init_calls[i].load(Relaxed);
-                                            if v != 0 {
-                                                let a0 = t.init_a0[i].load(Relaxed);
-                                                let _ = write!(s3, " {}@{:#x}", v, a0);
-                                            }
-                                        }
-                                        crate::pr_warn!("{}", s3);
-                                    }
-                                }
-                            }
-                        }
-                        // sc135 (Session Q): a forked appspawn child that
-                        // CREATES a thread is the WORKING shape (sc125:
-                        // tgid 1146 -> OS_IPC_0 + OS_DfxWatchdog, alive)
-                        // while its siblings park single-threaded before
-                        // their first pthread_create. Dump the CREATING
-                        // thread's full init ring (all-calls + fails, same
-                        // format as APP-PARK) so the two sequences can be
-                        // diffed — the divergence point is the abort.
-                        // Parent's own batches excluded via APPSPAWN_TGID.
-                        if flags & 0x00010000 != 0 /* CLONE_THREAD */
-                            && APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) != 0
-                        {
-                            if let Some(t) = crate::sched::current() {
-                                // t is the current (forking) task —
-                                // current() hands out &mut Task directly.
-                                {
-                                    let spawn_tgid = APPSPAWN_TGID
-                                        .load(core::sync::atomic::Ordering::Relaxed);
-                                    if t.tgid() as u32 != spawn_tgid {
-                                        static NT: core::sync::atomic::AtomicUsize =
-                                            core::sync::atomic::AtomicUsize::new(0);
-                                        if NT.fetch_add(
-                                            1,
-                                            core::sync::atomic::Ordering::Relaxed,
-                                        ) < 6
-                                        {
-                                            use core::fmt::Write;
-                                            const RL: usize =
-                                                crate::process::task::LAST_CALLS_LEN;
-                                            let cur = t
-                                                .last_calls_cur
-                                                .load(core::sync::atomic::Ordering::Relaxed);
-                                            let mut s2 = alloc::string::String::new();
-                                            let _ = write!(
-                                                s2,
-                                                "APP-THR: tgid {} comm='{}' leader='{}' calls:",
-                                                t.tgid(),
-                                                core::str::from_utf8(t.comm())
-                                                    .unwrap_or("")
-                                                    .trim_end_matches('\0'),
-                                                // The forking task's
-                                                // leader is live
-                                                // (INV-PROC-BORROW-1).
-                                                core::str::from_utf8(
-                                                    crate::process::edges::borrow_task(
-                                                        t.group_leader_ptr()
-                                                    )
-                                                    .comm()
-                                                )
-                                                .unwrap_or("")
-                                                .trim_end_matches('\0')
-                                            );
-                                            for k in 0..RL {
-                                                let i = (cur + RL - k) % RL; // newest first
-                                                let v = t.last_calls[i]
-                                                    .load(core::sync::atomic::Ordering::Relaxed);
-                                                if v != 0 {
-                                                    let _ = write!(s2, " {}", v);
-                                                }
-                                            }
-                                            crate::pr_warn!("{}", s2);
-                                            let cur8 = t
-                                                .last_fails_cur
-                                                .load(core::sync::atomic::Ordering::Relaxed);
-                                            let mut s = alloc::string::String::new();
-                                            let _ = write!(s, "APP-THR: tgid {} fails:", t.tgid());
-                                            for k in 0..8 {
-                                                let i = (cur8 + 8 - 1 - k) % 8;
-                                                let v = t.last_fails[i]
-                                                    .load(core::sync::atomic::Ordering::Relaxed);
-                                                if v != 0 {
-                                                    let a0 = t.last_fails_a0[i]
-                                                        .load(core::sync::atomic::Ordering::Relaxed);
-                                                    let a1 = t.last_fails_a1[i]
-                                                        .load(core::sync::atomic::Ordering::Relaxed);
-                                                    let _ = write!(
-                                                        s,
-                                                        " nr{}=-{} a0={:#x} a1={:#x}",
-                                                        v & 0xffff,
-                                                        v >> 16,
-                                                        a0,
-                                                        a1
-                                                    );
-                                                }
-                                            }
-                                            crate::pr_warn!("{}", s);
-                                            // sc138 (Session Q): the FILTERED
-                                            // init ring for the WORKING side —
-                                            // this creator reached
-                                            // pthread_create; APP-PARK dumps
-                                            // the parked side. The diff
-                                            // between the two sequences is
-                                            // the abort point.
-                                            {
-                                                use core::sync::atomic::Ordering::Relaxed;
-                                                const RL: usize =
-                                                    crate::process::task::INIT_CALLS_LEN;
-                                                let icur = t
-                                                    .init_calls_cur
-                                                    .load(Relaxed);
-                                                let mut s4 = alloc::string::String::new();
-                                                let _ = write!(
-                                                    s4,
-                                                    "APP-THR: tgid {} init:",
-                                                    t.tgid()
-                                                );
-                                                for k in 0..RL {
-                                                    let i = (icur + RL - k) % RL;
-                                                    let v = t.init_calls[i]
-                                                        .load(Relaxed);
-                                                    if v != 0 {
-                                                        let _ = write!(s4, " {}", v);
-                                                    }
-                                                }
-                                                crate::pr_warn!("{}", s4);
-                                                let mut s5 = alloc::string::String::new();
-                                                let _ = write!(
-                                                    s5,
-                                                    "APP-THR: tgid {} initA:",
-                                                    t.tgid()
-                                                );
-                                                for k in 0..32.min(RL) {
-                                                    let i = (icur + RL - k) % RL;
-                                                    let v = t.init_calls[i]
-                                                        .load(Relaxed);
-                                                    if v != 0 {
-                                                        let a0 = t.init_a0[i]
-                                                            .load(Relaxed);
-                                                        let _ =
-                                                            write!(s5, " {}@{:#x}", v, a0);
-                                                    }
-                                                }
-                                                crate::pr_warn!("{}", s5);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Parent-namespace view, same as the main return.
-                        let parent_ns = crate::sched::current().and_then(|t| t.ns_pid.clone());
-                        crate::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
-                    }
-                    Err(e) => {
-                        crate::pr_warn!(
-                            "appclone: comm='{}' flags={:#x} -> errno {}",
-                            comm,
-                            flags,
-                            -(e as i32)
-                        );
-                        e as i64
-                    }
-                };
-            }
-        }
     }
 
     // fork returns the child's pid in the PARENT's pid namespace (a
@@ -1361,40 +1134,6 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     } else {
         0
     };
-    // uevent hunt (serial-getty chain): any exec carrying a
-    // KOBJECT_UEVENT netlink fd — the socket-activation shape (udevd
-    // inherits pid1's bound monitor). One line per such exec, with each
-    // fd's CLOEXEC state (LISTEN_FDS fds must pass with CLOEXEC CLEAR).
-    //
-    // RETIRED (probe-retire): unconditional (26 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::debug::switches::oh_hunt_prints_on() {
-        static UEEX_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if UEEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-            if let Some(ft) = crate::sched::get_current_fdtable() {
-                let mut hits: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
-                for fd in 0..16usize {
-                    if let Some(f) = ft.get_file(fd) {
-                        if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
-                            if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
-                                hits.push((fd, ft.get_fd_cloexec(fd)));
-                            }
-                        }
-                    }
-                }
-                if !hits.is_empty() {
-                    crate::pr_info!(
-                        "UEEXEC[{}] pid={} path='{}' uevent-fds={:?}",
-                        UEEX_N.load(core::sync::atomic::Ordering::Relaxed),
-                        crate::process::current_pid(),
-                        pathname_str,
-                        hits
-                    );
-                }
-            }
-        }
-    }
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
     if fp_t_exec != 0 {
         crate::debug::forkprof::add(crate::debug::forkprof::P_EXEC_TOTAL, fp_t_exec);
@@ -5457,23 +5196,6 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         Ok(vpath) => vpath.dentry.clone(),
         Err(_) => None,
     };
-    // sc29 hunt: the recorded root STRING is the user argument, but the
-    // resolved dentry may live at a different GLOBAL path (a chroot prefix
-    // like /usr can be in effect at pivot time) — every later prefixed
-    // lookup walks the string against the global tree. Print both.
-    //
-    // RETIRED (probe-retire): the hunt print was unconditional (22 lines
-    // per ub2404 boot); behind the existing OH hunt-print master gate
-    // (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::debug::switches::oh_hunt_prints_on() {
-        if let Some(rd) = root_dentry.as_ref() {
-            crate::pr_info!(
-                "pivot_root: arg='{}' resolved dentry global='{}'",
-                new_root,
-                rd.build_path()
-            );
-        }
-    }
     if let Some(fs) = current.fs_arc() {
         fs.set_root_with_dentry(new_root.as_bytes(), root_dentry.clone());
         // The root now comes from a pivot: setns(CLONE_NEWNS) into a
@@ -5558,13 +5280,6 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         *ns.root.lock() = root_dentry.or_else(crate::fs::vfs::get_vfs_root);
     }
 
-    // RETIRED (probe-retire): the pivot_root success trace was
-    // unconditional (22 lines per ub2404 boot across the 11 pivots
-    // systemd performs); behind the existing OH hunt-print master gate
-    // (rux:ohhunt (retired dfx=ohhunt)).
-    if crate::debug::switches::oh_hunt_prints_on() {
-        crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
-    }
     0
 }
 
@@ -6598,14 +6313,6 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             || comm.contains("systemui")
             || comm.contains("dataability");
         let is_spawn = comm == "appspawn";
-        // 110th: rides the ohhunt gate with the sys_clone census above.
-        if (is_app || is_spawn) && crate::debug::switches::oh_hunt_prints_on() {
-            static N4: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                crate::pr_warn!("appclone3: comm='{}' flags={:#x}", comm, flags);
-            }
-        }
     }
 
     match do_clone(clone_args) {

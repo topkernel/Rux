@@ -875,12 +875,6 @@ static SEQ_SEEN_REQS: [AtomicU32; 16] = [
 static SEQ_SEEN_N: AtomicU32 = AtomicU32::new(0);
 
 fn trace_seq(request: u32, ret: i64) {
-    // 110th: rides the ohhunt gate — the full-sequence handshake trace
-    // printed the first 128 drm ioctls (~123 lines pre-launcher) of
-    // every perf boot.
-    if !crate::debug::switches::oh_hunt_prints_on() {
-        return;
-    }
     let pid = crate::process::current_pid();
     let n = SEQ_N.fetch_add(1, Ordering::Relaxed);
     if n < 128 {
@@ -920,13 +914,6 @@ const T_VBLANK: usize = 6; // WAIT_VBLANK
 const T_UNHANDLED: usize = 7; // ENOTTY answers
 
 fn trace_ioctl(request: u32, ret: i64) {
-    // 110th: the whole census (VERSION probes, first-ioctl lines, the
-    // every-100th atomic/dumb milestones — ~130 lines per perf boot in
-    // the render window) rides the ohhunt gate like the other drm hunt
-    // taps; the counters only feed these prints.
-    if !crate::debug::switches::oh_hunt_prints_on() {
-        return;
-    }
     let (slot, name) = match request {
         DRM_IOCTL_VERSION => {
             // VERSION is every DRM client's first ioctl — an effective
@@ -1960,18 +1947,6 @@ fn add_fb_common(arg: usize, size: usize, handle: u32, width: u32, height: u32, 
     // 110th: rides the ohhunt gate (~60 lines per perf boot).
     static FB_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let fn_ = FB_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    if fn_ < 60 && crate::debug::switches::oh_hunt_prints_on() {
-        crate::pr_warn!(
-            "drm: addfb#{} fb={} gem={} {}x{} pitch={} fourcc={:#x}",
-            fn_,
-            fb_id,
-            handle,
-            width,
-            height,
-            pitch,
-            fourcc
-        );
-    }
 
     let mut out = [0u8; 104];
     wru32(&mut out, 0, fb_id);
@@ -2020,67 +1995,6 @@ fn present_fb(fb_id: u32) -> i64 {
     // shows up there even when the background is opaque black.
     static FLIP_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let ft = FLIP_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    // 110th: rides the ohhunt gate — the probe itself (1M+ volatile
-    // reads ~ a few ms) ran on the composer's flip path of every perf
-    // boot, print on top (~55 lines).
-    if (ft < 40 || ft % 10 == 0) && crate::debug::switches::oh_hunt_prints_on() {
-        let mut nz: usize = 0;
-        let mut paint: usize = 0;
-        let mut samples = [0u32; 4];
-        // SAFETY: gem.kva..gem.kva+size is the object's own backing store;
-        // word-aligned reads stay inside the allocation (sample offsets are
-        // clamped to words — the fixed 720-wide sample geometry only fits
-        // full-size frame GEMs).
-        {
-            let base = gem.kva as *const u32;
-            let words = gem.size / 4;
-            for i in 0..words {
-                let v = crate::drivers::edges::volatile_read_u32_at(base, i);
-                if v != 0 {
-                    nz += 1;
-                }
-            }
-            let row_words = (pitch / 4) as usize;
-            let vis_words = width as usize;
-            for row in 0..height as usize {
-                let rowp = crate::drivers::edges::u32_offset(base, row * row_words);
-                for col in (0..vis_words).step_by(2) {
-                    let v = crate::drivers::edges::volatile_read_u32_at(rowp, col);
-                    if v != 0 && v != 0xff00_0000 {
-                        paint += 1;
-                    }
-                }
-            }
-            let mid_row = (height as usize / 2) * row_words;
-            let last_row = (height as usize - 1).saturating_mul(row_words);
-            let s = |off: usize| -> u32 {
-                if off < words {
-                    crate::drivers::edges::volatile_read_u32_at(base, off)
-                } else {
-                    0
-                }
-            };
-            samples[0] = s(720 / 4);
-            samples[1] = s(row_words + 720 / 4);
-            samples[2] = s(mid_row + (width as usize / 2));
-            samples[3] = s(last_row + 720 / 4);
-        }
-        crate::pr_warn!(
-            "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
-            ft,
-            fb_id,
-            gem.id,
-            width,
-            height,
-            pitch,
-            vfmt,
-            nz,
-            gem.size / 4,
-            paint,
-            samples[0],
-            samples[2]
-        );
-    }
 
     // (The scanout-binding oracle that used to live here painted a banded
     // checkerboard into the flipped GEM through kva before the host
@@ -2243,8 +2157,9 @@ fn mode_atomic(arg: usize) -> i64 {
     // binding would show up. First 60 commits in full, then 1-in-25.
     static ATOM_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let at = ATOM_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    // 110th: rides the ohhunt gate (~65 lines per perf boot).
-    let trace_on = (at < 60 || at % 25 == 0) && crate::debug::switches::oh_hunt_prints_on();
+    // 110th (probe-retire): the ohhunt-gated bring-up trace was deleted
+    // with the OH hunt-print family; the property walk remains.
+    let trace_on = false;
     let mut trace = if trace_on {
         alloc::string::String::with_capacity(128)
     } else {
@@ -2427,10 +2342,11 @@ pub fn gem_mmap_resolve(
 ) -> Option<(u64, usize)> {
     // Bring-up trace (compose-content): who maps which GEM — RS's
     // llvmpipe must map the SAME objects the composer flips.
-    // 110th: rides the ohhunt gate (~25 lines per perf boot).
+    // 110th (probe-retire): the ohhunt-gated bring-up trace was deleted
+    // with the OH hunt-print family.
     static MMAP_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let mt = MMAP_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    let trace = mt < 30 && crate::debug::switches::oh_hunt_prints_on();
+    let trace = false;
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
         let n = len.min(gem.size);

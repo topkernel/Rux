@@ -1273,22 +1273,6 @@ pub fn mount_table_regen(path: &str) -> Option<fn() -> Vec<u8>> {
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     use crate::process::current_pid;
-    // 24.04 bring-up hunt probe (NOBLEDBG): "which /proc reads does pid 1
-    // make?" — printed ~1.1k lines on a ub2404 boot (every cgroup/
-    // self//mountinfo read systemd does), flooding the serial console.
-    // Retired: the probe lives behind the existing OH hunt-print master
-    // gate (rux:ohhunt (retired dfx=ohhunt)) and is budgeted, so an ordinary boot is silent
-    // while a hunt can still arm it.
-    if crate::debug::switches::oh_hunt_prints_on()
-        && (path.contains("cgroup") || path.contains("self/") || path.contains("mountinfo"))
-        && current_pid() == 1
-    {
-        static NOBLEDBG_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if NOBLEDBG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
-            crate::pr_warn!("NOBLEDBG free read_file({}) called", path);
-        }
-    }
 
     // (perf-syscall lane) prefix gate before the components Vec — this
     // runs on EVERY non-O_DIRECTORY openat (sys_openat's procfs

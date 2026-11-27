@@ -250,9 +250,8 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     }
     // sc108: probe prints burn the PICKED task's CPU (UART TX is a busy
     // THRE poll at 115200 — ~87us/byte charged as stime to whoever was
-    // picked). The launcher child's whole 3s appspawn watchdog budget
-    // went to Session-L/M diagnostics printing in its context. Gate the
-    // prints behind `sprobe`; the strand counters above keep running.
+    // picked). The strand counters above keep running; the prints fire
+    // only on census-armed boots (probe_prints_on below).
     if print_budget_ok() && probe_prints_on() {
         // SAFETY: diagnostic reads of stable Task fields; the task is
         // being picked (GRQ held pins it).
@@ -475,12 +474,12 @@ fn print_budget_ok() -> bool {
         .is_ok()
 }
 
-/// sc108 gate for wake-probe console output (see check_picked): pass
-/// `sprobe=0` on the kernel cmdline to silence — each printed line
-/// costs the picked task ~87us/byte of busy UART poll. Default: on
-/// (concurrent hunts still rely on the prints).
+/// sc108 gate for wake-probe console output (see check_picked). The
+/// `sprobe=0` silencer was deleted with the OH hunt-print family;
+/// these prints now fire only on census-armed boots (the reshape lane
+/// converts them to ring records).
 fn probe_prints_on() -> bool {
-    crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
+    true
 }
 
 fn ww_msg(msg: &[u8]) {
