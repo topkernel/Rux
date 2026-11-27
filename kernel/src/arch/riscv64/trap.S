@@ -331,25 +331,19 @@ trap_entry:
     // the silent-hart-wedge shape. Repair to a fresh frame at the task's
     // own stack top BEFORE any push; the wild-sp context then dies at its
     // next stack touch with a clean, attributable frame. Clobbers
-    // t0/t1/a0-a3 on the repair path only (interrupted values for those
+    // t0/t1 on the repair path only (interrupted values for those
     // registers are lost — the context is already garbage). The PT_SP
     // recorded below then names the REPAIRED sp, so the unwind cannot
     // re-enter the wild pointer.
     bltz sp, 120f
     li   t0, TASK_STRUCT_THRESHOLD
     bltu tp, t0, 120f            // early boot (tp = hartid): no repair
-    mv   a4, sp                  // stash the wild sp for the report
     li   t0, {task_kstack_bottom}
     add  t0, tp, t0
     ld   t0, 0(t0)
     beqz t0, 120f
     li   t1, {kernel_stack_size}
     add  sp, t0, t1              // sp = kernel stack top (push below)
-    li   a0, 5
-    mv   a1, a4
-    mv   a2, tp
-    csrr a3, sepc
-    call r84_ksp_trap
 120:
     // Allocate PtRegs on the current stack and save ALL registers first.
     addi sp, sp, -PT_SIZE
@@ -547,17 +541,12 @@ trap_entry:
     // wild context dies at its next stack touch instead. t0/t1 clobber:
     // acceptable on this death path (user t1/t2 lose their stash).
     bltz sp, 110f
-    li   a0, 6
-    mv   a1, sp
-    mv   a2, tp
-    csrr a3, sepc
     li   t0, {task_kstack_bottom}
     add  t0, tp, t0
     ld   t0, 0(t0)
     beqz t0, 110f               // no stack record: keep old behavior
     li   t1, {kernel_stack_size}
     add  sp, t0, t1
-    call r84_ksp_trap
 110:
 
 .Lfrom_user_frame:
@@ -740,13 +729,7 @@ trap_exit:
     // the live sp is garbage: anchor ksp at the task's OWN kernel-stack
     // top instead (the next trap frames fresh at top-PT_SIZE) and let the
     // wild-sp context die at its next stack touch instead of smearing.
-    // R84b report stays: one-shot per site, names the interrupted sepc.
     bltz t0, 100f
-    li   a0, 1
-    mv   a1, t0
-    mv   a2, tp
-    csrr a3, sepc
-    call r84_ksp_trap
     li   t1, {task_kstack_bottom}
     add  t1, tp, t1
     ld   t0, 0(t1)
@@ -844,13 +827,8 @@ trap_exit:
     // R85 (ksp reload gate): never load a user-half ksp into sp — the
     // reload would point this hart at an unmapped frame and fault-
     // cascade. Anchor at the task's own stack top (residue frame; the
-    // r74d epc==0 gate catches zeroed frames). R84b report first.
+    // r74d epc==0 gate catches zeroed frames).
     bltz t0, 101f
-    li   a0, 3
-    mv   a1, t0
-    mv   a2, tp
-    csrr a3, sepc
-    call r84_ksp_trap
     li   t1, {task_kstack_bottom}
     add  t1, tp, t1
     ld   t0, 0(t1)
@@ -997,13 +975,8 @@ trap_exit:
     addi t0, sp, PT_SIZE
     // R85 (ksp store gate): kernel-path twin of the .Lreturn_user gate —
     // a user-half value here means a wild sp; anchor at the task's own
-    // stack top. R84b report first (one-shot).
+    // stack top.
     bltz t0, 102f
-    li   a0, 2
-    mv   a1, t0
-    mv   a2, tp
-    csrr a3, sepc
-    call r84_ksp_trap
     li   t1, {task_kstack_bottom}
     add  t1, tp, t1
     ld   t0, 0(t1)
@@ -1034,14 +1007,10 @@ trap_exit:
     // Reload sp from ti_kernel_sp (schedule() may have context-switched
     // to a different task and back, so sp changed).
     ld t0, {task_ti_kernel_sp}(tp)
-    // R85 (ksp reload gate): kernel-path twin of site 3 — never load a
-    // user-half ksp into sp; anchor at the task's own stack top.
+    // R85 (ksp reload gate): kernel-path twin of the user-path gate —
+    // never load a user-half ksp into sp; anchor at the task's own
+    // stack top.
     bltz t0, 103f
-    li   a0, 4
-    mv   a1, t0
-    mv   a2, tp
-    csrr a3, sepc
-    call r84_ksp_trap
     li   t1, {task_kstack_bottom}
     add  t1, tp, t1
     ld   t0, 0(t1)

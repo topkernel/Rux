@@ -4171,9 +4171,6 @@ fn __schedule() {
                 // stack address).
                 r56_print_pid(b"", (tpr.ti_kernel_sp() >> 32) as u32, b":");
                 r56_print_pid(b"", (tpr.ti_kernel_sp() & 0xFFFF_FFFF) as u32, b"\n");
-                // R83: byte-level header dump of the victim — the scribble
-                // shape (extent + alignment) names the writer's store.
-                crate::debug::r83hunt::dump_victim(b"R74", tp);
                 // R85: book the physical truth — unconditional within this
                 // block (tp != prev by the enclosing guard, tp is running,
                 // canonical, and not exiting). The slot's task may be
@@ -9962,14 +9959,6 @@ pub fn scheduler_tick() {
         }
     }
 
-    // R84 (R74 producer-#2 hunt): the R83 idle-loop audit never ran
-    // under the dbus storm (all harts busy) — validate headers from the
-    // tick itself: current task every tick, full pid-hash walk every 4
-    // jiffies, heap fingerprint scan every 64 jiffies (all CAS-gated
-    // inside; try-locked walks so IRQ context is safe).
-    #[cfg(feature = "riscv64")]
-    crate::debug::r83hunt::sched_tick_audit();
-
     // Poll UART for pending data — MUST be before current check.
     if crate::console::uart_has_data() {
         crate::console::read_waitq().wake_up_one();
@@ -12444,10 +12433,6 @@ pub fn cpu_idle_loop() -> ! {
         #[cfg(feature = "riscv64")]
         {
             harvest_orphan_tasks(cpu_id);
-            // R83 (R74 producer hunt): header audit on the same cadence —
-            // names the scribbled task within ~4 jiffies of the write,
-            // instead of at its next (fatal) schedule.
-            crate::debug::r83hunt::audit_tick();
         }
 
         // Ensure IRQs are enabled before each schedule() call.

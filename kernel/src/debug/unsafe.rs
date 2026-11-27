@@ -7,7 +7,7 @@
 //!
 //! OWNERSHIP (the coordinator's framework-consolidation doctrine): every
 //! raw stale-handle read the dfx hunt family performs routes through
-//! THIS file. The modules that hunt (leakorigin, scribble, r83hunt,
+//! THIS file. The modules that hunt (leakorigin, scribble,
 //! treehunt, wildwatch, memwatch's fp-chain, the preempt/softirq
 //! bracket diagnostics) stay in their own files; their raw pointer
 //! discipline lives here, named and audited once.
@@ -125,7 +125,7 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
 // forensics_edges.rs per the edges->unsafe.rs naming decision) is now
 // the dfx subsystem's ONE audited unsafe file. The arms below absorbed
 // the last inline unsafe of the hunt/diagnostic modules (backtrace,
-// memwatch, scribble, wildwatch, r83hunt, leakorigin, taskdump, pstore,
+// memwatch, scribble, wildwatch, leakorigin, taskdump, pstore,
 // treehunt, pathstash, ledger, mmforensics, oops, hung_task, slowtask,
 // mod) — all sixteen now zero-unsafe with file-level forbid. Existing
 // INV-FOR-1..3 contracts are unchanged; the arms reuse those families
@@ -204,7 +204,7 @@ pub(crate) fn t_ti_cpu(task: *const Task) -> i32 {
 /// Racy volatile read of a sched slot's published current pointer
 /// (INV-FOR-1 racy-diagnostic arm: the slot is written by its owning
 /// CPU under the GRQ; this read is moment-stale by design — the same
-/// discipline as r83hunt's header reads). Returns the raw pointer VALUE
+/// discipline as the hunt modules' header reads). Returns the raw pointer VALUE
 /// (0 when the slot is empty), never a reference.
 pub(crate) fn sched_slot_current_volatile(cpu: usize) -> usize {
     // SAFETY: INV-FOR-1 — single volatile read of the published slot;
@@ -1091,31 +1091,8 @@ pub(crate) fn pstore_capture_write(
 }
 
 // ---------------------------------------------------------------------------
-// INV-FOR-12: the cmdline-blob scan (r83hunt's foreign-word probe: the
-// blob is [ptr, ptr+len) for the whole boot; read-only scan).
-// ---------------------------------------------------------------------------
-
-/// Does the boot cmdline blob contain the 8-byte LE pattern `v`?
-/// (INV-FOR-12: unaligned search — the observed words are unaligned
-/// slices; the blob pointer/length are the boot-time constants.)
-pub(crate) fn cmdline_contains_qword(v: u64) -> bool {
-    let ptr = crate::cmdline::CMDLINE_PTR.load(core::sync::atomic::Ordering::Acquire) as usize;
-    let len = crate::cmdline::CMDLINE_LEN.load(core::sync::atomic::Ordering::Acquire);
-    if ptr == 0 || len < 8 {
-        return false;
-    }
-    let needle = v.to_le_bytes();
-    // SAFETY: INV-FOR-12 — blob is [ptr, ptr+len) for the whole boot;
-    // read-only scan.
-    unsafe {
-        let blob = core::slice::from_raw_parts(ptr as *const u8, len);
-        blob.windows(8).any(|w| w == needle)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// INV-FOR-1/2 extension arms (second wave: scribble/wildwatch/pathstash/
-// r83hunt specifics).
+// INV-FOR-1/2 extension arms (second wave: scribble/wildwatch/pathstash
+// specifics).
 // ---------------------------------------------------------------------------
 
 /// Stale task hung_task_since read (INV-FOR-1: the header canary word —

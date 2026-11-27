@@ -465,12 +465,6 @@ impl SleepMutex {
             }
         };
 
-        // R83b: baseline header snapshot for the waiter self-watch below.
-        let mut wait_snap = crate::debug::r83hunt::WatchSnap {
-            ksp: 0, user_sp: 0, preempt: 0, pick: 0, claim: 0, flags: 0,
-        };
-        let mut wait_snap_set = false;
-
         // R84 waiter bookkeeping:
         //  counted      <=> st.waiters already includes us (we are on the
         //                   queue or hold an unspent wake token); the count
@@ -544,27 +538,6 @@ impl SleepMutex {
                     self.rt_leave(&mut pi_q);
                 }
                 return Some(g);
-            }
-            // R83b (R74 producer hunt): every capture so far had the
-            // victim parked in THIS wait when its ti_kernel_sp turned to
-            // foreign data. ti_kernel_sp/ti_user_sp have NO legal writer
-            // while a task sleeps here (their only writers are the task's
-            // own trap exit / exec paths), so any change between two
-            // iterations of this loop is the scribbler — reported from
-            // inside the exposure window itself.
-            {
-                let now_snap = crate::debug::r83hunt::watch_snap(cur as *mut _);
-                if !wait_snap_set {
-                    wait_snap = now_snap;
-                    wait_snap_set = true;
-                } else if now_snap.ksp != wait_snap.ksp || now_snap.user_sp != wait_snap.user_sp {
-                    crate::debug::r83hunt::waitwatch_report(
-                        cur as *mut _,
-                        &wait_snap,
-                        &now_snap,
-                    );
-                    wait_snap = now_snap;
-                }
             }
             // Register on the wait queue BEFORE re-checking the state
             // (R7-B6b discipline): any release() that pairs with this

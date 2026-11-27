@@ -1436,33 +1436,6 @@ pub fn poison_and_dealloc_task(task_ptr: *mut Task) {
             slot.add(crate::process::task::TASK_PID) as *mut u32,
             crate::sched::sched::TASK_POISON,
         );
-        // R83 (R74 producer hunt): paint the whole freed header (0x100
-        // bytes) with a fixed pattern AFTER the field destructors and
-        // BEFORE the state/pid poison below is (re)written above. Any
-        // later reader of this page that still reaches it through a
-        // stale Task pointer sees the paint instead of stale task
-        // data — turning the "recycled page vs wild write" question
-        // into a one-bit answer at the R74/R83 detection sites.
-        {
-            let mut off = 0usize;
-            while off < 0x100 {
-                core::ptr::write_volatile(
-                    slot.add(off) as *mut u64,
-                    crate::debug::r83hunt::R83_FREED_PAINT,
-                );
-                off += 8;
-            }
-            // Keep the R47/R12-4 poison words authoritative over the
-            // paint (guards read state/pid to refuse stale wakes).
-            core::ptr::write_volatile(
-                slot.add(crate::process::task::TASK_STATE) as *mut u32,
-                crate::sched::sched::TASK_POISON,
-            );
-            core::ptr::write_volatile(
-                slot.add(crate::process::task::TASK_PID) as *mut u32,
-                crate::sched::sched::TASK_POISON,
-            );
-        }
         // R69: release the ownership bit and tell the heap's free-side
         // audit that THIS free is the legitimate one (anything else
         // freeing a live Task page is the double-handoff engine).

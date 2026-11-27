@@ -5251,11 +5251,6 @@ pub mod riscv64 {
                         let _ = write!(w,
                             "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
                             crate::sched::get_current_pid(), pc);
-                        // R83 (R74 producer hunt): the underflow victim's header may
-                        // already carry the foreign store — dump it while it is fresh.
-                        if let Some(cur) = crate::sched::current() {
-                            crate::debug::r83hunt::dump_victim(b"PREEMPT-UF", cur as *mut _);
-                        }
                         crate::interrupt::preempt::preempt_count_reset();
                     } else {
                         // Cannot sleep in interrupt context
