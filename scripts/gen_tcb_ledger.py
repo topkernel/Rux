@@ -62,7 +62,7 @@ RULES = [
     ("drivers/timer/", "framework"),
     ("drivers/pci/", "framework"),
     ("drivers/", "service"),
-    ("dfx/", "diagnostics"),
+    ("debug/", "diagnostics"),
     ("tests/", "test"),
     # root files tied to early boot / raw hardware
     ("console.rs", "framework"),
