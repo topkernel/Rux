@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
