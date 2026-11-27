@@ -1354,10 +1354,10 @@ fn reg_write(reg_xapic: u32, msr_x2apic: u32, value: u32) {
 }
 
 fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
-    crate::drivers::edges::apic_hc_raw(nr, a1, a2, a3, a4, vmmcall)
+    crate::drivers::edges::hc(nr, a1, a2, a3, a4, vmmcall)
 }
 
 #[inline(always)]
 fn tick_arm_ra() -> u64 {
-    crate::drivers::edges::tick_arm_ra()
+    crate::drivers::edges::tick_arm_ra_raw()
 }

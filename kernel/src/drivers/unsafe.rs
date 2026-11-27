@@ -310,7 +310,8 @@ pub fn msr_write(msr: u32, v: u64) {
 /// the fixed data and mode/command registers).
 #[cfg(feature = "x86_64")]
 pub fn pit_program_ch0(divisor: u16) {
-    use crate::drivers::timer::x86_64::{PIT_MODE_CMD, PIT_CH0_MODE3_BIN, PIT_CH0_DATA, io_wait};
+    use crate::arch::cpu::io_wait;
+    use crate::drivers::timer::x86_64::{PIT_MODE_CMD, PIT_CH0_MODE3_BIN, PIT_CH0_DATA};
     // SAFETY: INV-DRV-CSR — the standard 8254 channel-0 square-wave
     // programming sequence.
     unsafe {
@@ -493,7 +494,7 @@ pub(crate) fn pci_blk_acquire_site_raw() -> usize {
 /// Read a LAPIC register in whichever mode is active.
 #[inline]
 pub fn apic_reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
-    if crate::drivers::intc::apic::X2APIC.load(Ordering::Acquire) {
+    if crate::drivers::intc::apic::X2APIC.load(core::sync::atomic::Ordering::Acquire) {
         // SAFETY: x2APIC MSR read; READY gates first use.
         unsafe { crate::arch::cpu::rdmsr(msr_x2apic) as u32 }
     } else {
@@ -514,7 +515,7 @@ pub fn apic_reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
 /// Write a LAPIC register in whichever mode is active.
 #[inline]
 pub fn apic_reg_write(reg_xapic: u32, msr_x2apic: u32, value: u32) {
-    if crate::drivers::intc::apic::X2APIC.load(Ordering::Acquire) {
+    if crate::drivers::intc::apic::X2APIC.load(core::sync::atomic::Ordering::Acquire) {
         // SAFETY: x2APIC MSR write; READY gates first use.
         unsafe { crate::arch::cpu::wrmsr(msr_x2apic, value as u64) };
     } else {
