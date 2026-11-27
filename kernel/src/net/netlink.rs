@@ -511,8 +511,8 @@ pub struct NetlinkSocket {
     pub options: Spinlock<SocketOptions>,
 }
 
-// SAFETY: all mutable state is behind Spinlocks / atomics.
-unsafe impl Sync for NetlinkSocket {}
+// Send/Sync commitment for NetlinkSocket lives in the audited
+// unsafe.rs (net/unsafe.rs).
 
 impl NetlinkSocket {
     pub fn new(protocol: i32) -> Self {

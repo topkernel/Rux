@@ -43,15 +43,19 @@ pub use ipv6::{AF_INET6, IpAddr};
 /// `*_socket_from_fd` checks). The File's lifetime keeps the Arc alive
 /// (close() is the only drop path); increment-before-clone keeps the
 /// returned Arc independent of the slot.
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub(crate) mod edges;
+
 pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::Arc<T>> {
     let ptr = file.private_data_ptr()? as *const T;
-    // SAFETY: INV-NETARC-1 — the pointer is a live Arc::into_raw value
-    // of this type (ops identity checked by the caller); the increment
-    // balances the from_raw construction below.
-    unsafe {
-        alloc::sync::Arc::increment_strong_count(ptr);
-        Some(alloc::sync::Arc::from_raw(ptr))
-    }
+    // INV-NETARC-1 (live Arc::into_raw value of this type, ops identity
+    // checked by the caller; the increment balances the from_raw
+    // construction). Edge lives in the audited unsafe.rs.
+    crate::net::edges::arc_increment_strong(ptr);
+    Some(crate::net::edges::arc_from_raw(ptr))
 }
 
 /// Take the Arc OUT of a closing socket File's private_data slot and
@@ -59,11 +63,10 @@ pub(crate) fn file_arc<T>(file: &crate::fs::file::File) -> Option<alloc::sync::A
 /// check; the slot is cleared under the file's own close serialization).
 pub(crate) fn take_file_arc<T>(file: &crate::fs::file::File) -> Option<()> {
     let ptr = file.private_data_ptr()? as *const T;
-    // SAFETY: INV-NETARC-1 — reconstructing the stored Arc consumes the
-    // slot's single reference (close is the last user of the file).
-    unsafe {
-        drop(alloc::sync::Arc::from_raw(ptr));
-    }
+    // INV-NETARC-1 (reconstructing the stored Arc consumes the slot's
+    // single reference; close is the last user of the file). Edge in
+    // the audited unsafe.rs.
+    drop(crate::net::edges::arc_from_raw(ptr));
     file.clear_private_data();
     Some(())
 }

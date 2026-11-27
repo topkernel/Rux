@@ -38,10 +38,8 @@ impl UdpHdr {
             return None;
         }
 
-        // SAFETY: data has at least UDP_HLEN bytes and is aligned to UdpHdr layout.
-        unsafe {
-            Some(&*(data.as_ptr() as *const UdpHdr))
-        }
+        // Typed-view edge lives in the audited unsafe.rs (INV-NET-SKBUFF-1).
+        Some(crate::net::edges::typed_ref(data.as_ptr() as *const UdpHdr))
     }
 
     /// Get source port
@@ -202,7 +200,7 @@ impl UdpSocket {
 }
 
 /// Global UDP socket table
-struct UdpSocketTable {
+pub(in crate::net) struct UdpSocketTable {
     sockets: [Option<UdpSocket>; UDP_SOCKET_TABLE_SIZE],
     count: usize,
 }
@@ -245,7 +243,7 @@ impl UdpSocketTable {
     }
 
     /// Get socket
-    fn get(&self, fd: usize) -> Option<&UdpSocket> {
+    pub(in crate::net) fn get(&self, fd: usize) -> Option<&UdpSocket> {
         if fd < self.count {
             self.sockets[fd].as_ref()
         } else {
@@ -254,7 +252,7 @@ impl UdpSocketTable {
     }
 
     /// Get mutable socket
-    fn get_mut(&mut self, fd: usize) -> Option<&mut UdpSocket> {
+    pub(in crate::net) fn get_mut(&mut self, fd: usize) -> Option<&mut UdpSocket> {
         if fd < self.count {
             self.sockets[fd].as_mut()
         } else {
@@ -264,7 +262,7 @@ impl UdpSocketTable {
 }
 
 /// Global UDP socket table
-static mut UDP_SOCKET_TABLE: UdpSocketTable = UdpSocketTable::new();
+pub(in crate::net) static mut UDP_SOCKET_TABLE: UdpSocketTable = UdpSocketTable::new();
 
 /// R24 (HIGH-6, mirroring R21-N1's TCP_TABLE_LOCK): the UDP table is
 /// mutated concurrently from syscalls (socket/bind/connect/close/send/recv)
@@ -311,18 +309,15 @@ pub fn udp_socket_free(fd: i32) {
 /// # Returns
 /// Socket reference
 pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
-    // SAFETY: UDP_SOCKET_TABLE is a global; caller ensures no concurrent access.
-    unsafe {
-        UDP_SOCKET_TABLE.get_mut(fd as usize)
-    }
+    // Table edge lives in the audited unsafe.rs (INV-NET-UDPTAB-1).
+    crate::net::edges::udp_table().get_mut(fd as usize)
 }
 
 /// Read-only view of the UDP protocol-table slot (the same liveness
 /// contract as udp_socket_get: global table, caller-serialized).
 pub fn udp_socket_read(fd: i32) -> Option<&'static UdpSocket> {
-    // SAFETY: read-only access to the global table; caller ensures no
-    // concurrent mutation (same contract as udp_socket_get).
-    unsafe { UDP_SOCKET_TABLE.get(fd as usize) }
+    // Table edge lives in the audited unsafe.rs (INV-NET-UDPTAB-1).
+    crate::net::edges::udp_table_shared().get(fd as usize)
 }
 
 /// Whole-table views for the scans (bind-conflict walk, udp_rcv
@@ -330,14 +325,13 @@ pub fn udp_socket_read(fd: i32) -> Option<&'static UdpSocket> {
 /// table writers (UDP_TABLE_LOCK or the softirq/syscall discipline the
 /// scan sites already document).
 pub fn udp_table_mut() -> &'static mut UdpSocketTable {
-    // SAFETY: no re-entrancy inside (pure reference formation); the
-    // caller holds the documented serialization.
-    unsafe { &mut UDP_SOCKET_TABLE }
+    // Table edge lives in the audited unsafe.rs (INV-NET-UDPTAB-1).
+    crate::net::edges::udp_table()
 }
 
 pub fn udp_table_ref() -> &'static UdpSocketTable {
-    // SAFETY: read-only view; caller-serialized against mutation.
-    unsafe { &UDP_SOCKET_TABLE }
+    // Table edge lives in the audited unsafe.rs (INV-NET-UDPTAB-1).
+    crate::net::edges::udp_table_shared()
 }
 
 /// Bind socket to local address and port
@@ -1494,12 +1488,11 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Get UDP data (after header)
     let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
     let data = if data_len > 0 {
-        // SAFETY: skb.data + UDP_HLEN is within the skb's valid data range
-        // since udp_parse_packet validated the length.
-        unsafe {
-            let data_ptr = skb.data.add(UDP_HLEN);
-            core::slice::from_raw_parts(data_ptr, data_len)
-        }
+        // Raw-core edges live in the audited unsafe.rs (INV-NET-SKBUFF-1).
+        crate::net::edges::slice_parts(
+            crate::net::edges::ptr_add(skb.data, UDP_HLEN),
+            data_len,
+        )
     } else {
         &[]
     };

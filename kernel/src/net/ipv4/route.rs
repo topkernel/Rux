@@ -90,9 +90,9 @@ impl RouteEntry {
 }
 
 /// Routing table
-struct RouteTable {
-    entries: [Option<RouteEntry>; ROUTE_TABLE_SIZE],
-    count: usize,
+pub(in crate::net) struct RouteTable {
+    pub(in crate::net) entries: [Option<RouteEntry>; ROUTE_TABLE_SIZE],
+    pub(in crate::net) count: usize,
 }
 
 impl RouteTable {
@@ -106,7 +106,7 @@ impl RouteTable {
 
     /// Look up route (longest prefix match; a mask-0 default route is a
     /// valid fallback — the old `best_mask = 0` init never let it win).
-    fn lookup(&self, dst: u32) -> Option<RouteEntry> {
+    pub(in crate::net) fn lookup(&self, dst: u32) -> Option<RouteEntry> {
         let mut best_match: Option<RouteEntry> = None;
         let mut have_match = false;
         let mut best_mask = 0u32;
@@ -126,7 +126,7 @@ impl RouteTable {
 
     /// Add route (replaces an identical dst/mask entry — `route add`
     /// twice / SIOCADDRT + RTM_NEWROUTE must not duplicate rows)
-    fn add(&mut self, route: RouteEntry) -> Result<(), ()> {
+    pub(in crate::net) fn add(&mut self, route: RouteEntry) -> Result<(), ()> {
         if self.count >= ROUTE_TABLE_SIZE {
             return Err(());
         }
@@ -146,7 +146,7 @@ impl RouteTable {
     }
 
     /// Remove route
-    fn remove(&mut self, dst: u32, mask: u32) -> bool {
+    pub(in crate::net) fn remove(&mut self, dst: u32, mask: u32) -> bool {
         for i in 0..self.count {
             if let Some(route) = self.entries[i] {
                 if route.dst == dst && route.mask == mask {
@@ -163,7 +163,7 @@ impl RouteTable {
     }
 
     /// Clear routing table
-    fn clear(&mut self) {
+    pub(in crate::net) fn clear(&mut self) {
         self.count = 0;
         for entry in self.entries.iter_mut() {
             *entry = None;
@@ -172,7 +172,7 @@ impl RouteTable {
 }
 
 /// Global routing table
-static mut ROUTE_TABLE: RouteTable = RouteTable::new();
+pub(in crate::net) static mut ROUTE_TABLE: RouteTable = RouteTable::new();
 
 /// W3 (RACE): ROUTE_TABLE is read from the TX data path (every CPU) and
 /// written from route management — irqsave spinlock, mirroring the
@@ -188,8 +188,8 @@ static ROUTE_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::
 /// Route entry if found, None otherwise
 pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.lookup(dst) }
+    // Table edge lives in the audited unsafe.rs (INV-NET-ROUTETAB-1).
+    crate::net::edges::route_table_lookup(dst)
 }
 
 /// Add route
@@ -223,8 +223,8 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
         flags,
     };
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.add(route) }
+    // Table edge lives in the audited unsafe.rs (INV-NET-ROUTETAB-1).
+    crate::net::edges::route_table_add(route)
 }
 
 /// Remove route
@@ -237,22 +237,22 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
 /// Whether removal was successful
 pub fn route_remove(dst: u32, mask: u32) -> bool {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.remove(dst, mask) }
+    // Table edge lives in the audited unsafe.rs (INV-NET-ROUTETAB-1).
+    crate::net::edges::route_table_remove(dst, mask)
 }
 
 /// Clear routing table
 pub fn route_clear() {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.clear() }
+    // Table edge lives in the audited unsafe.rs (INV-NET-ROUTETAB-1).
+    crate::net::edges::route_table_clear()
 }
 
 /// P0-2 (rtnetlink RTM_GETROUTE dump): snapshot of every route entry.
 pub fn route_dump() -> alloc::vec::Vec<RouteEntry> {
     let _g = ROUTE_LOCK.lock_irqsave();
-    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
-    unsafe { ROUTE_TABLE.entries[..ROUTE_TABLE.count].iter().flatten().cloned().collect() }
+    // Table edge lives in the audited unsafe.rs (INV-NET-ROUTETAB-1).
+    crate::net::edges::route_table_entries()
 }
 
 /// Initialize default routes
