@@ -3456,21 +3456,22 @@ pub fn schedule() {
         }
         return;
     }
-    // PER-CPU MIGRATION — the base-holdout gate (replaces the old
-    // __schedule park adjudication's holdout refusal, which keyed on
-    // the now-frozen per-task field): at a legitimate blocking-path
-    // schedule() entry THIS cpu's word must carry NO preemption-disable
-    // base — every guard frame of this task has unwound. This is the
-    // reference's __schedule_bug boundary (kernel/sched/core.c
-    // schedule_debug: in_atomic_preempt_off() -> BUG + preempt_count_set
-    // clamp), in the tree's refuse-the-park form: a task that reaches
-    // schedule() while holding a lock guard (the cross-context leak
-    // family) parks with the +1 stranded ON THE CPU WORD — the word
-    // then blocks every later schedule() on this cpu (the ksoftirqd
-    // strand + both-cpu wedge the migration boot measured live) and its
-    // guard's eventual release lands on whatever cpu the task resumed
-    // on (cross-cpu underflow). Refuse: the caller stays RUNNING, its
-    // wait loop retries, and the held guard drains in its own context.
+    // PER-CPU MIGRATION — the schedule-entry count clamp (the reference's
+    // __schedule_bug boundary, kernel/sched/core.c schedule_debug:
+    // in_atomic_preempt_off() -> __schedule_bug + preempt_count_set
+    // clamp). At a legitimate blocking-path schedule() entry THIS cpu's
+    // word must carry NO preemption-disable base — every guard frame of
+    // this task has unwound. A nonzero base here is the residue of the
+    // still-open cross-context producer family (sc69-sc73): refusing the
+    // park (the pre-migration per-task answer) turns the sleeper into an
+    // unpreemptible monopolist under the cpu word — no switch, no RCU QS
+    // report, the fd-reaper's grace period never closes (measured on the
+    // p23b pbench board: cpu0 strand -> REAP-GP-NUDGE storm, p5 wedge).
+    // The reference's answer is REPORT + CLAMP + PROCEED, so mirror it:
+    // name the residue (budget + leakhunt acquire-site dump), drop the
+    // base bits, and let the switch happen — a real lock holder's later
+    // drop underflow-clamps and REPORTS at its own site, and the residue
+    // is captured for the producer hunt.
     {
         let base = crate::interrupt::preempt::preempt_count()
             & crate::interrupt::preempt::PREEMPT_MASK;
@@ -3480,14 +3481,14 @@ pub fn schedule() {
             if HOLDOUT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
                 let loc = core::panic::Location::caller();
                 crate::pr_err!(
-                    "SCHEDULE-HOLDOUT caller={}:{} pid={} base={:#x}",
+                    "SCHEDULE-HOLDOUT caller={}:{} pid={} base={:#x} (clamped)",
                     loc.file(),
                     loc.line(),
                     crate::process::current_pid(),
                     base
                 );
             }
-            return;
+            crate::interrupt::preempt::preempt_count_repair();
         }
     }
     // SP-5 r5 frozen-tick trap: schedule() entered with IF=0. The tail's
