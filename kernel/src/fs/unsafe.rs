@@ -789,6 +789,18 @@ pub(crate) fn volatile_write_at<T: Copy>(base: *mut T, k: usize, v: T) {
     unsafe { core::ptr::write_volatile(base.add(k), v) }
 }
 
+/// INV-FS-JFORGET-1: journal forget registration (brelse of a metadata
+/// buffer whose block is being freed): `handle` is the current task's
+/// live transaction handle (INV-EXT4-JHANDLE-1), `bh` the checked-out
+/// buffer. Bookkeeping only.
+pub(crate) fn jbd2_forget(
+    handle: *mut crate::fs::jbd2::Handle,
+    bh: *mut crate::fs::bio::BufferHead,
+) -> Result<(), i32> {
+    // SAFETY: INV-FS-JFORGET-1 (deref forms the &mut the API takes).
+    unsafe { crate::fs::jbd2::jbd2_journal_forget(&mut *handle, bh) }
+}
+
 /// INV-FS-JREVOKE-1: journal revoke registration — `handle` is the
 /// current task's live transaction handle (INV-EXT4-JHANDLE-1), `block`
 /// the block number being returned to the free pool. Bookkeeping only.
