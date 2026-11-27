@@ -945,9 +945,11 @@ impl File {
         unsafe { self.lseek(offset, whence) }
     }
 
-    /// Close file
-    pub unsafe fn close(&mut self) -> i32 {
-        if let Some(ops) = *self.ops.get() {
+    /// Close file (runs the ops-table close hook at most once; the
+    /// caller holds exclusive ownership of the description — the
+    /// get_mut/last-Arc discipline at every call site).
+    pub fn close(&mut self) -> i32 {
+        if let Some(ops) = crate::fs::edges::cell_ref(&self.ops) {
             if let Some(close_fn) = ops.close {
                 return close_fn(self);
             }

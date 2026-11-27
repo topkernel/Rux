@@ -404,6 +404,18 @@ pub(crate) fn arc_take<T>(p: *const T) -> alloc::sync::Arc<T> {
     unsafe { alloc::sync::Arc::from_raw(p) }
 }
 
+/// INV-FS-RAWADOPT-1: claim-then-adopt of a leaked Arc allocation —
+/// the caller holds the protocol's claim (walk claim / pending-retire
+/// blocking), so increment_strong_count on the live allocation is
+/// race-free and from_raw hands back the extra reference.
+pub(crate) fn arc_adopt<T>(p: *const T) -> alloc::sync::Arc<T> {
+    // SAFETY: INV-FS-RAWADOPT-1.
+    unsafe {
+        alloc::sync::Arc::increment_strong_count(p);
+        alloc::sync::Arc::from_raw(p)
+    }
+}
+
 /// INV-FS-ZEROPOD-1: all-zero-bytes constructor for `#[repr(C)]` POD
 /// types. Caller obligation: T is repr(C) and composed only of integer
 /// / bool / float / array-of-those fields (no references, no NonNull,
