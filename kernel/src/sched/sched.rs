@@ -1588,6 +1588,145 @@ pub fn switching_out_names(task: *mut Task) -> bool {
     false
 }
 
+/// Wall-time bars cannot adjudicate a switch-out window (R87: "that
+/// window can exceed any fixed age bar" — a monopolist stretch, a KVM
+/// host deschedule, or a long ring dump can hold a switch open past any
+/// constant). The only wall-time quantity that means "the switching CPU
+/// is gone and its window will never close on its own" is its timer-IRQ
+/// liveness (R57 probe, the steal's own gate): a CPU still servicing
+/// ticks may unstall at any microsecond and complete the switch — the
+/// release store it then makes is the protocol's own heal, and no
+/// heal-side store may pre-empt it.
+///
+/// Geekbench MC capture (gbwedge lane, 2026-11-28; the bench-main
+/// rux-serial-CRASH{1,2,3} family): a vCPU stalled mid-switch-out past
+/// the 50-jiffy mark (the marker aged) while a futex wake had already
+/// linked the mid-switch task (the legitimate whitelist). The 1 Hz
+/// phantom sweep then retired the aged marker and cleared the qword
+/// {on_cpu=1, claim=X} of the STILL-MID-SWITCH task; the next pick
+/// resumed it on another CPU while the stalled switcher was still
+/// executing its switch-out on the SAME kernel stack — the string-byte
+/// execution hijacks (rip=0x6600000066, rsp into " error=0x7579"
+/// message text), the torn frames (SpinlockIrqGuard<[(u64,u64);16]>
+/// drop faulting on a smashed guard), the per-task preempt_count
+/// chaos (PICK-PC-ZERO was=0x1/0x3, soft-lockup pc=0x20001), and the
+/// leaked GRQ section whose holder stamps schedule:class-op while its
+/// stack shows poll/syscall frames. R87 fixed exactly this shape for
+/// the EXIT side (free_dead_member) and kept the pick side's age
+/// discount on the theory that "a wrong call there relinks a task" —
+/// the capture proves a wrong pick-side release relinks a task whose
+/// stack is still live, which is the double-run, not a mere relink.
+///
+/// Therefore: every heal that releases the ownership qword of a task it
+/// did not see switch (the pick screens, the phantom sweep, the R80
+/// LIVE-on-linked leg) must first pass this gate.
+///
+/// The discriminator is SOUND by the IRQ discipline of the window: the
+/// marker is born under the GRQ (IRQs off), the GRQ is dropped with
+/// unlock_irqretain (IRQs stay off through context_switch), and the
+/// incoming tail clears the marker BEFORE its irq re-enable — so a
+/// genuinely open window implies the switching cpu has serviced NO
+/// timer tick since the marker's birth: `frozen_ms >= age_ms`. When
+/// the cpu HAS ticked since the birth (frozen_ms << age), the window
+/// provably closed — the marker is a lost retire and the release must
+/// proceed (the d023bc051 strand recovery is preserved: a live cpu
+/// that leaked its marker does not strand the task). A cpu frozen past
+/// [`PICK_RELEASE_DEAD_MS`] is treated as gone (the window will never
+/// close on its own; 30 s bounds the recovery of a genuinely lost
+/// switch instead of the old forever).
+///
+/// The qword CLAIM half stays GATED on flat cpu liveness (30 s): a
+/// markerless {on_cpu=1, claim=X, slotless} shape released on a ticking
+/// cpu is the one release whose "provably a corpse" proof is weakest —
+/// the claim's own producer (a lost release whose slot was rewritten by
+/// an idle-heal/abort repair while the task identity remained live) has
+/// no on-CPU discriminator, and the A/B boots split on exactly this
+/// half: the flat-gated build completed Geekbench (the gate deferring
+/// {pid=310/311/312, claim=2/3/1, no marker} up to 30 s without
+/// harm), the claim-ungated build wedged once in the same family with
+/// ZERO marker-gate fires. Recovery is bounded by the same 30 s bar
+/// (the W3 forever-strand face is still closed: a markerless claim on
+/// a dead cpu heals immediately, and on a live one after the bar).
+pub const PICK_RELEASE_DEAD_MS: u64 = 30_000;
+
+/// True when cpu `c`'s SWITCHING_OUT marker for a task may still be an
+/// open switch window (see [`switch_owner_maybe_live`]).
+fn switch_marker_maybe_in_flight(c: usize) -> bool {
+    let frozen = crate::debug::softlockup::cpu_irq_frozen_ms(c);
+    if frozen >= PICK_RELEASE_DEAD_MS {
+        return false; // the switcher is gone; the window never closes
+    }
+    let born = SWITCHING_OUT_JIF[c].load(core::sync::atomic::Ordering::Acquire);
+    if born == 0 {
+        return true; // un-stamped marker: age unknown, stay conservative
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    let age_ms = now
+        .wrapping_sub(born)
+        .saturating_mul(1000 / crate::config::KERNEL_HZ as u64);
+    frozen >= age_ms // the cpu has been IRQ-silent since the birth
+}
+
+pub fn switch_owner_maybe_live(task: *mut Task) -> bool {
+    if task.is_null() {
+        return true;
+    }
+    for c in 0..MAX_CPUS {
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
+            && switch_marker_maybe_in_flight(c)
+        {
+            return true;
+        }
+    }
+    // The claim half (flat 30 s bar — see the block comment above): a
+    // pending-claim look on a cpu that still services ticks defers the
+    // release even with no marker and no slot naming the task.
+    let claim = crate::sched::edges::task_shared(task)
+        .running_on_cpu
+        .load(core::sync::atomic::Ordering::Acquire);
+    if claim >= 0
+        && (claim as usize) < MAX_CPUS
+        && crate::debug::softlockup::cpu_irq_frozen_ms(claim as usize) < PICK_RELEASE_DEAD_MS
+    {
+        return true;
+    }
+    false
+}
+
+/// Rate-limited report that a qword release was gated by
+/// [`switch_owner_maybe_live`] — the heal side deferred, the owning cpu
+/// is expected to complete its own switch (or die past the bar, at which
+/// point the next sweep round heals). Raw console, first 8 per boot:
+/// these are the near-misses that would have been the next double-run.
+pub fn report_release_gated(task: *mut Task) {
+    static GATED_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if GATED_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 {
+        return;
+    }
+    let pid = crate::sched::edges::task_shared(task).pid();
+    let mut swcpu = i32::MIN;
+    for c in 0..MAX_CPUS {
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
+            swcpu = c as i32;
+            break;
+        }
+    }
+    let claim = crate::sched::edges::task_shared(task)
+        .running_on_cpu
+        .load(core::sync::atomic::Ordering::Acquire);
+    let fz = if swcpu >= 0 {
+        crate::debug::softlockup::cpu_irq_frozen_ms(swcpu as usize)
+    } else if claim >= 0 && (claim as usize) < MAX_CPUS {
+        crate::debug::softlockup::cpu_irq_frozen_ms(claim as usize)
+    } else {
+        0
+    };
+    r56_print_pid(b"R87P-GATE-BLOCK pid=", pid, b" claim=");
+    r56_print_pid(b"", claim.unsigned_abs(), b" swcpu=");
+    r56_print_pid(b"", if swcpu < 0 { u32::MAX } else { swcpu as u32 }, b" fzms=");
+    r56_print_pid(b"", fz as u32, b"\n");
+}
+
 /// R85: pick-side time confirmation for a stale-ownership adjudication.
 /// Wraps the harvester's orphan watch (same table, same exec-frozen
 /// refresh discipline — R81): a mid-switch-out transient or a briefly
@@ -6759,6 +6898,20 @@ pub fn wake_up_enqueue_opt(
                     ) {
                         return false;
                     }
+                    // R87P: the frozen-exec conviction proves nobody RAN
+                    // it; it does not prove the marking cpu is gone. An
+                    // aged SWITCHING_OUT mark on a stalled-but-live
+                    // switcher presents exactly this shape (the wake's
+                    // mid-switch whitelist linked the task, the switcher
+                    // is descheduled mid-window) — releasing the qword
+                    // here resumes the task on a second CPU while the
+                    // switcher still owns its stack. Defer while any
+                    // naming cpu services ticks (the Geekbench MC
+                    // double-run leg).
+                    if switch_owner_maybe_live(task) {
+                        report_release_gated(task);
+                        return false;
+                    }
                     // (Threshold 50 jiffies = 500 ms, two orders above
                     // every legitimate in-flight window. R81: conviction
                     // is the frozen exec clock, so the threshold matures
@@ -10823,6 +10976,18 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         // the watch instead).
                         return false;
                     }
+                    // R87P: the frozen-exec proof convicts "nobody ran
+                    // it", but the marks may still name a LIVE cpu — an
+                    // open switch window on a stalled switcher (the
+                    // Geekbench MC capture: the wake-link put the task in
+                    // the tree, the switcher stalled past every age bar,
+                    // this leg released the qword, the resume double-ran
+                    // it on the switcher's stack). Defer to the switch's
+                    // own release while the naming cpu lives.
+                    if switch_owner_maybe_live(task) {
+                        report_release_gated(task);
+                        return false;
+                    }
                     crate::sched::edges::task_shared(task).release_pick_ownership();
                     // Rule 1 (grq-lock-1st): event ring, not the console.
                     crate::sched::sched_ev::sched_ev(
@@ -11088,6 +11253,23 @@ pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
             // heal may re-offer it (R57).
             if task_is_dying(next) {
                 return;
+            }
+            // R87P (gbwedge): a SWITCHIN-DEAD-TASK abort fired because
+            // this task's resume context is gone — freed kernel stack
+            // (top == 0) or a DEAD state. Re-offering such a task books
+            // a picker for a resume that is guaranteed to abort again
+            // (or, after the page returns to the allocator, to run on
+            // recycled memory — the rip=heap / stack-text panic family).
+            // The marks die with the task; leave them (the LIVE-claimed
+            // corpse is already unpickable) and let the exit path's
+            // R85/R87 adjudication free it.
+            {
+                let top = next_t.get_kernel_stack().map_or(0, |p| p as usize);
+                let is_static = !(0xffff_8880_4000_0000..0xffff_8880_4800_0000)
+                    .contains(&(next as usize));
+                if (!is_static && top == 0) || next_t.state().is_dead() {
+                    return;
+                }
             }
             let linked = match next_t.policy() {
                 SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(next),
@@ -11709,6 +11891,23 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                             if born == 0
                                 || now.wrapping_sub(born) >= SWITCHING_OUT_STALE_JIF
                             {
+                                // R87P (gbwedge, Geekbench MC double-run):
+                                // a marker that may still be an open switch
+                                // window (the switching cpu IRQ-silent since
+                                // the marker's birth) must NOT be retired —
+                                // the cpu may unstall at any microsecond and
+                                // its release store is the protocol's own
+                                // heal; retiring the marker (and with it the
+                                // strict gate's evidence) let the qword clear
+                                // below hand the task to a second CPU on the
+                                // switcher's live stack. A marker whose cpu
+                                // HAS ticked since the birth is a lost retire
+                                // (d023bc051) and still retires; a cpu frozen
+                                // past the 30 s bar is gone and still
+                                // recovers. The strand retry re-runs at 1 Hz.
+                                if switch_marker_maybe_in_flight(c) {
+                                    continue;
+                                }
                                 SWITCHING_OUT[c]
                                     .store(0, core::sync::atomic::Ordering::Release);
                                 SWITCHING_OUT_JIF[c]
@@ -11736,12 +11935,20 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                     }
                     // The qword: clear when it names an owner this
                     // sweep just proved absent (the `owned` scan ran
-                    // under the same GRQ hold).
+                    // under the same GRQ hold). R87P: "proved absent"
+                    // means timer-dead — an on_cpu mark on a task whose
+                    // switching cpu still services ticks is an open
+                    // window; clearing it here resumed a mid-switch task
+                    // on a second CPU (the Geekbench MC double-run).
                     let q = crate::sched::edges::task_ownership_qword(task);
                     let q_oncpu = (q & 0xFF) != 0;
                     let q_claim = (q >> 32) as i32;
                     if q_oncpu || q_claim != -1 {
-                        crate::sched::edges::task_shared(task).release_pick_ownership();
+                        if switch_owner_maybe_live(task) {
+                            report_release_gated(task);
+                        } else {
+                            crate::sched::edges::task_shared(task).release_pick_ownership();
+                        }
                     }
                 }
                 let mut owned = false;

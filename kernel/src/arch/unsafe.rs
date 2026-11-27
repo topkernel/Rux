@@ -10748,6 +10748,22 @@ pub mod x86_64 {
                 }
             }
 
+            // Arch current-task slot (tp twin): x86_switch_publish flips
+            // PER_CPU[cpu].current_task to `next` AFTER the affirm CAS
+            // wins and BEFORE the SWITCHIN-DEAD-TASK check can abort
+            // (dead-task resume guard). The abort resumes PREV, so the
+            // flip must be undone — sched::current()/get_thread_id()
+            // derive from this slot, and leaving it naming a dead or
+            // stackless task meant the resumed prev RAN with a corpse's
+            // identity: its GRQ guards booked preempt bits on the corpse
+            // (the PICK-PC-ZERO phantom-count family), every current()
+            // consumer (futex keys, signals, fds) targeted the corpse,
+            // and the corpse's page could be recycled by fork under the
+            // live tp pointer. (The wrapper's early-check call site
+            // never moved the slot, so restoring to prev is a same-value
+            // store there — cheap and harmless.)
+            crate::arch::smp::set_current_task_ptr(prev.as_ptr() as u64);
+
             // Sched slot + tripwire.
             let cpu = crate::arch::cpu_id() as usize;
             crate::sched::sched::republish_current_after_abort(cpu, prev.as_ptr());

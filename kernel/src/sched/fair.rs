@@ -2194,6 +2194,17 @@ impl CfsRunQueue {
                             continue;
                         }
                         let was_pk = tr.pick_state();
+                        if crate::sched::sched::switch_owner_maybe_live(task) {
+                            // R87P (gbwedge): aged mark on a live cpu = an
+                            // open switch window; release would double-run
+                            // the task on the switcher's stack. Defer.
+                            crate::sched::sched::report_release_gated(task);
+                            oncpu_marked += 1;
+                            if let Some(slot) = oncpu_pids.iter_mut().find(|p| **p == 0) {
+                                *slot = tr.pid();
+                            }
+                            continue;
+                        }
                         tr.release_pick_ownership();
                         stale_reset += 1;
                         Self::stale_oncpu_healed(
@@ -2628,6 +2639,17 @@ impl CfsRunQueue {
                                     putchar(b'\n');
                                 }
                                 skip_reason = 1; // treat as owned/transient: refuse
+                            } else if crate::sched::sched::switch_owner_maybe_live(task) {
+                                // R87P (gbwedge): the aged-mark qword here
+                                // may belong to an open switch window on a
+                                // stalled-but-live cpu (the Geekbench MC
+                                // double-run leg) — a picker resuming this
+                                // task while the switcher still owns its
+                                // stack. Defer; the switcher's own release
+                                // store heals it, and the 30 s timer-dead
+                                // bar recovers a genuinely lost switch.
+                                crate::sched::sched::report_release_gated(task);
+                                skip_reason = 1;
                             } else {
                                 let was_pk = crate::sched::edges::task_shared(task).pick_state();
                                 crate::sched::edges::task_shared(task).release_pick_ownership();
