@@ -665,7 +665,7 @@ fn send_arp_reply(
     target_mac: [u8; ETH_ALEN],
     target_ip: u32,
 ) -> Result<(), ()> {
-    let mut skb = rux::net::hotpath::alloc_skb(128).ok_or(())?;
+    let mut skb = crate::buffer::alloc_skb(128).ok_or(())?;
 
     arp_build_reply(&mut skb, sender_mac, sender_ip.to_be(), target_mac, target_ip.to_be())?;
 
@@ -692,7 +692,7 @@ pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
     let sender_mac = get_local_mac();
     let sender_ip = get_local_ip();
 
-    let mut skb = rux::net::hotpath::alloc_skb(128).ok_or(())?;
+    let mut skb = crate::buffer::alloc_skb(128).ok_or(())?;
 
     arp_build_request(&mut skb, sender_mac, sender_ip.to_be(), target_ip.to_be())?;
 

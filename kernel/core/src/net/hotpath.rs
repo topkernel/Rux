@@ -212,25 +212,10 @@ impl SkBuff {
 
 }
 
-/// Helper function to allocate SkBuff
-///
-/// # Arguments
-/// - `size`: Data size
-///
-/// # Returns
-/// The allocated SkBuff
-pub fn alloc_skb(size: u32) -> Option<SkBuff> {
-    SkBuff::alloc(size)
-}
-
-/// Helper function to free SkBuff
-///
-/// # Arguments
-/// - `skb`: SkBuff to free
-pub fn kfree_skb(skb: SkBuff) {
-    skb.free();
-}
-
+// alloc_skb / kfree_skb (the free-helper pair) moved to the net service
+// crate at the shrink stage (allocation-table MOVE-FREE): crate-local in
+// kernel/net/src/buffer.rs, re-exported at the crate's root. The core-side
+// callers reach the pinned substrate directly (SkBuff::alloc / .free()).
 
 // ==================== Net-family header-view edges (round-5) ====================
 

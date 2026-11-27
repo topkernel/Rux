@@ -13347,7 +13347,7 @@ impl VirtIONetDevice {
         let eth_data = &hdr_and_data[core::mem::size_of::<VirtIONetHdr>()..];
 
         // Create SkBuff
-        let mut skb = match crate::net::hotpath::alloc_skb(pkt_data_len as u32 + 64) {
+        let mut skb = match crate::net::types::SkBuff::alloc(pkt_data_len as u32 + 64) {
             Some(skb) => skb,
             None => {
                 // R24: recycle on allocation failure (was a leak).

@@ -181,7 +181,7 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
 
 /// Send ICMP echo reply in response to echo request
 fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
-    let mut skb = match rux::net::hotpath::alloc_skb(1500) {
+    let mut skb = match crate::buffer::alloc_skb(1500) {
         Some(s) => s,
         None => return,
     };
@@ -240,7 +240,7 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
 
     hdr.checksum = IcmpHdr::compute_checksum(hdr_bytes, orig_data);
 
-    let mut skb = match rux::net::hotpath::alloc_skb(1500) {
+    let mut skb = match crate::buffer::alloc_skb(1500) {
         Some(s) => s,
         None => return,
     };
@@ -331,7 +331,7 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
     }
     hdr.checksum = !total as u16;
 
-    let mut skb = match rux::net::hotpath::alloc_skb(128) {
+    let mut skb = match crate::buffer::alloc_skb(128) {
         Some(s) => s,
         None => return,
     };

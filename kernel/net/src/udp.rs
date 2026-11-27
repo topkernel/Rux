@@ -733,13 +733,13 @@ fn udp_build_locked6(
     }
     socket.is_v6 = true;
 
-    let mut skb = match rux::net::hotpath::alloc_skb((UDP_HLEN + buf.len()) as u32) {
+    let mut skb = match crate::buffer::alloc_skb((UDP_HLEN + buf.len()) as u32) {
         Some(skb) => skb,
         None => return Err(-12), // ENOMEM
     };
 
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
-        rux::net::hotpath::kfree_skb(skb);
+        crate::buffer::kfree_skb(skb);
         return Err(-5); // EIO
     }
 
@@ -753,7 +753,7 @@ fn udp_build_locked6(
             match crate::ipv6::get_link_local() {
                 Some(ll) => ll,
                 None => {
-                    rux::net::hotpath::kfree_skb(skb);
+                    crate::buffer::kfree_skb(skb);
                     return Err(-99); // EADDRNOTAVAIL — no v6 source configured
                 }
             }
@@ -964,14 +964,14 @@ fn udp_build_locked(
     }
 
     // W3: size the skb for the full datagram (max 65507 + 8 header fits u16).
-    let mut skb = match rux::net::hotpath::alloc_skb((UDP_HLEN + buf.len()) as u32) {
+    let mut skb = match crate::buffer::alloc_skb((UDP_HLEN + buf.len()) as u32) {
         Some(skb) => skb,
         None => return Err(-12), // ENOMEM
     };
 
     // Build UDP header + data (udp_build_packet puts data into skb)
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
-        rux::net::hotpath::kfree_skb(skb);
+        crate::buffer::kfree_skb(skb);
         return Err(-5); // EIO
     }
 
@@ -1116,7 +1116,7 @@ fn igmp_send(igmp_type: u8, group: u32) {
     // Report destinations are the group itself; the leave caller passes
     // 224.0.0.2 (ALL-ROUTERS) as `group`.
     let dst = group;
-    let mut skb = match rux::net::hotpath::alloc_skb(8) {
+    let mut skb = match crate::buffer::alloc_skb(8) {
         Some(s) => s,
         None => return,
     };
