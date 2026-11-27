@@ -3598,10 +3598,13 @@ pub mod riscv64 {
                         // HARDIRQ_OFFSET. pctick=0x1 vs >=0x10001 at the LEAK
                         // print splits the observed 0x10001 shape into
                         // leaked-PREEMPT-bit vs stranded-hardirq-bit producers.
+                        // PER-CPU MIGRATION: the snapshot is of THIS cpu's
+                        // count word (the interrupted task no longer owns
+                        // a count of its own).
                         if cpu_id < crate::config::MAX_CPUS {
-                            if let Some(t) = crate::sched::current() {
+                            {
                                 crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id]
-                                    .store(t.preempt_count() as u32,
+                                    .store(crate::interrupt::preempt::preempt_count() as u32,
                                            core::sync::atomic::Ordering::Relaxed);
                             }
                             // leg-33B incumbent attribution: the interrupted
@@ -4024,7 +4027,8 @@ pub mod riscv64 {
         // INV-ARCH-TRAP-38 (collected 2026-11-27): global_asm! invocation moved verbatim from riscv64/trap.rs
         core::arch::global_asm!(
             include_str!("riscv64/trap.S"),
-            task_ti_preempt = const crate::process::task::task_offsets::TI_PREEMPT_COUNT,
+            // (task_ti_preempt removed — PER-CPU MIGRATION: the gate reads
+            // interrupt::preempt's per-CPU word via asm_preemptible.)
             task_ti_kernel_sp = const crate::process::task::task_offsets::TI_KERNEL_SP,
             task_ti_user_sp = const crate::process::task::task_offsets::TI_USER_SP,
             task_ti_cpu = const crate::process::task::task_offsets::TI_CPU,
@@ -22711,7 +22715,7 @@ pub mod aarch64 {
             // consumes each operand via textual substitution; this comment keeps
             // the asm usage check satisfied for the scanner (same trick the
             // compiler suggests for intentionally "unused" asm operands).
-            "/* {S_FRAME_SIZE} {S_X0} {S_X8} {S_X20} {S_X21} {S_X22} {S_X30} {S_SP} {S_PC} {S_PSTATE} {S_ESR} {S_FAR} {S_ORIG_X0} {S_SYSCALLNO} {TI_PREEMPT} {TI_KSTACK_BOTTOM} {KSTACK_SIZE} */",
+            "/* {S_FRAME_SIZE} {S_X0} {S_X8} {S_X20} {S_X21} {S_X22} {S_X30} {S_SP} {S_PC} {S_PSTATE} {S_ESR} {S_FAR} {S_ORIG_X0} {S_SYSCALLNO} {TI_KSTACK_BOTTOM} {KSTACK_SIZE} */",
             include_str!("aarch64/trap.S"),
             S_FRAME_SIZE = const PT_REGS_SIZE,
             S_X0 = const 0,
@@ -22727,7 +22731,8 @@ pub mod aarch64 {
             S_FAR = const core::mem::offset_of!(PtRegs, far),
             S_ORIG_X0 = const core::mem::offset_of!(PtRegs, orig_x0),
             S_SYSCALLNO = const core::mem::offset_of!(PtRegs, syscallno),
-            TI_PREEMPT = const crate::process::task::task_offsets::TI_PREEMPT_COUNT,
+            // (TI_PREEMPT removed — PER-CPU MIGRATION: the gate reads
+            // interrupt::preempt's per-CPU word via asm_preemptible.)
             TI_KSTACK_BOTTOM = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
             KSTACK_SIZE = const crate::config::KERNEL_STACK_SIZE,
         );}

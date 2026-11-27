@@ -109,11 +109,52 @@ pub static TICK_ENTRY_JIF: [core::sync::atomic::AtomicU64;
     [const { core::sync::atomic::AtomicU64::new(0) };
         crate::config::MAX_CPUS];
 
+/// One CPU's preempt_count word (64-byte row: two CPUs' hot guard ops
+/// must not share a cache line).
+#[repr(C, align(64))]
+pub struct PreemptWord {
+    cnt: core::sync::atomic::AtomicI32,
+    _pad: [u64; 7],
+}
+
+/// The per-CPU preempt_count words. Writes are own-CPU-only by the
+/// reference construction (you can only be preempted when your word is
+/// 0, and hardirq/softirq nesting is strictly per-CPU); remote READS
+/// are legal diagnostics — go through [`cpu_preempt_count`].
+pub static PREEMPT_WORDS: [PreemptWord; crate::config::MAX_CPUS] = [const {
+    PreemptWord {
+        cnt: core::sync::atomic::AtomicI32::new(0),
+        _pad: [0; 7],
+    }
+}; crate::config::MAX_CPUS];
+
+/// This CPU's word (None when the cpu id is out of range — the same
+/// survive-and-taint stance the per-CPU banks take).
+#[inline]
+fn this_word() -> Option<&'static PreemptWord> {
+    let id = crate::arch::cpu_id() as usize;
+    if id < crate::config::MAX_CPUS {
+        Some(&PREEMPT_WORDS[id])
+    } else {
+        None
+    }
+}
+
+/// Remote diagnostic read of cpu `cpu`'s count (Relaxed; a concurrent
+/// own-CPU update may win — the value is a sample, not a barrier).
+pub fn cpu_preempt_count(cpu: usize) -> i32 {
+    if cpu < crate::config::MAX_CPUS {
+        PREEMPT_WORDS[cpu].cnt.load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
 /// Read current task's preempt_count
 #[inline]
 pub fn preempt_count() -> i32 {
-    match crate::sched::current() {
-        Some(task) => task.preempt_count(),
+    match this_word() {
+        Some(w) => w.cnt.load(core::sync::atomic::Ordering::Relaxed),
         None => 0,
     }
 }
@@ -190,8 +231,12 @@ pub fn preemptible() -> bool {
 #[inline]
 #[track_caller]
 pub fn preempt_count_add(val: i32) {
-    if let Some(task) = crate::sched::current() {
-        task.add_preempt_count(val);
+    // THE COUNT: one fetch-add on THIS cpu's word. No current() resolve
+    // — the release-side sub lands on the same word even if a switch
+    // changed task identity inside the bracket (the per-task add/drop
+    // split family is structurally impossible here).
+    if let Some(w) = this_word() {
+        w.cnt.fetch_add(val, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -203,8 +248,8 @@ pub fn preempt_count_add_at(
     val: i32,
     _loc: &'static core::panic::Location<'static>,
 ) {
-    if let Some(task) = crate::sched::current() {
-        task.add_preempt_count(val);
+    if let Some(w) = this_word() {
+        w.cnt.fetch_add(val, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -217,9 +262,7 @@ pub fn preempt_count_add_at(
 #[track_caller]
 pub fn preempt_count_sub(val: i32) {
     let loc = core::panic::Location::caller();
-    if let Some(task) = crate::sched::current() {
-        task.sub_preempt_count_at(val, loc);
-    }
+    preempt_count_sub2_at(val, loc, 0);
 }
 
 /// `preempt_count_sub` with an explicit captured drop-site location —
@@ -230,9 +273,7 @@ pub fn preempt_count_sub_at(
     val: i32,
     loc: &'static core::panic::Location<'static>,
 ) {
-    if let Some(task) = crate::sched::current() {
-        task.sub_preempt_count_at(val, loc);
-    }
+    preempt_count_sub2_at(val, loc, 0);
 }
 
 /// As `preempt_count_sub_at`, plus the guard's lock instance address for
@@ -243,8 +284,18 @@ pub fn preempt_count_sub2_at(
     loc: &'static core::panic::Location<'static>,
     site: usize,
 ) {
-    if let Some(task) = crate::sched::current() {
-        task.sub_preempt_count2_at(val, loc, site);
+    let Some(w) = this_word() else {
+        return;
+    };
+    let prev = w.cnt.fetch_sub(val, core::sync::atomic::Ordering::Release);
+    let after = prev.wrapping_sub(val);
+    if after < 0 {
+        // Underflow is never legal: clamp to zero and report (the
+        // reference's DEBUG_PREEMPT warns; it never steals a live
+        // bracket). The report names the guard's drop site.
+        w.cnt.store(0, core::sync::atomic::Ordering::Release);
+        let pid = crate::sched::get_current_pid();
+        crate::process::task::preempt_underflow_report(pid, prev, val, loc, site);
     }
 }
 
@@ -254,8 +305,19 @@ pub fn preempt_count_sub2_at(
 /// the fault-path corruption self-heal, with a loud print alongside.
 #[inline]
 pub fn preempt_count_reset() {
-    if let Some(task) = crate::sched::current() {
-        task.ti_preempt_count_zero();
+    if let Some(w) = this_word() {
+        w.cnt.store(0, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// USER-RETURN / CLAMP REPAIR: zero THIS cpu's word. Called from the
+/// schedule-entry count clamp (the __schedule_bug boundary) — the
+/// same bounded remediation shape the reference uses
+/// (preempt_count_set at its bug site).
+#[inline]
+pub fn preempt_count_repair() {
+    if let Some(w) = this_word() {
+        w.cnt.store(0, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -282,40 +344,100 @@ pub fn preempt_count_reset() {
 #[inline]
 #[track_caller]
 pub fn irq_enter() {
-    // 119th: book the task that takes the base (per-CPU depth stack).
+    // Depth bookkeeping: the schedule-entry count clamp consults "is a
+    // hardirq bracket in flight on this cpu" (the IRQ-class bits on the
+    // word are legal nesting while it is).
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
-        let cur = crate::sched::current()
-            .map(|t| t as *mut crate::process::task::Task as usize)
-            .unwrap_or(0);
-        let depth = IRQ_BOOK_DEPTH_CNT[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-        if depth < IRQ_BOOK_DEPTH {
-            IRQ_BOOKED[cpu][depth].store(cur, core::sync::atomic::Ordering::Release);
-        }
+        IRQ_BOOK_DEPTH_CNT[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     }
     preempt_count_add(HARDIRQ_OFFSET);
+    // s14 IRQ-PAIR capture — the per-CPU migration's verification probe:
+    // remember which task THIS cpu's bracket saw at enter; irq_exit
+    // compares. Post-migration the count cannot split (both sides hit
+    // the same CPU word), so this must stay SILENT.
+    if crate::trace::EVENT_LEAKHUNT.armed() {
+        if let Some(task) = crate::sched::current() {
+            let cpu = crate::arch::cpu_id() as usize;
+            if cpu < crate::config::MAX_CPUS {
+                IRQ_PAIR_TASK[cpu].store(
+                    task as *mut _ as usize,
+                    core::sync::atomic::Ordering::Release,
+                );
+            }
+        }
+    }
     crate::debug::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
 }
-
-/// Per-CPU stack of the tasks that booked +HARDIRQ_OFFSET, one slot per
-/// nesting depth (119th). The depth stack (not a single token) is what
-/// makes an overwrite visible: with one token per CPU a second booking
-/// overwrote the first and the exit side could not see the split.
-const IRQ_BOOK_DEPTH: usize = 8;
-
-/// Booked-task stack (119th): [cpu][depth] holds the task pointer that
-/// took the +HARDIRQ_OFFSET base at that depth (0 = no task).
-static IRQ_BOOKED: [[core::sync::atomic::AtomicUsize; IRQ_BOOK_DEPTH];
-    crate::config::MAX_CPUS] =
-    [const {
-        [const {
-            core::sync::atomic::AtomicUsize::new(0)
-        }; IRQ_BOOK_DEPTH]
-    }; crate::config::MAX_CPUS];
 
 /// Current booking depth per CPU (119th).
 static IRQ_BOOK_DEPTH_CNT: [core::sync::atomic::AtomicUsize; crate::config::MAX_CPUS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; crate::config::MAX_CPUS];
+
+/// Per-CPU token of the task the in-flight outermost hardirq bracket
+/// saw at enter (s14 IRQ-PAIR probe; see irq_enter) — KEPT as the
+/// per-CPU migration's verification witness: post-migration the count
+/// cannot split, so the report below must stay silent.
+static IRQ_PAIR_TASK: [core::sync::atomic::AtomicUsize;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) };
+        crate::config::MAX_CPUS];
+
+/// s14 IRQ-PAIR split report: the bracket's enter/exit legs saw
+/// different tasks on this cpu. Post-migration this is a
+/// migration-correctness witness only — the count itself lives on the
+/// cpu word and cannot split. Direct console; budget 60 per boot.
+#[allow(unsafe_code)]
+fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
+    use crate::console::putchar_no_lock as putchar;
+    static BUDGET: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(60);
+    let b = BUDGET.load(core::sync::atomic::Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    BUDGET
+        .compare_exchange(b, b - 1, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .ok();
+    fn phex(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    // SAFETY: diagnostic scalar reads of a stable Task field; both task
+    // pointers were current on this cpu moments before (pinned by
+    // execution).
+    let pid_e = crate::debug::forensics_edges::t_pid(enter as *const _);
+    let pid_x = crate::debug::forensics_edges::t_pid(exit as *const _);
+    let pc = preempt_count();
+    for &c in b"\nIRQ-PAIR-SPLIT cpu=" {
+        putchar(c);
+    }
+    phex(cpu as u64);
+    for &c in b" enter_pid=" {
+        putchar(c);
+    }
+    phex(pid_e as u64);
+    for &c in b" exit_pid=" {
+        putchar(c);
+    }
+    phex(pid_x as u64);
+    for &c in b" word=" {
+        putchar(c);
+    }
+    phex(pc as u32 as u64);
+    for &c in b" enter_tp=" {
+        putchar(c);
+    }
+    phex(enter as u64);
+    for &c in b" exit_tp=" {
+        putchar(c);
+    }
+    phex(exit as u64);
+    putchar(b'\n');
+}
 
 /// r-strand round 4 (lat_fs conviction, 2026-11-19): does THIS cpu have
 /// live (booked, not yet exited) hardirq brackets? The __schedule
@@ -343,99 +465,35 @@ const SOFTIRQ_STARVE_TICKS: u64 =
 /// IRQ exit path with softirq invocation.
 #[inline]
 pub fn irq_exit() {
-    // 119th (epoll-pwait conviction): release the base on the task that
-    // BOOKED it. The bracket can span a context switch (the tick
-    // handler switches inside it), so the release used to land on
-    // whatever task was current at exit — stranding the 0x10000 base
-    // on the interrupted task forever and underflowing the task the
-    // switch brought in. The per-CPU booked-task stack names the owner.
+    // s14 IRQ-PAIR probe (leakhunt-gated): a booked/exit task divergence
+    // means tp changed inside the bracket. Post-migration the count
+    // cannot split (both sides hit the same CPU word) — this line must
+    // stay SILENT; any firing is a migration-correctness finding.
+    if crate::trace::EVENT_LEAKHUNT.armed() {
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
+            if booked != 0 {
+                if let Some(cur) = crate::sched::current() {
+                    let cur_ptr = cur as *mut crate::process::task::Task as usize;
+                    if cur_ptr != booked {
+                        irq_pair_report(cpu, booked, cur_ptr);
+                    }
+                }
+            }
+        }
+    }
     let cpu = crate::arch::cpu_id() as usize;
-    let mut booked: usize = 0;
     if cpu < crate::config::MAX_CPUS {
         let depth = IRQ_BOOK_DEPTH_CNT[cpu].load(core::sync::atomic::Ordering::Acquire);
         if depth > 0 {
             IRQ_BOOK_DEPTH_CNT[cpu].store(depth - 1, core::sync::atomic::Ordering::Release);
-            let idx = depth - 1;
-            if idx < IRQ_BOOK_DEPTH {
-                booked = IRQ_BOOKED[cpu][idx].load(core::sync::atomic::Ordering::Acquire);
-                IRQ_BOOKED[cpu][idx].store(0, core::sync::atomic::Ordering::Release);
-            }
         }
     }
-    if booked != 0 {
-        let cur = crate::sched::current()
-            .map(|t| t as *mut crate::process::task::Task as usize)
-            .unwrap_or(0);
-        if cur == booked {
-            preempt_count_sub(HARDIRQ_OFFSET);
-        } else {
-            // The bracket spanned a switch: release on the BOOKED task.
-            // The task may have exited and been freed inside the
-            // bracket (it ran on another CPU) — the safe accessor
-            // keeps the write off a freed page; the count of a freed
-            // task is meaningless anyway.
-            let bpid = crate::process::task::Task::task_pid_of(booked as *mut crate::process::task::Task);
-            let released = crate::process::task::Task::release_hardirq_base_on(
-                booked as *mut crate::process::task::Task,
-                HARDIRQ_OFFSET,
-                core::panic::Location::caller(),
-            );
-            // 119th conviction print: the bracket spanned a switch — the
-            // release landed on a task that never took the base. This
-            // is the producer of the leaked 0x10000 face. Budgeted.
-            {
-                static SPLIT_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if SPLIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                    use crate::console::putchar_no_lock as putchar;
-                    const M: &[u8] = b"\nIRQ-BOOK-SPLIT cpu=";
-                    for &b in M {
-                        putchar(b);
-                    }
-                    fn pd(mut v: u64) {
-                        use crate::console::putchar_no_lock as p;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        while v > 0 {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        if n == 0 {
-                            p(b'0');
-                        }
-                        while n > 0 {
-                            n -= 1;
-                            p(buf[n]);
-                        }
-                    }
-                    pd(cpu as u64);
-                    const M2: &[u8] = b" booked_pid=";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    pd(bpid as u64);
-                    const M3: &[u8] = b" cur_pid=";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    let cpid = crate::sched::get_current_pid();
-                    pd(cpid as u64);
-                    const M4: &[u8] = b" released=";
-                    for &b in M4 {
-                        putchar(b);
-                    }
-                    pd(released as u64);
-                    putchar(b'\n');
-                }
-            }
-        }
-    } else {
-        // No booking on the stack (early boot, or a bracket whose
-        // entry ran before the stack existed): release on the current
-        // task — the legacy behaviour.
-        preempt_count_sub(HARDIRQ_OFFSET);
-    }
+    // PER-CPU MIGRATION: the booking discipline retires. The bracket's
+    // -HARDIRQ_OFFSET lands on THIS cpu's word — the same word irq_enter
+    // booked — whatever task identity changes happened in between.
+    preempt_count_sub(HARDIRQ_OFFSET);
 
     // If we are no longer in hardirq context (outermost irq_exit),
     // check for and process pending softirqs.

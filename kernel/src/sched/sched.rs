@@ -2532,7 +2532,9 @@ pub fn ww_sched_snapshot() -> [u64; 10] {
                     let cur_t = crate::sched::edges::task_shared(cur);
                     out[base] = cur_t.pid() as u64;
                     out[base + 1] = cur_t.state().bits() as u64;
-                    out[base + 2] = cur_t.preempt_count() as u64;
+                    // PER-CPU MIGRATION: the count is cpu c's word.
+                    out[base + 2] =
+                        crate::interrupt::preempt::cpu_preempt_count(c) as u64;
                 } else {
                     out[base] = u64::MAX;
                 }
@@ -2607,7 +2609,8 @@ pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) {
     {
         (
             crate::sched::edges::task_shared(cur).pid() as u64,
-            crate::sched::edges::task_shared(cur).preempt_count() as u64,
+            // PER-CPU MIGRATION: the count is this report's cpu's word.
+            crate::interrupt::preempt::cpu_preempt_count(cpu) as u64,
             crate::arch::trap::pt_regs_rip_for_cpu(cpu),
         )
     }
@@ -3453,6 +3456,48 @@ pub fn schedule() {
         }
         return;
     }
+    // PER-CPU MIGRATION — the base-holdout gate (replaces the old
+    // __schedule park adjudication's holdout refusal, which keyed on
+    // the now-frozen per-task field): at a legitimate blocking-path
+    // schedule() entry THIS cpu's word must carry NO preemption-disable
+    // base — every guard frame of this task has unwound. This is the
+    // reference's __schedule_bug boundary (kernel/sched/core.c
+    // schedule_debug: in_atomic_preempt_off() -> BUG + preempt_count_set
+    // clamp), in the tree's refuse-the-park form: a task that reaches
+    // schedule() while holding a lock guard (the cross-context leak
+    // family) parks with the +1 stranded ON THE CPU WORD — the word
+    // then blocks every later schedule() on this cpu (the ksoftirqd
+    // strand + both-cpu wedge the migration boot measured live) and its
+    // guard's eventual release lands on whatever cpu the task resumed
+    // on (cross-cpu underflow). Refuse: the caller stays RUNNING, its
+    // wait loop retries, and the held guard drains in its own context.
+    {
+        let base = crate::interrupt::preempt::preempt_count()
+            & crate::interrupt::preempt::PREEMPT_MASK;
+        if base != 0 {
+            static HOLDOUT_N: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            if HOLDOUT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                if crate::trace::EVENT_LEAKHUNT.armed() {
+                    if let Some(task) = crate::sched::current() {
+                        crate::dfx::leakorigin::report_outermost(
+                            b"PARK-REFUSED-ORIGIN",
+                            task,
+                        );
+                    }
+                }
+                let loc = core::panic::Location::caller();
+                crate::pr_err!(
+                    "SCHEDULE-HOLDOUT caller={}:{} pid={} base={:#x}",
+                    loc.file(),
+                    loc.line(),
+                    crate::process::current_pid(),
+                    base
+                );
+            }
+            return;
+        }
+    }
     // SP-5 r5 frozen-tick trap: schedule() entered with IF=0. The tail's
     // per-caller restore_irq(flags) then returns with IF STILL 0, and the
     // caller keeps running with IRQs off until some other sti — the
@@ -3471,9 +3516,7 @@ pub fn schedule() {
                 loc.file(),
                 loc.line(),
                 crate::process::current_pid(),
-                crate::sched::current()
-                    .map(|t| t.preempt_count())
-                    .unwrap_or(0)
+                crate::interrupt::preempt::preempt_count()
             );
         }
     }
@@ -7880,7 +7923,8 @@ pub fn runq_strand_census(now_j: u64) {
                     " c{}={}/pc{:#x}/act{}s",
                     c,
                     cur.pid(),
-                    cur.preempt_count(),
+                    // PER-CPU MIGRATION: the count is cpu c's word.
+                    crate::interrupt::preempt::cpu_preempt_count(c),
                     act_ms / 1000
                 );
             }
@@ -8647,7 +8691,7 @@ pub fn scheduler_tick() {
                 // Subtract exactly the tick's one level before any
                 // adjudication; a task's own leaked hardirq level still
                 // shows as a residue (and h_extra reads >= 1 level).
-                let pc = crate::sched::edges::task_shared(cur).preempt_count()
+                let pc = crate::interrupt::preempt::preempt_count()
                     .saturating_sub(crate::interrupt::preempt::HARDIRQ_OFFSET);
                 // Per-field consecutive-PRESENT run counters (phantom-bits
                 // r2/3, stress-port r3 2026-11-02): a field's phantomness
@@ -8686,13 +8730,10 @@ pub fn scheduler_tick() {
                 // a fresh task's counters start at 0 and must climb to
                 // 200 real observations before any heal.
                 {
-                    let h_extra_now = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
-                        >= crate::interrupt::preempt::HARDIRQ_OFFSET;
-                    crate::sched::edges::task_shared(cur).ti_pc_present_runs_tick(
-                            pc & crate::interrupt::preempt::PREEMPT_MASK != 0,
-                            pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0,
-                            h_extra_now,
-                        );
+                    // PER-CPU MIGRATION: the runs are per-CPU now (same
+                    // observations — the tick reads its own word; the
+                    // resets fire on the owning CPU's outermost pair).
+                    crate::interrupt::preempt::pc_runs_tick(pc, cpu_id);
                 }
                 if pc != 0 {
                     let now = crate::drivers::timer::get_jiffies();
@@ -8787,13 +8828,16 @@ pub fn scheduler_tick() {
                         run >= 2 * crate::config::KERNEL_HZ as u64
                     };
                     let p_stale = p_set && {
-                        stale_2s(crate::sched::edges::task_shared(cur).ti_pc_pirq_present_run())
+                        stale_2s(crate::interrupt::preempt::PC_PIRQ_RUN[cpu_id]
+                            .load(core::sync::atomic::Ordering::Relaxed))
                     };
                     let s_stale = s_set && {
-                        stale_2s(crate::sched::edges::task_shared(cur).ti_pc_sirq_present_run())
+                        stale_2s(crate::interrupt::preempt::PC_SIRQ_RUN[cpu_id]
+                            .load(core::sync::atomic::Ordering::Relaxed))
                     };
                     let h_stale = h_extra && {
-                        stale_2s(crate::sched::edges::task_shared(cur).ti_pc_hirq_present_run())
+                        stale_2s(crate::interrupt::preempt::PC_HIRQ_RUN[cpu_id]
+                            .load(core::sync::atomic::Ordering::Relaxed))
                     };
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
@@ -9148,17 +9192,17 @@ pub fn scheduler_tick() {
                             for &b in M4B {
                                 putchar(b);
                             }
-                            ph(crate::sched::edges::task_shared(cur).ti_pc_pirq_present_run());
+                            ph(crate::interrupt::preempt::PC_PIRQ_RUN[cpu_id].load(core::sync::atomic::Ordering::Relaxed));
                             const M4C: &[u8] = b" srun=";
                             for &b in M4C {
                                 putchar(b);
                             }
-                            ph(crate::sched::edges::task_shared(cur).ti_pc_sirq_present_run());
+                            ph(crate::interrupt::preempt::PC_SIRQ_RUN[cpu_id].load(core::sync::atomic::Ordering::Relaxed));
                             const M4D: &[u8] = b" hrun=";
                             for &b in M4D {
                                 putchar(b);
                             }
-                            ph(crate::sched::edges::task_shared(cur).ti_pc_hirq_present_run());
+                            ph(crate::interrupt::preempt::PC_HIRQ_RUN[cpu_id].load(core::sync::atomic::Ordering::Relaxed));
                             // CARRIER-HEAL (123rd): name the healed
                             // carrier at fire time with the tick-entry
                             // snapshots (already refreshed every tick on

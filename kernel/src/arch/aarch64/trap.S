@@ -51,7 +51,8 @@
 .equ S_FAR, {S_FAR}
 .equ S_ORIG_X0, {S_ORIG_X0}
 .equ S_SYSCALLNO, {S_SYSCALLNO}
-.equ TI_PREEMPT, {TI_PREEMPT}
+// (TI_PREEMPT removed — PER-CPU MIGRATION: the gate reads
+// interrupt::preempt's per-CPU word via asm_preemptible.)
 .equ TI_KSTACK_BOTTOM, {TI_KSTACK_BOTTOM}
 .equ KSTACK_SIZE, {KSTACK_SIZE}
 // Offset of the interrupted x22's frame slot relative to the restored
@@ -227,13 +228,17 @@ aarch64_exit_to_user:
     cbz     x0, restore_and_eret
 
     // Preempt only if preempt_count == 0 (a user return holds no
-    // kernel locks — the riscv64 USER-path gate; load width matters:
-    // ti_preempt_count is an i32, a wide load straddles the neighbour
-    // field and silently disables preemption machine-wide).
+    // kernel locks — the riscv64 USER-path gate; load width mattered
+    // when the count was a per-task i32: a wide load straddled the
+    // neighbour field and silently disabled preemption machine-wide).
+    // PER-CPU MIGRATION (p23-percpupreempt): the count is THIS cpu's
+    // word now (interrupt/preempt.rs PREEMPT_WORDS); the gate reads it
+    // through asm_preemptible — reached only when need_resched is
+    // already set.
     mrs     x20, tpidr_el1           // x20 = current Task*
     cbz     x20, restore_and_eret    // early boot: no task, no preemption
-    ldr     w21, [x20, #TI_PREEMPT]
-    cbnz    w21, restore_and_eret
+    bl      asm_preemptible
+    cbz     x0, restore_and_eret
 
     bl      asm_schedule
     // __schedule returns with interrupts enabled (restore_irq(true) at
