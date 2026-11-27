@@ -3139,24 +3139,6 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Pending children of a dying listener are dropped with their Arcs;
     // their clients see EPIPE on the next send (peer upgrade fails).
     sock.accept_queue.lock().clear();
-    // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
-    // queue at close time are about to be released — the receiver died
-    // (or stopped reading) before the ancillary segment was touched.
-    if crate::debug::scmtap::enabled() {
-        let q = sock.recv_queue.lock();
-        let mut nfds = 0usize;
-        let mut segs = 0usize;
-        for seg in q.segs.iter() {
-            if !seg.files.is_empty() {
-                segs += 1;
-                nfds += seg.files.len();
-            }
-        }
-        drop(q);
-        if nfds > 0 {
-            crate::debug::scmtap::tap_orphan(nfds, segs);
-        }
-    }
     // unix_release_sock: wake_up_interruptible_all(&u->peer_wait) —
     // senders/connectors parked on OUR peer_wait re-check and take
     // EPIPE/ECONNREFUSED; our own waiters (readers/pollers — an
@@ -3429,9 +3411,6 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if r.len == 0 {
                     return 0; // EOF
                 }
-                if crate::debug::scmtap::enabled() && !r.files.is_empty() {
-                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
-                }
                 // dst was access_ok-validated by the caller;
                 // r.len <= stage <= count.
                 if crate::arch::uaccess_safe::copy_out(dst as usize, &kbuf[..r.len]) != 0 {
@@ -3469,15 +3448,9 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if n == 0 {
                     break; // peer EOF
                 }
-                // scmtap: read(2) cannot report ancillary data — the
+                // read(2) cannot report ancillary data — the
                 // queued fds are released here (Linux closes them the
-                // same way). A fd-carrying segment touched by a plain
-                // read is the dbus "message refers to more unix fds
-                // than were sent" corruption shape, so make the loss
-                // visible when hunting (rux:scmtap (retired dfx=scmtap)).
-                if crate::debug::scmtap::enabled() && !r.files.is_empty() {
-                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
-                }
+                // same way).
                 // user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv
                 // wrote are read out of the bounce.
@@ -3521,7 +3494,7 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
 ///   already landed (unix_wait_round reports EINTR only while total
 ///   is zero, matching the bounce path's first-call propagation).
 /// - Ancillary data is taken first-touch and discarded (read(2) cannot
-///   report cmsgs — same as the bounce path; scmtap notes the drop).
+///   report cmsgs — same as the bounce path).
 /// - A fault mid-copy returns the bytes that landed (POSIX partial
 ///   read); the unconsumed remainder of the torn segment stays queued.
 fn unix_recv_stream_user(
@@ -3613,9 +3586,6 @@ fn unix_recv_stream_user(
                 }
             }
             if !files.is_empty() {
-                if crate::debug::scmtap::enabled() {
-                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", files.len());
-                }
                 let _ = cred;
             }
             if fault_tail.is_some() && total == 0 {

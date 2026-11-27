@@ -68,7 +68,6 @@ STATUS = {
     "kernel/src/debug/mod.rs": ("part", "init, debugfs knob registration"),
     "kernel/src/debug/monowatch.rs": ("part", "monotonic jump tripwire"),
     "kernel/src/debug/oops.rs": ("todo", ""),
-    "kernel/src/debug/scmtap.rs": ("part", "cr3: session-fifo hunt tap — every print budgeted, dfx=scmtap gated; no failure-path semantics touched"),
     "kernel/src/debug/filerd.rs": ("todo", ""),
     "kernel/src/debug/forkprof.rs": ("todo", ""),
     "kernel/src/debug/lostpark.rs": ("todo", ""),

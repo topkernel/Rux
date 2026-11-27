@@ -132,10 +132,6 @@ pub mod pathstash;
 /// kernel-stack chain — attributes the leaf of nested-call cascades
 /// (fs stalls behind binder reader exhaustion). See debug/slowtask.rs.
 pub mod slowtask;
-/// SCM_RIGHTS relay tap (rux:scmtap (retired dfx=scmtap), gdm session-fifo hunt): one line
-/// per unix-fd hop/drop plus the fifo last-writer-close line; see
-/// debug/scmtap.rs.
-pub mod scmtap;
 /// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
 /// debug/forkprof.rs.
