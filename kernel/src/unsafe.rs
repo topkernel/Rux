@@ -363,3 +363,88 @@ pub fn cmdline_str(ptr: *const u8, len: usize) -> Option<&'static str> {
         core::str::from_utf8(slice).ok()
     }
 }
+
+// ---------------------------------------------------------------------------
+// INV-CONSOLE-UART-1: the console's UART hardware byte edges (moved from
+// console.rs by the root-file unsafe collection, 2026-11-27). The
+// register FILE and the stall/probe logic stay in console.rs — only the
+// raw per-arch byte moves cross here.
+// ---------------------------------------------------------------------------
+
+/// One byte to the ns16550a data register (riscv64 MMIO base).
+///
+/// INV-CONSOLE-UART-1: `base` is the mapped UART register base
+/// (get_uart_base()); the data-register store is the 8250 TX protocol.
+#[cfg(feature = "riscv64")]
+pub fn uart_dr_store_riscv(base: usize, b: u8) {
+    // SAFETY: INV-CONSOLE-UART-1 — MMIO store to the UART data register.
+    unsafe {
+        core::arch::asm!(
+            "sb t1, 0(a0)",
+            in("a0") base,
+            in("t1") b,
+            options(nostack, nomem)
+        );
+    }
+}
+
+/// One byte to the PL011 data register (aarch64 fixmap/identity VA).
+///
+/// INV-CONSOLE-UART-1: `addr` is uart_virt_addr() — the PL011 fixmap VA
+/// once the early map is installed (mmu_init::init →
+/// fixmap::init_uart_fixmap), the identity physical address before that
+/// (boot.S idmap still live); both are valid data-register addresses.
+#[cfg(feature = "aarch64")]
+pub fn pl011_dr_store(addr: usize, b: u8) {
+    // SAFETY: INV-CONSOLE-UART-1 — DR store through the fixmap/identity VA.
+    unsafe {
+        core::arch::asm!(
+            "str w1, [x0]",
+            in("x0") addr,
+            in("w1") b as u32,
+            options(nostack, nomem)
+        );
+    }
+}
+
+/// PL011 Flag Register read (`addr` is the FR offset — see the data_ready
+/// caller's RX-empty bit test).
+///
+/// INV-CONSOLE-UART-1: pure MMIO flag read through the fixmap/identity
+/// VA (same address contract as [`pl011_dr_store`]).
+#[cfg(feature = "aarch64")]
+pub fn pl011_fr_read(addr: usize) -> u32 {
+    let fr: u32;
+    // SAFETY: INV-CONSOLE-UART-1 — volatile FR read.
+    unsafe {
+        core::arch::asm!(
+            "ldr {fr}, [{addr}]",
+            fr = out(reg) fr,
+            addr = in(reg) addr,
+            options(nostack, readonly)
+        );
+    }
+    fr
+}
+
+/// The COM1 transmit burst: string-out the chunk to the 8250 data port.
+///
+/// INV-CONSOLE-UART-1 (x86_64 arm): COM1 THR is the standard 8250 data
+/// port; the string IO writes exactly chunk.len() bytes from chunk. DF
+/// is cleared per the ABI before `rep` (belt: `cld`).
+#[cfg(feature = "x86_64")]
+pub fn com1_rep_outsb(port: u16, chunk: &[u8]) {
+    // SAFETY: INV-CONSOLE-UART-1 — bounded rep-outsb to the data port.
+    unsafe {
+        core::arch::asm!(
+            "cld",
+            "rep outsb",
+            in("dx") port,
+            in("rcx") chunk.len() as u64,
+            in("rsi") chunk.as_ptr(),
+            lateout("rcx") _,
+            lateout("rsi") _,
+            options(nostack)
+        );
+    }
+}

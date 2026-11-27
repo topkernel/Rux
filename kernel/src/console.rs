@@ -7,9 +7,14 @@
 //! Split initialization:
 //! - `early_init()`: basic MMIO setup, enable FIFOs (before PLIC)
 //! - `init_irq()`: enable RX interrupt, register IRQ handler (after PLIC)
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the
+//! per-arch UART hardware byte edges live in kernel/src/unsafe.rs
+//! (INV-CONSOLE-UART-1); x86 port IO goes through the audited safe
+//! arch::cpu::{inb,outb} edges.
+#![forbid(unsafe_code)]
 
 use core::fmt;
-use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
@@ -219,31 +224,17 @@ impl Uart {
         crate::dfx::pstore::sink(c);
 
         #[cfg(feature = "aarch64")]
-        // SAFETY: uart_virt_addr() is the PL011 fixmap VA once the early
-        // map is installed (mmu_init::init → fixmap::init_uart_fixmap),
-        // the identity physical address before that (boot.S idmap still
-        // live) — both are valid MMIO data-register addresses.
-        unsafe {
-            let addr = uart_virt_addr();
-            asm!(
-                "str w1, [x0]",
-                in("x0") addr,
-                in("w1") c as u32,
-                options(nostack, nomem)
-            );
-        }
+        // INV-CONSOLE-UART-1 (the audited edge): uart_virt_addr() is the
+        // PL011 fixmap VA once the early map is installed (mmu_init::init
+        // → fixmap::init_uart_fixmap), the identity physical address
+        // before that (boot.S idmap still live) — both are valid MMIO
+        // data-register addresses.
+        crate::boot_edges::pl011_dr_store(uart_virt_addr(), c);
 
         #[cfg(feature = "riscv64")]
-        // SAFETY: get_uart_base() returns a valid MMIO address for the UART data register.
-        unsafe {
-            let addr = get_uart_base();
-            asm!(
-                "sb t1, 0(a0)",
-                in("a0") addr,
-                in("t1") c,
-                options(nostack, nomem)
-            );
-        }
+        // INV-CONSOLE-UART-1: get_uart_base() returns the mapped MMIO
+        // address of the UART data register; the edge stores the byte.
+        crate::boot_edges::uart_dr_store_riscv(get_uart_base(), c);
 
         #[cfg(feature = "x86_64")]
         {
@@ -350,12 +341,11 @@ impl Uart {
         #[cfg(feature = "riscv64")]
         {
             // MMIO stores under TCG: per-byte stays for now (the riscv
-            // fleet's console row is its own measurement).
-            unsafe {
-                let addr = get_uart_base();
-                for &b in bytes {
-                    asm!("sb t1, 0(a0)", in("a0") addr, in("t1") b, options(nostack, nomem));
-                }
+            // fleet's console row is its own measurement). INV-CONSOLE-
+            // UART-1 — the audited per-byte DR edge.
+            let addr = get_uart_base();
+            for &b in bytes {
+                crate::boot_edges::uart_dr_store_riscv(addr, b);
             }
         }
         #[cfg(feature = "aarch64")]
@@ -370,16 +360,10 @@ impl Uart {
             // RX and receive-timeout interrupts, so the console's own DR
             // writes never raise a serial IRQ, and printk-side
             // re-entrancy is covered by the per-CPU IN_PRINTK guard.
-            unsafe {
-                let addr = uart_virt_addr();
-                for &b in bytes {
-                    asm!(
-                        "str w1, [x0]",
-                        in("x0") addr,
-                        in("w1") b as u32,
-                        options(nostack, nomem)
-                    );
-                }
+            // INV-CONSOLE-UART-1 — the audited per-byte DR edge.
+            let addr = uart_virt_addr();
+            for &b in bytes {
+                crate::boot_edges::pl011_dr_store(addr, b);
             }
         }
         #[cfg(feature = "x86_64")]
@@ -430,21 +414,10 @@ impl Uart {
                     }
                     core::hint::spin_loop();
                 }
-                // SAFETY: COM1 THR is the standard 8250 data port; the
-                // string IO writes exactly chunk.len() bytes from chunk.
-                // DF is cleared per the ABI before `rep` (belt: `cld`).
-                unsafe {
-                    core::arch::asm!(
-                        "cld",
-                        "rep outsb",
-                        in("dx") COM1_BASE,
-                        in("rcx") chunk.len() as u64,
-                        in("rsi") chunk.as_ptr(),
-                        lateout("rcx") _,
-                        lateout("rsi") _,
-                        options(nostack)
-                    );
-                }
+                // INV-CONSOLE-UART-1 (the audited edge): COM1 THR is the
+                // standard 8250 data port; the string IO writes exactly
+                // chunk.len() bytes, DF cleared per the ABI before `rep`.
+                crate::boot_edges::com1_rep_outsb(COM1_BASE, chunk);
                 consumed += chunk.len();
             }
             if if0 {
@@ -628,15 +601,15 @@ fn read_reg(base: usize, offset: usize) -> u8 {
 
 #[cfg(feature = "x86_64")]
 fn write_reg(base: u16, offset: usize, val: u8) {
-    // SAFETY: `base + offset` is a valid 8250 register port (port-IO is
-    // the one instruction that can reach it).
-    unsafe { crate::arch::cpu::outb(base + offset as u16, val) }
+    // `base + offset` is a valid 8250 register port; arch::cpu::outb is
+    // the audited safe port-IO edge (the asm lives in arch/x86_64/cpu.rs).
+    crate::arch::cpu::outb(base + offset as u16, val)
 }
 
 #[cfg(feature = "x86_64")]
 fn read_reg(base: u16, offset: usize) -> u8 {
-    // SAFETY: `base + offset` is a valid 8250 register port.
-    unsafe { crate::arch::cpu::inb(base + offset as u16) }
+    // Same audited safe port-IO edge (arch::cpu::inb).
+    crate::arch::cpu::inb(base + offset as u16)
 }
 
 // ============================================================================
@@ -928,18 +901,10 @@ pub fn uart_data_ready() -> bool {
 /// aarch64 PL011: FR (offset 0x18) bit 4 = RX FIFO empty
 #[cfg(feature = "aarch64")]
 pub fn uart_data_ready() -> bool {
-    // SAFETY: uart_virt_addr() is the fixmap VA (or the early identity
-    // address pre-init — see putc); reading FR is a pure MMIO flag read.
-    unsafe {
-        let fr: u32;
-        core::arch::asm!(
-            "ldr {fr}, [{addr}]",
-            fr = out(reg) fr,
-            addr = in(reg) uart_virt_addr() + 0x18,
-            options(nostack, readonly)
-        );
-        fr & (1 << 4) == 0
-    }
+    // INV-CONSOLE-UART-1 (the audited FR edge): uart_virt_addr() is the
+    // fixmap VA (or the early identity address pre-init — see putc);
+    // reading FR is a pure MMIO flag read.
+    crate::boot_edges::pl011_fr_read(uart_virt_addr() + 0x18) & (1 << 4) == 0
 }
 
 /// Read single character (non-blocking).
