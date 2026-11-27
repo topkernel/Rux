@@ -848,6 +848,12 @@ pub(crate) fn read_unaligned_u32(data: &[u8], off: usize) -> u32 {
     unsafe { core::ptr::read_unaligned(data.as_ptr().add(off) as *const u32) }
 }
 
+/// The u16 twin of [`read_unaligned_u32`] (INV-FS-UNALIGN-1).
+pub(crate) fn read_unaligned_u16(data: &[u8], off: usize) -> u16 {
+    // SAFETY: INV-FS-UNALIGN-1.
+    unsafe { core::ptr::read_unaligned(data.as_ptr().add(off) as *const u16) }
+}
+
 /// The u64 twin of [`read_unaligned_u32`] (INV-FS-UNALIGN-1).
 pub(crate) fn read_unaligned_u64(data: &[u8], off: usize) -> u64 {
     // SAFETY: INV-FS-UNALIGN-1.

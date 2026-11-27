@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -334,22 +335,21 @@ pub fn jbd2_journal_commit_transaction(
             // SAFETY: data_bh is a valid BufferHead; b_data is block_size
             // bytes on both heads; the copy length is the journal block
             // size.
-            unsafe {
-                let data_bh_ref = &mut *data_bh;
-                core::ptr::copy_nonoverlapping(
-                    (*src_bh).b_data.as_ptr(),
-                    data_bh_ref.b_data.as_mut_ptr(),
+            {
+                let data_bh_ref = crate::fs::edges::bh_data_mut(data_bh);
+                crate::fs::edges::kcopy(
+                    data_bh_ref.as_mut_ptr(),
+                    0,
+                    crate::fs::edges::bh_data(src_bh).as_ptr(),
+                    0,
                     block_size,
                 );
                 // Tag checksum over the frozen image (reference
                 // jbd2_block_tag_csum_set: crc32c(crc32c(seed, be32(seq)),
                 // block bytes)).
-                let data_bytes: &[u8] = core::slice::from_raw_parts(
-                    data_bh_ref.b_data.as_ptr(),
-                    block_size,
-                );
-                tag_csums[i] = block_tag_csum(journal, tid, data_bytes);
-                data_bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                tag_csums[i] =
+                    block_tag_csum(journal, tid, &data_bh_ref[..block_size]);
+                bio::bh_set_state_bit(&data_bh, crate::fs::bio::BufferState::BH_Dirty);
             }
             bio::brelse(src_bh);
             current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
@@ -383,11 +383,9 @@ pub fn jbd2_journal_commit_transaction(
 
         // Build descriptor: header + tags + tail
         let header = journal_header_t::new(JBD2_DESCRIPTOR_BLOCK, tid);
-        // SAFETY: header is a stack-local journal_header_t; reinterpreting as bytes is safe
-        // because the struct is #[repr(C)] with no padding concerns for the sizes used.
-        let header_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(&header as *const _ as *const u8, header_size)
-        };
+        // header is a stack-local journal_header_t; the byte view is its
+        // own repr(C) representation (INV-FS-STRUCTBYTES-1).
+        let header_bytes: &[u8] = &crate::fs::edges::struct_bytes(&header)[..header_size];
 
         let mut desc_data = alloc::vec![0u8; block_size];
         desc_data[0..header_size].copy_from_slice(header_bytes);
@@ -406,11 +404,9 @@ pub fn jbd2_journal_commit_transaction(
                     t_blocknr_high: (((blocknr >> 31) >> 1) as u32).to_be(),
                     t_checksum: tag_csums[i].to_be(),
                 };
-                // SAFETY: tag is a stack-local journal_block_tag3_t;
+                // tag is a stack-local journal_block_tag3_t;
                 // #[repr(C, packed)] with size == tag_size for V3.
-                let tag_bytes: &[u8] = unsafe {
-                    core::slice::from_raw_parts(&tag as *const _ as *const u8, tag_size)
-                };
+                let tag_bytes: &[u8] = &crate::fs::edges::struct_bytes(&tag)[..tag_size];
                 desc_data[offset..offset + tag_size].copy_from_slice(tag_bytes);
             } else if journal_has_64bit {
                 // V1/V2 tag with the high block half.
@@ -420,11 +416,9 @@ pub fn jbd2_journal_commit_transaction(
                     t_flags: (flags as u16).to_be(),
                     t_blocknr_high: (((blocknr >> 31) >> 1) as u32).to_be(),
                 };
-                // SAFETY: tag is a stack-local journal_block_tag_t;
+                // tag is a stack-local journal_block_tag_t;
                 // #[repr(C, packed)] with size == tag_size for 64-bit V2.
-                let tag_bytes: &[u8] = unsafe {
-                    core::slice::from_raw_parts(&tag as *const _ as *const u8, tag_size)
-                };
+                let tag_bytes: &[u8] = &crate::fs::edges::struct_bytes(&tag)[..tag_size];
                 desc_data[offset..offset + tag_size].copy_from_slice(tag_bytes);
             } else {
                 // 32-bit V1/V2 tag: blocknr, truncated csum, flags.
@@ -434,11 +428,9 @@ pub fn jbd2_journal_commit_transaction(
                     t_flags: (flags as u16).to_be(),
                     t_blocknr_high: 0,
                 };
-                // SAFETY: 8-byte truncated view of a stack-local
+                // 8-byte truncated view of a stack-local
                 // journal_block_tag_t (12 bytes) — in bounds.
-                let tag_bytes: &[u8] = unsafe {
-                    core::slice::from_raw_parts(&tag as *const _ as *const u8, tag_size)
-                };
+                let tag_bytes: &[u8] = &crate::fs::edges::struct_bytes(&tag)[..tag_size];
                 desc_data[offset..offset + tag_size].copy_from_slice(tag_bytes);
             }
             offset += tag_size;
@@ -448,12 +440,12 @@ pub fn jbd2_journal_commit_transaction(
         // journal carries V2/V3 checksums.
         descriptor_block_csum_set(journal, &mut desc_data);
 
-        // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes;
-        // copy_nonoverlapping sizes are bounds-checked by block_size.
-        unsafe {
-            let bh_ref = &mut *bh;
-            core::ptr::copy_nonoverlapping(desc_data.as_ptr(), bh_ref.b_data.as_mut_ptr(), block_size);
-            bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        // bh is a valid BufferHead from bio::bread; b_data is block_size bytes;
+        // the copy sizes are bounds-checked by block_size.
+        {
+            let bh_data = crate::fs::edges::bh_data_mut(bh);
+            bh_data[..block_size].copy_from_slice(&desc_data[..block_size]);
+            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
         }
 
         // R20-FS5 (F3): release the bh BEFORE propagating a sync error — the
@@ -518,16 +510,15 @@ pub fn jbd2_journal_commit_transaction(
         h_sequence: tid.to_be(),
         ..Default::default()
     };
-    // SAFETY: commit_hdr is a stack-local commit_header; #[repr(C)] struct reinterpreted as bytes.
-    let commit_bytes: &[u8] = unsafe {
-        core::slice::from_raw_parts(&commit_hdr as *const _ as *const u8, size_of::<commit_header>())
-    };
+    // commit_hdr is a stack-local commit_header; the byte view is its
+    // own repr(C) representation.
+    let commit_bytes: &[u8] = &crate::fs::edges::struct_bytes(&commit_hdr)[..size_of::<commit_header>()];
     // SAFETY: commit_bh is a valid BufferHead; b_data is block_size bytes;
     // commit_bytes.len() fits within a block.
-    unsafe {
-        let commit_ref = &mut *commit_bh;
-        for b in commit_ref.b_data.iter_mut() { *b = 0; }
-        core::ptr::copy_nonoverlapping(commit_bytes.as_ptr(), commit_ref.b_data.as_mut_ptr(), commit_bytes.len());
+    {
+        let commit_data = crate::fs::edges::bh_data_mut(commit_bh);
+        for b in commit_data.iter_mut() { *b = 0; }
+        commit_data[..commit_bytes.len()].copy_from_slice(commit_bytes);
         // CSUM_V2/V3 (reference jbd2_commit_block_csum_set): h_chksum_type,
         // h_chksum_size and h_chksum[0] are all zero at this point
         // (commit_header::Default + the block wipe), so the checksum runs
@@ -535,12 +526,14 @@ pub fn jbd2_journal_commit_transaction(
         if journal.has_csum_v2or3() {
             let csum = crate::fs::ext4::csum::crc32c(
                 journal.csum_seed(),
-                core::slice::from_raw_parts(commit_ref.b_data.as_ptr(), block_size),
+                &commit_data[..block_size],
             );
-            let hdr = &mut *(commit_ref.b_data.as_mut_ptr() as *mut commit_header);
+            let hdr = crate::fs::edges::raw_mut(
+                commit_data.as_ptr() as *mut commit_header,
+            );
             hdr.h_chksum[0] = csum.to_be();
         }
-        commit_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&commit_bh, crate::fs::bio::BufferState::BH_Dirty);
     }
     current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
@@ -651,9 +644,10 @@ fn write_journal_superblock(
 
     // SAFETY: bh is a valid BufferHead; the superblock fits within a block;
     // bh_ref.b_data contains the on-disk journal_superblock_t.
-    unsafe {
-        let bh_ref = &mut *bh;
-        let sb = &mut *(bh_ref.b_data.as_mut_ptr() as *mut journal_superblock_t);
+    {
+        let sb = crate::fs::edges::raw_mut(
+            crate::fs::edges::bh_data(bh).as_ptr() as *mut journal_superblock_t,
+        );
         sb.s_start = (new_start as u32).to_be();
         sb.s_sequence = new_sequence.to_be();
         // CSUM_V2/V3 (reference jbd2_superblock_csum + jbd2_journal_update_sb_*
@@ -662,14 +656,12 @@ fn write_journal_superblock(
         // NOT j_csum_seed, NOT the full block.
         if journal.has_csum_v2or3() {
             sb.s_checksum = 0;
-            let bytes: &[u8] = core::slice::from_raw_parts(
-                bh_ref.b_data.as_ptr(),
-                size_of::<journal_superblock_t>(),
-            );
+            let bytes: &[u8] =
+                &crate::fs::edges::bh_bytes(bh, size_of::<journal_superblock_t>());
             let csum = crate::fs::ext4::csum::crc32c(0xFFFF_FFFF, bytes);
             sb.s_checksum = csum.to_be();
         }
-        bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
     }
 
     let sync_res = bio::sync_dirty_buffer(bh);
