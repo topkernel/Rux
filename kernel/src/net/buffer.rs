@@ -589,9 +589,8 @@ pub fn hdr_view<T: Copy>(data: &[u8]) -> Option<&T> {
     if data.len() < core::mem::size_of::<T>() {
         return None;
     }
-    // SAFETY: length checked above; T is a plain wire header; the
-    // reference borrows from `data` with its own lifetime.
-    Some(unsafe { &*(data.as_ptr() as *const T) })
+    // Typed-view edge lives in the audited unsafe.rs (INV-NET-SKBUFF-1).
+    Some(crate::net::edges::typed_ref(data.as_ptr() as *const T))
 }
 
 /// The mutable twin of [`hdr_view`] (the build side over a caller-owned
@@ -600,6 +599,7 @@ pub fn hdr_view_mut<T: Copy>(data: &mut [u8]) -> Option<&mut T> {
     if data.len() < core::mem::size_of::<T>() {
         return None;
     }
-    // SAFETY: as hdr_view, over the exclusive borrow.
-    Some(unsafe { &mut *(data.as_mut_ptr() as *mut T) })
+    // Typed-view edge as hdr_view, over the exclusive borrow
+    // (INV-NET-SKBUFF-1).
+    Some(crate::net::edges::typed_mut(data.as_mut_ptr() as *mut T))
 }

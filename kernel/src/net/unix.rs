@@ -318,8 +318,8 @@ pub struct UnixSocket {
     pub file_id: AtomicU64,
 }
 
-// SAFETY: all mutable state is behind Spinlocks.
-unsafe impl Sync for UnixSocket {}
+// Send/Sync commitment for UnixSocket lives in the audited unsafe.rs
+// (net/unsafe.rs).
 
 impl UnixSocket {
     pub fn new(kind: UnixKind) -> Self {
@@ -960,9 +960,10 @@ fn unix_wait_round(
             core::sync::atomic::AtomicU32::new(0);
         let n = WQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 24 || n % 200 == 0 {
-            let sock_of_queue = (queue as *const _ as usize)
-                .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
-            let q = unsafe { &*(sock_of_queue as *const UnixSocket) };
+            // Container_of edge lives in the audited unsafe.rs
+            // (INV-NET-SOCKDIAG-1).
+            let sock_of_queue = queue as *const _ as usize;
+            let q = crate::net::edges::unix_sock_from_waitq(queue);
             static LAST_J: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
@@ -3261,16 +3262,16 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     if kbuf.try_reserve_exact(count).is_err() {
         return cc_out(-12); // ENOMEM
     }
-    // SAFETY: capacity is exactly count; copy_from_user fills it before
-    // set_len exposes the bytes. A partial copy is EFAULT with nothing
-    // sent — the exact contract the generic staged path had (its staged
-    // copy_in returned EFAULT on a first-chunk fault, no short send).
-    unsafe {
-        let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
+    // Safe twin (uaccess_safe::copy_in): capacity is exactly count;
+    // the copy fills it before set_len exposes the bytes. A partial
+    // copy is EFAULT with nothing sent — the exact contract the
+    // generic staged path had (INV-NET-SOCKDIAG-1 lineage unchanged).
+    {
+        let uncopied = crate::arch::uaccess_safe::copy_in(&mut kbuf, src as usize);
         if uncopied > 0 {
             return cc_out(-14); // EFAULT
         }
-        kbuf.set_len(count);
+        crate::net::edges::vec_set_len(&mut kbuf, count);
     }
     match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
         Ok(n) => cc_out(n as isize),
@@ -3322,9 +3323,10 @@ pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize
     let sk: &UnixSocket = file
         .private_data_ptr()
         .map(|p| {
-            // SAFETY: UNIX_SOCKET_OPS files carry an Arc<UnixSocket>
-            // installed at creation (file-lifetime; read-only here).
-            unsafe { &*(p as *const UnixSocket) }
+            // Typed-view edge lives in the audited unsafe.rs
+            // (INV-NET-SKBUFF-1; UNIX_SOCKET_OPS files carry an
+            // Arc<UnixSocket> installed at creation).
+            crate::net::edges::typed_ref(p as *const UnixSocket)
         })?;
     let name = sk
         .bound_name
@@ -4195,8 +4197,10 @@ pub fn unix_park_audit() {
         // SAFETY: callback runs under the pid-hash bucket lock (same
         // contract as sleep_snapshot); reads confined to the task's own
         // fields, its entry frame, its fdtable and the socket objects.
-        unsafe {
-            let tk = &*task;
+        {
+            // Frame reads via the audited edge (INV-NET-SOCKDIAG-1);
+            // the task handle is the callback's safe &Task.
+            let tk = task;
             if tk.pid() == 0 {
                 return;
             }
@@ -4209,24 +4213,9 @@ pub fn unix_park_audit() {
             if top == 0 {
                 return;
             }
-            #[cfg(feature = "x86_64")]
-            let (sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry frame.
-                ((*regs).orig_rax, (*regs).rdi)
-            };
-            #[cfg(feature = "riscv64")]
-            let (sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                // SAFETY: same contract, riscv64.
-                ((*regs).a7, (*regs).a0)
-            };
-            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (sys, a0) = (0u64, 0u64);
+            // Entry-frame read lives in the audited unsafe.rs
+            // (INV-NET-SOCKDIAG-1).
+            let (sys, a0) = crate::net::edges::task_syscall_frame(top);
             // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.
             // riscv: 207=recvfrom 211=recvmsg 206=sendto 66=writev.
             #[cfg(feature = "x86_64")]

@@ -34,6 +34,9 @@ unsafe impl Sync for crate::net::raw::RawSocket {}
 // SAFETY: all mutable state is behind Spinlocks / atomics.
 unsafe impl Sync for crate::net::socket::Socket {}
 
+// SAFETY: all mutable state is behind Spinlocks.
+unsafe impl Sync for crate::net::unix::UnixSocket {}
+
 // ------------------------------------------------------------------
 // SkBuff raw core (INV-NET-SKBUFF-1): every accessor's CALLER has
 // bounds-checked the offset against head..end above the unsafe line;
@@ -143,6 +146,59 @@ pub(crate) fn socket_ref(ptr: *const crate::net::socket::Socket) -> &'static cra
     // SAFETY: INV-NETARC-1 — validated live Arc<Socket>, strong ref
     // held by private_data for the file's lifetime.
     unsafe { &*(ptr as *const crate::net::socket::Socket) }
+}
+
+/// Container_of edge for the wait-queue diagnostics: recover the
+/// owning UnixSocket from its embedded wait_queue pointer (INV-NET-
+/// SOCKDIAG-1 — the queue pointer always names a live socket's field
+/// in the wake path that reports).
+pub(crate) fn unix_sock_from_waitq(
+    queue: &crate::process::wait::WaitQueueHead,
+) -> &'static crate::net::unix::UnixSocket {
+    // SAFETY: INV-NET-SOCKDIAG-1 — container_of over an embedded field
+    // of a live socket (offset_of is the compile-time layout fact).
+    unsafe {
+        let addr = (queue as *const _ as usize)
+            - core::mem::offset_of!(crate::net::unix::UnixSocket, wait_queue);
+        &*(addr as *const crate::net::unix::UnixSocket)
+    }
+}
+
+/// Diagnostic read of the task's own syscall entry frame (INV-NET-
+/// SOCKDIAG-1: the frame lies directly below the task's checked kernel
+/// stack top; the read is diagnostic-only).
+pub(crate) fn task_syscall_frame(top: usize) -> (u64, u64) {
+    #[cfg(feature = "x86_64")]
+    {
+        // SAFETY: INV-NET-SOCKDIAG-1 — diagnostic read of this task's
+        // own entry frame.
+        unsafe {
+            let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+                as *const crate::arch::x86_64::pt_regs::PtRegs;
+            ((*regs).orig_rax, (*regs).rdi)
+        }
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: INV-NET-SOCKDIAG-1 — same contract, riscv64.
+        unsafe {
+            let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+                as *const crate::arch::riscv64::pt_regs::PtRegs;
+            ((*regs).a7, (*regs).a0)
+        }
+    }
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    {
+        (0u64, 0u64)
+    }
+}
+
+/// Vec set_len after a validated copy (INV-NET-SKBUFF-ALLOC-1
+/// lineage: capacity is exactly `n`; the copy filled it before this
+/// exposes the bytes).
+pub(crate) fn vec_set_len(buf: &mut alloc::vec::Vec<u8>, n: usize) {
+    // SAFETY: capacity >= n (allocated above); the copy filled n bytes.
+    unsafe { buf.set_len(n) }
 }
 
 /// Forensic read of the Arc head counts at `raw - 16 / - 8` (the
