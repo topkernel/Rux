@@ -25,6 +25,11 @@
 //! same shape: get_user/put_user = size-of-T copies, string walkers =
 //! per-byte get_user.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use super::mm::memory_layout::user_addr::USER_END;
 
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
@@ -47,138 +52,7 @@ pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
 // The fixup label ALSO clears AC (a fault mid-copy lands there with AC
 // still set); with SMAP off both clac sites degrade to plain ret, same
 // as the old pushfq/andq/popfq pair did.
-core::arch::global_asm!(
-    r#"
-.section .text.uaccess
-.align 8
 
-/* __x64_copy_to_user: rdi = user dst, rsi = kernel src, rdx = n.
- * Returns rax = bytes NOT copied. */
-.global __x64_copy_to_user
-.hidden __x64_copy_to_user
-__x64_copy_to_user:
-    movq %rdx, %rcx
-    testq %rcx, %rcx
-    jz 80f
-    cmpb $0, {smap}(%rip)
-    je 81f
-    stac
-81: cld
-82: rep movsb
-    .pushsection __ex_table, "a"
-    .balign 8
-    .quad 82b
-    .quad 84f
-    .popsection
-    movq %rcx, %rax          /* rcx == 0 on completion */
-    cmpb $0, {smap}(%rip)
-    je 83f
-    clac
-83: ret
-84: movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
-    cmpb $0, {smap}(%rip)
-    je 86f
-    clac
-86: ret
-80: xorl %eax, %eax
-    ret
-
-/* __x64_copy_from_user: rdi = kernel dst, rsi = user src, rdx = n.
- * Returns rax = bytes NOT copied. */
-.global __x64_copy_from_user
-.hidden __x64_copy_from_user
-__x64_copy_from_user:
-    movq %rdx, %rcx
-    testq %rcx, %rcx
-    jz 70f
-    cmpb $0, {smap}(%rip)
-    je 71f
-    stac
-71: cld
-72: rep movsb
-    .pushsection __ex_table, "a"
-    .balign 8
-    .quad 72b
-    .quad 74f
-    .popsection
-    movq %rcx, %rax
-    cmpb $0, {smap}(%rip)
-    je 73f
-    clac
-73: ret
-74: movq %rcx, %rax
-    cmpb $0, {smap}(%rip)
-    je 76f
-    clac
-76: ret
-70: xorl %eax, %eax
-    ret
-
-/* __x64_clear_user: rdi = user dst, rsi = n.
- * Returns rax = bytes NOT cleared. */
-.global __x64_clear_user
-.hidden __x64_clear_user
-__x64_clear_user:
-    movq %rsi, %rcx
-    testq %rcx, %rcx
-    jz 60f
-    cmpb $0, {smap}(%rip)
-    je 61f
-    stac
-61: xorl %eax, %eax
-    cld
-62: rep stosb
-    .pushsection __ex_table, "a"
-    .balign 8
-    .quad 62b
-    .quad 64f
-    .popsection
-    xorl %eax, %eax           /* rcx == 0 on completion */
-    cmpb $0, {smap}(%rip)
-    je 63f
-    clac
-63: ret
-64: movq %rcx, %rax          /* fault mid-clear: rcx = remaining */
-    cmpb $0, {smap}(%rip)
-    je 66f
-    clac
-66: ret
-60: xorl %eax, %eax
-    ret
-
-/* __x64_futex_cmpxchg_u32: rdi = user u32*, esi = expected, edx = new.
- * ATOMIC (vs userspace) compare-exchange on the user word — the PI
- * futex protocol primitive (reference futex_cmpxchg_value_locked).
- * If (*uaddr == expected) *uaddr = new; either way rax = the observed
- * old value. Returns rax = packed: bit 32 set = page fault (old = 0),
- * low 32 bits = old value. */
-.global __x64_futex_cmpxchg_u32
-.hidden __x64_futex_cmpxchg_u32
-__x64_futex_cmpxchg_u32:
-    movl %esi, %eax
-    cmpb $0, {smap}(%rip)
-    je 91f
-    stac
-91: lock cmpxchgl %edx, (%rdi)
-    .pushsection __ex_table, "a"
-    .balign 8
-    .quad 91b
-    .quad 94f
-    .popsection
-    cmpb $0, {smap}(%rip)
-    je 92f
-    clac
-92: ret
-94: cmpb $0, {smap}(%rip)
-    je 95f
-    clac
-95: movl $1, %eax           /* fault: 1<<32 packed marker */
-    shlq $32, %rax
-    ret
-"#,
-    options(att_syntax),
-    smap = sym super::cpu::SMAP_ENABLED
-);
 
 // IRREDUCIBLE F-ROW (F-UACC-2): the exception-table copy bottoms —
 // reference kernel arch/x86/lib/copy_user_64.S (rep movsb with .fixup
@@ -189,116 +63,38 @@ extern "C" {
     fn __x64_clear_user(to: *mut u8, n: usize) -> usize;
     fn __x64_futex_cmpxchg_u32(uaddr: *mut u32, expected: u32, new: u32) -> u64;
 }
-
 /// Atomic compare-exchange on a user u32 word (PI futex protocol,
-/// reference futex_cmpxchg_value_locked). If `*uaddr == expected`,
-/// stores `new`; returns the observed old value either way. `None` on a
-/// user page fault (EFAULT at the futex layer).
 ///
-/// # Safety
-/// `uaddr` must point at a 4-byte user word; access_ok-checked here.
-pub unsafe fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32> {
-    if !access_ok(uaddr as usize, 4) {
-        return None;
-    }
-    // SAFETY: the asm core faults into the extable fixup which returns
-    // the packed fault marker instead of panicking.
-    let packed = unsafe { __x64_futex_cmpxchg_u32(uaddr, expected, new) };
-    if packed >> 32 != 0 {
-        None
-    } else {
-        Some(packed as u32)
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-27): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32> {
+    crate::arch::arch_floor::x86_64::uaccess::futex_cmpxchg_u32_user(uaddr, expected, new)
 }
 
 /// Is the [addr, addr+size) window inside user VA space?
 pub fn access_ok(addr: usize, size: usize) -> bool {
     addr.checked_add(size).map_or(false, |end| end <= USER_END)
 }
-
 /// Copy kernel → user. Returns the number of bytes NOT copied.
 ///
-/// A write into a COW-downgraded user page (e.g. a register-held local on
-/// the parent's stack after fork — the parent's first write to that page
-/// may be THIS kernel copy) faults under CR0.WP, resolves through the
-/// trap path, and the `rep movsb` re-executes — see exception.rs. The
-/// fault_in_write retry below is the second belt (Linux
-/// fault_in_pages_writeable + copy retry parity, ported from the riscv64
-/// twin): if the extable fixup already consumed the fault once (short
-/// copy) and the range is still resolvable, resolve it here and retry
-/// once instead of propagating EFAULT.
-///
-/// # Safety
-/// `from` must be readable for `n` bytes; `to` is validated by access_ok.
-pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
-    if !access_ok(to as usize, n) {
-        return n;
-    }
-    // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
-    // and returns the remaining count instead of faulting the kernel.
-    let uncopied = unsafe { __x64_copy_to_user(to, from, n) };
-    if uncopied == 0 {
-        return 0;
-    }
-    // Best-effort COW/demand resolution on the user range.
-    if fault_in_write(to, n) {
-        // SAFETY: exception-table retry after resolution.
-        return unsafe { __x64_copy_to_user(to, from, n) };
-    }
-    uncopied
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-26): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
+    crate::arch::arch_floor::x86_64::uaccess::copy_to_user(to, from, n)
 }
-
 /// Copy user → kernel. Returns the number of bytes NOT copied.
 ///
-/// On failure the uncopied tail of `to` is zero-filled, matching the
-/// riscv64 twin and the reference copy_from_user: callers (e.g. msgsnd,
-/// semtimedop) historically consumed the buffer even on failure, and
-/// leaving previous kernel heap contents in it is an information leak
-/// (review SEC, the riscv64 twin's fix — the x86 port had been left
-/// behind).
-///
-/// # Safety
-/// `to` must be writable for `n` bytes; `from` is validated by access_ok.
-pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
-    if !access_ok(from as usize, n) {
-        // Zero the whole kernel buffer: callers that proceed with a
-        // failed copy must never see stale kernel heap contents.
-        core::ptr::write_bytes(to, 0, n);
-        return n;
-    }
-    // SAFETY: exception-table copy (see copy_to_user).
-    let uncopied = unsafe { __x64_copy_from_user(to, from, n) };
-    if uncopied > 0 {
-        // Zero-fill the uncopied tail (reference semantics): the kernel
-        // buffer must never keep stale contents past the point the user
-        // copy reached.
-        let copied = n - uncopied;
-        core::ptr::write_bytes(to.add(copied), 0, uncopied);
-    }
-    uncopied
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-25): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
+    crate::arch::arch_floor::x86_64::uaccess::copy_from_user(to, from, n)
 }
-
 /// Zero user memory. Returns the number of bytes NOT cleared.
 ///
-/// Same COW discipline as copy_to_user (see fault_in_write).
-///
-/// # Safety
-/// `to` is validated by access_ok; a fault lands in the exception table.
-pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
-    if !access_ok(to as usize, n) {
-        return n;
-    }
-    // SAFETY: exception-table clear (see copy_to_user).
-    let uncleared = unsafe { __x64_clear_user(to, n) };
-    if uncleared == 0 {
-        return 0;
-    }
-    // Best-effort COW/demand resolution on the user range.
-    if fault_in_write(to, n) {
-        // SAFETY: exception-table retry after resolution.
-        return unsafe { __x64_clear_user(to, n) };
-    }
-    uncleared
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-24): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn clear_user(to: *mut u8, n: usize) -> usize {
+    crate::arch::arch_floor::x86_64::uaccess::clear_user(to, n)
 }
 
 /// Fault-in a user address range for writing (COW resolution / demand
@@ -309,7 +105,7 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
 /// supervisor uaccess write to a COW/read-only page faults instead of
 /// silently piercing the protection (F1b), so the copy layer needs an
 /// explicit resolve-and-retry for the pages the trap path could not fix.
-fn fault_in_write(start: *mut u8, len: usize) -> bool {
+pub(crate) fn fault_in_write(start: *mut u8, len: usize) -> bool {
     use crate::arch::mm::PageTableEntry;
     use crate::arch::mm::mm_ops::PageTableWalker;
 
@@ -398,170 +194,31 @@ fn fault_in_write(start: *mut u8, len: usize) -> bool {
     }
     resolved_any
 }
-
 /// Read one value from user memory.
 ///
-/// Routes through the exception-table copy core: a fault on the user
-/// page returns a short copy → None (EFAULT), never a kernel panic.
-///
-/// # Safety
-/// `from` is validated by access_ok only in this phase.
-pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
-    let size = core::mem::size_of::<T>();
-
-    if !access_ok(from as usize, size) {
-        return None;
-    }
-
-    let mut value: core::mem::MaybeUninit<T> = core::mem::MaybeUninit::uninit();
-
-    // SAFETY: destination is a size-of-T kernel stack slot; the source
-    // read faults into the extable fixup which returns a short count.
-    let uncopied = unsafe {
-        __x64_copy_from_user(value.as_mut_ptr() as *mut u8, from as *const u8, size)
-    };
-
-    if uncopied == 0 {
-        // SAFETY: `size` bytes were copied into the slot.
-        Some(unsafe { value.assume_init() })
-    } else {
-        None
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-23): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn get_user<T: Copy>(from: *const T) -> Option<T> {
+    crate::arch::arch_floor::x86_64::uaccess::get_user::<T>(from)
 }
-
 /// Write one value to user memory.
 ///
-/// Routes through [`copy_to_user`] (the riscv64 twin's shape) so a fault
-/// on a COW/demand page gets the resolve-and-retry instead of a bare
-/// short copy: a put_user onto a valid but not-yet-writable user page
-/// must succeed, not report EFAULT.
-///
-/// # Safety
-/// `to` is validated by access_ok only in this phase.
-pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
-    let size = core::mem::size_of::<T>();
-
-    if !access_ok(to as usize, size) {
-        return false;
-    }
-
-    // SAFETY: source is a size-of-T kernel stack slot; the destination
-    // write faults into the extable fixup which returns a short count.
-    let uncopied =
-        unsafe { copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
-
-    uncopied == 0
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-22): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
+    crate::arch::arch_floor::x86_64::uaccess::put_user::<T>(to, value)
 }
-
 /// Safely read a null-terminated string from user space
 ///
-/// Uses `get_user` (backed by the exception-table copy core) for each
-/// byte, so a page fault in user memory returns an error instead of
-/// panicking the kernel. Ported verbatim from the riscv64 twin.
-///
-/// # Arguments
-/// - `from`: User space source address
-/// - `max_len`: Maximum bytes to read (including null terminator)
-/// - `buf`: Kernel buffer to store the string
-///
-/// # Returns
-/// Returns Ok(slice) on success (without null terminator), Err(-EFAULT) on failure
-pub fn strncpy_from_user<'a>(
-    from: *const u8,
-    max_len: usize,
-    buf: &'a mut [u8],
-) -> Result<&'a [u8], i64> {
-    // EFAULT = 14
-    const EFAULT: i64 = 14;
-
-    if from.is_null() {
-        return Err(-EFAULT);
-    }
-
-    // Verify the pointer itself is in user space.
-    if !access_ok(from as usize, 1) {
-        return Err(-EFAULT);
-    }
-
-    // Compute max readable bytes as distance from pointer to
-    // USER_END. This avoids the old bug where access_ok(from, max_len)
-    // failed when from was near the end of user space.
-    let addr = from as usize;
-    let max = if addr < USER_END { USER_END - addr } else { return Err(-EFAULT) };
-    let limit = core::cmp::min(max_len, buf.len());
-    let limit = core::cmp::min(limit, max);
-
-    // Note (kept from the byte-loop era): a NUL at index 0 (empty string)
-    // is a SUCCESS returning an empty slice — callers rely on it for
-    // empty-argument execs and openat("") -> ENOENT.
-    // (perf-syscall lane) CHUNKED copy, scanning kernel memory for the
-    // NUL after each chunk. The old byte-at-a-time loop paid one
-    // exception-safe accessor call PER CHARACTER (each with its own AC
-    // bracket on x86_64 after SMAP) — ~30 instructions per path byte on
-    // every openat/stat/exec. Copying the whole `limit` in one shot
-    // regressed instead (a PATH_MAX window of 4 KiB memcpy for a
-    // 20-byte name): chunks of 64 bytes bound both sides — short names
-    // cost ONE chunk, long names never copy more than 63 bytes past
-    // their NUL. A fault mid-chunk leaves the tail zeroed and the scan
-    // either finds the NUL first (the old loop also succeeded there) or
-    // reports EFAULT exactly where the old loop did.
-    const CHUNK: usize = 64;
-    let mut done: usize = 0;
-    while done < limit {
-        let want = core::cmp::min(CHUNK, limit - done);
-        // SAFETY: buf is `limit` bytes; done+want stays inside it. The
-        // raw exception-table copy handles user faults: it returns the
-        // bytes NOT copied of this chunk.
-        let uncopied = unsafe {
-            __x64_copy_from_user(buf.as_mut_ptr().add(done), from.add(done), want)
-        };
-        let got = want - uncopied;
-        if uncopied > 0 {
-            // SAFETY: zero the never-written tail so the NUL scan below
-            // cannot see stale kernel bytes.
-            unsafe {
-                core::ptr::write_bytes(buf.as_mut_ptr().add(done + got), 0, uncopied)
-            };
-        }
-        if let Some(rel) = buf[done..done + got].iter().position(|&b| b == 0) {
-            return Ok(&buf[..done + rel]);
-        }
-        if uncopied > 0 {
-            // Faulted with no NUL in the readable window so far.
-            return Err(-EFAULT);
-        }
-        done += want;
-    }
-    // No NUL within `limit` bytes: same shape the old loop returned.
-    Ok(&buf[..limit])
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-21): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn strncpy_from_user<'a>( from: *const u8, max_len: usize, buf: &'a mut [u8], ) -> Result<&'a [u8], i64> {
+    crate::arch::arch_floor::x86_64::uaccess::strncpy_from_user(from, max_len, buf)
 }
-
 /// Get length of null-terminated string in user space
 ///
-/// # Arguments
-/// - `str`: User space string address
-/// - `maxlen`: Maximum length to check
-///
-/// # Returns
-/// Returns the length of the string (excluding null) plus 1 on success,
-/// or 0 on failure (including if string is longer than maxlen).
-pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
-    if maxlen == 0 {
-        return 0;
-    }
-
-    if !access_ok(str as usize, 1) {
-        return 0;
-    }
-
-    let mut len = 0;
-    while len < maxlen {
-        match unsafe { get_user(str.add(len)) } {
-            Some(0) => return len + 1, // Include null terminator
-            Some(_) => len += 1,
-            None => return 0,
-        }
-    }
-
-    0 // String too long
+/// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-20): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
+    crate::arch::arch_floor::x86_64::uaccess::strnlen_user(str, maxlen)
 }

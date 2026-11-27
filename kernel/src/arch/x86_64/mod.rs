@@ -4,7 +4,12 @@
 //!
 //! x86_64 architecture support (QEMU q35, multiboot1 boot protocol)
 
-pub mod unsafe_edges;
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
+pub use crate::arch::arch_floor::x86_64 as unsafe_edges;
 pub mod boot;
 pub mod mpk;
 pub mod pt_regs;
@@ -48,14 +53,10 @@ pub fn init() {
 
     println!("arch: Architecture initialization [DONE]");
 }
-
+/// Collected into `arch::arch_floor` (INV-ARCH-MOD-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_interrupts() {
-    // SAFETY: setting IF via STI is safe in any context that intends to
-    // enable interrupts.
-    unsafe {
-        core::arch::asm!("sti", options(nomem, nostack));
-    }
-    println!("arch: Interrupts enabled (STI)");
+    crate::arch::arch_floor::x86_64::root::enable_interrupts()
 }
 
 /// Get current CPU number.

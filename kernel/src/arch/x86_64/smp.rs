@@ -32,13 +32,18 @@
 //! CPU-private fields and cross-CPU fields never share a line, and the
 //! CPU publishes its own id inside the struct.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::cpu::{rdmsr, wrmsr};
 use crate::config::MAX_CPUS;
 
 // The trampoline blob (copied to physical 0x8000; see smp_trampoline.S).
-core::arch::global_asm!(include_str!("smp_trampoline.S"), options(att_syntax));
+
 
 // ============================================================================
 // Per-CPU area — offsets are consumed by trap.S (PC_* asserts below)
@@ -90,11 +95,11 @@ pub struct PerCpu {
     pub started: AtomicU32,
     /// Authenticity magic (see PC_MAGIC): {pattern, cpu_number}.
     pub magic: AtomicU64,
-    _pad: [u32; 12],
+    pub(crate) _pad: [u32; 12],
 }
 
 impl PerCpu {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         PerCpu {
             cpu_number: AtomicU32::new(0),
             lapic_id: AtomicU32::new(u32::MAX),
@@ -110,7 +115,7 @@ impl PerCpu {
     }
 
     /// Arm this slot's authenticity magic (cpu embedded, pattern on top).
-    fn arm_magic(&self, cpu: usize) {
+    pub(crate) fn arm_magic(&self, cpu: usize) {
         let m = ((PC_MAGIC_HI as u64) << 32) | cpu as u64;
         self.magic.store(m, Ordering::Release);
     }
@@ -120,42 +125,35 @@ impl PerCpu {
 pub static PER_CPU: [PerCpu; MAX_CPUS] = [const { PerCpu::new() }; MAX_CPUS];
 
 // Pin the asm-visible offsets to the actual struct layout.
-const _: () = assert!(core::mem::offset_of!(PerCpu, cpu_number) == PC_CPU_NUMBER);
-const _: () = assert!(core::mem::offset_of!(PerCpu, lapic_id) == PC_LAPIC_ID);
-const _: () = assert!(core::mem::offset_of!(PerCpu, tss_rsp0) == PC_TSS_RSP0);
-const _: () = assert!(core::mem::offset_of!(PerCpu, syscall_scratch) == PC_SYSCALL_SCRATCH);
-const _: () = assert!(core::mem::offset_of!(PerCpu, current_task) == PC_CURRENT_TASK);
-const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_stack_top) == PC_KERNEL_STACK_TOP);
-const _: () = assert!(core::mem::offset_of!(PerCpu, cpu_online) == PC_CPU_ONLINE);
-const _: () = assert!(core::mem::offset_of!(PerCpu, started) == PC_STARTED);
-const _: () = assert!(core::mem::offset_of!(PerCpu, magic) == PC_MAGIC);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, cpu_number) == PC_CPU_NUMBER);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, lapic_id) == PC_LAPIC_ID);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, tss_rsp0) == PC_TSS_RSP0);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, syscall_scratch) == PC_SYSCALL_SCRATCH);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, current_task) == PC_CURRENT_TASK);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_stack_top) == PC_KERNEL_STACK_TOP);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, cpu_online) == PC_CPU_ONLINE);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, started) == PC_STARTED);
+pub(crate) const _: () = assert!(core::mem::offset_of!(PerCpu, magic) == PC_MAGIC);
 
 // ============================================================================
 // GS base management
 // ============================================================================
 
-const MSR_GS_BASE: u32 = 0xC000_0101;
-const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
-
+pub(crate) const MSR_GS_BASE: u32 = 0xC000_0101;
+pub(crate) const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 /// Point this CPU's GS base at its PerCpu slot and zero the user shadow
-/// (glibc TLS lives on FS; a NULL user GS is the correct state).
 ///
-/// Kernel GS = percpu / user GS = 0; entries/exits pair SWAPGS (trap.S).
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-25): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn load_per_cpu_base(cpu: usize) {
-    let base = &PER_CPU[cpu] as *const PerCpu as u64;
-    // SAFETY: WRMSR of the GS base MSRs with a kernel .bss address and
-    // zero; both values are valid in any context that runs kernel code.
-    unsafe {
-        wrmsr(MSR_GS_BASE, base);
-        wrmsr(MSR_KERNEL_GS_BASE, 0);
-    }
+    crate::arch::arch_floor::x86_64::smp::load_per_cpu_base(cpu)
 }
 
 // ============================================================================
 // Boot-completion gate (interface parity with the riscv64 twin)
 // ============================================================================
 
-static BOOT_COMPLETE: AtomicBool = AtomicBool::new(false);
+pub(crate) static BOOT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 /// BSP signal: secondaries may join the scheduler.
 pub fn signal_boot_complete() {
@@ -201,21 +199,12 @@ pub fn cpu_started(cpu: usize) -> bool {
 pub fn is_boot_hart() -> bool {
     crate::arch::cpu_id() == 0
 }
-
 /// Current CPU number via GS (used by trap.S and mod::cpu_id).
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-24): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn gs_cpu_id() -> u64 {
-    let id: u32;
-    // SAFETY: %gs:0 reads this CPU's PerCpu.cpu_number; the GS base is
-    // established before any code that can reach here runs.
-    unsafe {
-        core::arch::asm!(
-            "mov {0:e}, dword ptr gs:[0]",
-            out(reg) id,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    id as u64
+    crate::arch::arch_floor::x86_64::smp::gs_cpu_id()
 }
 
 /// Current CPU number (interface parity with the riscv64 twin — generic
@@ -251,30 +240,30 @@ pub fn set_current_task_ptr(task: u64) {
 // ============================================================================
 
 /// Trampoline physical base (Linux-real-mode-trampoline convention).
-const TRAMP_PHYS: usize = 0x8000;
+pub(crate) const TRAMP_PHYS: usize = 0x8000;
 /// Trampoline blob size (see smp_trampoline.S layout: end at org 0x0F00).
-const TRAMP_SIZE: usize = 0x0F00;
+pub(crate) const TRAMP_SIZE: usize = 0x0F00;
 
 // Data-block org offsets inside the trampoline (smp_trampoline.S).
-const TRAMP_GDTR_BASE: usize = 0x0E42; // u32 gdtr base (after the u16 limit)
-const TRAMP_PML4: usize = 0x0E50; // u32 trampoline PML4 PA
-const TRAMP_CPU: usize = 0x0E54; // u32 cpu number
-const TRAMP_STACK: usize = 0x0E58; // u64 stack top VA
-const TRAMP_GSBASE: usize = 0x0E60; // u64 GS base VA
-const TRAMP_ENTRY: usize = 0x0E68; // u64 ap_entry64 VA
-const TRAMP_KCR3: usize = 0x0E70; // u64 kernel CR3 (diagnostics)
-const TRAMP_FAR16_PM32: usize = 0x0E80; // u16 org-offset of pm32
-const TRAMP_FAR64_LONG: usize = 0x0E88; // u32 LINEAR offset of long64
+pub(crate) const TRAMP_GDTR_BASE: usize = 0x0E42; // u32 gdtr base (after the u16 limit)
+pub(crate) const TRAMP_PML4: usize = 0x0E50; // u32 trampoline PML4 PA
+pub(crate) const TRAMP_CPU: usize = 0x0E54; // u32 cpu number
+pub(crate) const TRAMP_STACK: usize = 0x0E58; // u64 stack top VA
+pub(crate) const TRAMP_GSBASE: usize = 0x0E60; // u64 GS base VA
+pub(crate) const TRAMP_ENTRY: usize = 0x0E68; // u64 ap_entry64 VA
+pub(crate) const TRAMP_KCR3: usize = 0x0E70; // u64 kernel CR3 (diagnostics)
+pub(crate) const TRAMP_FAR16_PM32: usize = 0x0E80; // u16 org-offset of pm32
+pub(crate) const TRAMP_FAR64_LONG: usize = 0x0E88; // u32 LINEAR offset of long64
 
 /// Trampoline page tables: PML4 at 0x9000, PDPT at 0xA000, PD at 0xB000
 /// (identity-map the first 1GB with 2MB leaves).
-const TRAMP_PML4_PHYS: usize = 0x9000;
-const TRAMP_PDPT_PHYS: usize = 0xA000;
-const TRAMP_PD_PHYS: usize = 0xB000;
+pub(crate) const TRAMP_PML4_PHYS: usize = 0x9000;
+pub(crate) const TRAMP_PDPT_PHYS: usize = 0xA000;
+pub(crate) const TRAMP_PD_PHYS: usize = 0xB000;
 
-const PDE_P: u64 = 1 << 0;
-const PDE_RW: u64 = 1 << 1;
-const PDE_PS: u64 = 1 << 7;
+pub(crate) const PDE_P: u64 = 1 << 0;
+pub(crate) const PDE_RW: u64 = 1 << 1;
+pub(crate) const PDE_PS: u64 = 1 << 7;
 
 extern "C" {
     static __ap_trampoline_start: u8;
@@ -288,12 +277,8 @@ extern "C" {
 pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
 
 #[repr(align(16))]
-struct BootStack([u8; STACK_SIZE]);
+pub(crate) struct BootStack(pub(crate) [u8; STACK_SIZE]);
 
-/// Per-AP boot stacks (static so the BSP can poke the pointer before
-/// kmalloc-safe concurrency exists).
-#[link_section = ".bss.stack"]
-static AP_BOOT_STACKS: [BootStack; MAX_CPUS] = [const { BootStack([0; STACK_SIZE]) }; MAX_CPUS];
 
 /// R87 (stale-rsp0 feeder, oh-launch round 10): the address range of the
 /// static per-CPU boot stacks. The idle tasks run on these stacks — their
@@ -307,103 +292,35 @@ pub fn ap_boot_stacks_range() -> (usize, usize) {
     let base = AP_BOOT_STACKS.as_ptr() as usize;
     (base, base + STACK_SIZE * MAX_CPUS)
 }
-
 /// Write into the trampoline copy at low memory through the linear map.
-fn tramp_write(off: usize, bytes: &[u8]) {
-    let va = crate::arch::mm::memory_layout::phys_to_virt(
-        crate::arch::mm::memory_layout::PhysAddr::new((TRAMP_PHYS + off) as u64),
-    );
-    // SAFETY: the trampoline window 0x8000..0xC000 is inside the
-    // memblock-reserved low region and mapped by the linear map.
-    unsafe {
-        let dst = va.as_usize() as *mut u8;
-        for (i, b) in bytes.iter().enumerate() {
-            core::ptr::write_volatile(dst.add(i), *b);
-        }
-    }
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-22): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn tramp_write(off: usize, bytes: &[u8]) {
+    crate::arch::arch_floor::x86_64::smp::tramp_write(off, bytes)
 }
 
-fn tramp_write_u64(off: usize, v: u64) {
+pub(crate) fn tramp_write_u64(off: usize, v: u64) {
     tramp_write(off, &v.to_le_bytes());
 }
 
-fn tramp_write_u32(off: usize, v: u32) {
+pub(crate) fn tramp_write_u32(off: usize, v: u32) {
     tramp_write(off, &v.to_le_bytes());
 }
 
-fn tramp_write_u16(off: usize, v: u16) {
+pub(crate) fn tramp_write_u16(off: usize, v: u16) {
     tramp_write(off, &v.to_le_bytes());
 }
-
 /// Copy the trampoline blob to 0x8000 and build its page tables.
-fn setup_trampoline(kernel_cr3: u64) {
-    // Linker-bound symbols; the blob is read-only data.
-    // SAFETY: symbol arithmetic + a bounded from_raw_parts over the
-    // linker section (len clamped to TRAMP_SIZE).
-    unsafe {
-        let start = &raw const __ap_trampoline_start as usize;
-        let end = &raw const __ap_trampoline_end as usize;
-        let len = (end - start).min(TRAMP_SIZE);
-        tramp_write(0, core::slice::from_raw_parts(start as *const u8, len));
-    }
-
-    // gdtr base: linear address of the GDT inside the copy.
-    // SAFETY: link-time symbol arithmetic against the blob base symbol.
-    let gdt_off = (&raw const tramp_gdt as usize) - (&raw const __ap_trampoline_start as usize);
-    tramp_write_u32(TRAMP_GDTR_BASE, (TRAMP_PHYS + gdt_off) as u32);
-
-    // Far-jump targets (org offset for the 16:16 pm32 pointer, LINEAR
-    // for the 32:16 long64 pointer).
-    // SAFETY: link-time symbol arithmetic.
-    let pm32_off = (&raw const pm32 as usize) - (&raw const __ap_trampoline_start as usize);
-    let long64_off = (&raw const long64 as usize) - (&raw const __ap_trampoline_start as usize);
-    tramp_write_u16(TRAMP_FAR16_PM32, pm32_off as u16);
-    tramp_write_u32(TRAMP_FAR64_LONG, (TRAMP_PHYS + long64_off) as u32);
-
-    tramp_write_u32(TRAMP_PML4, TRAMP_PML4_PHYS as u32);
-    tramp_write_u64(TRAMP_ENTRY, ap_entry64 as usize as u64);
-    // Diagnostics slot: store the plain physical root (mask the live
-    // CR3's PCID/NOFLUSH bits — with PCID the BSP's CR3 carries them).
-    tramp_write_u64(TRAMP_KCR3, kernel_cr3 & 0x000F_FFFF_FFFF_F000);
-
-    // ---- Trampoline page tables ----
-    // PML4[0] -> PDPT -> PD (identity low 1GB, 2MB leaves); the upper
-    // half (entries 256..511) is copied from the kernel root so the AP
-    // can run on kernel VA (stack + entry) before switching to the real
-    // kernel CR3.
-    let pml4 = tramp_va(TRAMP_PML4_PHYS);
-    let pdpt = tramp_va(TRAMP_PDPT_PHYS);
-    let pd = tramp_va(TRAMP_PD_PHYS);
-    // SAFETY: freshly zero-initialized scratch tables in low reserved
-    // memory, written via the linear map before any AP can see them.
-    unsafe {
-        for p in [pml4, pdpt, pd] {
-            core::ptr::write_bytes(p as *mut u8, 0, 4096);
-        }
-        let pml4 = pml4 as *mut u64;
-        let pdpt = pdpt as *mut u64;
-        let pd = pd as *mut u64;
-        *pml4.add(0) = (TRAMP_PDPT_PHYS as u64) | PDE_P | PDE_RW;
-        *pdpt.add(0) = (TRAMP_PD_PHYS as u64) | PDE_P | PDE_RW;
-        for i in 0..512u64 {
-            *pd.add(i as usize) = (i << 21) | PDE_P | PDE_RW | PDE_PS;
-        }
-        // Copy the kernel upper half out of the static kernel root.
-        let kernel_root = crate::arch::mm::memory_layout::phys_to_virt(
-            crate::arch::mm::memory_layout::PhysAddr::new(kernel_cr3 & !0xFFF),
-        )
-        .as_usize() as *const u64;
-        for i in 256..512usize {
-            let e = core::ptr::read_volatile(kernel_root.add(i));
-            if e & PDE_P != 0 {
-                *pml4.add(i) = e;
-            }
-        }
-    }
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-SMP-21): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn setup_trampoline(kernel_cr3: u64) {
+    crate::arch::arch_floor::x86_64::smp::setup_trampoline(kernel_cr3)
 }
 
 /// Linear-map VA of a low physical address.
-fn tramp_va(phys: usize) -> usize {
+pub(crate) fn tramp_va(phys: usize) -> usize {
     crate::arch::mm::memory_layout::phys_to_virt(
         crate::arch::mm::memory_layout::PhysAddr::new(phys as u64),
     )
@@ -497,7 +414,7 @@ pub fn start_secondaries() {
 /// every AP (exercises the CALL_FUNCTION IPI vector + CSD queue +
 /// completion handshake) and one TLB-flush broadcast (TLB_FLUSH vector
 /// on every CPU — full local CR3 reload).
-fn smp_selftest() {
+pub(crate) fn smp_selftest() {
     if num_started_cpus() < 2 {
         return;
     }
@@ -539,7 +456,7 @@ fn smp_selftest() {
 }
 
 /// Bounded spin until `cpu` publishes its started flag.
-fn wait_started(cpu: usize, spins: u64) -> bool {
+pub(crate) fn wait_started(cpu: usize, spins: u64) -> bool {
     for _ in 0..spins {
         if PER_CPU[cpu].started.load(Ordering::Acquire) == 1 {
             return true;
@@ -553,84 +470,10 @@ fn wait_started(cpu: usize, spins: u64) -> bool {
 // AP entry (runs on the AP, on its boot stack, GS already set)
 // ============================================================================
 
-/// C entry for application processors.  The trampoline has already:
-/// enabled long mode on the trampoline page tables, loaded the AP boot
-/// stack, and set GS base to this CPU's PerCpu slot.
-#[no_mangle]
-pub extern "C" fn ap_entry64() -> ! {
-    let cpu = crate::arch::cpu_id() as usize;
-
-    // RACE-FORENSICS (x86-smprace): a second execution of ap_entry64 for
-    // an already-started CPU is the ghost-CPU signature (re-SIPI/reset of
-    // a running AP): it would clobber the per-CPU slots while the real
-    // scheduler state keeps running tasks. Never observed; cheap to keep.
-    if PER_CPU[cpu].started.load(Ordering::Acquire) == 1 {
-        crate::println!("\nAP-REENTRY!!! cpu={} already started — ghost bring-up", cpu);
-    }
-
-    // The AP inherits the power-on CR0 with CD|NW set (uncached, no
-    // write-through) — the trampoline only adds PE/PG.  Clear them so
-    // this CPU runs cached like the BSP (NW=1 also violates the
-    // WB-memory SMP coherence contract). Set CR0.WP in the same RMW:
-    // the BSP arms it at early_boot_init (F1b fix) and every AP must
-    // match before userspace can run on it, or this CPU's ring-0
-    // stores would pierce the COW protections the BSP enforces.
-    // SAFETY: only CD/NW are cleared and WP set; PE/PG/PAE stay set.
-    unsafe {
-        let cr0 = crate::arch::cpu::read_cr0();
-        crate::arch::cpu::write_cr0((cr0 & !(0x6000_0000)) | 0x1_0000);
-    }
-
-    // Switch to the real kernel CR3 — both roots map the kernel upper
-    // half identically, so the fetch after the switch is seamless.
-    // SAFETY: root_static_phys is the permanent kernel PML4.
-    unsafe {
-        crate::arch::cpu::write_cr3(crate::arch::mm::mmu_init::root_static_phys());
-    }
-
-    // Arm PCID on this AP right after the clean kernel-root load (the
-    // enable precondition is CR3[11:0]=0). Idempotent with the BSP's
-    // enable; stays off without CPUID PCID+INVPCID.
-    crate::arch::mm::asid::enable_pcid();
-
-    // Per-CPU descriptor tables, syscall MSRs and FPU enable.
-    crate::arch::trap::init_secondary(cpu);
-
-    // Local APIC on this CPU (also arms the periodic timer; delivery
-    // waits for STI below).
-    crate::drivers::intc::apic::init_secondary();
-
-    // Per-CPU vCPU TSC-offset calibration while IRQs are still off and
-    // before this CPU's first tick can serve read_time() (sc110: the
-    // one-time ~25 s TSC-vs-HPET step tracked secondary online). No-op
-    // unless the HPET-calibrated TSC timekeeper is active (tscclk).
-    crate::drivers::timer::x86_64::calibrate_cpu_tsc_offset(cpu);
-
-    // Publish the idle task as `current` so the first timer tick (which
-    // can arrive right after STI) finds a valid task on this CPU, and
-    // touch this CPU's watchdog so the boot-time gap (idle task created
-    // on the BSP seconds ago under TCG) cannot read as a lockup.
-    crate::arch::cpu::set_thread_id(crate::sched::idle_task_ptr(cpu) as u64);
-    crate::dfx::softlockup::touch(cpu);
-
-    PER_CPU[cpu].cpu_online.store(1, Ordering::Release);
-    PER_CPU[cpu].started.store(1, Ordering::Release);
-    crate::println!(
-        "smp: CPU {} online (lapic {:#x})",
-        cpu,
-        PER_CPU[cpu].lapic_id.load(Ordering::Acquire)
-    );
-
-    // Park until the BSP finished all single-CPU initialization.  HLT
-    // with IRQs on: the local timer tick wakes us to re-check the flag
-    // (cheap under TCG — a spinning AP would steal host time slices).
-    while !is_boot_complete() {
-        crate::arch::cpu::enable_irq();
-        crate::arch::cpu::wfi();
-    }
-
-    // Join the scheduler (registers this CPU's idle task in the
-    // per-CPU scheduler state, then never returns).
-    crate::sched::init_secondary(cpu);
-    crate::sched::cpu_idle_loop();
-}
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+// INV-ARCH note: ap_entry64 moved to arch::arch_floor::x86_64::smp (naked
+// trampoline — no wrapper; this re-export keeps the original
+// path and fn identity).
+pub(crate) use crate::arch::arch_floor::x86_64::smp::ap_entry64;
+pub(crate) use crate::arch::arch_floor::x86_64::smp::AP_BOOT_STACKS;

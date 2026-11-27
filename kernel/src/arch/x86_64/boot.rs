@@ -14,36 +14,41 @@
 //! need (memory map, cmdline, bootloader name) into kernel BSS before
 //! any of that happens.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 /// Multiboot info as provided by QEMU (multiboot1, 32-bit fields).
 #[repr(C)]
-struct MultibootInfo {
-    flags: u32,
-    mem_lower: u32,
-    mem_upper: u32,
-    boot_device: u32,
-    cmdline: u32,
-    mods_count: u32,
-    mods_addr: u32,
-    syms0: u32,
-    syms1: u32,
-    syms2: u32,
-    mmap_length: u32,
-    mmap_addr: u32,
-    drives_length: u32,
-    drives_addr: u32,
-    config_table: u32,
-    boot_loader_name: u32,
+pub(crate) struct MultibootInfo {
+    pub(crate) flags: u32,
+    pub(crate) mem_lower: u32,
+    pub(crate) mem_upper: u32,
+    pub(crate) boot_device: u32,
+    pub(crate) cmdline: u32,
+    pub(crate) mods_count: u32,
+    pub(crate) mods_addr: u32,
+    pub(crate) syms0: u32,
+    pub(crate) syms1: u32,
+    pub(crate) syms2: u32,
+    pub(crate) mmap_length: u32,
+    pub(crate) mmap_addr: u32,
+    pub(crate) drives_length: u32,
+    pub(crate) drives_addr: u32,
+    pub(crate) config_table: u32,
+    pub(crate) boot_loader_name: u32,
 }
 
 /// One e820-style entry in the multiboot memory map.
 #[repr(C)]
-struct MbMmapEntry {
-    size: u32,
-    addr_low: u32,
-    addr_high: u32,
-    len_low: u32,
-    len_high: u32,
-    mtype: u32,
+pub(crate) struct MbMmapEntry {
+    pub(crate) size: u32,
+    pub(crate) addr_low: u32,
+    pub(crate) addr_high: u32,
+    pub(crate) len_low: u32,
+    pub(crate) len_high: u32,
+    pub(crate) mtype: u32,
 }
 
 /// A memory region as handed to the generic memblock layer.
@@ -55,25 +60,26 @@ pub struct BootMemoryRegion {
 }
 
 /// Cap the early-copied memory map (multiboot reports at most a handful).
-const MAX_MMAP_ENTRIES: usize = 64;
+pub(crate) const MAX_MMAP_ENTRIES: usize = 64;
 /// Cap the early-copied command line (matches cmdline.rs buffer).
-const CMDLINE_MAX: usize = 1024;
+pub(crate) const CMDLINE_MAX: usize = 1024;
 
-static mut BOOT_MMAP: [BootMemoryRegion; MAX_MMAP_ENTRIES] =
+pub(crate) static mut BOOT_MMAP: [BootMemoryRegion; MAX_MMAP_ENTRIES] =
     [BootMemoryRegion { start: 0, end: 0, usable: false }; MAX_MMAP_ENTRIES];
-static mut BOOT_MMAP_COUNT: usize = 0;
-static mut BOOT_CMDLINE: [u8; CMDLINE_MAX] = [0; CMDLINE_MAX];
-static mut BOOT_MAGIC: u32 = 0;
+pub(crate) static mut BOOT_MMAP_COUNT: usize = 0;
+pub(crate) static mut BOOT_CMDLINE: [u8; CMDLINE_MAX] = [0; CMDLINE_MAX];
+pub(crate) static mut BOOT_MAGIC: u32 = 0;
 
 extern "C" {
     static boot_mb_magic: u32;
     static boot_mb_info: u32;
 }
-
 /// Get the multiboot magic (0x2BADB002 when booted by a multiboot loader).
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-BOOT-7): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_boot_magic() -> u32 {
-    // SAFETY: written by boot.S before any Rust code runs.
-    unsafe { core::ptr::read_volatile(&raw const boot_mb_magic) }
+    crate::arch::arch_floor::x86_64::boot::get_boot_magic()
 }
 
 /// Placeholder for the riscv64 FDT interface — x86 has no device tree.
@@ -81,183 +87,29 @@ pub fn get_boot_magic() -> u32 {
 pub fn get_dtb_pointer() -> u64 {
     0
 }
-
 /// Copy the memory map and command line out of the multiboot blob.
 ///
-/// MUST run while the bootstrap identity mapping is still active
-/// (before `mm::init()` switches CR3).
+/// Collected into `arch::arch_floor` (INV-ARCH-BOOT-6): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn early_boot_init() {
-    // CR0.WP, permanently, from the earliest Rust BSP code (F1b fix —
-    // see cpu::enable_write_protect). Everything reachable here is
-    // mapped RW, so arming WP this early is inert for boot itself; it
-    // only starts biting once RO mappings appear (user COW pages,
-    // wildwatch guards). CR0 survives the later CR3 switch.
-    crate::arch::cpu::enable_write_protect();
-
-    let mbi: &MultibootInfo = unsafe {
-        let ptr = core::ptr::read_volatile(&raw const boot_mb_info) as usize as *const MultibootInfo;
-        if ptr as usize == 0 {
-            return;
-        }
-        &*ptr
-    };
-
-    // BSS scratch, single-threaded early boot context: each raw
-    // volatile op carries its own block below.
-    {
-
-    // SAFETY: single-threaded boot BSS.
-    unsafe { BOOT_MAGIC = get_boot_magic() };
-
-    // ---- bzImage (Linux protocol): QEMU's linuxboot ROM has already
-    // patched the boot_params zero page at 0x10000 (where our setup
-    // sectors were loaded): e820_entries @ +0x1E8, e820_map @ +0x2D0
-    // (20-byte entries: addr u64, size u64, type u32; type 1 = usable),
-    // cmd_line_ptr @ +0x228. Multiboot handoff (EAX=0x2BADB002) is the
-    // other supported path. ----
-    if get_boot_magic() != 0x2BADB002 {
-        // bzImage path: the 16-bit trampoline ran BIOS int 15h E820 and
-        // stored the map at setup+0x660 with count (u16) at setup+0x658
-        // (setup is loaded at linear 0x10000).
-        // SAFETY: boot-protocol fixed physical location (setup+0x658).
-        let count = unsafe { core::ptr::read_volatile(0x10658usize as *const u16) } as usize;
-        let mut idx = 0usize;
-        for i in 0..count.min(32) {
-            // BIOS entries are 20 bytes, packed (repr(C) with u64 would
-            // stride 24 — read fields manually at 20-byte stride).
-            let base = 0x10660usize + i * 20;
-            let addr = unsafe { core::ptr::read_volatile(base as *const u64) };
-            let size = unsafe { core::ptr::read_volatile((base + 8) as *const u64) };
-            let mtype = unsafe { core::ptr::read_volatile((base + 16) as *const u32) };
-            // SAFETY: single-threaded boot BSS.
-            unsafe {
-                BOOT_MMAP[idx] = BootMemoryRegion {
-                    start: addr,
-                    end: addr + size,
-                    usable: mtype == 1,
-                }
-            };
-            idx += 1;
-        }
-        // SAFETY: single-threaded boot BSS.
-        unsafe { BOOT_MMAP_COUNT = idx };
-
-        // command line from boot_params.cmd_line_ptr (setup header at
-        // 0x10000; QEMU/rom honor our cmd_line_ptr = 0x20000)
-        // SAFETY: boot-protocol fixed physical location (setup+0x228).
-        let cl = u64::from(unsafe { core::ptr::read_volatile(0x10228usize as *const u32) }) as usize;
-        if cl != 0 {
-            let src = cl as *const u8;
-            let mut i = 0usize;
-            while i < CMDLINE_MAX - 1 {
-                let b = unsafe { core::ptr::read_volatile(src.add(i)) };
-                if b == 0 {
-                    break;
-                }
-                // SAFETY: single-threaded boot BSS.
-                unsafe { BOOT_CMDLINE[i] = b; };
-                i += 1;
-            }
-        }
-        return;
-    }
-
-    // ---- Multiboot path (mmap format: flags bit 6) ----
-    if mbi.flags & (1 << 6) != 0 && mbi.mmap_addr != 0 && mbi.mmap_length != 0 {
-        let mut off = 0u32;
-        let mut idx = 0usize;
-        while off < mbi.mmap_length && idx < MAX_MMAP_ENTRIES {
-            // SAFETY: the multiboot-provided mmap table, mapped at boot.
-            let entry = unsafe { &*((mbi.mmap_addr + off) as *const MbMmapEntry) };
-            let size = if entry.size != 0 { entry.size } else { 20 };
-            let start = (entry.addr_low as u64) | ((entry.addr_high as u64) << 32);
-            let len = (entry.len_low as u64) | ((entry.len_high as u64) << 32);
-            // SAFETY: single-threaded boot BSS.
-            unsafe {
-                BOOT_MMAP[idx] = BootMemoryRegion {
-                    start,
-                    end: start + len,
-                    usable: entry.mtype == 1,
-                }
-            };
-            idx += 1;
-            off += size + 4;
-        }
-        // SAFETY: single-threaded boot BSS.
-        unsafe { BOOT_MMAP_COUNT = idx };
-    } else {
-        // Fall back to mem_lower/mem_upper (flags bit 0).
-        let upper_end = (1u64 << 20) + mbi.mem_upper as u64 * 1024;
-        // SAFETY: single-threaded boot BSS.
-        unsafe { BOOT_MMAP[0] = BootMemoryRegion { start: 0, end: upper_end, usable: true }; };
-        // SAFETY: single-threaded boot BSS.
-        unsafe { BOOT_MMAP_COUNT = 1 };
-    }
-
-    // ---- Command line (flags bit 2) ----
-    if mbi.flags & (1 << 2) != 0 && mbi.cmdline != 0 {
-        let src = mbi.cmdline as *const u8;
-        let mut i = 0usize;
-        while i < CMDLINE_MAX - 1 {
-            let b = unsafe { core::ptr::read_volatile(src.add(i)) };
-            if b == 0 {
-                break;
-            }
-            // SAFETY: single-threaded boot BSS.
-            unsafe { BOOT_CMDLINE[i] = b; };
-            i += 1;
-        }
-    }
-
-    }
+    crate::arch::arch_floor::x86_64::boot::early_boot_init()
 }
-
 /// The early-copied memory map (valid for the whole boot).
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-BOOT-5): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn boot_memory_regions() -> &'static [BootMemoryRegion] {
-    // SAFETY: written once in early_boot_init, read-only afterwards.
-    unsafe {
-        let count = core::ptr::read_volatile(&raw const BOOT_MMAP_COUNT);
-        &BOOT_MMAP[..count]
-    }
+    crate::arch::arch_floor::x86_64::boot::boot_memory_regions()
 }
-
 /// The early-copied kernel command line, as a &str prefix (NUL-terminated
-/// buffer); empty string when the loader passed none.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-BOOT-4): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn boot_cmdline() -> &'static str {
-    // SAFETY: written once in early_boot_init, read-only afterwards.
-    let bytes: &[u8] = unsafe { &BOOT_CMDLINE };
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    core::str::from_utf8(&bytes[..end]).unwrap_or("")
+    crate::arch::arch_floor::x86_64::boot::boot_cmdline()
 }
 
 // ---------------------------------------------------------------------------
 // 64-bit high-half entry — first instructions of the kernel image
 // ---------------------------------------------------------------------------
 
-core::arch::global_asm!(
-    r#"
-.section .text.boot64, "ax"
-.align 4096
-.global __x86_64_start
-.type __x86_64_start, @function
-__x86_64_start:
-    /* We arrive here from boot.S with:
-     *   - long mode + higher-half mapping active
-     *   - .bss already zeroed by boot.S (mode64_low) — the Linux boot
-     *     protocol makes BSS zeroing the kernel's job; see boot.S
-     *   - rsp on the low boot stack (still identity-mapped)
-     *   - selectors already loaded (0x08/0x10) */
-    xor rbp, rbp
-    /* Keep the low boot stack for now; mm::init switches to the real
-     * boot task stack when the scheduler comes up. */
-    call {early_boot_init}
-    call {rust_main}
-1:  hlt
-    jmp 1b
-.size __x86_64_start, . - __x86_64_start
-"#,
-    early_boot_init = sym early_boot_init,
-    // (lib/bin split): the symbol now lives in the BIN crate; the asm
-    // sym reference goes through the lib's forwarding declaration.
-    rust_main = sym crate::rust_main,
-);

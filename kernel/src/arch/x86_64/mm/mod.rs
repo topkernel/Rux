@@ -14,7 +14,7 @@ pub use pagetable::*;
 pub mod mmu_init;
 pub use mmu_init::*;
 
-pub mod unsafe_edges;
+pub use crate::arch::arch_floor::x86_64::mm as unsafe_edges;
 pub use unsafe_edges::*;
 
 pub mod mm_ops;

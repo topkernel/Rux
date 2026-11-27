@@ -21,6 +21,11 @@
 //! - Fixmap: memblock allocation (linear map live)
 //! - Late: buddy allocator + PtLedger accounting
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use super::unsafe_edges::PtTable;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicU32, AtomicUsize, Ordering};
 
@@ -50,7 +55,7 @@ pub fn kernel_image_phys_end() -> u64 {
     (end + 0x1fffff) & !0x1fffff // round up to 2MB
 }
 
-fn raw_image_phys_end() -> u64 {
+pub(crate) fn raw_image_phys_end() -> u64 {
     // Linker symbol; address-of and arithmetic only.
     let vma_end = &raw const __kernel_end as usize as u64;
     vma_end - KERNEL_LINK_BASE as u64
@@ -60,15 +65,12 @@ fn raw_image_phys_end() -> u64 {
 
 /// Kernel root page table (PML4) — the Rust-built one
 pub static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
-
 /// Physical address of the static ROOT_PAGE_TABLE (image BSS).
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-60): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn root_static_phys() -> u64 {
-    // SAFETY: address arithmetic on a static; no dereference.
-    unsafe {
-        let vma = &raw mut ROOT_PAGE_TABLE as *mut PageTable as u64;
-        vma - KERNEL_MAP.va_kernel_pa_offset as u64
-    }
+    crate::arch::arch_floor::x86_64::mm::mmu_init::root_static_phys()
 }
 
 /// Physical page number of the static root.
@@ -90,7 +92,7 @@ pub fn root_page_table_ppn() -> u64 {
     root_static_ppn()
 }
 
-static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
+pub(crate) static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 // ==================== Page Table Allocation ====================
 //
@@ -112,14 +114,11 @@ static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Early page-table pool: 96 tables (384KB of BSS). The linear map of 2GB
 /// at 2MB granularity needs ~6 PMD tables + PUDs; the kernel image and
 /// fixmap a handful more; 96 leaves generous headroom.
-const NUM_EARLY_TABLES: usize = 96;
+pub(crate) const NUM_EARLY_TABLES: usize = 96;
 
-#[link_section = ".bss"]
-static mut EARLY_TABLES: [PageTable; NUM_EARLY_TABLES] =
-    [const { PageTable::new() }; NUM_EARLY_TABLES];
 
 /// Counter for early page table allocation
-static EARLY_TABLE_NEXT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static EARLY_TABLE_NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocation stage tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +143,7 @@ impl AllocStage {
 }
 
 /// Current allocation stage
-static ALLOC_STAGE: AtomicU8 = AtomicU8::new(AllocStage::Early as u8);
+pub(crate) static ALLOC_STAGE: AtomicU8 = AtomicU8::new(AllocStage::Early as u8);
 
 /// Get current allocation stage
 pub fn get_alloc_stage() -> AllocStage {
@@ -177,194 +176,30 @@ pub fn pt_ops_set_late() {
 pub fn early_tables_used() -> usize {
     EARLY_TABLE_NEXT.load(Ordering::Acquire)
 }
-
 /// INV-XE-ZP (zero-pages edge, owned by mm/unsafe_edges.rs): `phys` is a
-/// frame this caller just took from a page/table allocator and owns
-/// exclusively; zeroing it cannot race any other accessor. The linear-map
-/// (or early-pool VMA) address is derived by the same stage-aware
-/// conversion [`get_page_table_virt`] uses.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-58): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub(crate) fn zero_owned_pages(virt: u64, bytes: usize) {
-    // SAFETY: INV-XE-ZP — freshly allocated, exclusively owned frames;
-    // the address comes from the audited stage-aware conversion.
-    unsafe { core::ptr::write_bytes(virt as *mut u8, 0, bytes) };
+    crate::arch::arch_floor::x86_64::mm::mmu_init::zero_owned_pages(virt, bytes)
 }
-
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-57): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn alloc_page_table() -> Option<u64> {
-    let stage = get_alloc_stage();
-    match stage {
-        AllocStage::Early => {
-            // Early boot: use the static BSS pool. phys = virt - va_kernel_pa_offset
-            // (the image's constant VMA-LMA offset holds for the whole image).
-            // SAFETY: single-CPU boot section; the pool slot is claimed
-            // exclusively by the fetch_add below.
-            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-            let idx = EARLY_TABLE_NEXT.fetch_add(1, Ordering::AcqRel);
-            if idx < NUM_EARLY_TABLES {
-                let table_virt = unsafe { &raw const EARLY_TABLES[idx] as u64 };
-                let table_phys = table_virt.wrapping_sub(offset);
-                // SAFETY: static BSS pool slot just claimed exclusively by
-                // the fetch_add above (INV-XE-ZP).
-                unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) };
-                return Some(table_phys);
-            }
-            panic!(
-                "mm: out of early page tables (used {}, pool {})",
-                idx, NUM_EARLY_TABLES
-            );
-        }
-        AllocStage::Fixmap => {
-            // Fixmap stage: use memblock allocation
-            let phys_addr = crate::mm::memblock::memblock_phys_alloc()?;
-
-            // FORENSIC→FIX: boot-stage tables are shared by early mms —
-            // mark permanent so teardown never frees them.
-            PT_LEDGER.stamp_boot(phys_addr as u64 >> PAGE_SHIFT);
-
-            // Use linear mapping (must be available at this point)
-            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-            zero_owned_pages(virt_addr.bits(), PAGE_SIZE as usize);
-            Some(phys_addr as u64)
-        }
-        AllocStage::Late => {
-            // Late stage: use zone allocator
-            use crate::mm::zone::ZoneType;
-
-            // SAFETY: node-table mutation is the zone allocator's own
-            // discipline (single-threaded bring-up / zone-locked paths).
-            let phys_addr = if let Some(node) = unsafe { crate::mm::pglist::first_online_node_mut() } {
-                if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
-                    if zone.is_initialized() {
-                        // (fork-frag lane) Per-CPU pageset fast path: a
-                        // fork's COW walk allocates one table per parent
-                        // leaf table (36 on the fragmented pbench shape)
-                        // and each used to pay a full zone-lock round
-                        // trip. The pcp row serves order-0 frames with no
-                        // zone lock (refill pays it once per PCP_BATCH) —
-                        // the exact fast path page_alloc::alloc_pages
-                        // gives data pages. Slowpath/reclaim semantics
-                        // unchanged: a pcp miss falls through to the
-                        // zone path below verbatim (the GFP slowpath
-                        // stays OUT of here — this call may run under the
-                        // mm PteLock, and swap-out reclaim of the same mm
-                        // would self-deadlock; see the shrink comment).
-                        let mut pfn_opt = crate::mm::pcp::alloc_order0(zone);
-                        if pfn_opt.is_none() {
-                            pfn_opt = zone.alloc_pages(0);
-                        }
-                        if pfn_opt.is_none() {
-                            // PT-alloc slowpath (fake-OOM family): the
-                            // demand-fault path allocates its DATA page
-                            // through page_alloc::alloc_pages (watermark
-                            // wakeup + direct reclaim) and then calls
-                            // map_page for the TABLE page — the old raw
-                            // zone.alloc_pages here bypassed reclaim, so
-                            // a zone at its reclaim edge failed the TABLE
-                            // alloc right after succeeding the data alloc,
-                            // and map_page's .expect turned a recoverable
-                            // failure into a kernel panic. Reclaim only
-                            // the subset that is safe from this context:
-                            // we may run under the caller's per-mm PteLock,
-                            // and page-cache eviction of CLEAN pages takes
-                            // no mm PTE locks and performs no I/O.
-                            // Swap-out reclaim (rmap unmap) is deliberately
-                            // NOT attempted — unmapping a page of the SAME
-                            // mm would self-deadlock on the PteLock we hold.
-                            for _ in 0..4 {
-                                let freed =
-                                    crate::fs::page_cache::get_page_cache().shrink(32);
-                                if freed == 0 {
-                                    break;
-                                }
-                                pfn_opt = zone.alloc_pages(0);
-                                if pfn_opt.is_some() {
-                                    break;
-                                }
-                            }
-                            if pfn_opt.is_none() {
-                                // One-shot ledger + zone + census dump
-                                // (internally rate-limited): attributes
-                                // the drain (genuine exhaustion vs broken
-                                // free lists vs leak) on the serial log.
-                                crate::mm::page_alloc::oom_forensic_dump(
-                                    "alloc_page_table order-0",
-                                );
-                            }
-                        }
-                        match pfn_opt {
-                            Some(pfn) => {
-                                // SCRIBBLE HUNT: zone starts above the image; a
-                                // low PFN here means the zone was mis-seeded.
-                                if (pfn << 12) < 0x1E0_0000 {
-                                    crate::pr_err!(
-                                        "PTALLOC-LOW-HIT ppn={:#x} — below zone floor!",
-                                        pfn
-                                    );
-                                }
-                                if let Some(page) = crate::mm::page_desc::page_desc(pfn) {
-                                    page.set_refcount(1);
-                                    page.set_order(0);
-                                    page.set_flag(crate::mm::page_desc::PageFlag::Referenced);
-                                }
-                                crate::mm::zone::pfn_to_phys(pfn) as u64
-                            }
-                            None => 0,
-                        }
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            if phys_addr == 0 {
-                return None;
-            }
-
-            // DFX memwatch: page-table frames bypass page_alloc::alloc_pages
-            // (direct zone.alloc_pages above) — feed them to the page-level
-            // site table from THIS frame so the chain names the mapping path
-            // (map_page / create_user_address_space / ...).
-            if crate::dfx::memwatch::armed() {
-                let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                    [0; crate::dfx::memwatch::SITE_FRAMES];
-                // SAFETY: reading rbp is register-only; the frame-pointer
-                // chain walk is the dfx edge (guarded against wild frames).
-                let mw_bp: u64 = unsafe {
-                    let v;
-                    core::arch::asm!("mov {}, rbp", out(reg) v, options(nomem, nostack));
-                    v
-                };
-                // SAFETY: the chain walk is the dfx stack-forensics edge;
-                // mw_bp is this frame's own frame pointer.
-                unsafe { crate::dfx::memwatch::walk_fp_chain(mw_bp, &mut mw_frames) };
-                crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
-            }
-
-            // FORENSIC ledger: stamp every Late-stage table allocation.
-            PT_LEDGER.stamp(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid());
-
-            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-            zero_owned_pages(virt_addr.bits(), PAGE_SIZE as usize);
-            Some(phys_addr)
-        }
-    }
+    crate::arch::arch_floor::x86_64::mm::mmu_init::alloc_page_table()
 }
 
 /// The phys→table conversion edge lives in the framework module now
 /// (one audited site per arch; see unsafe_edges.rs).
 pub use super::unsafe_edges::get_page_table_virt;
 
-fn free_page_table_checked(phys_addr: u64, site: &str) {
+pub(crate) fn free_page_table_checked(phys_addr: u64, site: &str) {
     free_page_table_checked_rooted(phys_addr, site, 0)
 }
 
 /// `root_ppn` feeds the sharing-pair forensics ring (which tree freed the
 /// frame). Callers inside free_user_page_tables pass the tree root.
-fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
+pub(crate) fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
     if get_alloc_stage() == AllocStage::Late {
         stamp_kernel_tree_boot();
         if !PT_LEDGER.take_returns(phys_addr >> PAGE_SHIFT) {
@@ -415,7 +250,7 @@ fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
     free_page_table(phys_addr)
 }
 
-static BOOT_TREE_STAMPED: AtomicBool = AtomicBool::new(false);
+pub(crate) static BOOT_TREE_STAMPED: AtomicBool = AtomicBool::new(false);
 
 /// One-time: mark every page-table frame wired into the kernel's ROOT page
 /// table as boot-permanent. Early boot builds tables by hand (not through
@@ -425,7 +260,7 @@ static BOOT_TREE_STAMPED: AtomicBool = AtomicBool::new(false);
 /// table bookkeeping. (INV note ported from riscv64: the stamp set is the
 /// kernel ROOT tree's own tables ONLY — stamping every memblock-reserved
 /// frame saturates the boot set and refuses every legitimate free.)
-fn stamp_kernel_tree_boot() {
+pub(crate) fn stamp_kernel_tree_boot() {
     use crate::mm::phys_valid;
     if BOOT_TREE_STAMPED.load(Ordering::Acquire) {
         return;
@@ -461,28 +296,12 @@ fn stamp_kernel_tree_boot() {
         }
     }
 }
-
 /// Free a page table (only valid for late stage allocations)
-fn free_page_table(phys_addr: u64) {
-    if get_alloc_stage() != AllocStage::Late {
-        return;
-    }
-
-    // Check if it's from the early static pool (never freed, only reused
-    // during Early boot — by Late stage the pool is dormant).
-    // SAFETY: KERNEL_MAP is set before any Late-stage free can run;
-    // reading the pool's address is inert.
-    let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-    let pool_start = (&raw const EARLY_TABLES as u64).wrapping_sub(offset);
-    let pool_end = pool_start + (NUM_EARLY_TABLES * PAGE_SIZE as usize) as u64;
-
-    if phys_addr >= pool_start && phys_addr < pool_end {
-        // Don't free early page tables
-        return;
-    }
-
-    // Use zone allocator to free
-    crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-56): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn free_page_table(phys_addr: u64) {
+    crate::arch::arch_floor::x86_64::mm::mmu_init::free_page_table(phys_addr)
 }
 
 // ============================================================================
@@ -534,9 +353,9 @@ pub struct PtPendingFree {
     pub snaps: [u64; crate::config::MAX_CPUS],
 }
 
-const PT_PENDING_CAP: usize = 96;
+pub(crate) const PT_PENDING_CAP: usize = 96;
 
-static PT_PENDING: crate::sync::spinlock::Spinlock<[Option<PtPendingFree>; PT_PENDING_CAP]> =
+pub(crate) static PT_PENDING: crate::sync::spinlock::Spinlock<[Option<PtPendingFree>; PT_PENDING_CAP]> =
     crate::sync::spinlock::Spinlock::new([const { None }; PT_PENDING_CAP]);
 
 /// Unlink and defer-free ONE emptied leaf table. Runs under the caller's
@@ -635,7 +454,7 @@ pub struct PtLedger {
     // collisions by construction. (A hash bitmap saturates and then
     // refuses legitimate frees — every refusal permanently leaks one
     // table frame; see the riscv64 fake-OOM investigation.)
-    live: [AtomicU64; MAX_PAGES / 64],
+    pub(crate) live: [AtomicU64; MAX_PAGES / 64],
     // QUARANTINE bitset (mmforensics lane, 2026-11-15): set once, never
     // cleared, on any double-tracking guard firing for the frame (raw
     // free of a live-stamped frame, cache-side live-PT release refusal,
@@ -648,7 +467,7 @@ pub struct PtLedger {
     // re-stamped by five different trees while the cache kept releasing
     // it). Every free path refuses poisoned frames: the poisoned frame
     // becomes an inert, bounded (<= a few/boot) orphan instead.
-    poisoned: [AtomicU64; MAX_PAGES / 64],
+    pub(crate) poisoned: [AtomicU64; MAX_PAGES / 64],
     // Boot-permanent tables (kernel root tree + Early static + Fixmap):
     // referenced by every early mm — freeing them per-mm tears down shared
     // state and feeds the frames back for reuse as live page tables (the
@@ -656,11 +475,11 @@ pub struct PtLedger {
     // ppn+1, linear scan), NOT a hash: a false "boot" on a USER table made
     // fork share that subtree between parent and child (cross-process PTE
     // aliasing). The boot set is tiny (the kernel tree's own tables, ~dozens).
-    boot: [AtomicU64; 512],
-    reported: AtomicUsize,
+    pub(crate) boot: [AtomicU64; 512],
+    pub(crate) reported: AtomicUsize,
 }
 impl PtLedger {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             live: [const { AtomicU64::new(0) }; MAX_PAGES / 64],
             poisoned: [const { AtomicU64::new(0) }; MAX_PAGES / 64],
@@ -670,7 +489,7 @@ impl PtLedger {
     }
     /// Bit index for an absolute PPN; None when outside the managed range.
     #[inline]
-    fn bit_index(ppn: u64) -> Option<usize> {
+    pub(crate) fn bit_index(ppn: u64) -> Option<usize> {
         let base = crate::mm::page_desc::MIN_PFN as u64;
         let i = ppn.checked_sub(base)? as usize;
         if i < MAX_PAGES {
@@ -680,7 +499,7 @@ impl PtLedger {
         }
     }
     #[inline]
-    fn live_bit(&self, ppn: u64) -> bool {
+    pub(crate) fn live_bit(&self, ppn: u64) -> bool {
         match Self::bit_index(ppn) {
             Some(i) => {
                 let word = &self.live[i / 64];
@@ -690,7 +509,7 @@ impl PtLedger {
         }
     }
     #[inline]
-    fn set_live_bit(&self, ppn: u64, value: bool) -> bool {
+    pub(crate) fn set_live_bit(&self, ppn: u64, value: bool) -> bool {
         // Returns the PREVIOUS bit (false for out-of-range PFNs — they are
         // never tracked, so a take() on one is refused as before).
         match Self::bit_index(ppn) {
@@ -706,7 +525,7 @@ impl PtLedger {
             None => false,
         }
     }
-    fn stamp_boot(&self, ppn: u64) {
+    pub(crate) fn stamp_boot(&self, ppn: u64) {
         for slot in self.boot.iter() {
             let v = slot.load(core::sync::atomic::Ordering::Relaxed);
             if v == ppn + 1 {
@@ -722,7 +541,7 @@ impl PtLedger {
         // normal. Should be unreachable; loudly noted if it ever happens.
         crate::pr_err!("PTLEDGER: boot table overflow, ppn={:#x}", ppn);
     }
-    fn take_returns(&self, ppn: u64) -> bool {
+    pub(crate) fn take_returns(&self, ppn: u64) -> bool {
         for slot in self.boot.iter() {
             let v = slot.load(core::sync::atomic::Ordering::Relaxed);
             if v == 0 {
@@ -734,7 +553,7 @@ impl PtLedger {
         }
         true
     }
-    fn stamp(&self, ppn: u64, pid: u32) {
+    pub(crate) fn stamp(&self, ppn: u64, pid: u32) {
         use core::sync::atomic::Ordering::Relaxed;
         if self.set_live_bit(ppn, true) {
             crate::pr_err!(
@@ -769,101 +588,7 @@ impl PtLedger {
             PT_STAMP_RING[idx].root.store(root, Relaxed);
         }
     }
-    /// Returns true if the frame had a live stamp (a legitimate first
-    /// free) and was cleared; false for double/foreign frees — the caller
-    /// must then REFUSE to return the frame to the zone. A table frame
-    /// entering the free list twice is what wires one physical page into
-    /// two live page-table trees (the shared-pgd corruption family).
-    fn take(&self, ppn: u64, pid: u32, site: &str, root_ppn: u64) -> bool {
-        use core::sync::atomic::Ordering::Relaxed;
-        if self.set_live_bit(ppn, false) {
-            // FORENSIC: ring of successful table frees — at a stale-tree
-            // event this names who freed each frame and from which
-            // teardown site ('r'=root, '0'=PT, '1'=PMD, '2'=PUD).
-            {
-                let idx = PT_FREE_CURSOR.fetch_add(1, Relaxed) % PT_FREE_RING.len();
-                PT_FREE_RING[idx].ppn.store(ppn, Relaxed);
-                PT_FREE_RING[idx].pid.store(pid, Relaxed);
-                PT_FREE_RING[idx].site.store(site.as_bytes()[0] as u64, Relaxed);
-                PT_FREE_RING[idx].root.store(root_ppn, Relaxed);
-            }
-            // EARLY-TEARDOWN WITNESS: a registered fork-mm root is being
-            // freed. If the freeing context is NOT the registered owner and
-            // the owner task is still alive, another mm shared this root.
-            // The registry entry is CONSUMED on the first root free of this
-            // frame — the frame returns to the allocator and its next
-            // incarnation as a fork root gets a fresh registration;
-            // leaving the stale entry made every recycled root a
-            // false-positive witness (exitwalk probe, seconds in).
-            if site == "root" {
-                for k in 0..FORK_ROOTS.len() {
-                    let r = FORK_ROOTS[k].root_ppn.load(Relaxed);
-                    if r == ppn && r != 0 {
-                        let owner = FORK_ROOTS[k].owner_pid.load(Relaxed);
-                        if owner != pid && task_pid_alive(owner) {
-                            static EARLY_REPORTS: AtomicUsize = AtomicUsize::new(0);
-                            if EARLY_REPORTS.fetch_add(1, Relaxed) < 8 {
-                                crate::pr_debug!(
-                                    "EARLY-ROOT-FREE root={:#x} owner pid={} ALIVE, freed in pid={} context",
-                                    ppn, owner, pid
-                                );
-                            }
-                        }
-                        FORK_ROOTS[k].root_ppn.store(0, Relaxed);
-                        break;
-                    }
-                }
-            }
-            return true;
-        }
-        if self.reported.fetch_add(1, Relaxed) < 8 {
-            crate::pr_err!(
-                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={} root={:#x}, boot={})",
-                ppn, site, pid, pt_free_ring_prev_free_pid(ppn),
-                pt_free_ring_prev_free_root(ppn), self.is_boot(ppn)
-            );
-            // FORENSIC: the frame's live descriptor state distinguishes
-            // "freed earlier, still on freelist" (OnFreelist, refcount 0)
-            // from "reallocated as live data page" (refcount>0, Anonymous/
-            // Lru) — both prove this tree references a frame it no longer
-            // owns.
-            {
-                let page = crate::mm::page_desc::pfn_to_page(ppn as usize);
-                if !page.is_null() {
-                    // SAFETY: read-only descriptor access on the diagnostic path.
-                    let (rc, linked, lru, anon) = unsafe {
-                        use crate::mm::page_desc::PageFlag;
-                        (
-                            (*page).refcount(),
-                            (*page).test_flag(PageFlag::OnFreelist),
-                            (*page).test_flag(PageFlag::Lru),
-                            (*page).test_flag(PageFlag::Anonymous),
-                        )
-                    };
-                    crate::pr_err!(
-                        "  PTLEDGER: frame state refcount={} on_freelist={} lru={} anon={}",
-                        rc, linked, lru, anon
-                    );
-                }
-            }
-            let cur = FUT_RING_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
-            for k in 0..32 {
-                let idx = (cur + FUT_RING.len() - 1 - k) % FUT_RING.len();
-                let r = FUT_RING[idx].root.load(core::sync::atomic::Ordering::Relaxed);
-                let p = FUT_RING[idx].pid.load(core::sync::atomic::Ordering::Relaxed);
-                if r != 0 {
-                    crate::pr_err!("  FUT ring[{}] root={:#x} pid={}", idx, r, p);
-                }
-            }
-        }
-        // mmforensics: deep capture at the double/foreign free refusal
-        // (own report cap + switch gate; no locks needed here — the
-        // refusal path runs before any frame-state transition).
-        crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
-        // Double-tracked frame: quarantine.
-        Self::poison_table(ppn);
-        false
-    }
+
 }
 pub static PT_LEDGER: PtLedger = PtLedger::new();
 
@@ -877,7 +602,7 @@ pub struct PtFreeEntry {
     pub root: AtomicU64,
 }
 impl PtFreeEntry {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             ppn: AtomicU64::new(0),
             pid: AtomicU32::new(0),
@@ -886,7 +611,7 @@ impl PtFreeEntry {
         }
     }
 }
-const PT_FREE_NEW: PtFreeEntry = PtFreeEntry::new();
+pub(crate) const PT_FREE_NEW: PtFreeEntry = PtFreeEntry::new();
 pub static PT_FREE_RING: [PtFreeEntry; 1024] = [PT_FREE_NEW; 1024];
 pub static PT_FREE_CURSOR: AtomicUsize = AtomicUsize::new(0);
 pub static PT_STAMP_RING: [PtFreeEntry; 1024] = [PT_FREE_NEW; 1024];
@@ -902,14 +627,14 @@ pub struct ForkRootReg {
     pub owner_pid: AtomicU32,
 }
 impl ForkRootReg {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             root_ppn: AtomicU64::new(0),
             owner_pid: AtomicU32::new(0),
         }
     }
 }
-const FORK_ROOT_NEW: ForkRootReg = ForkRootReg::new();
+pub(crate) const FORK_ROOT_NEW: ForkRootReg = ForkRootReg::new();
 pub static FORK_ROOTS: [ForkRootReg; 256] = [FORK_ROOT_NEW; 256];
 pub static FORK_ROOT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
@@ -919,26 +644,10 @@ pub fn register_fork_root(root_ppn: u64, owner_pid: u32) {
     FORK_ROOTS[idx].root_ppn.store(root_ppn, core::sync::atomic::Ordering::Relaxed);
     FORK_ROOTS[idx].owner_pid.store(owner_pid, core::sync::atomic::Ordering::Relaxed);
 }
-
-fn task_pid_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let alive = AtomicBool::new(false);
-    crate::sched::for_each_task(|t| unsafe {
-        if (*t).pid() as u32 == pid {
-            // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
-            // they stay in the pid hash until reaped but are NOT live
-            // owners. Counting them made the EARLY-ROOT-FREE witness fire
-            // on recycled root frames (stale registry entry + unreaped
-            // zombie owner) — the exitwalk probe tripped it within seconds.
-            let st = (*t).state();
-            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
-                alive.store(true, Ordering::Relaxed);
-            }
-        }
-    });
-    alive.load(Ordering::Relaxed)
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-53): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn task_pid_alive(pid: u32) -> bool {
+    crate::arch::arch_floor::x86_64::mm::mmu_init::task_pid_alive(pid)
 }
 
 impl PtLedger {
@@ -1015,7 +724,7 @@ impl PtLedger {
 /// FORENSIC: newest PT_FREE_RING entry naming `ppn` — the pid context of its
 /// most recent legitimate free (0 when the frame never freed within the
 /// ring window). Backwards scan from the cursor; the freshest match wins.
-fn pt_free_ring_prev_free_pid(ppn: u64) -> u32 {
+pub(crate) fn pt_free_ring_prev_free_pid(ppn: u64) -> u32 {
     use core::sync::atomic::Ordering::Relaxed;
     let cur = PT_FREE_CURSOR.load(Relaxed);
     for k in 0..PT_FREE_RING.len() {
@@ -1028,7 +737,7 @@ fn pt_free_ring_prev_free_pid(ppn: u64) -> u32 {
 }
 
 /// Root of the tree that last successfully freed this frame (0 = unknown).
-fn pt_free_ring_prev_free_root(ppn: u64) -> u64 {
+pub(crate) fn pt_free_ring_prev_free_root(ppn: u64) -> u64 {
     use core::sync::atomic::Ordering::Relaxed;
     let cur = PT_FREE_CURSOR.load(Relaxed);
     for k in 0..PT_FREE_RING.len() {
@@ -1045,14 +754,14 @@ pub struct FutEntry {
     pub pid: AtomicU64,
 }
 impl FutEntry {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             root: AtomicU64::new(0),
             pid: AtomicU64::new(0),
         }
     }
 }
-const FUT_NEW: FutEntry = FutEntry::new();
+pub(crate) const FUT_NEW: FutEntry = FutEntry::new();
 pub static FUT_RING: [FutEntry; 1024] = [FUT_NEW; 1024];
 pub static FUT_RING_CURSOR: AtomicUsize = AtomicUsize::new(0);
 /// Global cap on "REPEAT teardown" forensic reports — the first handful
@@ -1069,7 +778,7 @@ pub struct PteInstall {
     pub ppn: AtomicU64,
 }
 impl PteInstall {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             root: AtomicU64::new(0),
             va: AtomicU64::new(0),
@@ -1077,7 +786,7 @@ impl PteInstall {
         }
     }
 }
-const PTEI_NEW: PteInstall = PteInstall::new();
+pub(crate) const PTEI_NEW: PteInstall = PteInstall::new();
 pub static PTEI_RING: [PteInstall; 65536] = [PTEI_NEW; 65536];
 pub static PTEI_CUR: AtomicUsize = AtomicUsize::new(0);
 #[inline]
@@ -1637,59 +1346,19 @@ pub fn free_user_page_tables(
 }
 
 // ==================== Page Mapping Functions ====================
-
 /// Map a single 4K page in a page table WITHOUT flushing the TLB.
 ///
-/// Internal batch primitive — region/batch callers flush ONCE after their
-/// loop; single-page callers use the public `map_page`, which keeps its
-/// flush so a freshly faulted-in page is immediately usable.
-///
-/// 4-level walk with intermediate-table allocation. A 2MB PMD leaf or 1GB
-/// PUD leaf cannot host a 4K entry as-is — its PPN names a frame, not a
-/// table. Linux semantics for a mapping over an existing translation: the
-/// new mapping REPLACES it, so the leaf is DEMOTED — an intermediate table
-/// is installed whose entries reproduce the leaf's translation verbatim
-/// (same phys base, same flag bits) — then the caller's 4K map overwrites
-/// exactly its own slot below (E8-MM, ported from riscv64; user roots
-/// clone the kernel's low-half device windows, and a user fixed-address
-/// mmap landing on one must replace, not silently drop, the window).
-///
-/// # Arguments
-/// - root_ppn: Root page table physical page number
-/// - virt: Virtual address
-/// - phys: Physical address
-/// - flags: Page table entry flag bits
-/// SCRIBBLE GUARD: a table-link PTE parsed out of a scribbled slot can
-/// carry an arbitrary ppn (we saw .text bytes parsed as links — the x86
-/// text-scribbler self-propagation). Every walk that FOLLOWS a link must
-/// validate the target lies inside physical RAM before touching it; a
-/// bad link is reported and the walk refuses to continue (the mapping
-/// fails loudly instead of writing a "page table" over kernel memory).
-#[inline]
-fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
-    // Runtime RAM top (discovered memory map — fake-OOM fix: the old
-    // compile-time MAX_PFN rejected every table link above the Kernel.toml
-    // nominal 2 GiB, breaking user page tables on larger machines).
-    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
-    let phys = ppn << 12;
-    if phys >= ram_top {
-        return false;
-    }
-    // USER-tree links must also stay above the kernel-image reserve: their
-    // tables come from the zone (floor ~1GB), never from the Early BSS
-    // pool or the image itself. A user-tree link below 0x1E00000 is a
-    // scribbled slot parsing as a pointer — following it would read/write
-    // the kernel image (the x86 scribble engine: PMD[6]=0x300065 steering
-    // writes into .text). The KERNEL root's own tables legitimately live
-    // in the image (BSS pool) and are exempt.
-    root_ppn == unsafe { root_page_table_ppn() } || phys >= 0x1E0_0000
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-52): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
+    crate::arch::arch_floor::x86_64::mm::mmu_init::valid_table_link_ppn(ppn, root_ppn)
 }
 
 /// Rate-limited one-liner naming the walk level whose page-table
 /// allocation failed (fake-OOM family). The loud allocator-state dump
 /// lives in alloc_page_table (oom_forensic_dump, itself rate-limited);
 /// this only marks the failure depth in the serial log.
-fn pt_alloc_fail(level: &str, va: u64) {
+pub(crate) fn pt_alloc_fail(level: &str, va: u64) {
     static N: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
     if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
@@ -1700,306 +1369,12 @@ fn pt_alloc_fail(level: &str, va: u64) {
         );
     }
 }
-
 /// Map one 4K page; returns false when the mapping could NOT be installed
-/// (page-table allocation failure — the caller decides the failure
-/// policy: user demand faults convert this to MmFaultResult::OutOfMemory,
-/// i.e. SIGKILL/OOM-kill, instead of the old kernel panic; see the
-/// fake-OOM family notes in alloc_page_table).
 ///
-/// No-TLB-flush contract (fault-around batches): callers installing
-/// leaves into slots that were NOT PRESENT (verified by their own walk
-/// immediately before, under the PTE lock) need no invlpg — x86 never
-/// caches non-present translations, and every teardown path
-/// (munmap/mprotect) flushes what it zaps. Callers REPLACING a present
-/// leaf must flush that VA themselves.
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-51): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub(crate) fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
-    // 0xb9 install validator (oh-launch round 7) — see write_pte_raw's
-    // twin: a PRESENT entry with zero address bits is corrupt by
-    // construction; name the installer the moment it is written. Gated
-    // by rux:mmforensics; deferred printk; one load when off.
-    if crate::trace::EVENT_MMFORENSICS.armed()
-        && (flags & 0x1) != 0
-        && ((flags | phys.bits()) & 0x000F_FFFF_FFFF_F000) == 0
-    {
-        static BADMN_N: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        if BADMN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-            crate::pr_err!(
-                "PT-BAD-INSTALL: map_page_noflush flags={:#x} phys={:#x} va={:#x} root={:#x} pid {}",
-                flags,
-                phys.bits(),
-                virt.bits(),
-                root_ppn,
-                crate::sched::get_current_pid()
-            );
-        }
-    }
-    let virt_addr = virt.bits();
-    let phys_addr = phys.bits();
-
-    let a = VirtAddr::new(virt_addr);
-    let vpn4 = a.pgd_index() as usize;
-    let vpn3 = a.pud_index() as usize;
-    let vpn2 = a.pmd_index() as usize;
-    let vpn1 = a.pte_index() as usize;
-
-    let Some(root) = PtTable::from_phys(root_ppn << PAGE_SHIFT) else {
-        pt_alloc_fail("ROOT", virt_addr);
-        return false;
-    };
-
-    // x86 checks U/S at EVERY walk level: a user mapping (flags carry US)
-    // must reach the leaf through links that all carry US, or a CPL3
-    // access faults with P=1 (protection) even though the leaf itself is
-    // user-accessible. `link_user` is OR'd into every link this walk
-    // creates and upgrades pre-existing user-half links that lack it
-    // (e.g. the supervisor-only links create_user_address_space /
-    // earlier kernel-side installs left behind). Kernel mappings pass
-    // link_user=0 and never widen anything.
-    let link_user = flags & PageTableEntry::US;
-
-    // PML4 -> PUD (PML4 leaves do not exist on x86_64)
-    let pte4 = root.get(vpn4);
-    let ppn3 = if pte4.is_valid() {
-        if link_user != 0 && pte4.bits() & PageTableEntry::US == 0 {
-            root.set(
-                vpn4,
-                PageTableEntry::from_bits(pte4.bits() | PageTableEntry::US),
-            );
-        }
-        pte4.ppn()
-    } else {
-        let Some(table_phys) = alloc_page_table() else {
-            pt_alloc_fail("PUD", virt_addr);
-            return false;
-        };
-        let ppn = table_phys >> PAGE_SHIFT;
-        root.set(
-            vpn4,
-            PageTableEntry::from_bits(PageTableEntry::new_table(ppn).bits() | link_user),
-        );
-        ppn
-    };
-
-    // PUD -> PMD
-    if !valid_table_link_ppn(ppn3, root_ppn) {
-        crate::pr_err!(
-            "SCRIBBLE-GUARD map_page: PUD link ppn={:#x} bad at va {:#x} — refusing",
-            ppn3, virt_addr
-        );
-        return false;
-    }
-    let Some(table3_ref) = PtTable::from_phys(ppn3 << PAGE_SHIFT) else {
-        pt_alloc_fail("PUD", virt_addr);
-        return false;
-    };
-    let mut pte3 = table3_ref.get(vpn3);
-    // 1GB leaf demotion: install a PMD table whose 512 entries reproduce
-    // the 1GB mapping as 2MB leaves (same phys base, same flags + PS).
-    if pte3.is_valid() && pte3.is_leaf() {
-        if let Some(pmd_phys) = alloc_page_table() {
-            let Some(pmd) = PtTable::from_phys(pmd_phys) else {
-                return false;
-            };
-            let base = pte3.phys_addr(); // 1GB-aligned
-            let flag_bits = pte3.bits() & !PageTableEntry::PHYS_MASK_PUBLIC;
-            for k in 0..512u64 {
-                pmd.set(
-                    k as usize,
-                    PageTableEntry::from_bits((base + (k << PMD_SHIFT)) | flag_bits),
-                );
-            }
-            // Single-word swap: a concurrent walker sees either the leaf or
-            // a fully populated table — both translate the whole 1GB
-            // identically. The caller's page is overwritten afterwards; the
-            // flush in map_page / region batch publishes both writes.
-            let pmd_ppn = pmd_phys >> PAGE_SHIFT;
-            table3_ref.set(
-                vpn3,
-                PageTableEntry::from_bits(PageTableEntry::new_table(pmd_ppn).bits() | link_user),
-            );
-            pte3 = table3_ref.get(vpn3);
-        } else {
-            crate::pr_err!(
-                "map_page: PMD table alloc failed demoting 1GB leaf at {:#x}",
-                virt_addr
-            );
-            return false;
-        }
-    }
-    let ppn2 = if pte3.is_valid() {
-        if link_user != 0 && pte3.bits() & PageTableEntry::US == 0 {
-            table3_ref.set(
-                vpn3,
-                PageTableEntry::from_bits(pte3.bits() | PageTableEntry::US),
-            );
-        }
-        pte3.ppn()
-    } else {
-        let Some(table_phys) = alloc_page_table() else {
-            pt_alloc_fail("PMD", virt_addr);
-            return false;
-        };
-        let ppn = table_phys >> PAGE_SHIFT;
-        table3_ref.set(
-            vpn3,
-            PageTableEntry::from_bits(PageTableEntry::new_table(ppn).bits() | link_user),
-        );
-        ppn
-    };
-
-    // PMD -> PT
-    if !valid_table_link_ppn(ppn2, root_ppn) {
-        crate::pr_err!(
-            "SCRIBBLE-GUARD map_page: PMD link ppn={:#x} out of RAM at va {:#x} — refusing",
-            ppn2, virt_addr
-        );
-        return false;
-    }
-    let Some(table2_ref) = PtTable::from_phys(ppn2 << PAGE_SHIFT) else {
-        pt_alloc_fail("PMD", virt_addr);
-        return false;
-    };
-    let mut pte2 = table2_ref.get(vpn2);
-    // 2MB leaf demotion (E8-MM): install a PT whose 512 entries reproduce
-    // the 2MB mapping verbatim (same phys base, same flag bits minus PS).
-    if pte2.is_valid() && pte2.is_leaf() {
-        if let Some(pt_phys) = alloc_page_table() {
-            let Some(pt) = PtTable::from_phys(pt_phys) else {
-                return false;
-            };
-            let base = pte2.phys_addr(); // 2MB-aligned
-            let flag_bits = (pte2.bits() & !PageTableEntry::PHYS_MASK_PUBLIC) & !PageTableEntry::PS;
-            for k in 0..512u64 {
-                pt.set(
-                    k as usize,
-                    PageTableEntry::from_bits((base + (k << PAGE_SHIFT)) | flag_bits),
-                );
-            }
-            let pt_ppn = pt_phys >> PAGE_SHIFT;
-            table2_ref.set(
-                vpn2,
-                PageTableEntry::from_bits(PageTableEntry::new_table(pt_ppn).bits() | link_user),
-            );
-            pte2 = table2_ref.get(vpn2);
-        } else {
-            crate::pr_err!(
-                "map_page: PT table alloc failed demoting 2MB leaf at {:#x}",
-                virt_addr
-            );
-            return false;
-        }
-    }
-    let ppn1 = if pte2.is_valid() {
-        if link_user != 0 && pte2.bits() & PageTableEntry::US == 0 {
-            table2_ref.set(
-                vpn2,
-                PageTableEntry::from_bits(pte2.bits() | PageTableEntry::US),
-            );
-        }
-        pte2.ppn()
-    } else {
-        let Some(table_phys) = alloc_page_table() else {
-            pt_alloc_fail("PT", virt_addr);
-            return false;
-        };
-        let ppn = table_phys >> PAGE_SHIFT;
-        table2_ref.set(
-            vpn2,
-            PageTableEntry::from_bits(PageTableEntry::new_table(ppn).bits() | link_user),
-        );
-        ppn
-    };
-
-    // PT -> physical page
-    if !valid_table_link_ppn(ppn1, root_ppn) {
-        crate::pr_err!(
-            "SCRIBBLE-GUARD map_page: PT link ppn={:#x} out of RAM at va {:#x} — refusing",
-            ppn1, virt_addr
-        );
-        return false;
-    }
-    let Some(table1_ref) = PtTable::from_phys(ppn1 << PAGE_SHIFT) else {
-        pt_alloc_fail("PT", virt_addr);
-        return false;
-    };
-    let ppn: u64 = phys_addr >> PAGE_SHIFT;
-    let pte_bits: u64 = (ppn << PAGE_SHIFT) | flags;
-
-    // SCRIBBLE HUNT: a leaf whose physical frame lies inside the kernel
-    // image (below the 30MB reserve) is corruption — the zone starts at
-    // ~1GB and post-boot memblock never dips below the reserve. The ONE
-    // legitimate low-image alias is the vDSO pair (106th): the two
-    // memblock-reserved statics every exec maps into the user tree.
-    let is_vdso = crate::mm::vdso::is_vdso_phys(phys_addr);
-    if phys_addr < 0x1E0_0000 && root_ppn != root_page_table_ppn() && !is_vdso {
-        crate::pr_err!(
-            "LEAF-LOW-HIT map_page va={:#x} -> phys={:#x} flags={:#x} root={:#x}",
-            virt_addr, phys_addr, flags, root_ppn
-        );
-    }
-    // CORRUPTION TRIPWIRE: overwriting a PRESENT USER leaf with a
-    // different frame is the aliasing instant (one mapping's block reads
-    // another's data — heapstress blk canary, gnome-shell malloc assert).
-    // map_page legitimately installs each user page exactly once (fault
-    // path re-checks under PTE_MODIFY_LOCK), so a live-leaf overwrite is
-    // always a bug upstream.
-    {
-        let old = table1_ref.get(vpn1);
-        if old.is_valid()
-            && old.bits() & PageTableEntry::US != 0
-            && old.ppn() != ppn
-            && root_ppn != root_page_table_ppn()
-        {
-            static OW_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if OW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-                // Name the caller: context marker set at candidate
-                // map_page call sites (mm_ops::MM_CTX).
-                let ctx = super::mm_ops::MM_CTX.load(core::sync::atomic::Ordering::Relaxed);
-                // Data verdict: does the new frame carry the old frame's
-                // contents (copy semantics) or is the mapping's data
-                // destroyed (fresh zero/garbage)?
-                let old_kv = phys_to_virt(PhysAddr::new(old.ppn() << PAGE_SHIFT)).bits()
-                    as *const u8;
-                let new_kv =
-                    phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as *const u8;
-                // SAFETY: both are kernel linear-map addresses of the two
-                // frames; read-only compare of 16 bytes each.
-                let equal = unsafe {
-                    core::slice::from_raw_parts(old_kv, 16)
-                        == core::slice::from_raw_parts(new_kv, 16)
-                };
-                let comm = crate::process::current_task()
-                    .map(|t| {
-                        core::str::from_utf8(t.comm())
-                            .unwrap_or("?")
-                            .trim_end_matches('\0')
-                    })
-                    .unwrap_or("?");
-                crate::pr_err!(
-                    "PTE-OVERWRITE-LIVE va={:#x} old={:#x} new={:#x} pid={} comm={} ctx={} data_{}",
-                    virt_addr,
-                    old.bits(),
-                    pte_bits,
-                    crate::process::current_pid(),
-                    comm,
-                    ctx,
-                    if equal { "COPIED" } else { "DESTROYED" }
-                );
-                // Attribution: MM_CTX can be stale (it is never reset),
-                // so the printed ctx only says what ran RECENTLY, not
-                // which path is mapping now. The frame walk names the
-                // actual caller — b86 lost render_service to a 2-page
-                // heap overwrite at 0x1f000 whose ctx label was useless.
-                crate::dfx::backtrace::dump_stack();
-            }
-        }
-    }
-    table1_ref.set(vpn1, PageTableEntry::from_bits(pte_bits));
-    pte_install_log(root_ppn, virt_addr, ppn);
-    true
+    crate::arch::arch_floor::x86_64::mm::mmu_init::map_page_noflush(root_ppn, virt, phys, flags)
 }
 
 /// Map a single 4K page in a page table (with TLB flush of the page).
@@ -2031,7 +1406,7 @@ pub fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bo
 /// the window UNMAPPED with no recovery path, so the .expect panics below
 /// are deliberate (unlike map_page, which is failible for the fake-OOM
 /// family — user demand faults must OOM-kill, not panic).
-fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
+pub(crate) fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     let a = VirtAddr::new(virt as u64);
     let vpn4 = a.pgd_index() as usize;
     let vpn3 = a.pud_index() as usize;
@@ -2081,7 +1456,7 @@ fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
 /// PDPTE-with-PS). Same contract as map_pmd_huge_page: boot-time windows
 /// only. Used for the above-4G device alias (DEVICE_ALIAS64), where 2MB
 /// leaves would cost hundreds of PD tables for one PML4 slot.
-fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
+pub(crate) fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
     let a = VirtAddr::new(virt as u64);
     let vpn4 = a.pgd_index() as usize;
     let vpn3 = a.pud_index() as usize;
@@ -2118,7 +1493,7 @@ fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
 /// Internal batch primitive — region callers flush once via
 /// map_kernel_region. Walks from the CURRENTLY ACTIVE root (CR3): kernel
 /// VAs resolve through the shared kernel-half links in any root.
-fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
+pub(crate) fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
     let root_ppn = root_page_table_ppn();
     map_page_noflush(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), flags)
 }
@@ -2185,210 +1560,26 @@ pub fn map_kernel_region_huge(virt: u64, size: u64, flags: u64) {
 }
 
 // ==================== MMU Initialization ====================
-
 /// arch::mm::init() — build the real kernel PML4 and switch CR3.
 ///
-/// Called from main.rs early, while the bootstrap tables are still active.
-/// Contents:
-/// - Kernel image at KERNEL_LINK_ADDR..__kernel_end (higher-half)
-/// - PML4[0] linked to the bootstrap identity PUD (0..2GB) so the low
-///   boot stack and early low-memory access stay valid across the switch
-///   (bring-up simplification; drop with KPTI)
-/// - Fixmap PUD pre-link (the 16MB window at FIXADDR_START)
-///
-/// The linear map at PAGE_OFFSET is added later by setup_linear_mapping().
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-50): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn init() {
-    {
-        println!("mm: x86_64 4-level page tables (building real PML4)");
-
-        let static_root = PtTable::static_root();
-        static_root.zero_entries();
-
-        let root_ppn = root_static_ppn();
-
-        // Kernel image mapping: RW supervisor pages. 2MB leaves where the
-        // image boundary aligns, 4K for the tail (the image's constant
-        // VMA-LMA offset keeps va and pa alignment-locked).
-        let kernel_flags = PageTableEntry::P | PageTableEntry::RW
-            | PageTableEntry::ACCESSED | PageTableEntry::DIRTY;
-
-        let kernel_virt = KERNEL_LINK_ADDR as u64;
-        let kernel_phys = KERNEL_ENTRY;
-        let kernel_end_phys = kernel_image_phys_end();
-
-        let mut phys = kernel_phys;
-        let mut virt = kernel_virt;
-        while phys < kernel_end_phys {
-            let remaining = kernel_end_phys - phys;
-            if remaining >= PMD_SIZE
-                && (phys & (PMD_SIZE - 1)) == 0
-                && (virt & (PMD_SIZE - 1)) == 0
-            {
-                map_pmd_huge_page(virt as usize, phys as usize, kernel_flags);
-                phys += PMD_SIZE;
-                virt += PMD_SIZE;
-            } else {
-                // No per-page flush — the CR3 switch below publishes the
-                // whole table once.
-                map_page_noflush(
-                    root_ppn,
-                    VirtAddr::new(virt),
-                    PhysAddr::new(phys),
-                    kernel_flags,
-                );
-                phys += PAGE_SIZE;
-                virt += PAGE_SIZE;
-            }
-        }
-
-        // Keep the bootstrap identity map alive: PML4[0] → boot_pdpt_lo
-        // (identity 0..2GB, supervisor-only). The boot stack is low, and
-        // early low-memory access patterns (multiboot blob copies) rely on
-        // it until the linear map is up.
-        let boot_pdpt_lo_phys = &raw const boot_pdpt_lo as usize as u64;
-        static_root.set(
-            0,
-            PageTableEntry::from_bits(boot_pdpt_lo_phys | PageTableEntry::P | PageTableEntry::RW),
-        );
-
-        // Fixmap PUD pre-link: the kernel image mapping already created
-        // PML4[511]'s PUD table; install one PMD table for the fixmap
-        // window so set_fixmap never needs a table allocation.
-        {
-            let fixmap_virt = VirtAddr::new(FIXADDR_START as u64);
-            let vpn4 = fixmap_virt.pgd_index() as usize;
-            let vpn3 = fixmap_virt.pud_index() as usize;
-            let pte4 = static_root.get(vpn4);
-            if pte4.is_valid() {
-                if let Some(pud) = PtTable::from_phys(pte4.ppn() << PAGE_SHIFT) {
-                    if !pud.get(vpn3).is_valid() {
-                        if let Some(pmd_phys) = alloc_page_table() {
-                            pud.set(
-                                vpn3,
-                                PageTableEntry::new_table(pmd_phys >> PAGE_SHIFT),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Switch to the real tables. The switching code path (this text,
-        // the low boot stack) is identically mapped in the bootstrap and
-        // the new tables, so the very next instruction after `mov cr3`
-        // fetches fine; loading CR3 flushes the non-global TLB.
-        let root_phys = root_ppn << PAGE_SHIFT;
-        // SAFETY: root_phys is the static root PML4 just built above
-        // (image BSS); the switching path is identically mapped.
-        unsafe { crate::arch::cpu::write_cr3(root_phys) };
-
-        MMU_INITIALIZED.store(true, Ordering::Release);
-
-        // Record the real image size for /proc-style consumers.
-        let image_size = (kernel_image_phys_end() - KERNEL_ENTRY) as usize;
-        // SAFETY: single-CPU boot section; no concurrent reader exists.
-        unsafe { KERNEL_MAP.size = image_size };
-
-        println!(
-            "mm: switched CR3 to real PML4 (phys {:#x}), image {:#x}-{:#x}",
-            root_phys,
-            kernel_virt,
-            kernel_virt + image_size as u64
-        );
-
-        // Arm PCID now: CR3 holds the clean (low bits 0) static root.
-        // Context switches from here on carry a per-mm PCID + NOFLUSH;
-        // every TLB invalidation goes through the INVPCID paths in
-        // mm/asid.rs. No-op (stays flush-on-CR3) without CPUID
-        // PCID+INVPCID.
-        super::asid::enable_pcid();
-    }
+    crate::arch::arch_floor::x86_64::mm::mmu_init::init()
 }
-
 /// Drop the bootstrap identity map (PML4[0] -> boot_pdpt_lo, identity
-/// 0..2GB supervisor-only) from the kernel CR3. See boot_stack_continuation
-/// for the call site and the run/perf-review-ledger.md for the contract.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-49): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn drop_bootstrap_identity() {
-    // Exclusive owner of the kernel root table (init() built it); runs
-    // once on the BSP after the stack switch, task context.
-    PtTable::static_root().set(0, PageTableEntry::new());
-    // SAFETY: reloading the static root's own physical address.
-    unsafe { crate::arch::cpu::write_cr3(root_static_phys()) };
+    crate::arch::arch_floor::x86_64::mm::mmu_init::drop_bootstrap_identity()
 }
-
 /// Setup linear mapping for physical memory (PAGE_OFFSET region).
 ///
-/// Called from main.rs after memblock is initialized and the memory
-/// regions are parsed; CR3 already points at the real PML4. All usable RAM
-/// is mapped at PAGE_OFFSET with 2MB leaves where region boundaries align,
-/// 4K pages otherwise.
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-48): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
-    {
-        // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys
-        // SAFETY: single-CPU boot section; no concurrent reader exists.
-        unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
-
-        let linear_flags = PageTableEntry::P | PageTableEntry::RW
-            | PageTableEntry::ACCESSED | PageTableEntry::DIRTY;
-
-        let root_ppn = root_static_ppn();
-
-        for region in memory_regions {
-            let phys_start = region.base as u64;
-            let size = region.size as u64;
-            let phys_end = phys_start.saturating_add(size);
-
-            let virt_start = phys_start + VA_PA_OFFSET as u64;
-
-            let mut phys = phys_start;
-            let mut virt = virt_start;
-
-            while phys < phys_end {
-                let remaining = phys_end - phys;
-                // PAGE_OFFSET is 2MB-aligned and va-pa offset constant, so
-                // va alignment tracks pa alignment (best_map_size logic).
-                let map_size = if phys % PMD_SIZE == 0 && virt % PMD_SIZE == 0 && remaining >= PMD_SIZE
-                {
-                    PMD_SIZE
-                } else {
-                    PAGE_SIZE
-                };
-
-                if map_size == PMD_SIZE {
-                    map_pmd_huge_page(virt as usize, phys as usize, linear_flags);
-                } else {
-                    // No per-page flush: the whole linear mapping is
-                    // flushed once after this loop.
-                    map_page_noflush(
-                        root_ppn,
-                        VirtAddr::new(virt),
-                        PhysAddr::new(phys),
-                        linear_flags,
-                    );
-                }
-
-                phys += map_size;
-                virt += map_size;
-            }
-        }
-
-        // Reserve the early table pool in memblock so no Fixmap-stage
-        // memblock_alloc can hand its frames out from under live tables.
-        // (The pool is part of the kernel image BSS; this is belt and
-        // braces for flows whose image reservation is size-based.)
-        {
-            // SAFETY: boot section, single CPU (see above).
-            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
-            let pool_virt = &raw const EARLY_TABLES as u64;
-            let pool_phys = pool_virt.wrapping_sub(offset);
-            let used = (EARLY_TABLE_NEXT.load(Ordering::Acquire).min(NUM_EARLY_TABLES))
-                * PAGE_SIZE as usize;
-            let _ = crate::mm::memblock_reserve(pool_phys as usize, used);
-        }
-
-        // One full flush for the whole linear map (new PML4 entries).
-        crate::arch::mm::asid::flush_tlb_all();
-    }
+    crate::arch::arch_floor::x86_64::mm::mmu_init::setup_linear_mapping(memory_regions)
 }
 
 /// E8-MM port: the low-half identity windows the kernel maps into EVERY
@@ -2405,14 +1596,14 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 /// Runtime ioremap'd device windows (above-4G PCI BARs), recorded so
 /// `kernel_device_window_pte` restores them when a user mapping is torn
 /// down over one. Fixed capacity; overflow refuses the ioremap.
-const EXTRA_WINDOW_SLOTS: usize = 16;
+pub(crate) const EXTRA_WINDOW_SLOTS: usize = 16;
 
-struct ExtraWindows {
-    base: [core::sync::atomic::AtomicU64; EXTRA_WINDOW_SLOTS],
-    size: [core::sync::atomic::AtomicU64; EXTRA_WINDOW_SLOTS],
+pub(crate) struct ExtraWindows {
+    pub(crate) base: [core::sync::atomic::AtomicU64; EXTRA_WINDOW_SLOTS],
+    pub(crate) size: [core::sync::atomic::AtomicU64; EXTRA_WINDOW_SLOTS],
 }
 
-static EXTRA_WINDOWS: ExtraWindows = ExtraWindows {
+pub(crate) static EXTRA_WINDOWS: ExtraWindows = ExtraWindows {
     base: [const { core::sync::atomic::AtomicU64::new(0) }; EXTRA_WINDOW_SLOTS],
     size: [const { core::sync::atomic::AtomicU64::new(0) }; EXTRA_WINDOW_SLOTS],
 };
@@ -2503,16 +1694,16 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
 /// Registry capacity: one slot per distinct above-window BAR. The full OH
 /// set (6 blk + net + keyboard + tablet + gpu ≈ 10 functions, 1-2 modern
 /// BARs each) stays under 20; overflow refuses the ioremap loudly.
-const DYN_BAR_SLOTS: usize = 32;
+pub(crate) const DYN_BAR_SLOTS: usize = 32;
 
-struct DynBarMap {
-    pa_base: [AtomicU64; DYN_BAR_SLOTS],
-    pa_end: [AtomicU64; DYN_BAR_SLOTS],
-    va_base: [AtomicU64; DYN_BAR_SLOTS],
+pub(crate) struct DynBarMap {
+    pub(crate) pa_base: [AtomicU64; DYN_BAR_SLOTS],
+    pub(crate) pa_end: [AtomicU64; DYN_BAR_SLOTS],
+    pub(crate) va_base: [AtomicU64; DYN_BAR_SLOTS],
 }
 
 impl DynBarMap {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             pa_base: [const { AtomicU64::new(0) }; DYN_BAR_SLOTS],
             pa_end: [const { AtomicU64::new(0) }; DYN_BAR_SLOTS],
@@ -2521,11 +1712,11 @@ impl DynBarMap {
     }
 }
 
-static DYN_BARS: DynBarMap = DynBarMap::new();
+pub(crate) static DYN_BARS: DynBarMap = DynBarMap::new();
 
 /// Bump cursor into IOREMAP_ARENA. Chunks are 2MB-aligned so most BAR
 /// mappings get 2MB PMD leaves for their interior.
-static DYN_BAR_CURSOR: AtomicU64 = AtomicU64::new(
+pub(crate) static DYN_BAR_CURSOR: AtomicU64 = AtomicU64::new(
     crate::arch::mm::memory_layout::IOREMAP_ARENA_BASE as u64,
 );
 
@@ -2534,7 +1725,7 @@ static DYN_BAR_CURSOR: AtomicU64 = AtomicU64::new(
 /// copied the kernel-half links at creation). PCI probe must therefore
 /// finish before the first exec — a late ioremap is still mapped for the
 /// boot root but is reported loudly instead of failing silently later.
-static USER_MMS_EXIST: AtomicBool = AtomicBool::new(false);
+pub(crate) static USER_MMS_EXIST: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_user_mms_exist() {
     USER_MMS_EXIST.store(true, Ordering::Release);
@@ -2559,77 +1750,12 @@ pub fn device_alias_dyn(pa: u64) -> Option<u64> {
     }
     None
 }
-
 /// Map one device BAR (or any device PA range) into the kernel-half
-/// ioremap arena and register it for `device_alias`.
 ///
-/// Returns the kernel-half VA base on success — either an existing
-/// covering mapping (fixed window or earlier registration) or a fresh
-/// one. Returns None when the registry or the arena is exhausted, or the
-/// mapping could not be installed.
-///
-/// Safe to call repeatedly for the same range (idempotent). Call from
-/// single-threaded boot context (PCI probe); installs PML4 entries in the
-/// static kernel root.
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-47): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn ioremap_bar_kernel(pa: u64, size: u64) -> Option<u64> {
-    use crate::arch::mm::memory_layout::{
-        device_alias_fixed, IOREMAP_ARENA_BASE, IOREMAP_ARENA_END,
-    };
-    if size == 0 {
-        return None;
-    }
-    // Already inside a fixed alias window: nothing to do (and never burn
-    // arena space for it).
-    if let Some(va) = device_alias_fixed(pa) {
-        return Some(va);
-    }
-    if USER_MMS_EXIST.load(Ordering::Acquire) {
-        // Not fatal for the boot root, but every existing user CR3 will
-        // page-fault on this BAR — the callers' warning covers the
-        // consequence; this names the cause.
-        crate::pr_err!(
-            "ioremap_bar_kernel: pa={:#x} mapped AFTER user mms exist — \
-             existing user CR3s will not see this arena link",
-            pa
-        );
-    }
-    // Already registered (re-probe of the same function, two capabilities
-    // sharing one BAR)?
-    if let Some(va) = device_alias_dyn(pa) {
-        return Some(va);
-    }
-    // Fresh chunk: 2MB-aligned size, bumped atomically.
-    let chunk = (size + 0x1f_ffff) & !0x1f_ffff;
-    let va = DYN_BAR_CURSOR.fetch_add(chunk, Ordering::AcqRel);
-    if va < IOREMAP_ARENA_BASE as u64 || va + chunk > IOREMAP_ARENA_END as u64 {
-        crate::pr_err!(
-            "ioremap_bar_kernel: arena exhausted (pa={:#x} size={:#x}) — \
-             enlarge IOREMAP_ARENA_SIZE",
-            pa, size
-        );
-        return None;
-    }
-    unsafe {
-        let device_flags = PageTableEntry::P | PageTableEntry::RW
-            | PageTableEntry::ACCESSED | PageTableEntry::DIRTY
-            | PageTableEntry::IO;
-        map_kernel_region(va, pa, size, device_flags);
-    }
-    // Record after the mapping is installed (Release/Acquire pairing).
-    for i in 0..DYN_BAR_SLOTS {
-        if DYN_BARS.pa_base[i].load(Ordering::Acquire) == 0 {
-            DYN_BARS.va_base[i].store(va, Ordering::Release);
-            DYN_BARS.pa_end[i].store(pa + size, Ordering::Release);
-            DYN_BARS.pa_base[i].store(pa, Ordering::Release);
-            return Some(va);
-        }
-    }
-    crate::pr_err!(
-        "ioremap_bar_kernel: registry full ({} slots) — pa={:#x} left on the \
-         identity fallback; user-CR3 MMIO on it will KERNPANIC",
-        DYN_BAR_SLOTS, pa
-    );
-    None
+    crate::arch::arch_floor::x86_64::mm::mmu_init::ioremap_bar_kernel(pa, size)
 }
 
 /// Device/ECAM mappings (q35: MMCONFIG @ 0xb0000000, IOAPIC, LAPIC).
@@ -2695,23 +1821,19 @@ pub fn setup_device_mappings() {
 
     }
 }
-
 /// Re-point CR3 at the static kernel root (parity with riscv64 enable()).
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-46): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable() {
-    unsafe {
-        let root_phys = root_static_phys();
-        crate::arch::cpu::write_cr3(root_phys);
-    }
+    crate::arch::arch_floor::x86_64::mm::mmu_init::enable()
 }
-
 /// Map identity mapping into the static root (interface parity).
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-45): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    let vpn4 = virt.pgd_index() as usize;
-    let ppn = phys.ppn();
-
-    unsafe {
-        ROOT_PAGE_TABLE.set(vpn4, PageTableEntry::from_bits((ppn << PAGE_SHIFT) | flags));
-    }
+    crate::arch::arch_floor::x86_64::mm::mmu_init::map_identity(virt, phys, flags)
 }
 
 /// Get kernel page table PPN (physical)
@@ -2720,175 +1842,14 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 }
 
 // ==================== mmforensics: live-tree reverse scan ====================
-
 /// Bounded reverse scan: which LIVE page-table trees still reference
-/// `target_ppn` (as root, as an upper-table link, or as a leaf/data
-/// mapping)? This is the reverse map the kernel otherwise lacks — the
-/// decisive capture at a RAW-FREE-OF-LIVE-TABLE echo (pcachewedge §6
-/// residual): the frame is double-tracked, and the referencing tree that
-/// is NOT the stamping root holds the stale pointer.
 ///
-/// Safety shape (forensic, gated by rux:mmforensics (retired dfx=mmforensics), <= a few/boot):
-/// - task set snapshotted with `for_each_task_try` (non-blocking; held
-///   pid-hash buckets are skipped and reported);
-/// - each task's root is read with a single-field unsafe peek
-///   (`mm_ptr_peek` + `(*mm).pgd`) — no Arc is cloned inside the
-///   bucket-locked callback (its drop could run a teardown under the
-///   spinlock). A stale read at worst yields a garbage root, which the
-///   ledger-live/boot validation below rejects;
-/// - every walk link is bounds-checked (`phys_valid`, above the kernel
-///   image reserve, below the discovered RAM top) before descent, and
-///   the walk carries a hard entry budget;
-/// - shared boot subtrees (MMIO/ECAM tables cloned into every mm) are
-///   link-checked but not descended into — they are boot-permanent and
-///   never the freed frame.
-///
-/// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
-pub fn forensics_scan_trees(
-    target_ppn: u64,
-    out: &mut [crate::dfx::mmforensics::TreeHit],
-) -> (usize, usize, usize, usize) {
-    const MAX_TASKS: usize = 128;
-    let mut roots = [(0u32, 0u64); MAX_TASKS];
-    let mut tasks = 0usize;
-    let skipped = crate::sched::for_each_task_try(|t| {
-        if tasks >= MAX_TASKS {
-            return;
-        }
-        // SAFETY: task is pinned by the pid-hash bucket lock; the mm
-        // pointer peek takes mm_slot_lock (never held in reverse around
-        // pid-hash writers); the single-field read cannot fault (kernel
-        // heap is linearly mapped) and a stale value is filtered by the
-        // ledger validation below.
-        // SAFETY: see the comment above the closure.
-        let (pid, root) = unsafe {
-            let root = (*t)
-                .mm_ptr_peek()
-                .map(|mm| (*mm).pgd)
-                .unwrap_or(0);
-            ((*t).pid() as u32, root)
-        };
-        roots[tasks] = (pid, root);
-        tasks += 1;
-    });
-
-    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
-    let mut reads = 0usize;
-    const BUDGET: usize = 400_000;
-    let mut nh = 0usize;
-
-    let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
-        if nh < out.len() {
-            out[nh] = crate::dfx::mmforensics::TreeHit {
-                pid,
-                root_ppn: root,
-                level,
-                idx0: i0,
-                idx1: i1,
-            };
-        }
-        nh += 1;
-    };
-
-    let link_ok = |ppn: u64| -> bool {
-        let phys = ppn << 12;
-        ppn != 0 && phys >= 0x1E0_0000 && phys < ram_top && crate::mm::phys_valid(phys as usize)
-    };
-
-    for &(pid, root) in roots.iter().take(tasks) {
-        if root == 0 || reads >= BUDGET {
-            continue;
-        }
-        // Root validation: a live mm's root carries a ledger stamp (or is
-        // boot-shared); a garbage peek fails here and the task is skipped.
-        if root != target_ppn
-            && !PtLedger::is_live_table(root)
-            && !PT_LEDGER.is_boot(root)
-        {
-            continue;
-        }
-        if root == target_ppn {
-            push(pid, root, 0, 0xFFFF, 0xFFFF);
-        }
-        // Link_ok-validated frames are inside managed RAM and linearly
-        // mapped; the read-only walk goes through the typed accessor.
-        let Some(root_table) = PtTable::from_phys(root << 12) else { continue };
-        for vpn4 in 0..USER_PTRS_PER_PGD {
-            if reads >= BUDGET {
-                break;
-            }
-            reads += 1;
-            let pte4 = root_table.get(vpn4);
-            if !pte4.is_valid() || pte4.is_leaf() {
-                continue;
-            }
-            let ppn3 = pte4.ppn();
-            if ppn3 == target_ppn {
-                push(pid, root, 1, vpn4 as u32, 0xFFFF);
-            }
-            if !link_ok(ppn3) || PT_LEDGER.is_boot(ppn3) {
-                continue;
-            }
-            let Some(table3) = PtTable::from_phys(ppn3 << 12) else { continue };
-            for vpn3 in 0..512 {
-                if reads >= BUDGET {
-                    break;
-                }
-                reads += 1;
-                let pte3 = table3.get(vpn3);
-                if !pte3.is_valid() {
-                    continue;
-                }
-                if pte3.is_leaf() {
-                    if pte3.ppn() == target_ppn {
-                        push(pid, root, 4, vpn4 as u32, vpn3 as u32);
-                    }
-                    continue;
-                }
-                let ppn2 = pte3.ppn();
-                if ppn2 == target_ppn {
-                    push(pid, root, 2, vpn4 as u32, vpn3 as u32);
-                }
-                if !link_ok(ppn2) || PT_LEDGER.is_boot(ppn2) {
-                    continue;
-                }
-                let Some(table2) = PtTable::from_phys(ppn2 << 12) else { continue };
-                for vpn2 in 0..512 {
-                    if reads >= BUDGET {
-                        break;
-                    }
-                    reads += 1;
-                    let pte2 = table2.get(vpn2);
-                    if !pte2.is_valid() {
-                        continue;
-                    }
-                    if pte2.is_leaf() {
-                        if pte2.ppn() == target_ppn {
-                            push(pid, root, 4, vpn3 as u32, vpn2 as u32);
-                        }
-                        continue;
-                    }
-                    let ppn1 = pte2.ppn();
-                    if ppn1 == target_ppn {
-                        push(pid, root, 3, vpn3 as u32, vpn2 as u32);
-                    }
-                    if !link_ok(ppn1) || PT_LEDGER.is_boot(ppn1) {
-                        continue;
-                    }
-                    let Some(table1) = PtTable::from_phys(ppn1 << 12) else { continue };
-                    for vpn1 in 0..512 {
-                        if reads >= BUDGET {
-                            break;
-                        }
-                        reads += 1;
-                        let pte1 = table1.get(vpn1);
-                        if pte1.is_valid() && pte1.is_leaf() && pte1.ppn() == target_ppn {
-                            push(pid, root, 4, vpn2 as u32, vpn1 as u32);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    (nh.min(out.len()), tasks, skipped, reads)
+/// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-44): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn forensics_scan_trees( target_ppn: u64, out: &mut [crate::dfx::mmforensics::TreeHit], ) -> (usize, usize, usize, usize) {
+    crate::arch::arch_floor::x86_64::mm::mmu_init::forensics_scan_trees(target_ppn, out)
 }
+
+// Collected-unsafe re-exports: the unsafe floor for these names lives in
+// kernel/src/arch/unsafe.rs (INV-ARCH-*); these keep the original paths.
+pub(crate) use crate::arch::arch_floor::x86_64::mm::mmu_init::EARLY_TABLES;

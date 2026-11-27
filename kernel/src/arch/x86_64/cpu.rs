@@ -5,6 +5,11 @@
 //! x86_64 CPU primitives: port I/O, control registers, MSRs,
 //! interrupt-state management.
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 // ============================================================================
 // Port I/O (INV-XE-PIO-1)
 //
@@ -16,100 +21,79 @@
 // own, exactly like the reference kernel's C inlines (arch/x86/include/
 // asm/io.h), which carry no annotation either.
 // ============================================================================
-
 /// Read a byte from an I/O port
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-60): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn inb(port: u16) -> u8 {
-    let value: u8;
-    unsafe {
-        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
-    value
+    crate::arch::arch_floor::x86_64::cpu::inb(port)
 }
-
 /// Write a byte to an I/O port
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-59): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn outb(port: u16, value: u8) {
-    unsafe {
-        core::arch::asm!("out dx, al", in("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::x86_64::cpu::outb(port, value)
 }
-
 /// Read a word (16-bit) from an I/O port
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-58): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn inw(port: u16) -> u16 {
-    let value: u16;
-    unsafe {
-        core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
-    value
+    crate::arch::arch_floor::x86_64::cpu::inw(port)
 }
-
 /// Write a word (16-bit) to an I/O port
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-57): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn outw(port: u16, value: u16) {
-    unsafe {
-        core::arch::asm!("out dx, ax", in("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::x86_64::cpu::outw(port, value)
 }
-
 /// Read a dword (32-bit) from an I/O port
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-56): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn inl(port: u16) -> u32 {
-    let value: u32;
-    unsafe {
-        core::arch::asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
-    value
+    crate::arch::arch_floor::x86_64::cpu::inl(port)
 }
-
 /// Write a dword (32-bit) to an I/O port
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-55): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn outl(port: u16, value: u32) {
-    unsafe {
-        core::arch::asm!("out dx, eax", in("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
+    crate::arch::arch_floor::x86_64::cpu::outl(port, value)
 }
-
 /// I/O wait (dummy port write to serialize slow legacy devices)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-54): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn io_wait() {
-    // SAFETY: writing to port 0x80 (POST diagnostic port) is harmless.
-    unsafe { outb(0x80, 0) };
+    crate::arch::arch_floor::x86_64::cpu::io_wait()
 }
 
 // ---------------------------------------------------------------------------
 // Control registers / MSRs
 // ---------------------------------------------------------------------------
-
 /// Read CR2 (page-fault address)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-53): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_cr2() -> u64 {
-    let value: u64;
-    // SAFETY: CR2 is a read-only control register; reading is always safe.
-    unsafe { core::arch::asm!("mov {}, cr2", out(reg) value, options(nomem, nostack)) };
-    value
+    crate::arch::arch_floor::x86_64::cpu::read_cr2()
 }
-
 /// Read CR0.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-52): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_cr0() -> u64 {
-    let value: u64;
-    // SAFETY: reading CR0 is always safe.
-    unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) };
-    value
+    crate::arch::arch_floor::x86_64::cpu::read_cr0()
 }
-
 /// Write CR0.
 ///
-/// # Safety
-/// The value must keep PE/PG/PAE as required by the current mode.
-/// IRREDUCIBLE F-ROW (F-CR-1): control-register writes (CR0/CR3/CR4)
-/// and MSRs — reference kernel arch/x86/include/asm/special_insns.h;
-/// no safe Rust shape exists (inline asm is the only access).
-pub unsafe fn write_cr0(value: u64) {
-    // SAFETY: caller keeps the mode-defining bits intact.
-    unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-51): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn write_cr0(value: u64) {
+    crate::arch::arch_floor::x86_64::cpu::write_cr0(value)
 }
 
 /// CR0.TS (task switched) — set on every context switch-in; the first
@@ -122,115 +106,73 @@ pub const CR0_TS: u64 = 1 << 3;
 pub fn ts_set() -> bool {
     read_cr0() & CR0_TS != 0
 }
-
 /// Clear CR0.TS (claim the live FPU for the current task). Memory-safe
-/// for any caller: one control-bit clear, no mode bits touched.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-50): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn clts() {
-    // SAFETY: single-bit clear, mode bits preserved.
-    unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) };
+    crate::arch::arch_floor::x86_64::cpu::clts()
 }
-
 /// Set CR0.TS (drop the live FPU; next FP instruction traps #NM).
-/// Memory-safe for any caller: one control-bit set, no mode bits touched.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-49): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn stts() {
-    // SAFETY: single-bit set, mode bits preserved.
-    unsafe { write_cr0(read_cr0() | CR0_TS) };
+    crate::arch::arch_floor::x86_64::cpu::stts()
 }
-
 /// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
 ///
-/// F1b root-cause fix (wildwrite-hunt): without WP, ring-0 stores IGNORE
-/// page-table RW bits, so every "read-only" supervisor mapping is
-/// decorative — supervisor uaccess writes pierce COW/share protections
-/// (read() into a post-fork COW page writes the SHARED page: parent/child
-/// divergence, cross-mapper bleed, zero kernel-side trace). Linux sets WP
-/// early in boot for exactly this discipline; we now do the same,
-/// permanently, on BSP and every AP. Safe here because the kernel image,
-/// linear map, and device windows are all mapped P|RW — WP only ever
-/// bites user-side COW/RO pages (the trap path resolves those: see
-/// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
-/// kernel statics (rux:wildwatch (retired dfx=wildwatch)).
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-48): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_write_protect() {
-    // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
-    unsafe {
-        let cr0 = read_cr0();
-        write_cr0(cr0 | 0x1_0000);
-    }
+    crate::arch::arch_floor::x86_64::cpu::enable_write_protect()
 }
-
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-47): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_cr3() -> u64 {
-    let value: u64;
-    // SAFETY: reading CR3 is always safe.
-    unsafe { core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack)) };
-    value
+    crate::arch::arch_floor::x86_64::cpu::read_cr3()
 }
-
 /// Write CR3 (page-table root)
 ///
-/// # Safety
-/// Caller must ensure value is a valid PML4 physical address.
-#[inline]
-pub unsafe fn write_cr3(value: u64) {
-    unsafe { core::arch::asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-46): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn write_cr3(value: u64) {
+    crate::arch::arch_floor::x86_64::cpu::write_cr3(value)
 }
-
 /// Read an MSR
 ///
-/// # Safety
-/// Caller must ensure the MSR index is valid for this CPU.
-#[inline]
-pub unsafe fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    unsafe {
-        core::arch::asm!("rdmsr", out("eax") lo, out("edx") hi, in("ecx") msr, options(nomem, nostack));
-    }
-    (lo as u64) | ((hi as u64) << 32)
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-45): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn rdmsr(msr: u32) -> u64 {
+    crate::arch::arch_floor::x86_64::cpu::rdmsr(msr)
 }
-
 /// Write an MSR
 ///
-/// # Safety
-/// Caller must ensure the MSR index and value are valid for this CPU.
-#[inline]
-pub unsafe fn wrmsr(msr: u32, value: u64) {
-    let lo = value as u32;
-    let hi = (value >> 32) as u32;
-    unsafe {
-        core::arch::asm!("wrmsr", in("eax") lo, in("edx") hi, in("ecx") msr, options(nomem, nostack));
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-44): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn wrmsr(msr: u32, value: u64) {
+    crate::arch::arch_floor::x86_64::cpu::wrmsr(msr, value)
 }
-
 /// Invalidate a TLB entry
 ///
-/// With CR4.PCIDE=1 this invalidates only the entry cached under the
-/// CURRENT PCID (callers flushing a non-current address space use
-/// `invpcid` with an explicit PCID — see mm/asid.rs).
-/// Memory-safe for any address value: the worst a non-canonical or
-/// unmapped argument does is invalidate nothing.
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-43): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn invlpg(addr: u64) {
-    unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+    crate::arch::arch_floor::x86_64::cpu::invlpg(addr)
 }
-
 /// Read CR4.
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-42): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_cr4() -> u64 {
-    let value: u64;
-    // SAFETY: reading CR4 is always safe.
-    unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack)) };
-    value
+    crate::arch::arch_floor::x86_64::cpu::read_cr4()
 }
-
 /// Write CR4.
 ///
-/// # Safety
-/// Caller must ensure the written value is architecturally valid
-/// (reserved bits 0; PCIDE only with paging on and CR3[11:0]=0).
-#[inline]
-pub unsafe fn write_cr4(value: u64) {
-    unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-41): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn write_cr4(value: u64) {
+    crate::arch::arch_floor::x86_64::cpu::write_cr4(value)
 }
 
 /// INVPCID descriptor types.
@@ -238,27 +180,12 @@ pub const INVPCID_ADDR: u64 = 0; // one linear address under one PCID
 pub const INVPCID_SINGLE_CTX: u64 = 1; // all entries under one PCID
 pub const INVPCID_ALL_INCL_GLOBAL: u64 = 2; // every PCID, global included
 pub const INVPCID_ALL_NON_GLOBAL: u64 = 3; // every PCID, global excluded
-
 /// Invalidate by PCID descriptor (`invpcid`). The 16-byte descriptor is
-/// [ PCID:u64 | linear-address:u64 ]; its content is ignored for types
-/// 2/3 but must be readable memory.
 ///
-/// # Safety
-/// Caller must ensure INVPCID is present (CPUID.7.0:EBX[10]) and the type
-/// is <= 3; for types 0/1 with a nonzero PCID, CR4.PCIDE must be 1.
-#[inline]
-pub unsafe fn invpcid(kind: u64, pcid: u64, addr: u64) {
-    let desc: [u64; 2] = [pcid & 0xfff, addr];
-    // SAFETY: see fn doc; the descriptor is stack memory whose ADDRESS is
-    // an input (the instruction reads it, it does not write through it).
-    unsafe {
-        core::arch::asm!(
-            "invpcid {kind}, [{desc}]",
-            kind = in(reg) kind,
-            desc = in(reg) &desc as *const [u64; 2] as usize,
-            options(nostack, preserves_flags)
-        );
-    }
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-40): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn invpcid(kind: u64, pcid: u64, addr: u64) {
+    crate::arch::arch_floor::x86_64::cpu::invpcid(kind, pcid, addr)
 }
 
 // ---------------------------------------------------------------------------
@@ -299,15 +226,12 @@ pub fn set_thread_id(tid: u64) {
 pub fn get_counter_freq() -> u64 {
     crate::drivers::intc::apic::TSC_FREQ.load(core::sync::atomic::Ordering::Acquire)
 }
-
 /// Read the TSC cycle counter
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-39): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn read_counter() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: RDTSC is a pure counter read.
-    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)) };
-    (lo as u64) | ((hi as u64) << 32)
+    crate::arch::arch_floor::x86_64::cpu::read_counter()
 }
 
 /// CR4.SMAP (bit 21): Supervisor-Mode Access Prevention. When set, the
@@ -346,83 +270,33 @@ pub static FSGSBASE_ENABLED: core::sync::atomic::AtomicBool =
 pub fn fsgsbase_enabled() -> bool {
     FSGSBASE_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
-
 /// Arm FSGSBASE for the context-switch path (WRFSBASE/WRGSBASE take
-/// effect CPU-globally once CR4.FSGSBASE is set; the switch path gates
-/// on fsgsbase_enabled() so the instruction never executes without it).
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-38): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_fsgsbase() {
-    // CPUID leaf 7 subleaf 0, EBX bit 16 = FSGSBASE.
-    let (_, ebx, _, _) = cpuid(7, 0);
-    if ebx & (1 << 16) == 0 {
-        crate::println!("arch: FSGSBASE not available, switches keep wrmsr FS/GS");
-        return;
-    }
-    // SAFETY: CR4 update with the FSGSBASE bit only; CPUID gated and
-    // idempotent.
-    unsafe {
-        let cr4 = read_cr4();
-        write_cr4(cr4 | (1 << 16));
-    }
-    FSGSBASE_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
-    crate::println!("arch: CR4.FSGSBASE enabled");
+    crate::arch::arch_floor::x86_64::cpu::enable_fsgsbase()
 }
-
 /// CR4.SMEP (bit 20): Supervisor-Mode Execution Prevention. When set, a
-/// ring-0 instruction fetch of a U=1 page faults IMMEDIATELY at the
-/// fetch — the reference kernel arms it whenever CPUID offers it.
-/// R12 (oh-launch round 12, the rip=0x1 family): without SMEP the kernel
-/// happily EXECUTES user-mapped (and zero) pages, which is the
-/// amplifier half of the last scribbler face: a kernel rip that lands
-/// on a small-int garbage target (a return address or fn pointer
-/// overwritten with 1/0/3 — PICK_LIVE, a bool, an enum tag) does not
-/// fault at the fetch if the page happens to be mapped; it executes
-/// whatever bytes sit there (mostly zeros = `add [rax],al`-class ops)
-/// and the machine only faults later on a DATA access at a small
-/// address — the captured shape (rip=0x1 rsp=0x0 badaddr=0x3 and
-/// badaddr=-0x30, data faults while "executing" at 1). With SMEP on,
-/// the same jump faults AT THE TARGET: a clean #PF with badaddr=rip
-/// naming the hijack address, no zero-page execution cascade, no
-/// follow-on dumper re-entry. The kernel-EXEC-fault routing in
-/// mm/exception.rs already assumes these semantics ("SMEP blocks U=1
-/// fetches at CPL0 even when mapped" — kernel EXEC faults route to the
-/// exception table / KernelPanic instead of demand-filling); arming the
-/// bit is what makes that comment true.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-37): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_smep() {
-    // CPUID leaf 7 subleaf 0, EBX bit 7 = SMEP.
-    let (_, ebx, _, _) = cpuid(7, 0);
-    if ebx & (1 << 7) == 0 {
-        crate::println!("arch: SMEP not available");
-        return;
-    }
-    // SAFETY: CR4 update with the SMEP bit only; CPUID gated and
-    // idempotent. Set on the BSP before SMP bring-up so every AP
-    // inherits CR4 via the boot trampoline.
-    unsafe {
-        let cr4 = read_cr4();
-        write_cr4(cr4 | (1 << 20));
-    }
-    crate::println!("arch: CR4.SMEP enabled (kernel EXEC of user pages faults at the fetch)");
+    crate::arch::arch_floor::x86_64::cpu::enable_smep()
 }
-
 /// WRFSBASE — set FS.base without an MSR write.
 ///
-/// # Safety
-/// CR4.FSGSBASE must be set (see fsgsbase_enabled); value must be
-/// canonical.
-#[inline]
-pub unsafe fn wrfsbase(base: u64) {
-    unsafe { core::arch::asm!("wrfsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-36): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn wrfsbase(base: u64) {
+    crate::arch::arch_floor::x86_64::cpu::wrfsbase(base)
 }
-
 /// WRGSBASE — set the CURRENT GS.base (NOT the IA32_KERNEL_GS_BASE
-/// swapgs shadow; the switch path pairs it with swapgs to reach the
-/// shadow).
 ///
-/// # Safety
-/// CR4.FSGSBASE must be set; value must be canonical.
-#[inline]
-pub unsafe fn wrgsbase(base: u64) {
-    unsafe { core::arch::asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-35): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn wrgsbase(base: u64) {
+    crate::arch::arch_floor::x86_64::cpu::wrgsbase(base)
 }
 
 /// Boot-log assertion of the SMAP armed state, from LIVE reads (sec-r1,
@@ -467,65 +341,33 @@ pub fn smap_report() {
         ),
     }
 }
-
 /// Query CPUID. Returns (eax, ebx, ecx, edx) for (leaf, subleaf).
 ///
-/// NOTE: `subleaf` is only meaningful for leaves that use ECX as a
-/// sub-leaf selector (4, 7, 0xb, 0xd, ...); pass 0 otherwise. rbx is
-/// reserved by LLVM, so save/restore it around the instruction.
-#[inline]
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-34): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    let (a, b, c, d): (u32, u32, u32, u32);
-    // SAFETY: CPUID is a pure query. rbx is reserved by LLVM, so stash
-    // EBX in a scratch register around the push/pop (same discipline as
-    // cpu::isb, extended to recover the EBX result).
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov {tmp:e}, ebx",
-            "pop rbx",
-            in("eax") leaf,
-            in("ecx") subleaf,
-            tmp = out(reg) b,
-            lateout("eax") a,
-            lateout("ecx") c,
-            lateout("edx") d,
-            options(nostack)
-        );
-    }
-    (a, b, c, d)
+    crate::arch::arch_floor::x86_64::cpu::cpuid(leaf, subleaf)
 }
-
 /// Enable interrupts (STI)
-#[inline]
-#[track_caller]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-33): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn enable_irq() {
-    // syscost probe: pre-sti edge (reads the flag BEFORE the asm so the
-    // close/heal decision sees the pre-sti state); no-op when off.
-    crate::dfx::syscost::irq_note_on();
-    // SAFETY: setting IF is safe at any point the caller wants IRQs on.
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+    crate::arch::arch_floor::x86_64::cpu::enable_irq()
 }
-
 /// Disable interrupts (CLI)
-#[inline]
-#[track_caller]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-32): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn disable_irq() {
-    // syscost probe: pre-cli edge; Location::caller() propagates
-    // through the #[track_caller] chain (save_and_disable_irq /
-    // irq_save / lock_irq*) to the critical-section owner.
-    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
-    // SAFETY: clearing IF is always safe.
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+    crate::arch::arch_floor::x86_64::cpu::disable_irq()
 }
-
 /// Wait for interrupt (HLT)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-31): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn wfi() {
-    // SAFETY: HLT halts until the next interrupt; interrupts must be
-    // enabled or the CPU hangs forever — the idle loop guarantees that.
-    unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+    crate::arch::arch_floor::x86_64::cpu::wfi()
 }
 
 /// Read time since boot in the nominal clock domain
@@ -544,52 +386,33 @@ pub fn wfi() {
 pub fn read_time() -> u64 {
     crate::drivers::timer::read_time()
 }
-
 /// Instruction serialization barrier
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-30): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn isb() {
-    // SAFETY: CPUID serializes the pipeline. rbx is reserved by LLVM, so
-    // save/restore it around the instruction explicitly.
-    unsafe {
-        core::arch::asm!(
-            "xor eax, eax",
-            "push rbx",
-            "cpuid",
-            "pop rbx",
-            out("eax") _, out("ecx") _, out("edx") _,
-            options(nostack)
-        );
-    }
+    crate::arch::arch_floor::x86_64::cpu::isb()
 }
-
 /// Data synchronization barrier
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-29): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn dsb() {
-    // SAFETY: MFENCE orders all memory operations; no side effects beyond ordering.
-    unsafe { core::arch::asm!("mfence", options(nomem, nostack, preserves_flags)) };
+    crate::arch::arch_floor::x86_64::cpu::dsb()
 }
-
 /// Data memory barrier
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-28): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn dmb() {
-    // SAFETY: LFENCE orders loads; no side effects beyond ordering.
-    unsafe { core::arch::asm!("lfence", options(nomem, nostack, preserves_flags)) };
+    crate::arch::arch_floor::x86_64::cpu::dmb()
 }
-
 /// Get interrupt mask state (true = interrupts enabled)
-#[inline]
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-CPU-27): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn get_interrupts_state() -> bool {
-    let flags: u64;
-    // SAFETY: PUSHF/POPQ reads RFLAGS without modifying state.
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "pop {}",
-            out(reg) flags,
-            options(nostack)
-        );
-    }
-    (flags & (1 << 9)) != 0
+    crate::arch::arch_floor::x86_64::cpu::get_interrupts_state()
 }
 
 /// Save interrupt state and disable interrupts

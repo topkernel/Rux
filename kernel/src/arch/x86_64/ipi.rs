@@ -15,6 +15,11 @@
 //! - STOP (0xE4): halt the target permanently (panic path)
 //! - IRQ_WORK (0xE5): reserved (no users yet)
 
+
+// The unsafe floor for this file lives in kernel/src/arch/unsafe.rs
+// (named INV-contracted operations); this file is compiler-enforced safe.
+#![forbid(unsafe_code)]
+
 use crate::list::ListHead;
 use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
@@ -50,7 +55,7 @@ pub enum IpiType {
 }
 
 impl IpiType {
-    fn vector(self) -> u64 {
+    pub(crate) fn vector(self) -> u64 {
         match self {
             IpiType::Reschedule => VECTOR_RESCHEDULE,
             IpiType::CallFunction => VECTOR_CALL_FUNCTION,
@@ -139,7 +144,7 @@ pub fn flush_tlb_others_mm(mask: u64, _start: u64, _end: u64) {
 }
 
 /// Bitmask of started CPUs (bit i set = CPU i started).
-fn started_cpu_mask() -> u64 {
+pub(crate) fn started_cpu_mask() -> u64 {
     let mut mask = 0u64;
     for cpu in 0..MAX_CPUS.min(64) {
         if crate::arch::smp::cpu_started(cpu) {
@@ -207,83 +212,12 @@ pub fn tlb_epochs_advanced(targets: u64, snaps: &[u64; MAX_CPUS]) -> bool {
 // ============================================================================
 // Receive / dispatch (called from trap.rs with the IPI vector)
 // ============================================================================
-
 /// Dispatch a received IPI vector.  Called from interrupt context.
-/// `regs` is the INTERRUPTED context's frame (trap.S-built PtRegs) —
-/// used by the REMOTE-BT capture to name what this CPU was executing
-/// when poked.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-24): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
-    match vector {
-        VECTOR_RESCHEDULE => {
-            // Only set the flag.  Calling schedule() here (IRQs off)
-            // could deadlock on the runqueue lock the same way the
-            // riscv64 twin documents; the trap-exit path reschedules.
-            crate::sched::set_need_resched();
-            // RT-2X item-7 hunt: prove DELIVERY of the resched IPI to
-            // cpu0 (cmdline rt2xdbg=1, 200-line budget).
-            if crate::arch::cpu_id() as usize == 0
-                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-            {
-                static RIP: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if RIP.fetch_add(1, Ordering::Relaxed) < 200 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
-                    for &b in b"RESCHED-IPI-RECV cpu=0 rip=0x" {
-                        putchar(b);
-                    }
-                    let mut v = regs.rip as u64;
-                    for _ in 0..16 {
-                        let n = (v >> 60) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    putchar(b'\n');
-                }
-            }
-        }
-        VECTOR_CALL_FUNCTION => csd_flush_queue(),
-        VECTOR_TLB_FLUSH => {
-            // Full non-global flush of the CURRENT address space: no
-            // kernel PTEs carry the GLOBAL bit, so this covers
-            // everything the local invlpg/flush_tlb covered. With PCID
-            // active the CR3 reload would only reach the CURRENT PCID's
-            // entries, so the flush is INVPCID all-contexts (every PCID
-            // on this CPU) — the shootdown callers invalidate mappings
-            // that may be cached under any mm's PCID.
-            if crate::arch::mm::asid::pcid_enabled() {
-                // SAFETY: type 3 ignores the descriptor content and is
-                // valid regardless of the current CR3.
-                unsafe {
-                    crate::arch::x86_64::cpu::invpcid(
-                        crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL,
-                        0,
-                        0,
-                    )
-                };
-            } else {
-                // SAFETY: reloading the current CR3 with PCID off.
-                unsafe { crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) };
-            }
-            // (fork-frag lane) Flush COMPLETED: publish the epoch advance
-            // that releases deferred page-table frees waiting on this CPU
-            // (see TLB_FLUSH_EPOCH above).
-            let cpu = crate::arch::cpu_id() as usize;
-            if cpu < MAX_CPUS {
-                TLB_FLUSH_EPOCH[cpu].fetch_add(1, Ordering::Release);
-            }
-        }
-        VECTOR_STOP => loop {
-            crate::arch::cpu::disable_irq();
-            // HLT parks this CPU forever (panic path); WFI's SAFETY
-            // contract holds by construction here.
-            crate::arch::cpu::wfi();
-        },
-        VECTOR_IRQ_WORK => {
-            snapshot_self();
-            remote_bt_self(regs);
-        }
-        _ => {}
-    }
+    crate::arch::arch_floor::x86_64::ipi::handle_ipi_vector(vector, regs)
 }
 
 // ============================================================================
@@ -316,7 +250,7 @@ pub static SNAP_ARMSEQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MA
 pub static SNAP_TB: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// IRQ_WORK handler body: capture THIS CPU's LAPIC timer state.
-fn snapshot_self() {
+pub(crate) fn snapshot_self() {
     let cpu = crate::arch::cpu_id() as usize;
     if cpu >= MAX_CPUS {
         return;
@@ -367,18 +301,18 @@ fn snapshot_self() {
 // host-side with gen-ksyms output, same as the DEADLOCK ra= field.
 
 /// Request sequence (requester bumps; handler echoes into BT_DONE).
-static BT_REQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static BT_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub(crate) static BT_REQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub(crate) static BT_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Interrupted context at capture time. rbp = 0 when the target was
 /// interrupted in USER mode (kernel frame walk is meaningless there).
-static BT_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static BT_RSP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static BT_RBP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub(crate) static BT_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub(crate) static BT_RSP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub(crate) static BT_RBP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Captured kernel return addresses (frame-pointer walk), [cpu][i].
-static BT_FRAMES: [AtomicU64; REMOTE_BT_MAX_FRAMES * MAX_CPUS] =
+pub(crate) static BT_FRAMES: [AtomicU64; REMOTE_BT_MAX_FRAMES * MAX_CPUS] =
     [const { AtomicU64::new(0) }; REMOTE_BT_MAX_FRAMES * MAX_CPUS];
 /// Number of valid frames in BT_FRAMES[cpu] (0 = none / user mode).
-static BT_NFRAMES: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub(crate) static BT_NFRAMES: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Frames captured per remote request.
 pub const REMOTE_BT_MAX_FRAMES: usize = 24;
@@ -386,144 +320,23 @@ pub const REMOTE_BT_MAX_FRAMES: usize = 24;
 /// One in-flight remote-BT per machine (any hunter): a second requester
 /// racing the same target would bump the request sequence under the
 /// first's poll and force a bogus timeout. CAS gate, never blocks.
-static BT_INFLIGHT: AtomicBool = AtomicBool::new(false);
-
+pub(crate) static BT_INFLIGHT: AtomicBool = AtomicBool::new(false);
 /// IRQ_WORK handler body: capture THIS CPU's interrupted context and
-/// frame-pointer chain (REMOTE-BT, see the block comment above).
-fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= MAX_CPUS {
-        return;
-    }
-    let req = BT_REQ[cpu].load(Ordering::Acquire);
-    if BT_DONE[cpu].load(Ordering::Acquire) == req {
-        return; // no new request since the last service
-    }
-    BT_RIP[cpu].store(regs.rip, Ordering::Relaxed);
-    BT_RSP[cpu].store(regs.rsp, Ordering::Relaxed);
-    let mut n: u32 = 0;
-    if regs.kernel_mode() {
-        BT_RBP[cpu].store(regs.rbp, Ordering::Relaxed);
-        // Frame-pointer walk from the interrupted rbp — the same
-        // validation discipline as dfx::backtrace::walk_stack_trace
-        // (8-aligned, kernel range, strictly ascending, sane gap), but
-        // starting from the INTERRUPTED frame so the walk is the live
-        // chain of whatever the CPU was executing, not this handler's.
-        let mut fp = regs.rbp;
-        while n < REMOTE_BT_MAX_FRAMES as u32 {
-            if fp == 0 || fp % 8 != 0 || fp < 0x8000_0000 {
-                break;
-            }
-            // SAFETY: fp validated above (aligned, kernel range); the
-            // two frame-word reads are the standard unwind operation on
-            // a live kernel stack.
-            let (ret, next) = unsafe {
-                (*((fp + 8) as *const u64), *(fp as *const u64))
-            };
-            if ret == 0 {
-                break;
-            }
-            BT_FRAMES[cpu * REMOTE_BT_MAX_FRAMES + n as usize].store(ret, Ordering::Relaxed);
-            n += 1;
-            if next <= fp || next - fp > 0x4000 {
-                break;
-            }
-            fp = next;
-        }
-    } else {
-        BT_RBP[cpu].store(0, Ordering::Relaxed);
-    }
-    BT_NFRAMES[cpu].store(n, Ordering::Relaxed);
-    // Publish AFTER all slots (Release; pairs with the requester's
-    // Acquire poll of BT_DONE).
-    BT_DONE[cpu].store(req, Ordering::Release);
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-23): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
+    crate::arch::arch_floor::x86_64::ipi::remote_bt_self(regs)
 }
 
 /// Request a remote backtrace of `target` and print it (raw addresses;
 // see the block comment). Callers run in fragile contexts (deadlock
 /// spinner, softlockup detector): no locks, no jiffies, no allocation —
-/// the bounded wait is a pure spin over relaxed loads. Returns true
-/// when the target answered, false on timeout / not-inflight.
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-22): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
 pub fn remote_backtrace(target: usize, why: &str) -> bool {
-    if target >= MAX_CPUS || !crate::arch::smp::cpu_started(target) {
-        return false;
-    }
-    let me = crate::arch::cpu_id() as usize;
-    if target == me {
-        return false;
-    }
-    // One hunter at a time (see BT_INFLIGHT comment).
-    if BT_INFLIGHT
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return false;
-    }
-    let req = BT_REQ[target].fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-    send_ipi_type(target, IpiType::IrqWork);
-    // Bounded poll (~200M relaxed loads ≈ the DEADLOCK_WARN spin-budget
-    // class — well under a second on KVM).
-    let mut spins: u32 = 0;
-    while BT_DONE[target].load(Ordering::Acquire) != req {
-        spins = spins.wrapping_add(1);
-        if spins > 200_000_000 {
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-            let _ = core::fmt::Write::write_fmt(
-                &mut w,
-                format_args!("REMOTE-BT[{}]: cpu={} TIMEOUT (not servicing IPIs)\n", why, target),
-            );
-            BT_INFLIGHT.store(false, Ordering::Release);
-            return false;
-        }
-        core::hint::spin_loop();
-    }
-    let rip = BT_RIP[target].load(Ordering::Relaxed);
-    let rsp = BT_RSP[target].load(Ordering::Relaxed);
-    let rbp = BT_RBP[target].load(Ordering::Relaxed);
-    let n = BT_NFRAMES[target].load(Ordering::Relaxed) as usize;
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-    // Target's current task pid/comm (best-effort; comm is fixed-size
-    // bytes, no allocation).
-    let cur = unsafe { crate::sched::sched::cpu_state(target).current };
-    if cur.is_null() {
-        let _ = core::fmt::Write::write_fmt(
-            &mut w,
-            format_args!("REMOTE-BT[{}] cpu={}: (no current task) rip={:#x} rsp={:#x}\n", why, target, rip, rsp),
-        );
-    } else {
-        let pid = unsafe { (*cur).pid() };
-        let comm = unsafe { (*cur).comm() };
-        let mut cbuf = [0u8; 17];
-        let mut cl = 0;
-        for &b in comm.iter() {
-            if b == 0 || cl == 16 {
-                break;
-            }
-            if (0x20..0x7f).contains(&b) {
-                cbuf[cl] = b;
-                cl += 1;
-            }
-        }
-        let cname = core::str::from_utf8(&cbuf[..cl]).unwrap_or("?");
-        let _ = core::fmt::Write::write_fmt(
-            &mut w,
-            format_args!("REMOTE-BT[{}] cpu={} task={}({}) rip={:#x} rsp={:#x} rbp={:#x}\n",
-                why, target, pid, cname, rip, rsp, rbp),
-        );
-    }
-    if rbp == 0 {
-        let _ = core::fmt::Write::write_str(&mut w, "REMOTE-BT: target was in USER mode\n");
-    }
-    let base = target * REMOTE_BT_MAX_FRAMES;
-    for i in 0..n.min(REMOTE_BT_MAX_FRAMES) {
-        let a = BT_FRAMES[base + i].load(Ordering::Relaxed);
-        let _ = core::fmt::Write::write_fmt(
-            &mut w,
-            format_args!("REMOTE-BT  #{:02} {:#x}\n", i, a),
-        );
-    }
-    BT_INFLIGHT.store(false, Ordering::Release);
-    true
+    crate::arch::arch_floor::x86_64::ipi::remote_backtrace(target, why)
 }
 
 // ============================================================================
@@ -558,23 +371,19 @@ impl CallSingleData {
 }
 
 /// Per-CPU callback queues. Each target CPU drains its own queue.
-static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
+pub(crate) static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
     const INIT: ListHead = ListHead::new();
     [INIT; MAX_CPUS]
 };
 
 /// Per-CPU writer lock for CSD queue (protects list_add_tail).
-static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
-
+pub(crate) static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
 /// Initialize CSD queues. Called once during boot.
-fn csd_init() {
-    for i in 0..MAX_CPUS {
-        // SAFETY: CSD_QUEUES is a static mutable array. Called only once during boot
-        // init before any CSD operations, so no concurrent access.
-        unsafe {
-            CSD_QUEUES[i].init();
-        }
-    }
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-21): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn csd_init() {
+    crate::arch::arch_floor::x86_64::ipi::csd_init()
 }
 
 /// Call a function on a remote CPU and wait for completion.
@@ -624,146 +433,26 @@ pub fn smp_call_function(
     // other nodes in the detached list, but ListHead has no Drop impl,
     // so dropping the Box simply deallocates the CallSingleData.
 }
-
 /// Enqueue a CSD on the target's queue and fire the CALL_FUNCTION IPI.
 ///
-/// Shared by [`smp_call_function`] and the bounded diagnostic variant
-/// [`smp_call_function_timeout`]. `csd_list` must point at a stable
-/// (Box-pinned or leaked) CallSingleData's `list` field — the address
-/// the target's queue links; the container is recovered on the target
-/// by the list-offset back-adjustment in csd_flush_queue.
-fn csd_fire(target: usize, csd_list: *mut ListHead) {
-    // Enqueue on target CPU's callback queue.  irqsafe: the IPI handler
-    // on the target CPU dequeues with the same lock.
-    {
-        let _lock = CSD_LOCKS[target].lock_irqsave();
-        // SAFETY: We hold CSD_LOCKS[target], which serializes all mutations
-        // to CSD_QUEUES[target]. The csd_list pointer stays valid until
-        // `done` is set (caller contract, same as smp_call_function).
-        unsafe {
-            (*csd_list).init();
-            if CSD_QUEUES[target].is_empty() {
-                // First entry — set up circular list
-                CSD_QUEUES[target].next = csd_list;
-                CSD_QUEUES[target].prev = csd_list;
-                (*csd_list).next = &mut CSD_QUEUES[target] as *mut _;
-                (*csd_list).prev = &mut CSD_QUEUES[target] as *mut _;
-            } else {
-                // Insert at tail
-                let tail = CSD_QUEUES[target].prev;
-                // SAFETY: tail was read from the queue under lock and points to a valid
-                // ListHead node in the queue. The lock prevents concurrent modification.
-                unsafe {
-                    (*tail).next = csd_list;
-                    (*csd_list).prev = tail;
-                    (*csd_list).next = &mut CSD_QUEUES[target] as *mut _;
-                    CSD_QUEUES[target].prev = csd_list;
-                }
-            }
-        }
-    }
-    send_ipi_type(target, IpiType::CallFunction);
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-20): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn csd_fire(target: usize, csd_list: *mut ListHead) {
+    crate::arch::arch_floor::x86_64::ipi::csd_fire(target, csd_list)
 }
-
 /// Bounded diagnostic cross-CPU call — the frozen-CPU truth probe form
-/// (52nd session, rcu-gp-frozen hunt). Same enqueue+IPI protocol as
-/// [`smp_call_function`], but the wait is bounded: a target monopolized
-/// with IRQs off (or wedged holding the CSD lock) cannot answer, and
-/// the CALLER must survive that. Returns whether the callback ran. On
-/// timeout the CSD stays linked and its memory is LEAKED —
-/// deliberately: the node must outlive a target that may drain its
-/// queue arbitrarily far in the future, and this is a one-shot-per-boot
-/// diagnostic (a few dozen bytes).
-pub fn smp_call_function_timeout(
-    target: usize,
-    func: fn(*mut core::ffi::c_void),
-    info: *mut core::ffi::c_void,
-    max_ms: u64,
-) -> bool {
-    if target >= MAX_CPUS {
-        return false;
-    }
-    let current_cpu = crate::arch::cpu_id() as usize;
-    if target == current_cpu {
-        func(info);
-        return true;
-    }
-    let csd = Box::into_raw(Box::new(CallSingleData {
-        func,
-        info,
-        list: ListHead::new(),
-        done: AtomicBool::new(false),
-    }));
-    // SAFETY: csd is a valid allocation we own; the list field's address
-    // is stable for the lifetime of the Box (leaked on timeout).
-    csd_fire(
-        target,
-        unsafe { &raw mut (*csd).list as *mut ListHead },
-    );
-
-    let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
-    // SAFETY: csd is a valid allocation we own until done is observed;
-    // done is set only by the target after detaching the node.
-    while !unsafe { (*csd).done.load(Ordering::Acquire) } {
-        if crate::drivers::timer::get_jiffies() >= deadline {
-            return false; // node stays linked + leaked; see doc comment
-        }
-        crate::sched::cond_resched();
-        core::hint::spin_loop();
-    }
-    // SAFETY: done was observed; the target no longer touches the node
-    // (ListHead has no Drop; plain dealloc is correct).
-    unsafe { drop(Box::from_raw(csd)) };
-    true
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-19): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub fn smp_call_function_timeout( target: usize, func: fn(*mut core::ffi::c_void), info: *mut core::ffi::c_void, max_ms: u64, ) -> bool {
+    crate::arch::arch_floor::x86_64::ipi::smp_call_function_timeout(target, func, info, max_ms)
 }
-
 /// Drain the per-CPU CSD queue (CALL_FUNCTION IPI handler).
-fn csd_flush_queue() {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= MAX_CPUS {
-        return;
-    }
-
-    // Detach entire list under lock
-    let mut head: *mut ListHead;
-    {
-        let _lock = CSD_LOCKS[cpu].lock_irqsave();
-        // SAFETY: We hold CSD_LOCKS[cpu], serializing access to CSD_QUEUES[cpu].
-        // Detaching the list and re-initializing the queue head is safe under the lock.
-        unsafe {
-            if CSD_QUEUES[cpu].is_empty() {
-                return;
-            }
-            head = CSD_QUEUES[cpu].next;
-            // Re-init queue head to empty
-            CSD_QUEUES[cpu].init();
-        }
-    }
-
-    // Walk detached list, call each callback
-    // SAFETY: queue_ptr is a stable address of a static. The list was detached under
-    // lock above, so we have exclusive ownership of all nodes until completion.
-    let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
-    // The list link sits at an offset INSIDE CallSingleData: node→struct
-    // requires the back-adjustment (a bare cast reads the link pointers
-    // as func/info and calls the queue head).
-    let list_off = core::mem::offset_of!(CallSingleData, list);
-    let mut node = head;
-    while node != queue_ptr {
-        // SAFETY: node points into the detached list of CallSingleData entries.
-        // Each node was allocated via Box::new and is valid. The sender is
-        // spin-waiting on done, so the Box is not freed until after we store true.
-        unsafe {
-            let csd = (node as *mut u8).sub(list_off) as *mut CallSingleData;
-            let next = (*node).next;
-            let f = (*csd).func;
-            let arg = (*csd).info;
-            f(arg);
-            (*csd).done.store(true, Ordering::Release);
-            node = next;
-        }
-    }
+///
+/// Collected into `arch::arch_floor` (INV-ARCH-IPI-18): the unsafe floor moved there
+/// verbatim; this safe wrapper keeps the original call path.
+pub(crate) fn csd_flush_queue() {
+    crate::arch::arch_floor::x86_64::ipi::csd_flush_queue()
 }
 
 // ============================================================================
