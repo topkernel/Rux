@@ -34,6 +34,8 @@
 //! - INV-DRV-TASKLET the input bottom-half tasklet init.
 
 use core::arch::asm;
+#[cfg(feature = "x86_64")]
+use core::sync::atomic::Ordering;
 
 // ===========================================================================
 // INV-DRV-ALLOC: raw memory edges
@@ -310,7 +312,8 @@ pub fn msr_write(msr: u32, v: u64) {
 /// the fixed data and mode/command registers).
 #[cfg(feature = "x86_64")]
 pub fn pit_program_ch0(divisor: u16) {
-    use crate::drivers::timer::x86_64::{PIT_MODE_CMD, PIT_CH0_MODE3_BIN, PIT_CH0_DATA, io_wait};
+    use crate::arch::cpu::io_wait;
+    use crate::drivers::timer::x86_64::{PIT_CH0_DATA, PIT_CH0_MODE3_BIN, PIT_MODE_CMD};
     // SAFETY: INV-DRV-CSR — the standard 8254 channel-0 square-wave
     // programming sequence.
     unsafe {
