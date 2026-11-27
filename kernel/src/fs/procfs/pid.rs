@@ -1204,16 +1204,10 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
         None => return b"0\n".to_vec(),
     };
 
-<<<<<<< HEAD
-    // Get totalpages from zone
-    // read-only zone statistics — the safe accessor suffices.
+    // Get totalpages from zone — read-only zone statistics; the safe
+    // accessor suffices (no mutation, so the INV-MM-12 mut arm is not
+    // needed here).
     let totalpages = first_online_node()
-=======
-    // Get totalpages from zone (read-only zone statistics — no
-    // concurrent mutation concern; the NODE_DATA borrow is the audited
-    // edge's INV-MM-12 mut arm).
-    let totalpages = first_online_node_mut()
->>>>>>> ml-mmdfxsys
         .and_then(|node| {
             for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
                 if let Some(zone) = node.zone(zt) {
