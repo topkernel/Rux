@@ -475,7 +475,7 @@ fn print_budget_ok() -> bool {
 }
 
 /// sc108 gate for wake-probe console output (see check_picked). The
-/// `sprobe=0` silencer was deleted with the OH hunt-print family;
+/// old cmdline silencer was deleted with the OH hunt-print family;
 /// these prints now fire only on census-armed boots (the reshape lane
 /// converts them to ring records).
 fn probe_prints_on() -> bool {

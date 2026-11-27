@@ -12,25 +12,19 @@
 //! Switch catalog (see the RETIRED TOKENS note below for the ones
 //! that already moved to the unified trace framework):
 //!
-//! RETIRED TOKENS (dfx-migrate rounds 4/4b/5, 2026-11): the hunt
-//! families and debug aids that lived here — rounds 4/4b:
-//! `schedtrace`, `fuxstuck`, `txnhunt`, `mmforensics`, `sysring`,
-//! `ohhunt`, `sigtrace`, `futextrace`, `epolltrace`, `taskdump`,
-//! `periodic`, `watchdog`, `memwatch`; round 5: `schb`, `parkdump`,
-//! `sleepsnap`, `ksprobe`, `wwcensus`, `bindertrace`,
-//! `syscalltrace`, `inputtrace`, `exthunt`, `sfddbg`, `dbtrace`,
-//! `datatap`, `ams46`, `vmap`, `poolcensus`, `slowtask`, `execcost`,
-//! `tfdcensus`, `scmtap`, `sysforensic`, `filerd`, `lostpark`,
-//! `allocwatch`, `r83scan`, `leakhunt`, `acqdiv`, `metawatch`,
-//! `scribble`, `monowatch`, `epollscan`, `treehunt`, `tcptrace`,
-//! `strace1`, `ripsample`, `socksnap`, `writetrace`, `ledger`,
-//! `pid1spin`, `steptrace` — moved into the unified trace framework
-//! (`kernel/src/trace/`): each family's gate is now a `rux:` trace
-//! event, its serial prints are echo consumers of that event's
-//! enable. Old `dfx=` tokens for migrated families are GONE (user
-//! directive 2026-11-17: no compatibility aliases — use trace_event=).
-//! (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) name instruments
-//! whose probe bodies no longer exist — see `dead_dfx_tokens`.
+//! RETIRED TOKENS (dfx-migrate rounds 4/4b/5, 2026-11, plus the
+//! 2026-11-28 delete sweep): the hunt families and debug aids that
+//! lived here moved into the unified trace framework
+//! (`kernel/src/trace/`) — each family's gate became a `rux:` trace
+//! event and its serial prints echo consumers of that enable. Old
+//! `dfx=` tokens for migrated families are GONE (user directive
+//! 2026-11-17: no compatibility aliases — use trace_event=). The
+//! round-6 delete sweep (docs/development/debug-alignment.md S2)
+//! then removed the instrument BODIES whose hunts had closed; their
+//! event declarations remain in trace/ (armed default false, no
+//! emitters) and their token names live only in git history. Four
+//! dead tokens (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) named
+//! instruments whose probe bodies no longer exist.
 //!
 //! What survives here is deliberate, not leftover — BEHAVIOR INJECTION
 //! only (`claiminject`, `oncpuinject`): these CHANGE kernel
