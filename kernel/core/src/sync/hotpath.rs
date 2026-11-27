@@ -576,7 +576,6 @@ impl Mutex {
 /// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
 pub const FUTEX_WAKE: i32 = 1;
-pub const FUTEX_FD: i32 = 2;
 pub const FUTEX_REQUEUE: i32 = 3;
 pub const FUTEX_CMP_REQUEUE: i32 = 4;
 pub const FUTEX_WAKE_OP: i32 = 5;
@@ -585,8 +584,6 @@ pub const FUTEX_UNLOCK_PI: i32 = 7;
 pub const FUTEX_TRYLOCK_PI: i32 = 8;
 pub const FUTEX_WAIT_BITSET: i32 = 9;
 pub const FUTEX_WAKE_BITSET: i32 = 10;
-pub const FUTEX_WAIT_REQUEUE_PI: i32 = 11;
-pub const FUTEX_CMP_REQUEUE_PI: i32 = 12;
 pub const FUTEX_LOCK_PI2: i32 = 13;
 
 pub const FUTEX_PRIVATE_FLAG: i32 = 128;
@@ -1103,45 +1100,6 @@ pub static HASH_HEADS: [super::types::KeyedSpinlock<
     [INIT; HASH_SIZE]
 };
 
-/// Diagnostic (b133/b134 stall hunt): find the live futex-waiter entry of
-/// `task`, if any. Returns (uaddr, key.mm, woken). The binder stall report
-/// calls this for txn-holder threads parked in futex_wait: a `woken=true`
-/// waiter that never resumed indicts the wake→run path, while `woken=false`
-/// after minutes indicts the key match (compare key.mm with the task's own
-/// current identity) or the userspace releaser.
-pub fn waiter_of(task: *mut Task) -> Option<(usize, usize, bool)> {
-    for b in HASH_HEADS.iter() {
-        let h = b.lock_irqsave();
-        let mut idx = h.head;
-        while let Some(i) = idx {
-            // SAFETY: slot indices come from chain links under the bucket
-            // lock; slots are freed only under both locks, so the entry we
-            // copy out stays live for the duration of the read.
-            let (entry, next) = {
-                let slot = WAITER_POOL[i].lock_nested(&h.proof());
-                match *slot {
-                    Some(ref w) => (
-                        Some((w.key.uaddr, w.key.mm, w.woken, core::ptr::eq(w.task, task))),
-                        w.next,
-                    ),
-                    None => (None, None),
-                }
-            };
-            match entry {
-                Some((uaddr, mm, woken, true)) => {
-                    drop(h);
-                    return Some((uaddr, mm, woken));
-                }
-                Some(_) => {
-                    idx = next;
-                }
-                None => break,
-            }
-        }
-        drop(h);
-    }
-    None
-}
 
 pub static FUXWATCH_ADDR: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
@@ -1154,7 +1112,7 @@ static FUXWATCH2_HITS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 pub static FUXWATCH_DELAY_S: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
-static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
+pub static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 // step-marker SET: two CPUs can fault+step concurrently; a single
 // marker would lose one thread's #DB → SIGTRAP → thread killed.
@@ -1169,7 +1127,7 @@ static FUXWATCH_STEP_PAGES: [core::sync::atomic::AtomicU64; 4] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 4];
 pub static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 128] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 128];
-const FUXWATCH_BUDGET: usize = 4096;
+pub const FUXWATCH_BUDGET: usize = 4096;
 // 81st: when slot 1 was armed by the sync-holder park latch, its word is
 // a SINGLE process's object (foundation's main-stack condvar on ohw128:
 // 0x7fffffffc304) — but the VA is mapped in EVERY process (main-stack
@@ -1204,12 +1162,7 @@ pub static FUXWATCH2_TGID: core::sync::atomic::AtomicU32 =
 // OH67_M2 gate would never decode it).
 pub static FUXPARK_WORD: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
-pub static FUXPARK_TID: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
 pub static FUXPARK_TGID: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-/// Jiffies of the first latch (park age reference for the verdict line).
-pub static FUXPARK_J: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
 #[cfg(feature = "x86_64")]
@@ -1424,10 +1377,6 @@ pub fn fuxwatch_mm_armed(root_ppn: u64) -> bool {
             .any(|d| d.load(core::sync::atomic::Ordering::Relaxed) == root_ppn)
 }
 
-#[inline]
-pub fn fuxwatch_over_budget() -> bool {
-    FUXWATCH_HITS.load(core::sync::atomic::Ordering::Relaxed) >= FUXWATCH_BUDGET
-}
 
 /// Log the write and arm the single-step marker; false = step must not
 /// be armed (budget). `exact` — the faulting address is the watched
@@ -1546,25 +1495,6 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     true
 }
 
-/// Read the watched word's CURRENT value through the walker (fault
-/// context: the word still holds its pre-write value).
-pub fn fuxwatch_read_word(root_ppn: u64) -> u32 {
-    let addr = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    if addr == 0 {
-        return 0xffff_ffff;
-    }
-    // SAFETY: read-only walk of the current mm.
-    match crate::sync::r#unsafe::pt_walk(root_ppn, addr) {
-        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
-            let kv = crate::arch::mm::memory_layout::phys_to_virt(
-                crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
-            );
-            // SAFETY: linear-mapped RAM word.
-            crate::sync::r#unsafe::read_volatile_u32(kv.as_usize())
-        }
-        _ => 0xffff_ffff,
-    }
-}
 
 /// #DB hook: Some(page) when this trap is our single step (marker
 /// consumed) — the page the stepped store executed on. huks-wedge lane
@@ -4090,9 +4020,6 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
 /// under lock" ordering prevents the lost-wakeup race: by the time
 /// futex_wake sees the waiter, the task is already in INTERRUPTIBLE state
 /// so `Task::wake_up()` (which checks `is_sleeping()`) can succeed.
-pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
-    futex_wait_timeout(uaddr, flags, val, bitset, None)
-}
 
 /// FUTEX_WAIT with an optional jiffies deadline (see do_futex).
 pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadline: Option<u64>) -> i64 {
@@ -6854,10 +6781,6 @@ pub fn rwfz_emit_prio(s: &str, prio: bool) {
             part += 1;
         }
     }
-}
-
-fn rwfz_emit(s: &str) {
-    rwfz_emit_prio(s, false);
 }
 
 /// One user-stack frame line resolved to its covering VMA (Session F's
@@ -10104,17 +10027,6 @@ fn bh_enable() {
     );
 }
 
-// ==================== Free functions (C-style API) ====================
-
-#[inline(always)]
-pub fn raw_spin_lock(l: &RawSpinlock) { l.lock(); }
-#[inline(always)]
-pub fn raw_spin_unlock(l: &RawSpinlock) { l.unlock(); }
-#[inline(always)]
-pub fn raw_spin_is_locked(l: &RawSpinlock) -> bool { l.is_locked() }
-#[inline(always)]
-pub fn raw_spin_trylock(l: &mut RawSpinlock) -> bool { l.try_lock() }
-
 // ═══════════════ rwlock ═════════════════════════════════════════
 // (was rwlock.rs)
 // Read-Write Spinlock
@@ -10568,15 +10480,6 @@ impl<T: ?Sized> Drop for RwSpinlockBhWriteGuard<'_, T> {
 }
 
 // ==================== Inline helpers ====================
-
-#[inline]
-#[track_caller]
-fn rwlock_preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add_at(
-        crate::interrupt::preempt::PREEMPT_OFFSET,
-        core::panic::Location::caller(),
-    );
-}
 
 /// As `rwlock_preempt_disable`, booking the caller-of-the-lock's location (the
 /// #[track_caller] lock helpers forward their own caller down so the
