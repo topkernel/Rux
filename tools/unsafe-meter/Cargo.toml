@@ -1,0 +1,23 @@
+[package]
+name = "unsafe-meter"
+version = "0.1.0"
+edition = "2021"
+description = "Parser-grade unsafe-code measurement for the Rux kernel (syn-based; replaces naive brace scanning that breaks on macro-heavy code)"
+license = "MIT"
+publish = false
+
+[workspace]
+# Standalone host tool; deliberately not a member of the repo workspace.
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+
+[[bin]]
+name = "unsafe-meter"
+path = "src/main.rs"
+
+[lib]
+name = "unsafe_meter"
+path = "src/lib.rs"
