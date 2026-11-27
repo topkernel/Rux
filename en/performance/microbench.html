@@ -83,7 +83,26 @@
   </aside>
   <article class="doc-main">
     <h1>Internal microbenchmarks</h1>
-    <div class="sub">The flush-wall probe compared on the same test platform, the merge-gate Tier 1 bands, and the switch-cost anatomy · the pbench same-test platform comparison is being captured and will join · Canonical: docs/development/perf-gate-baseline.md</div>
+    <div class="sub">The pbench same-rig A/B, the flush-wall probe compared on the same test platform, the merge-gate Tier 1 bands, and the switch-cost anatomy · Canonical: docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="ab"><span class="anchor">§0</span>The pbench same-rig A/B: the consolidation move's second-order win (2026-11-27, release/LTO)</h2>
+    <p>Same rig, ABAB interleaved rounds plus one reversed-order r3; main (a6d1cdc2a) against the archive point (f1900270e), both release+LTO; q35 KVM smp2 2G. Between base..main the touched subsystems carry ONLY consolidation commits — the family win is the code-move second order (layout/inline); the disassembly proof: base's 11 non-inlined wrapper calls on the page-fault path are zero on main. Only the cross-round reproduced improvement rows are listed:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Probe row</th><th class="num">base med</th><th class="num">main med</th><th class="num">Δ</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">p5a_pipe (pipe roundtrip)</td><td class="num">0.276 µs</td><td class="num">0.180 µs</td><td class="num"><b>−34.7%</b> (base side carries an r2 noise component)</td></tr>
+        <tr><td class="mono">p5c_stream_write (unix stream write)</td><td class="num">0.331 µs</td><td class="num">0.220 µs</td><td class="num"><b>−33.5%</b></td></tr>
+        <tr><td class="mono">p5b_dgram_send (unix dgram send)</td><td class="num">0.266 µs</td><td class="num">0.210 µs</td><td class="num"><b>−20.9%</b></td></tr>
+        <tr><td class="mono">p5c3_stream_wrecv (stream recv+wake)</td><td class="num">0.290 µs</td><td class="num">0.230 µs</td><td class="num"><b>−20.8%</b></td></tr>
+        <tr><td class="mono">p5e_stream_send (stream send edge)</td><td class="num">0.276 µs</td><td class="num">0.220 µs</td><td class="num"><b>−20.1%</b></td></tr>
+        <tr><td class="mono">p5c2_stream_send (stream send)</td><td class="num">0.286 µs</td><td class="num">0.230 µs</td><td class="num"><b>−19.4%</b></td></tr>
+        <tr><td class="mono">p6_unlink</td><td class="num">11.030 µs</td><td class="num">9.317 µs</td><td class="num"><b>−15.5%</b></td></tr>
+        <tr><td class="mono">p5b_dgram_recv_peek (dgram recv)</td><td class="num">0.536 µs</td><td class="num">0.471 µs</td><td class="num"><b>−12.1%</b></td></tr>
+        <tr><td class="mono">p6_stat</td><td class="num">0.356 µs</td><td class="num">0.281 µs</td><td class="num"><b>−21.1%</b> (half-noise component noted)</td></tr>
+        <tr><td class="mono">p6_getdents</td><td class="num">33.888 µs</td><td class="num">32.150 µs</td><td class="num">−5.1% (boundary value)</td></tr>
+      </tbody>
+    </table></div>
+    <p style="font-size:13px;color:var(--text-3)">Recorded honestly from the same board: p6_write_fsync +13.6% is a reproduced real regression (min parity = wait-latency distribution shift, not wrapper cost; hunt ongoing, doc rows untouched for now); p2_ctxsw +2.0% is below threshold, recorded flat. Full accounting and attribution cross-checks in the canonical document.</p>
 
     <h2 id="flush"><span class="anchor">§1</span>The flush wall (the mmap2time2 probe, 128MB full-sync writeback, same-test platform comparison)</h2>
     <div class="tbl-wrap"><table>

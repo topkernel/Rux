@@ -82,7 +82,26 @@
   </aside>
   <article class="doc-main">
     <h1>内部微基准</h1>
-    <div class="sub">刷盘墙探针的同机对照、合并门 Tier 1 带、切换成本解剖 · pbench 同机对照采集中,落地后并入 · 正本:docs/development/perf-gate-baseline.md</div>
+    <div class="sub">pbench 同机 A/B 对照、刷盘墙探针的同机对照、合并门 Tier 1 带、切换成本解剖 · 正本:docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="ab"><span class="anchor">§0</span>pbench 同机 A/B:收拢搬动的二阶收益(2026-11-27,release/LTO)</h2>
+    <p>同 rig ABAB 交错 + 逆序 r3,main(a6d1cdc2a)对归档点(f1900270e),两侧均 release+LTO;q35 KVM smp2 2G。base..main 之间相关子系统只有收拢提交 —— 该族收益归代码搬动的布局/内联二阶效应;反汇编证明:base 缺页路径上 11 个未内联包装调用在 main 上清零。仅列跨轮复现的提升行:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>探针行</th><th class="num">base 中位</th><th class="num">main 中位</th><th class="num">Δ</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">p5a_pipe(管道往返)</td><td class="num">0.276 µs</td><td class="num">0.180 µs</td><td class="num"><b>−34.7%</b>(base 侧含 r2 噪声分量)</td></tr>
+        <tr><td class="mono">p5c_stream_write(unix 流写)</td><td class="num">0.331 µs</td><td class="num">0.220 µs</td><td class="num"><b>−33.5%</b></td></tr>
+        <tr><td class="mono">p5b_dgram_send(unix 数据报发送)</td><td class="num">0.266 µs</td><td class="num">0.210 µs</td><td class="num"><b>−20.9%</b></td></tr>
+        <tr><td class="mono">p5c3_stream_wrecv(流收+唤醒)</td><td class="num">0.290 µs</td><td class="num">0.230 µs</td><td class="num"><b>−20.8%</b></td></tr>
+        <tr><td class="mono">p5e_stream_send(stream send 边)</td><td class="num">0.276 µs</td><td class="num">0.220 µs</td><td class="num"><b>−20.1%</b></td></tr>
+        <tr><td class="mono">p5c2_stream_send(流发送)</td><td class="num">0.286 µs</td><td class="num">0.230 µs</td><td class="num"><b>−19.4%</b></td></tr>
+        <tr><td class="mono">p6_unlink</td><td class="num">11.030 µs</td><td class="num">9.317 µs</td><td class="num"><b>−15.5%</b></td></tr>
+        <tr><td class="mono">p5b_dgram_recv_peek(数据报收)</td><td class="num">0.536 µs</td><td class="num">0.471 µs</td><td class="num"><b>−12.1%</b></td></tr>
+        <tr><td class="mono">p6_stat</td><td class="num">0.356 µs</td><td class="num">0.281 µs</td><td class="num"><b>−21.1%</b>(半噪声分量说明)</td></tr>
+        <tr><td class="mono">p6_getdents</td><td class="num">33.888 µs</td><td class="num">32.150 µs</td><td class="num">−5.1%(边界值)</td></tr>
+      </tbody>
+    </table></div>
+    <p style="font-size:13px;color:var(--text-3)">同一块板上如实记录:p6_write_fsync +13.6% 为复现的真实回归(min 持平 = 时延分布上移,非包装类,定位中,文档行暂不动);p2_ctxsw +2.0% 低于门槛记平。完整口径与归因交叉验证见正本。</p>
 
     <h2 id="flush"><span class="anchor">§1</span>刷盘墙(mmap2time2 探针,128MB 全同步回写,同机对照)</h2>
     <div class="tbl-wrap"><table>

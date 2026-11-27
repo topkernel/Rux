@@ -86,6 +86,7 @@
       <li><b>unsafe 收拢战役落地</b>:全库 unsafe 收进 <b>19 个审计 <code>unsafe.rs</code> 文件</b>(每子系统一个集中文件 + 根集合),其余 <b>401 个文件</b>文件级 <code>forbid(unsafe_code)</code>;机器门禁 <code>gate_unsafe_mainline.py</code> 全库 rc=0。unsafe 关键字 <b>1,022 / 375,622 行 = 0.27%</b>(收拢前登记表 6,396 处),SAFETY 注记覆盖 65.5%,块块带 INV 契约。</li>
       <li><b>六个修复随线落地</b>:x86 <code>reboot(POWER_OFF)</code> 真关机(ACPI S5);sc69-sc73 泄漏计数三修(HZ 校准/裁决/边界清零);riscv64 trap 调用链捕获(25.9% 样本带内核帧);apic.rs 收拢损伤修复;riscv64 堆迁移至 LAYOUT-8 窗口末端 0x82200000;1000Hz 采样就绪(载体清零)。</li>
       <li><b>全站 unsafe 数字同步</b>:安全总览、审计记录、关于页与代码结构页更新到当前 main 状态。</li>
+      <li><b>收拢搬动的性能族(同机 A/B,release/LTO)</b>:IPC/fs pbench 族跨板提升 —— p5a_pipe 0.276→0.180 µs(−34.7%)、p5c_stream_write −33.5%、p5b_dgram_send −20.9%、p5c3 −20.8%、p5e_stream_send −20.1%、p5c2 −19.4%、p6_stat −21.1%、p6_unlink −15.5%、p5b_dgram_recv_peek −12.1%、p6_getdents −5.1%;归因收拢代码搬动的布局/内联二阶效应(base 缺页路径 11 个未内联包装调用在 main 清零);同板 p6_write_fsync +13.6% 如实记为复现回归(定位中,文档行暂不动)。内部微基准页已并入同机 A/B 表。</li>
     </ul>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
 
