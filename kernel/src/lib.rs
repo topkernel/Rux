@@ -1781,15 +1781,7 @@ pub extern "C" fn rust_main_impl() -> ! {
         let kstack = alloc::vec![0u8; BOOT_KSTACK_SIZE].into_boxed_slice();
         let top = kstack.as_ptr() as usize + BOOT_KSTACK_SIZE;
         core::mem::forget(kstack); // live for the whole boot; freed never
-        unsafe {
-            core::arch::asm!(
-                "mov rsp, {0}",
-                "jmp {1}",
-                in(reg) top,
-                sym boot_stack_continuation,
-                options(noreturn)
-            );
-        }
+        boot_edges::x86_boot_stack_switch(top);
     }
 
     // riscv64: no stack switch needed — continue on the .boot stack.
