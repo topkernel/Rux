@@ -314,7 +314,7 @@ fn refresh_wanted_bits() {
     let mut side = false;
     for &(_, p) in reg.iter() {
         // SAFETY: registry membership guarantees validity.
-        let ev = unsafe { &*(p as *const PerfEvent) };
+        let ev = edges::event_ref(p as *mut PerfEvent);
         match ev.config {
             PERF_COUNT_SW_CONTEXT_SWITCHES => ctxsw = true,
             PERF_COUNT_SW_PAGE_FAULTS => pf = true,
@@ -431,7 +431,7 @@ pub fn ring_covers(addr: u64) -> Option<(usize, usize, u64)> {
     let reg = REGISTRY.lock_irqsave();
     for &(_, p) in reg.iter() {
         // SAFETY: registry membership guarantees validity.
-        let ev = unsafe { &*(p as *const PerfEvent) };
+        let ev = edges::event_ref(p as *mut PerfEvent);
         let inner = ev.inner.lock_irqsave();
         if inner.va != 0
             && (addr as usize) >= inner.va
@@ -478,13 +478,16 @@ static REGISTRY: Spinlock<alloc::vec::Vec<(u64, usize)>> =
     Spinlock::new(alloc::vec::Vec::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub(super) mod edges;
+
 fn register(ev: *mut PerfEvent, starts_armed: bool) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: caller built the box; the registry keeps the pointer
-    // valid until unregister.
-    unsafe {
-        (*ev).id = id;
-    }
+    // Registry edge lives in the audited unsafe.rs (INV-PERF-EVENTREF-1).
+    edges::event_set_id(ev, id);
     let mut reg = REGISTRY.lock_irqsave();
     reg.push((id, ev as usize));
     drop(reg);
@@ -503,8 +506,8 @@ fn unregister(id: u64) -> bool {
     let was_armed = match reg.iter().position(|&(i, _)| i == id) {
         Some(idx) => {
             let (_, p) = reg.swap_remove(idx);
-            // SAFETY: pointer came from register, still valid.
-            let armed = unsafe { (*(p as *mut PerfEvent)).enabled.load(Ordering::Acquire) };
+            // Registry edge lives in the audited unsafe.rs (INV-PERF-EVENTREF-1).
+            let armed = edges::event_enabled_armed(p);
             drop(reg);
             refresh_wanted_bits();
             return armed;
@@ -686,7 +689,7 @@ fn ring_slice(pages: &[usize], data_size: usize, pos: u64, n: usize) -> Option<(
     let base = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(phys as u64))
         .bits() as *mut u8;
     let avail = PAGE_SIZE - off;
-    Some((unsafe { base.add(off) }, avail.min(n)))
+    Some((edges::ring_page_ptr(base, off), avail.min(n)))
 }
 
 /// Write `bytes` into the ring at `head` (wrapping), returning the new
@@ -700,9 +703,8 @@ fn ring_put(inner: &PerfInner, head: u64, bytes: &[u8]) -> u64 {
             Some(x) => x,
             None => break, // cannot happen: data_size pages cover all
         };
-        // SAFETY: dst points into kernel direct-map memory we own
-        // (order-0 pages held by this event); n within the page.
-        unsafe { core::ptr::copy_nonoverlapping(left.as_ptr(), dst, n) };
+        // Ring-memory edge lives in the audited unsafe.rs (INV-PERF-RINGMEM-1).
+        edges::ring_copy(dst, left, n);
         pos += n as u64;
         left = &left[n..];
     }
@@ -716,8 +718,8 @@ fn ring_read_user_tail(inner: &PerfInner) -> u64 {
     };
     let base = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pages[0] as u64))
         .bits() as *mut u8;
-    // SAFETY: our own page; a racing user store is benign (u64-aligned).
-    unsafe { core::ptr::read_volatile(base.add(MP_DATA_TAIL) as *const u64) }
+    // Ring-memory edge lives in the audited unsafe.rs (INV-PERF-RINGMEM-1).
+    edges::ring_tail_read(base, MP_DATA_TAIL)
 }
 
 fn ring_publish_head(inner: &PerfInner) {
@@ -728,7 +730,8 @@ fn ring_publish_head(inner: &PerfInner) {
     let base = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pages[0] as u64))
         .bits() as *mut u8;
     // Release: the record bytes are visible before the head bump.
-    unsafe { core::ptr::write_volatile(base.add(MP_DATA_HEAD) as *mut u64, inner.head) };
+    // Ring-memory edge lives in the audited unsafe.rs (INV-PERF-RINGMEM-1).
+    edges::ring_head_write(base, MP_DATA_HEAD, inner.head);
     core::sync::atomic::fence(Ordering::Release);
 }
 
@@ -748,8 +751,8 @@ fn ring_audit(inner: &PerfInner) {
             crate::pr_err!("PERF-RING-PAGE-BAD: pages[{}] frame {:#x} has NO descriptor", i, p);
             continue;
         }
-        // SAFETY: descriptor of a ring frame we allocated.
-        let rc = unsafe { (*pd).refcount() };
+        // Ring-memory edge lives in the audited unsafe.rs (INV-PERF-RINGMEM-1).
+        let rc = edges::page_desc_refcount(pd);
         if rc < 1 {
             crate::pr_err!(
                 "PERF-RING-PAGE-BAD: pages[{}] frame {:#x} refcount {} — freed while the ring still lists it",
@@ -894,17 +897,9 @@ fn kernel_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
         if bp == 0 || bp % 8 != 0 || bp < 0xffff_8000_0000_0000 {
             break;
         }
-        // SAFETY: bp validated (aligned, kernel range); the two
-        // frame-word reads are the standard unwind operation on a
-        // kernel stack. A torn read ends the walk via the checks
-        // below — worst case a garbage frame address is filtered by
-        // the ksyms check.
-        let (ret, next) = unsafe {
-            (
-                core::ptr::read_volatile((bp + 8) as *const u64),
-                core::ptr::read_volatile(bp as *const u64),
-            )
-        };
+        // Stack-walk edge lives in the audited unsafe.rs
+        // (INV-PERF-STACKWALK-1).
+        let (ret, next) = edges::frame_words(bp);
         if crate::dfx::ksyms::lookup(ret).is_none() {
             break; // not a kernel-text return address
         }
@@ -948,7 +943,7 @@ pub fn softirq_tick() {
         for &(_, p) in reg.iter() {
             // SAFETY: registry membership guarantees validity (close
             // unregisters before freeing).
-            let ev = unsafe { &*(p as *const PerfEvent) };
+            let ev = edges::event_ref(p as *mut PerfEvent);
             if !ev.enabled.load(Ordering::Relaxed) {
                 continue;
             }
@@ -1010,8 +1005,8 @@ pub fn softirq_tick() {
     }
     // Wakes with no locks held (timerfd expire-notify discipline).
     for p in to_wake {
-        // SAFETY: as above.
-        unsafe { (*p).wait_queue.wake_up_all() };
+        // Registry edge lives in the audited unsafe.rs (INV-PERF-EVENTREF-1).
+        edges::event_wake_all(p);
     }
 }
 
@@ -1134,7 +1129,7 @@ pub fn hook_comm(tgid: u32, tid: u32, comm: &[u8]) {
     let reg = REGISTRY.lock_irqsave();
     for &(_, p) in reg.iter() {
         // SAFETY: registry membership guarantees validity.
-        let ev = unsafe { &*(p as *const PerfEvent) };
+        let ev = edges::event_ref(p as *mut PerfEvent);
         if ev.track_comm && ev.enabled.load(Ordering::Relaxed) {
             emit_record(ev, &rec, false);
         }
@@ -1183,7 +1178,7 @@ pub fn hook_mmap2(
     let reg = REGISTRY.lock_irqsave();
     for &(_, p) in reg.iter() {
         // SAFETY: registry membership guarantees validity.
-        let ev = unsafe { &*(p as *const PerfEvent) };
+        let ev = edges::event_ref(p as *mut PerfEvent);
         if ev.track_mmap && ev.enabled.load(Ordering::Relaxed) {
             emit_record(ev, &rec, false);
         }
@@ -1210,7 +1205,7 @@ pub fn hook_fork(parent_pid: u32, parent_tid: u32, child_pid: u32, child_tid: u3
     let reg = REGISTRY.lock_irqsave();
     for &(_, p) in reg.iter() {
         // SAFETY: registry membership guarantees validity.
-        let ev = unsafe { &*(p as *const PerfEvent) };
+        let ev = edges::event_ref(p as *mut PerfEvent);
         if ev.enabled.load(Ordering::Relaxed) {
             emit_record(ev, &rec, false);
         }
@@ -1235,7 +1230,7 @@ pub fn hook_exit(tgid: u32, tid: u32) {
     let reg = REGISTRY.lock_irqsave();
     for &(_, p) in reg.iter() {
         // SAFETY: registry membership guarantees validity.
-        let ev = unsafe { &*(p as *const PerfEvent) };
+        let ev = edges::event_ref(p as *mut PerfEvent);
         if ev.enabled.load(Ordering::Relaxed) {
             emit_record(ev, &rec, false);
         }
@@ -1255,12 +1250,9 @@ fn read_value(ev: &PerfEvent) -> u64 {
                 // task-scoped: nvcsw+nivcsw of the target task
                 match crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid) {
                     t if !t.is_null() => {
-                        // SAFETY: the pinned lookup took a reference —
-                        // liveness proven for this block; put drops it.
-                        let v = unsafe {
-                            ((*t).nvcsw.load(Ordering::Relaxed)
-                                + (*t).nivcsw.load(Ordering::Relaxed)) as u64
-                        };
+                        // The pinned read lives in the audited unsafe.rs
+                        // (INV-PERF-PINNEDTASK-1).
+                        let v = edges::pinned_ctxsw(t);
                         crate::process::task::Task::task_put(t);
                         v
                     }
@@ -1276,11 +1268,8 @@ fn read_value(ev: &PerfEvent) -> u64 {
                 // ru_majflt equivalent; the Task counters).
                 match crate::process::pid_hash::pid_hash_lookup_pinned(ev.target_tid) {
                     t if !t.is_null() => {
-                        // SAFETY: as the ctxsw arm (pinned reference).
-                        let v = unsafe {
-                            ((*t).min_flt.load(Ordering::Relaxed)
-                                + (*t).maj_flt.load(Ordering::Relaxed)) as u64
-                        };
+                        // Pinned-task edge as the ctxsw arm (INV-PERF-PINNEDTASK-1).
+                        let v = edges::pinned_faults(t);
                         crate::process::task::Task::task_put(t);
                         v
                     }
@@ -1357,13 +1346,13 @@ fn event_of(file: &crate::fs::File) -> Option<&'static PerfEvent> {
     // SAFETY: private_data is an UnsafeCell; we hold &File so no
     // concurrent mutable access. The pointer stays valid while the
     // File exists (close unregisters + frees under the fd's lifetime).
-    let ptr = unsafe { *file.private_data.get() }?;
+    let ptr = edges::privdata_get(file)?;
     // SAFETY: installed by sys_perf_event_open as Box::into_raw.
-    Some(unsafe { &*(ptr as *const PerfEvent) })
+    Some(edges::event_ref(ptr))
 }
 
 fn perf_close(file: &crate::fs::File) -> i32 {
-    let Some(ptr) = (unsafe { *file.private_data.get() }) else { return 0 };
+    let Some(ptr) = (edges::privdata_get(file)) else { return 0 };
     // SAFETY: see event_of.
     let ev = unsafe { &*(ptr as *const PerfEvent) };
     let id = ev.id;
@@ -1386,40 +1375,16 @@ fn perf_close(file: &crate::fs::File) -> i32 {
                 // mapping reference went away with the PTEs (munmap or
                 // exit runs before the last fd release); the owner drop is
                 // the last one — free to the buddy when it hits 0.
-                let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(p));
-                if !page.is_null() {
-                    // SAFETY: descriptor of a page we allocated.
-                    unsafe {
-                        let r = (*page).put_page();
-                        if r == 0 {
-                            crate::mm::page_alloc::free_pages(p, 0);
-                        } else if r < 0 {
-                            // Underflow refusal (refcount was already 0):
-                            // the frame has been over-put — it may already
-                            // be back in the allocator and owned by someone
-                            // else. Freeing again would hand the same frame
-                            // to two owners; leak it and name the bug
-                            // (hp88a: the old `r <= 0` freed here — a
-                            // double-free of a possibly re-sold frame).
-                            static N: AtomicUsize = AtomicUsize::new(0);
-                            if N.fetch_add(1, Ordering::Relaxed) < 8 {
-                                crate::pr_err!(
-                                    "PERF-CLOSE-UNDERFLOW: ring frame {:#x} refcount already 0 at owner drop — an extra put happened (leaking, not freeing) pid {}",
-                                    p,
-                                    crate::process::current_pid()
-                                );
-                            }
-                        }
-                    }
-                }
+                // The owner-drop edge (put/free/underflow report) lives
+                // in the audited unsafe.rs (INV-PERF-RINGMEM-1).
+                edges::ring_frame_owner_drop(p);
             }
         }
     }
-    // SAFETY: ptr came from Box::into_raw in sys_perf_event_open.
-    unsafe {
-        let _ = Box::from_raw(ptr as *mut PerfEvent);
-    }
-    unsafe { *file.private_data.get() = None; }
+    // Close-path reclaim + cell clear live in the audited unsafe.rs
+    // (INV-PERF-EVENTREF-1 / INV-PERF-PRIVDATA-1).
+    edges::event_take_box(ptr);
+    edges::privdata_clear(file);
     0
 }
 
@@ -1518,7 +1483,7 @@ pub fn perf_mmap_handler(
             if !pd.is_null() {
                 // SAFETY: descriptor of the frame alloc_pages just
                 // returned; read-only loads.
-                let (rc, mc) = unsafe { ((*pd).refcount(), (*pd).mapcount()) };
+                let (rc, mc) = edges::page_desc_refs(pd);
                 if rc != 1 || mc != crate::mm::page_desc::PAGE_MAPCOUNT_BIAS {
                     crate::pr_err!(
                         "PERF-ALLOC-DIRTY: alloc_pages returned frame {:#x} with refcount {} mapcount {} — allocator handed out a LIVE page; zeroing it would corrupt its owner pid {}",
@@ -1531,7 +1496,7 @@ pub fn perf_mmap_handler(
         // SAFETY/zero: fresh buddy page.
         let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(p as u64))
             .bits() as *mut u8;
-        unsafe { core::ptr::write_bytes(kv, 0, PAGE_SIZE) };
+        edges::ring_page_zero(kv, PAGE_SIZE);
         pages.push(p);
     }
 
@@ -1644,22 +1609,17 @@ pub fn perf_mmap_handler(
             for i in 0..total_pages {
                 let va = b + i * PAGE_SIZE;
                 let pa = pages[i];
-                // SAFETY: fresh pages, aligned, under the PTE lock.
-                unsafe {
-                    map_page(
-                        root,
-                        VirtAddr::new(va as u64),
-                        crate::arch::mm::PhysAddr::new(pa as u64),
-                        pte_flags,
-                    );
-                }
+                // PTE-install edge lives in the audited unsafe.rs
+                // (INV-PERF-RINGMEM-1).
+                edges::ring_map_page(root, va as u64, pa as u64, pte_flags);
                 // Mapping reference (binder/io_uring discipline): munmap or
                 // process exit put_page's the PTE ref; perf_close drops the
                 // owner ref; the last drop frees.
                 let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
                 if !page.is_null() {
-                    // SAFETY: descriptor of the page we just mapped.
-                    unsafe { (*page).get_page(); }
+                    // Mapping-reference edge lives in the audited unsafe.rs
+                    // (INV-PERF-RINGMEM-1).
+                    edges::ring_page_get(page);
                 }
             }
         }
@@ -1671,19 +1631,21 @@ pub fn perf_mmap_handler(
         let mut inner = ev.inner.lock_irqsave();
         let base = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pages[0] as u64))
             .bits() as *mut u8;
-        // SAFETY: our own metadata page.
-        unsafe {
-            core::ptr::write_volatile(base.add(MP_VERSION) as *mut u32, 1);
-            core::ptr::write_volatile(base.add(MP_COMPAT_VERSION) as *mut u32, 2);
-            // cap_bit0 = 0, cap_bit0_is_deprecated = 1 (bit 1).
-            core::ptr::write_volatile(base.add(MP_CAPABILITIES) as *mut u64, 0x2);
-            core::ptr::write_volatile(base.add(MP_DATA_OFFSET) as *mut u64, PAGE_SIZE as u64);
-            core::ptr::write_volatile(base.add(MP_DATA_SIZE) as *mut u64, data_size as u64);
-            core::ptr::write_volatile(base.add(MP_TIME_ENABLED) as *mut u64, 0);
-            core::ptr::write_volatile(base.add(MP_TIME_RUNNING) as *mut u64, 0);
-            core::ptr::write_volatile(base.add(MP_DATA_HEAD) as *mut u64, 0);
-            core::ptr::write_volatile(base.add(MP_DATA_TAIL) as *mut u64, 0);
-        }
+        // Metadata publish lives in the audited unsafe.rs
+        // (INV-PERF-RINGMEM-1).
+        edges::ring_meta_init(
+            base,
+            &[
+                (MP_CAPABILITIES, 0x2), // cap_bit0 = 0, deprecated = 1
+                (MP_DATA_OFFSET, PAGE_SIZE as u64),
+                (MP_DATA_SIZE, data_size as u64),
+                (MP_TIME_ENABLED, 0),
+                (MP_TIME_RUNNING, 0),
+                (MP_DATA_HEAD, 0),
+                (MP_DATA_TAIL, 0),
+            ],
+            &[(MP_VERSION, 1), (MP_COMPAT_VERSION, 2)],
+        );
         inner.data_size = data_size;
         inner.head = 0;
         inner.lost = 0;
@@ -1770,9 +1732,9 @@ fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
         }
         IOC_PERIOD => {
             // _IOW u64: change the sampling period.
-            let Some(v) = (unsafe {
-                crate::arch::uaccess::get_user(arg as *const u64)
-            }) else {
+            // User-transfer edges live in the audited unsafe.rs
+            // (INV-PERF-UACCESS-1).
+            let Some(v) = (edges::u64_get(arg)) else {
                 return -(crate::errno::constants::EFAULT as i64);
             };
             if v == 0 {
@@ -1783,7 +1745,7 @@ fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
         }
         IOC_ID => {
             let id = ev.id;
-            match unsafe { crate::arch::uaccess::put_user(arg as *mut u64, id) } {
+            match edges::u64_put(arg, id) {
                 true => 0,
                 false => -(crate::errno::constants::EFAULT as i64),
             }
@@ -1839,7 +1801,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     if flags & !(PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_CLOEXEC) != 0 {
         // FD_OUTPUT (ring redirect) and PID_CGROUP (cgroup scoping)
         // are real ABI features we do not implement — EINVAL.
-        let a = unsafe { crate::arch::uaccess::get_user(attr_ptr as *const AttrHead) }
+        let a = edges::attr_head_get(attr_ptr as usize)
             .unwrap_or_default();
         perf_open_einval_diag("flags", &a, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
@@ -1851,7 +1813,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         return -(crate::errno::constants::EFAULT as i64);
     }
     // SAFETY: access_ok passed; get_user re-verifies page-wise.
-    let attr = match unsafe { crate::arch::uaccess::get_user(attr_ptr as *const AttrHead) } {
+    let attr = match edges::attr_head_get(attr_ptr as usize) {
         Some(a) => a,
         None => return -(crate::errno::constants::EFAULT as i64),
     };
@@ -1974,7 +1936,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         // Task-scoped: pid 0 = self.
         let tid = if pid == 0 {
             match crate::sched::current() {
-                Some(t) => unsafe { (*t).pid() },
+                Some(t) => t.pid(),
                 None => return -(crate::errno::constants::EINVAL as i64),
             }
         } else {
@@ -1989,9 +1951,9 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
                 return -(crate::errno::constants::ESRCH as i64);
             }
             let ok = if let Some(me) = crate::sched::current() {
-                // SAFETY: target's pin (the lookup above) proves liveness;
-                // me is the safe current() handle.
-                let ok = unsafe { (*target).cred().uid == me.cred().uid || me.cred().uid == 0 };
+                // Pinned-uid edge lives in the audited unsafe.rs
+                // (INV-PERF-PINNEDTASK-1); me is the safe current() handle.
+                let ok = edges::pinned_uid(target) == me.cred().uid || me.cred().uid == 0;
                 ok
             } else {
                 false
@@ -2076,13 +2038,13 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         Some(fd) => fd,
         None => {
             // Undo the registration (the id was stored in the event).
-            let was_armed = unregister(unsafe { (*ev_ptr).id });
+            let was_armed = unregister(edges::event_id_of(ev_ptr));
             if was_armed {
                 ARMED.fetch_sub(1, Ordering::Release);
                 perf_tick_dep_sync();
             }
             // SAFETY: reclaim the box.
-            unsafe { let _ = Box::from_raw(ev_ptr); }
+            edges::event_take_box(ev_ptr);
             return -(crate::errno::constants::EMFILE as i64);
         }
     };
@@ -2095,12 +2057,12 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             fd as i64
         }
         Err(_) => {
-            let was_armed = unregister(unsafe { (*ev_ptr).id });
+            let was_armed = unregister(edges::event_id_of(ev_ptr));
             if was_armed {
                 ARMED.fetch_sub(1, Ordering::Release);
             }
             // SAFETY: reclaim the box.
-            unsafe { let _ = Box::from_raw(ev_ptr); }
+            edges::event_take_box(ev_ptr);
             -(crate::errno::constants::EMFILE as i64)
         }
     }
