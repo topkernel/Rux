@@ -455,7 +455,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                         }
                         // Parent-namespace view, same as the main return.
                         let parent_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
-                        rux::process::hotpath::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+                        ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
                     }
                     Err(e) => {
                         crate::pr_warn!(
@@ -478,7 +478,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     match do_clone(clone_args) {
         Ok(pid) => {
             let parent_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
-            rux::process::hotpath::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+            ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }
         Err(e) => {
             // sc116 probe (see the reserve-gate comment): any other
@@ -1625,7 +1625,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     // U1c pid-namespace semantics: the wait target pid is interpreted in
     // the CALLER's pid namespace, and the reaped child is REPORTED in it.
     let wait_pid: i32 = if pid > 0 {
-        match rux::process::hotpath::resolve_vpid(pid as u32) {
+        match ::process::ns::resolve_vpid(pid as u32) {
             Some(g) => g as i32,
             None => return -(errno::ECHILD as i64),
         }
@@ -1721,7 +1721,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
 /// Falls back to the global pid when the task is already gone from the
 /// hash (reaped) or lives in another namespace.
 fn report_wait_pid(global_pid: u32) -> i64 {
-    rux::process::hotpath::wait_vpid(global_pid) as i64
+    ::process::ns::wait_vpid(global_pid) as i64
 }
 
 /// 125th waitid leg: the reaper forensics print for a SUCCESSFUL waitid
@@ -1858,7 +1858,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
     // is interpreted in the CALLER's pid namespace (identity in init ns).
     // do_waitid compares against global child pids.
     let wait_id: i32 = if idtype == 1 {
-        match rux::process::hotpath::resolve_vpid(id as u32) {
+        match ::process::ns::resolve_vpid(id as u32) {
             Some(g) => g as i32,
             None => return -(errno::ECHILD as i64),
         }
@@ -2070,7 +2070,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
     // pid > 0: process-directed send — spread over the target's thread group.
     // U1c pid-namespace translation: the target pid is interpreted in the
     // CALLER's pid namespace (init ns: identity).
-    let global_pid = match rux::process::hotpath::resolve_vpid(pid as u32) {
+    let global_pid = match ::process::ns::resolve_vpid(pid as u32) {
         Some(g) => g,
         None => return -(errno::ESRCH as i64),
     };
@@ -2191,7 +2191,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
         nodename: {
             // U1c: nodename comes from the caller's UTS namespace.
             let mut a = [0u8; 65];
-            let hn = rux::process::hotpath::current_uts_ns().get_hostname();
+            let hn = ::process::ns::current_uts_ns().get_hostname();
             let n = hn.len().min(64);
             a[..n].copy_from_slice(&hn[..n]);
             a
@@ -2225,7 +2225,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
         domainname: {
             // U1c: domainname comes from the caller's UTS namespace.
             let mut a = [0u8; 65];
-            let dn = rux::process::hotpath::current_uts_ns().get_domainname();
+            let dn = ::process::ns::current_uts_ns().get_domainname();
             let n = dn.len().min(64);
             a[..n].copy_from_slice(&dn[..n]);
             a
@@ -3391,7 +3391,7 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                     }
                 }
                 cred.securebits = new_bits;
-                cred.keepcaps = new_bits & rux::process::hotpath::SECBIT_KEEP_CAPS != 0;
+                cred.keepcaps = new_bits & ::process::securebits::SECBIT_KEEP_CAPS != 0;
             }
             0
         }
@@ -5328,7 +5328,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     }
 
     // new_root must be a mountpoint of the current mount namespace.
-    if !rux::process::hotpath::ns_is_mountpoint(&new_root) {
+    if !::process::ns::ns_is_mountpoint(&new_root) {
         // RETIRED (probe-retire): unbounded error trace; budgeted (first 8).
         static PIVOT_NMP_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -5401,7 +5401,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // put_old (new-root-relative), other rows are rebased onto new_root.
     {
         use ::rux::process::types::MountEntry;
-        let ns = rux::process::hotpath::current_mnt_ns();
+        let ns = ::process::ns::current_mnt_ns();
         let mut table = ns.mounts.lock();
         // Old root row ("/" or the previous root device) moves to put_old.
         let old_root_entry = table
@@ -5409,7 +5409,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             .find(|e| e.mount_point == "/")
             .cloned()
             .unwrap_or(MountEntry {
-                mount_id: rux::process::hotpath::alloc_mount_id(),
+                mount_id: ::process::ns::alloc_mount_id(),
                 device: alloc::string::String::from("rootfs"),
                 mount_point: alloc::string::String::from("/"),
                 fs_type: alloc::string::String::from("rootfs"),
@@ -5480,7 +5480,7 @@ pub fn sys_setns(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let nstype = args[1];
 
-    match rux::process::hotpath::setns(fd, nstype) {
+    match ::process::ns::setns(fd, nstype) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }
@@ -5736,7 +5736,7 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     // Only the current UTS namespace is affected (isolation contract).
-    rux::process::hotpath::current_uts_ns().set_hostname(&buf[..len]);
+    ::process::ns::current_uts_ns().set_hostname(&buf[..len]);
     0
 }
 
@@ -5772,7 +5772,7 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
     if crate::arch::uaccess_safe::copy_in(&mut buf[..len], name_ptr as usize) != 0 {
         return -(errno::EFAULT as i64);
     }
-    rux::process::hotpath::current_uts_ns().set_domainname(&buf[..len]);
+    ::process::ns::current_uts_ns().set_domainname(&buf[..len]);
     0
 }
 
@@ -5858,7 +5858,7 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
 
     // Only CLONE_* bits are meaningful; unknown bits (outside the CSIGNAL
     // byte) are EINVAL like clone.
-    const UNSHARE_KNOWN: u64 = rux::process::hotpath::CLONE_NEWMASK
+    const UNSHARE_KNOWN: u64 = ::process::ns::CLONE_NEWMASK
         | 0x00000200 /* CLONE_FS */
         | 0x00000400 /* CLONE_FILES */
         | 0x00010000 /* CLONE_THREAD (refused below, Linux EINVAL) */
@@ -5888,7 +5888,7 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
         }
     }
 
-    match rux::process::hotpath::unshare_namespaces(flags) {
+    match ::process::ns::unshare_namespaces(flags) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }
@@ -6512,7 +6512,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         Ok(pid) => {
             // Parent-namespace view, same as sys_clone's return.
             let parent_ns = rux::sched::hotpath::current().and_then(|t| t.ns_pid.clone());
-            rux::process::hotpath::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+            ::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }
         Err(e) => e as i64,
     }

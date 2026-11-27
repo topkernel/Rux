@@ -11547,7 +11547,7 @@ impl Default for IpcPermUapi {
 /// The caller's IPC namespace identity (inum). All SysV IPC lookups and
 /// enumerations are scoped to this (reference: the caller's ns->ids table).
 pub fn caller_ipc_ns_inum() -> u64 {
-    crate::process::hotpath::current_ipc_ns().inum
+    crate::api::process::current_ipc_ns().inum
 }
 
 impl KernIpcPerm {

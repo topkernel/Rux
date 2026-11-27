@@ -229,7 +229,7 @@ fn expand_core_pattern(task: &Task, sig: i32) -> Vec<u8> {
     let comm: &[u8] = &c[..c.iter().position(|&b| b == 0).unwrap_or(c.len())];
     let cred = task.cred();
     let (uid, gid) = (cred.uid, cred.gid);
-    let hostname = rux::process::hotpath::current_uts_ns().get_hostname();
+    let hostname = crate::ns::current_uts_ns().get_hostname();
 
     let mut out = Vec::with_capacity(pattern.len() + 24);
     let mut i = 0;

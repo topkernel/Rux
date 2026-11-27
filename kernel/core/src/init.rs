@@ -453,7 +453,7 @@ fn load_and_setup_elf(
         #[cfg(feature = "aarch64")]
         let entry = ret_from_fork as u64;
         let thread = (*task_ptr).thread_mut();
-        crate::process::hotpath::thread_set_entry(thread, entry, child_regs as u64);
+        crate::api::process::thread_set_entry(thread, entry, child_regs as u64);
     }
 
     Ok(())

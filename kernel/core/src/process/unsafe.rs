@@ -1257,7 +1257,7 @@ pub(crate) fn task_ref_deref_mut(nn: &mut core::ptr::NonNull<Task>) -> &mut Task
 /// on this CPU while the reader executes, so the page cannot be freed
 /// under the read (INV-PROC-BORROW-1's current-task discipline).
 #[inline(always)]
-pub(crate) fn task_pgid_raw(t: *mut Task) -> u32 {
+pub fn task_pgid_raw(t: *mut Task) -> u32 {
 unsafe { (*t).pgid() }
 }
 

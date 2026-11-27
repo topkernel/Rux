@@ -1165,7 +1165,7 @@ fc65a47e1a1b	kernel/core/src/ipc/unsafe.rs	entry_frame_futex_x86	187		INV:INV-SA
 99c2baf34255	kernel/core/src/ipc/unsafe.rs	stack_word	204	volatile,ptr-ops	INV:INV-SAFECALL-1
 ca2446bacf2e	kernel/core/src/ipc/unsafe.rs	diag_task_comm	216		GAP
 0d1d2c277bde	kernel/core/src/ipc/unsafe.rs	diag_task	228		GAP
-b3e3195358bf	kernel/core/src/lib.rs	rust_main_impl	1817	asm	INV:INV-BOOT-ZEROPAGE-1
+184eb852fa23	kernel/core/src/lib.rs	rust_main_impl	1809	asm	INV:INV-BOOT-ZEROPAGE-1
 52f833da8c48	kernel/core/src/list.rs	<module>	73		INV:INV-LIST-1
 0601e4fcc5a9	kernel/core/src/list.rs	<module>	92		INV:INV-LIST-1
 de73017fbd3c	kernel/core/src/list.rs	<module>	108	ptr-ops	INV:INV-LIST-1

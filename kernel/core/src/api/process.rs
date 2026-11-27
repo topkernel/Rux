@@ -18,7 +18,9 @@
 //! Three tables, not one (crate-plan §3a rule 1): lifecycle rows
 //! (ProcessHooks), kernel-thread rows (KthreadHooks), pid-allocator
 //! rows (PidHooks) — split by consumer, each well under the ~20-row
-//! width bar.
+//! width bar. A fourth consumer table (NsHooks, p23-shrink-process)
+//! carries the namespace-policy rows for the fs/ipc hotpath callers
+//! that are still framework-side; it dissolves when those lanes land.
 //!
 //! THE SELF-RECURSION RULE (the S1 lesson, binding): a registered row
 //! body must never call the wrapper that dispatches the same row.
@@ -64,6 +66,12 @@ pub struct ProcessHooks {
     pub ctrl_alt_del_latch: fn(),
     pub cad_deliver_pending: fn(),
     pub init_exited_fallback_cascade: fn(),
+    // p23-shrink-process rows: the arch-thread bridge (boot task
+    // creation — init.rs and Task::new_idle_at), the console pgid
+    // reader, and the alloc-failure task-kill latch. All boot/rare.
+    pub thread_set_entry: fn(&mut crate::arch::thread::ThreadStruct, u64, u64),
+    pub current_pgid: fn() -> u32,
+    pub memdie_latch: fn() -> bool,
 }
 
 /// An unfilled row is a kernel misbuild, not a degraded mode (the
@@ -80,6 +88,9 @@ impl ProcessHooks {
         ctrl_alt_del_latch: no_policy_ctrl_alt_del_latch,
         cad_deliver_pending: no_policy_cad_deliver_pending,
         init_exited_fallback_cascade: no_policy_init_exited_fallback_cascade,
+        thread_set_entry: no_policy_thread_set_entry,
+        current_pgid: no_policy_current_pgid,
+        memdie_latch: no_policy_memdie_latch,
     };
 }
 
@@ -125,6 +136,19 @@ fn no_policy_cad_deliver_pending() {
 }
 fn no_policy_init_exited_fallback_cascade() {
     panic!("process seam: reboot policy not registered (init_exited_fallback_cascade)")
+}
+fn no_policy_thread_set_entry(
+    _: &mut crate::arch::thread::ThreadStruct,
+    _: u64,
+    _: u64,
+) {
+    panic!("process seam: thread bridge not registered (thread_set_entry)")
+}
+fn no_policy_current_pgid() -> u32 {
+    panic!("process seam: task bridge not registered (current_pgid)")
+}
+fn no_policy_memdie_latch() -> bool {
+    panic!("process seam: thread flags not registered (memdie_latch)")
 }
 
 pub static PROCESS_HOOKS: crate::safety::slot::OnceSlot<ProcessHooks> =
@@ -218,6 +242,29 @@ pub fn cad_deliver_pending() {
 #[inline]
 pub fn init_exited_fallback_cascade() {
     (hooks().init_exited_fallback_cascade)()
+}
+
+/// Seed a fresh task's context-switch state (the arch-thread bridge; the
+/// body lives in the process crate's task_helpers.rs since
+/// p23-shrink-process). Callers: init.rs's boot task creator,
+/// Task::new_idle_at (both boot-time), the crate's fork path (direct).
+#[inline]
+pub fn thread_set_entry(thread: &mut crate::arch::thread::ThreadStruct, entry: u64, sp: u64) {
+    (hooks().thread_set_entry)(thread, entry, sp)
+}
+
+/// The calling task's process group id (console TIOCSCTTY-family reader;
+/// body in the crate's task_helpers.rs).
+#[inline]
+pub fn current_pgid() -> u32 {
+    (hooks().current_pgid)()
+}
+
+/// Test-and-set TIF_MEMDIE on the current task for the alloc-failure
+/// kill_self latch (body in the crate's thread_flags.rs).
+#[inline]
+pub fn memdie_latch() -> bool {
+    (hooks().memdie_latch)()
 }
 
 // ==================== KthreadHooks ====================
@@ -339,6 +386,9 @@ pub struct PidHooks {
     pub set_pid_max_live: fn(u32),
     pub last_pid: fn() -> u32,
     pub set_last_pid: fn(u32) -> bool,
+    // p23-shrink-process: the boot-time hash init (documented no-op kept
+    // for the historical lib.rs boot sequence).
+    pub pid_hash_init: fn(),
 }
 
 impl PidHooks {
@@ -349,6 +399,7 @@ impl PidHooks {
         set_pid_max_live: no_policy_set_pid_max_live,
         last_pid: no_policy_last_pid,
         set_last_pid: no_policy_set_last_pid,
+        pid_hash_init: no_policy_pid_hash_init,
     };
 }
 
@@ -369,6 +420,9 @@ fn no_policy_last_pid() -> u32 {
 }
 fn no_policy_set_last_pid(_: u32) -> bool {
     panic!("process seam: pid policy not registered (set_last_pid)")
+}
+fn no_policy_pid_hash_init() {
+    panic!("process seam: pid policy not registered (pid_hash_init)")
 }
 
 pub static PID_HOOKS: crate::safety::slot::OnceSlot<PidHooks> =
@@ -411,6 +465,13 @@ pub fn last_pid() -> u32 {
 #[inline]
 pub fn set_last_pid(v: u32) -> bool {
     (phooks().set_last_pid)(v)
+}
+
+/// The boot-time PID hash init (lib.rs boot sequence; body in the
+/// crate's pid.rs).
+#[inline]
+pub fn pid_hash_init() {
+    (phooks().pid_hash_init)()
 }
 
 // ==================== ExitHooks ====================
@@ -494,4 +555,166 @@ pub fn sweep_dead_threads(t: *mut Task) {
 #[inline]
 pub fn reparent_children_to_init(t: &Task) {
     (ehooks().reparent_children_to_init)(t)
+}
+
+// ==================== NsHooks (namespace policy) ====================
+
+/// The namespace rows (p23-shrink-process): the ns POLICY moved to the
+/// process crate's ns.rs; the framework consumers that stay core-side
+/// until their own subsystem pass (fs/ipc hotpath lanes: mount
+/// bookkeeping, procfs ns-file opens, /proc/sysvipc inum, the F_SETOWN
+/// pid translation) reach it through this table. Every row is a cold
+/// site: mount/umount, procfs file open, kill-path translation.
+///
+/// This is the seam's FOURTH consumer-split table (fs/ipc lane
+/// consumers); it dissolves when those lanes land and their callers
+/// take the process dep directly. Signatures carry the native core
+/// types (crate-plan §3a rule 3): no adapter logic.
+#[derive(Clone, Copy)]
+pub struct NsHooks {
+    pub ns_track_vfsmount: fn(alloc::sync::Arc<crate::fs::types::VfsMountInternal>),
+    pub in_init_mnt_ns: fn() -> bool,
+    pub current_mnt_ns: fn() -> alloc::sync::Arc<crate::process::types::MountNamespace>,
+    pub resolve_local_pid_to_global:
+        fn(u32, Option<&alloc::sync::Arc<crate::process::types::PidNamespace>>) -> Option<u32>,
+    pub ns_register_mount: fn(&str, &str, &str, &str),
+    pub ns_get_mounts: fn() -> alloc::vec::Vec<crate::process::types::MountEntry>,
+    pub build_ns_file:
+        fn(u32, crate::process::types::NsKind, u32) -> Result<alloc::sync::Arc<crate::fs::types::File>, i32>,
+    pub current_ipc_ns: fn() -> alloc::sync::Arc<crate::process::types::IpcNamespace>,
+    pub translate_sender_pid_ns:
+        fn(u32, Option<&alloc::sync::Arc<crate::process::types::PidNamespace>>) -> u32,
+}
+
+impl NsHooks {
+    pub const EMPTY: NsHooks = NsHooks {
+        ns_track_vfsmount: no_policy_ns_track_vfsmount,
+        in_init_mnt_ns: no_policy_in_init_mnt_ns,
+        current_mnt_ns: no_policy_current_mnt_ns,
+        resolve_local_pid_to_global: no_policy_resolve_local_pid_to_global,
+        ns_register_mount: no_policy_ns_register_mount,
+        ns_get_mounts: no_policy_ns_get_mounts,
+        build_ns_file: no_policy_build_ns_file,
+        current_ipc_ns: no_policy_current_ipc_ns,
+        translate_sender_pid_ns: no_policy_translate_sender_pid_ns,
+    };
+}
+
+fn no_policy_ns_track_vfsmount(_: alloc::sync::Arc<crate::fs::types::VfsMountInternal>) {
+    panic!("process seam: ns policy not registered (ns_track_vfsmount)")
+}
+fn no_policy_in_init_mnt_ns() -> bool {
+    panic!("process seam: ns policy not registered (in_init_mnt_ns)")
+}
+fn no_policy_current_mnt_ns() -> alloc::sync::Arc<crate::process::types::MountNamespace> {
+    panic!("process seam: ns policy not registered (current_mnt_ns)")
+}
+fn no_policy_resolve_local_pid_to_global(
+    _: u32,
+    _: Option<&alloc::sync::Arc<crate::process::types::PidNamespace>>,
+) -> Option<u32> {
+    panic!("process seam: ns policy not registered (resolve_local_pid_to_global)")
+}
+fn no_policy_ns_register_mount(_: &str, _: &str, _: &str, _: &str) {
+    panic!("process seam: ns policy not registered (ns_register_mount)")
+}
+fn no_policy_ns_get_mounts() -> alloc::vec::Vec<crate::process::types::MountEntry> {
+    panic!("process seam: ns policy not registered (ns_get_mounts)")
+}
+fn no_policy_build_ns_file(
+    _: u32,
+    _: crate::process::types::NsKind,
+    _: u32,
+) -> Result<alloc::sync::Arc<crate::fs::types::File>, i32> {
+    panic!("process seam: ns policy not registered (build_ns_file)")
+}
+fn no_policy_current_ipc_ns() -> alloc::sync::Arc<crate::process::types::IpcNamespace> {
+    panic!("process seam: ns policy not registered (current_ipc_ns)")
+}
+fn no_policy_translate_sender_pid_ns(
+    _: u32,
+    _: Option<&alloc::sync::Arc<crate::process::types::PidNamespace>>,
+) -> u32 {
+    panic!("process seam: ns policy not registered (translate_sender_pid_ns)")
+}
+
+pub static NS_HOOKS: crate::safety::slot::OnceSlot<NsHooks> =
+    crate::safety::slot::OnceSlot::new();
+
+pub fn ns_register_hooks(hooks: NsHooks) {
+    let _ = NS_HOOKS.publish(hooks);
+}
+
+#[inline]
+fn nshooks() -> &'static NsHooks {
+    NS_HOOKS.get().unwrap_or(&NsHooks::EMPTY)
+}
+
+/// Record a freshly attached mount in the CURRENT mount namespace
+/// (sc98 teardown tracking; ns.rs body).
+#[inline]
+pub fn ns_track_vfsmount(mnt: alloc::sync::Arc<crate::fs::types::VfsMountInternal>) {
+    (nshooks().ns_track_vfsmount)(mnt)
+}
+
+/// True when the caller runs in the init (boot) mount namespace.
+#[inline]
+pub fn in_init_mnt_ns() -> bool {
+    (nshooks().in_init_mnt_ns)()
+}
+
+/// The calling task's mount namespace (init fallback).
+#[inline]
+pub fn current_mnt_ns() -> alloc::sync::Arc<crate::process::types::MountNamespace> {
+    (nshooks().current_mnt_ns)()
+}
+
+/// Resolve a pid NUMBER written by a caller in `caller_ns` to the
+/// global pid of the task it names (F_SETOWN / fcntl; ns.rs body).
+#[inline]
+pub fn resolve_local_pid_to_global(
+    local: u32,
+    caller_ns: Option<&alloc::sync::Arc<crate::process::types::PidNamespace>>,
+) -> Option<u32> {
+    (nshooks().resolve_local_pid_to_global)(local, caller_ns)
+}
+
+/// Register a mount in the current mount namespace (fs::mount bookkeeping).
+#[inline]
+pub fn ns_register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
+    (nshooks().ns_register_mount)(device, mount_point, fs_type, flags)
+}
+
+/// Snapshot of the current namespace's mount table.
+#[inline]
+pub fn ns_get_mounts() -> alloc::vec::Vec<crate::process::types::MountEntry> {
+    (nshooks().ns_get_mounts)()
+}
+
+/// Build the ns descriptor File for (pid, kind) without installing an fd
+/// (procfs ns magic-link open path).
+#[inline]
+pub fn build_ns_file(
+    pid: u32,
+    kind: crate::process::types::NsKind,
+    flags: u32,
+) -> Result<alloc::sync::Arc<crate::fs::types::File>, i32> {
+    (nshooks().build_ns_file)(pid, kind, flags)
+}
+
+/// The calling task's IPC namespace (stub kinds share the global objects;
+/// /proc/sysvipc inum source).
+#[inline]
+pub fn current_ipc_ns() -> alloc::sync::Arc<crate::process::types::IpcNamespace> {
+    (nshooks().current_ipc_ns)()
+}
+
+/// Translate a sender's GLOBAL pid into the pid the receiver sees
+/// (siginfo si_pid under pid namespaces; ns.rs body).
+#[inline]
+pub fn translate_sender_pid_ns(
+    sender_global_pid: u32,
+    receiver_ns: Option<&alloc::sync::Arc<crate::process::types::PidNamespace>>,
+) -> u32 {
+    (nshooks().translate_sender_pid_ns)(sender_global_pid, receiver_ns)
 }

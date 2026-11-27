@@ -16,6 +16,7 @@ edition = "2021"
 # them directly, zero indirection).
 
 [dependencies]
+process = { path = "../process", default-features = false }
 rux = { path = "../core", package = "rux-core", default-features = false }
 debug = { path = "../debug", default-features = false }
 # The deeper fs leaf (rung 5): the merged fs view re-exports ext4+jbd2
@@ -30,9 +31,9 @@ sched = { path = "../sched", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64", "ext4/riscv64", "debug/riscv64", "sched/riscv64"]
-x86_64 = ["rux/x86_64", "ext4/x86_64", "debug/x86_64", "sched/x86_64"]
-aarch64 = ["rux/aarch64", "ext4/aarch64", "debug/aarch64", "sched/aarch64"]
-# Gates the guest test module + its run entry (make test forwards this
+
 # from bin's unit-test through the SERVICE-TEST SEAM).
 unit-test = ["rux/unit-test"]
+riscv64 = ["rux/riscv64", "ext4/riscv64", "debug/riscv64", "sched/riscv64", "process/riscv64"]
+x86_64 = ["rux/x86_64", "ext4/x86_64", "debug/x86_64", "sched/x86_64", "process/x86_64"]
+aarch64 = ["rux/aarch64", "ext4/aarch64", "debug/aarch64", "sched/aarch64", "process/aarch64"]

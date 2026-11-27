@@ -756,3 +756,13 @@ process\[[0-9a-f]+\]::reboot::shutdown_cascade$
 # gained the note_tick_fp s0-capture call (THE feature) — the drift IS
 # the change; recorded to keep the same-name-size-differs channel honest.
 rux::arch::riscv64::trap::handle_timer_interrupt$
+
+# --- p23-shrink-process gate (2026-11-27): the movable-safe whole move to
+# the process crate. Two same-name size drifts, both attributed:
+# register_all's body grows by the 12 new hook registrations (the drift IS
+# the change); alloc_error_handler's source is untouched (kernel/core/src/
+# lib.rs) — the 994->885 debug-only delta is instruction selection after
+# hotpath.rs lost 957 lines (inlining/layout, the accepted cross-subsystem
+# class; the OOM path is cold and release builds are pinned by pbench).
+^process(\[[0-9a-f]+\])?::register_all$
+^rux(\[[0-9a-f]+\])?::alloc_error_handler$

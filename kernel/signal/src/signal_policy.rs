@@ -266,7 +266,7 @@ pub fn send_signal_core(
         let pid_layout =
             info.si_code <= 0 || info.si_signo == Signal::SIGCHLD as i32;
         if pid_layout && info.si_pid > 0 {
-            info.si_pid = crate::process::hotpath::translate_sender_pid_ns(
+            info.si_pid = ::process::ns::translate_sender_pid_ns(
                 info.si_pid as u32,
                 task.ns_pid.as_ref(),
             ) as i32;

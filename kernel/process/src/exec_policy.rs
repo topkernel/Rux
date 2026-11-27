@@ -311,7 +311,7 @@ pub fn do_execve_elf(
     // act of zeroing).
     {
         use core::sync::atomic::Ordering::Relaxed;
-        let i = rux::process::hotpath::STACKZERO_CURSOR.fetch_add(1, Relaxed) % rux::process::hotpath::STACKZERO_RING.len();
+        let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % rux::process::hotpath::STACKZERO_RING.len();
         rux::process::hotpath::STACKZERO_RING[i].pid.store(crate::current_pid(), Relaxed);
         rux::process::hotpath::STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
         rux::process::hotpath::STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
@@ -1458,3 +1458,9 @@ pub fn do_execve_elf(
     }
     Ok(())
 }
+
+/// Slot cursor for the framework-side exec stack-zero ring
+/// (STACKZERO_RING stays in rux::process::hotpath — the riscv64 fault
+/// path walks it). Only the exec policy advances the cursor, so it
+/// lives here since p23-shrink-process.
+pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

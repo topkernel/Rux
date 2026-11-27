@@ -1024,7 +1024,7 @@ pub fn do_waitid(
                 // CALLER's pid namespace (U1c parity with wait4's
                 // report_wait_pid); the child is still hash-resident at
                 // this point — release_task runs after the write.
-                let report_pid = rux::process::hotpath::wait_vpid(child_pid);
+                let report_pid = crate::ns::wait_vpid(child_pid);
                 write_siginfo(infop, si_code, report_pid, child_uid, si_status);
 
                 // Reap zombie unless WNOWAIT

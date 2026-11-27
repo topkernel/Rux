@@ -23,8 +23,9 @@
 //!   `exit_wait`.
 //! - `process/exec_ring.rs`: the STACKZERO ring the riscv64 fault
 //!   path walks (hot read; the crate's exec policy writes it).
-//! - `api/process.rs`: the seam — three cold tables
-//!   (ProcessHooks / KthreadHooks / PidHooks), OnceSlot-published.
+//! - `api/process.rs`: the seam — four cold tables
+//!   (ProcessHooks / KthreadHooks / PidHooks / NsHooks),
+//!   OnceSlot-published.
 
 #![forbid(unsafe_code)]
 #![no_std]
@@ -64,13 +65,19 @@ pub mod coredump;
 pub mod reboot;
 pub mod task_helpers;
 pub mod exec_policy;
+// p23-shrink-process: the movable ns policy, the movable thread-flag
+// (TIF_MEMDIE + the alloc-failure latch), and the securebits value
+// whose only consumers are the syscall layer.
+pub mod ns;
+pub mod thread_flags;
+pub mod securebits;
 
 // exec: the ELF policy (this crate) merged with the
 // framework-side stack-zero ring at the historical path — so
 // crate::exec::X keeps resolving for both halves' users.
 pub mod exec {
     pub use crate::exec_policy::*;
-    pub use rux::process::{hotpath::{STACKZERO_RING, STACKZERO_CURSOR}, types::ZeroEntry};
+    pub use rux::process::{hotpath::STACKZERO_RING, types::ZeroEntry};
 }
 
 // exit: the wait4/waitid family + the TEARDOWN family (this crate)
@@ -89,7 +96,10 @@ pub mod exit {
 // The old framework mod.rs's re-exports at their historical paths
 // (crate::do_fork, the pid knobs/consts).
 pub use crate::fork::do_fork;
-pub use crate::task_helpers::{thread_clear_callee_saved, set_user_tls};
+pub use crate::ns::*;
+pub use crate::task_helpers::{
+    current_pgid, thread_clear_callee_saved, thread_set_entry, set_user_tls,
+};
 pub use crate::pid::{
     alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT, PID_MAX_DEFAULT,
     RESERVED_PIDS,
@@ -99,8 +109,8 @@ pub use crate::pid::{
 pub use rux::process::{
     types, hotpath, r#unsafe};
 pub use rux::process::{
-    types::Task, hotpath::current_pid, hotpath::current_ppid, hotpath::current_pgid, hotpath::current_task,
-    hotpath::find_task_by_pid, hotpath::thread_set_entry,
+    types::Task, hotpath::current_pid, hotpath::current_ppid, hotpath::current_task,
+    hotpath::find_task_by_pid,
 };
 
 // The framework's test counters at the crate root, where the moved
@@ -146,6 +156,9 @@ pub fn register_all() {
         ctrl_alt_del_latch: reboot::ctrl_alt_del_latch,
         cad_deliver_pending: reboot::cad_deliver_pending,
         init_exited_fallback_cascade: reboot::init_exited_fallback_cascade,
+        thread_set_entry: task_helpers::thread_set_entry,
+        current_pgid: task_helpers::current_pgid,
+        memdie_latch: thread_flags::memdie_latch,
     });
     rux::api::process::kthread_register_hooks(rux::api::process::KthreadHooks {
         kthread_run: kthread::kthread_run,
@@ -169,6 +182,18 @@ pub fn register_all() {
         set_pid_max_live: pid::set_pid_max_live,
         last_pid: pid::last_pid,
         set_last_pid: pid::set_last_pid,
+        pid_hash_init: pid::pid_hash_init,
+    });
+    rux::api::process::ns_register_hooks(rux::api::process::NsHooks {
+        ns_track_vfsmount: ns::ns_track_vfsmount,
+        in_init_mnt_ns: ns::in_init_mnt_ns,
+        current_mnt_ns: ns::current_mnt_ns,
+        resolve_local_pid_to_global: ns::resolve_local_pid_to_global,
+        ns_register_mount: ns::ns_register_mount,
+        ns_get_mounts: ns::ns_get_mounts,
+        build_ns_file: ns::build_ns_file,
+        current_ipc_ns: ns::current_ipc_ns,
+        translate_sender_pid_ns: ns::translate_sender_pid_ns,
     });
 }
 
