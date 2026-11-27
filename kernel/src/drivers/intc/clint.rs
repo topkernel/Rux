@@ -13,6 +13,7 @@
 //! - Time register (MTIME)
 //!
 //! This implementation uses SBI calls instead of direct MMIO access
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sbi;
@@ -91,24 +92,6 @@ pub fn get_ipi_count(hart: usize) -> u32 {
     }
 }
 
-/// Read system time (time CSR)
-///
-/// Uses RISC-V `rdtime` instruction to read time
-///
-/// # Returns
-/// Current time (cycles)
-pub fn read_time() -> u64 {
-    // SAFETY: rdtime is a read-only CSR available in S-mode on RISC-V.
-    unsafe {
-        let time: u64;
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) time,
-            options(nostack, readonly)
-        );
-        time
-    }
-}
 
 /// Set timer compare value
 ///
@@ -120,9 +103,12 @@ pub fn read_time() -> u64 {
 pub fn set_timecmp(_hart: usize, value: u64) {
     // Use SBI set_timer
     // Note: SBI's set_timer is per-hart, automatically applies to current hart
-    // SAFETY: sbi_rt::set_timer is an SBI ecall with no special preconditions;
-    // the `value` is an absolute timer deadline (u64), always valid.
-    unsafe {
-        sbi_rt::set_timer(value);
-    }
+    // sbi_rt::set_timer is an SBI ecall with no special preconditions;
+    // the `value` is an absolute timer deadline (u64), always valid
+    // (INV-DRV-SBI edge).
+    crate::drivers::edges::sbi_set_timer(value);
+}
+
+pub fn read_time() -> u64 {
+    crate::drivers::edges::clint_read_time()
 }

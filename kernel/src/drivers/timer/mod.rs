@@ -3,6 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Timer driver
+#![forbid(unsafe_code)]
 
 
 #[cfg(feature = "riscv64")]

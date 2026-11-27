@@ -15,6 +15,7 @@
 //! the LIVE counter against the NOMINAL tick grid (multi-cpu safe,
 //! immune to accumulated re-arm latency — see the riscv64 twin for the
 //! review history).
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -147,21 +148,6 @@ pub fn monotonic_ns_since_boot() -> u64 {
     ((read_time() as u128) * 1_000_000_000u128 / freq) as u64
 }
 
-/// Arm the EL1 virtual timer to an absolute CNTVCT deadline
-#[inline]
-pub fn set_timer(deadline: u64) {
-    // SAFETY: writing the virtual-timer compare/enable registers arms the
-    // per-cpu timer; the only side effect is the future PPI interrupt.
-    unsafe {
-        core::arch::asm!(
-            "msr cntv_cval_el0, {d}",
-            "msr cntv_ctl_el0, {e}",
-            d = in(reg) deadline,
-            e = in(reg) 1u64, // enable, unmasked
-            options(nomem, nostack)
-        );
-    }
-}
 
 /// Set next timer interrupt, aligned to the NOMINAL tick grid but never
 /// later than the earliest high-resolution deadline (riscv64 twin logic)
@@ -209,4 +195,8 @@ pub fn timer_interrupt_handler() {
             crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
         );
     }
+}
+
+pub fn set_timer(deadline: u64) {
+    crate::drivers::edges::aarch64_timer_arm(deadline)
 }

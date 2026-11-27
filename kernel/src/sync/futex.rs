@@ -34,6 +34,7 @@
 //!   exempts SHARED VMAs (mm_ops.rs cow_exempt), so the frame IS the
 //!   shared object (reference: inode/page-index key; Rux's MAP_SHARED
 //!   pages are single cache frames aliased in every mapper).
+#![forbid(unsafe_code)]
 
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::AtomicU32;
@@ -622,7 +623,7 @@ fn ftx_opname(op: i32) -> &'static [u8] {
 fn ftx_trace(_tag: &[u8], _uaddr: usize, _a: u64, _b: u64) {}
 
 /// Waiter information
-struct Waiter {
+pub(crate) struct Waiter {
     /// Futex key
     key: FutexKey,
     /// Waiting task
@@ -644,11 +645,6 @@ struct Waiter {
     next: Option<usize>,
 }
 
-// SAFETY: Waiter is only ever accessed while the per-slot Spinlock is held,
-// serialising all reads and writes.  The `task` raw pointer is only
-// dereferenced by the waker after validating it is non-null.
-unsafe impl Send for Waiter {}
-unsafe impl Sync for Waiter {}
 
 /// Waiter pool size - from config
 const WAITER_POOL_SIZE: usize = crate::config::FUTEX_WAITER_POOL_SIZE;

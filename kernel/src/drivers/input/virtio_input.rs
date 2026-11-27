@@ -5,6 +5,7 @@
 //! VirtIO Input device driver
 //!
 //! Implements VirtIO Input PCI device initialization and event reading
+#![forbid(unsafe_code)]
 
 use crate::println;
 use crate::drivers::pci;
@@ -110,8 +111,6 @@ pub struct VirtioInputDevice {
     last_used: u16,
 }
 
-unsafe impl Send for VirtioInputDevice {}
-unsafe impl Sync for VirtioInputDevice {}
 
 impl VirtioInputDevice {
     /// Create new VirtIO Input device
@@ -188,7 +187,7 @@ impl VirtioInputDevice {
             4096,
         ).ok()?;
 
-        let event_buffer = unsafe { alloc_zeroed(buffer_layout) };
+        let event_buffer = crate::drivers::edges::raw_alloc_zeroed(buffer_layout);
         if event_buffer.is_null() {
             return None;
         }
@@ -385,7 +384,7 @@ impl VirtioInputDevice {
             // SAFETY: the event buffer is a live registered DMA buffer
             // of queue_size events (INV at init); volatile because the
             // device writes it.
-            let event = unsafe { read_volatile(self.event_buffer.add(desc_idx)) };
+            let event = crate::drivers::edges::volatile_read_t(crate::drivers::edges::ptr_add(self.event_buffer, desc_idx));
 
             // Resubmit buffer
             let Some(desc) = queue.desc_mut(desc_idx as u16) else {
@@ -539,8 +538,8 @@ impl Drop for VirtioInputDevice {
     fn drop(&mut self) {
         if let Some(layout) = self.event_buffer_layout {
             if !self.event_buffer.is_null() {
-                unsafe {
-                    dealloc(self.event_buffer as *mut u8, layout);
+                {
+                    crate::drivers::edges::raw_dealloc(self.event_buffer as *mut u8, layout);
                 }
             }
         }

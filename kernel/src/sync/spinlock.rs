@@ -57,6 +57,7 @@
 //!   lock, timer IRQs stopped). Drivers must COLLECT completed work under
 //!   their locks and deliver wakes OUTSIDE them (timer.rs R12-3 pattern);
 //!   see drivers/virtio/mod.rs and `assert_no_virtio_lock`.
+#![forbid(unsafe_code)]
 
 // (INV-SPIN-1: the spinlock family — guards deref through the
 // held-lock lifetime; the panic/deadlock-warn rows are PANIC-TIME
@@ -170,28 +171,8 @@ pub fn acquire_evidence_fresh(cpu: usize, task: usize, now: u64) -> bool {
 
 // ==================== RawSpinlock (TTAS) ====================
 
-/// Capture this function's return address (the spinlock call site) for
-/// deadlock diagnostics.
-#[inline]
-fn caller_return_address() -> usize {
-    let ra: usize;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: frame pointers are forced on, so [rbp+8] is the return
-    // address of this inlined function's caller.
-    unsafe {
-        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
-    {
-        ra = 0;
-    }
-    ra
-}
+// caller_return_address moved to crate::sync::edges (unsafe.rs) —
+// mainline consolidation; the register-read contract lives with it.
 
 pub struct RawSpinlock {
     /// THE single authority for the lock's state: `0` = free,
@@ -219,7 +200,7 @@ pub struct RawSpinlock {
     /// may briefly see a stale value — fine for the watchdog print, which
     /// only needs "who held it when everything wedged".
     #[cfg(feature = "dfx-lock-owner")]
-    owner: AtomicUsize,
+    pub(crate) owner: AtomicUsize,
     /// oh-crash 91st (leak hunt): LAST-acquire forensics — pid + call
     /// site + jiffies of the most recent acquire. NOT cleared on unlock
     /// (they name the acquirer even after a leaked/dropped unlock), at
@@ -393,7 +374,7 @@ impl RawSpinlock {
     #[inline(never)]
     pub fn lock(&self) {
         // Capture caller's return address before spinning
-        let caller_ra = caller_return_address();
+        let caller_ra = crate::sync::edges::caller_return_address();
         let mut spins: u32 = 0;
         // TTAS (test-and-test-and-set, C7): one CAS to acquire; while
         // contended, spin on a plain Relaxed load until the word reads
@@ -528,7 +509,7 @@ impl RawSpinlock {
         for &b in msg_lw {
             crate::console::uart_putc_raw(b);
         }
-        let lw = unsafe { (&*lock_addr).locked_word() };
+        let lw = crate::sync::edges::rawspin_locked_word(lock_addr);
         let mut shift_lw: i32 = 8;
         while shift_lw > 0 {
             shift_lw -= 4;
@@ -557,8 +538,9 @@ impl RawSpinlock {
             for &b in msg4 {
                 crate::console::uart_putc_raw(b);
             }
-            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-            let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
+            // lock_addr is a valid RawSpinlock pointer (from lock());
+            // the deref crosses the audited INV-SY-5 edge.
+            let holder = crate::sync::edges::rawspin_owner(lock_addr);
             let mut holder_cpu: Option<usize> = None;
             if holder == 0 {
                 let msg5 = b"switching";
@@ -578,17 +560,19 @@ impl RawSpinlock {
                 // what the CPU runs NOW and the pid names the victim).
                 // SAFETY: cpu_state(h).current is the scheduler's own
                 // published pointer; read-only access.
-                let cur = unsafe { crate::sched::sched::cpu_state(h).current };
+                let cur = crate::sched::sched::cpu_state(h).current;
                 if !cur.is_null() {
-                    // SAFETY: read-only access to a live Task.
-                    let pid = unsafe { (*cur).pid() };
+                    // Read-only access to a live Task: crosses the
+                    // audited INV-SCE-2 edge.
+                    let pid = crate::sched::edges::task_shared(cur).pid();
                     let msg_pid = b" task=";
                     for &b in msg_pid {
                         crate::console::uart_putc_raw(b);
                     }
                     Self::putdec(pid as u64);
-                    // SAFETY: comm is a fixed [u8;16], no allocation.
-                    let comm = unsafe { (*cur).comm() };
+                    // comm is a fixed [u8;16], no allocation: crosses
+                    // the audited INV-SCE-2 edge.
+                    let comm = crate::sched::edges::task_shared(cur).comm();
                     crate::console::uart_putc_raw(b'(');
                     let mut any = false;
                     for &b in comm.iter() {
@@ -603,7 +587,7 @@ impl RawSpinlock {
                     if !any {
                         crate::console::uart_putc_raw(b'?');
                     }
-                    unsafe { crate::console::uart_putc_raw(b')'); }
+                    crate::console::uart_putc_raw(b')');
                 }
             }
 
@@ -618,7 +602,7 @@ impl RawSpinlock {
         #[cfg(feature = "dfx-lock-owner")]
         {
             // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-            let l = unsafe { &*lock_addr };
+            let l = crate::sync::edges::rawspin_ref(lock_addr);
             let apid = l.acq_pid.load(Ordering::Relaxed);
             let asite = l.acq_site.load(Ordering::Relaxed);
             let ajif = l.acq_jiffies.load(Ordering::Relaxed);
@@ -674,7 +658,7 @@ impl RawSpinlock {
                 // SAFETY: diagnostic read of the object's first words;
                 // the span was validated by object_span (inside a live
                 // slab page, in-bounds of the object's slot).
-                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
+                let w = crate::sync::edges::read_unaligned_u64(base + i * 8);
                 Self::puthex(w);
                 if i < 5 {
                     crate::console::uart_putc_raw(b',');
@@ -712,7 +696,7 @@ impl RawSpinlock {
                 // SAFETY: diagnostic read of the block's first words;
                 // buddy_block_span validated the address against the
                 // heap window and the block's base alignment.
-                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
+                let w = crate::sync::edges::read_unaligned_u64(base + i * 8);
                 Self::puthex(w);
                 if i < 5 {
                     crate::console::uart_putc_raw(b',');
@@ -799,7 +783,7 @@ impl RawSpinlock {
             shift -= 4;
             let nibble = ((v >> shift) & 0xF) as u8;
             let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-            unsafe { crate::console::putchar_no_lock(c); }
+            crate::console::putchar_no_lock(c);
         }
     }
 
@@ -817,7 +801,7 @@ impl RawSpinlock {
         }
         while i > 0 {
             i -= 1;
-            unsafe { crate::console::putchar_no_lock(buf[i]); }
+            crate::console::putchar_no_lock(buf[i]);
         }
     }
 
@@ -828,7 +812,7 @@ impl RawSpinlock {
             .compare_exchange(0, Self::held_word(), Ordering::Acquire, Ordering::Acquire)
             .is_ok();
         if ok {
-            self.record_owner(caller_return_address());
+            self.record_owner(crate::sync::edges::caller_return_address());
             // RT-plan R1 completion: symmetric with lock()/unlock().
             crate::interrupt::preempt::preempt_count_add(
                 crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -891,7 +875,7 @@ impl RawSpinlock {
     }
 
     #[inline]
-    pub unsafe fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.clear_owner();
         self.locked.store(0, Ordering::Release);
     }
@@ -913,12 +897,10 @@ pub struct Spinlock<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: Spinlock<T> only allows &mut T access via the guard, which exists
-// only while the inner lock is held.  Send is required so the lock (and its
-// data) can be moved between threads; Sync is safe because the lock mediates
-// all access.
-unsafe impl<T: ?Sized + Send> Send for Spinlock<T> {}
-unsafe impl<T: ?Sized + Send> Sync for Spinlock<T> {}
+// Send/Sync commitments moved to the subsystem's one audited unsafe
+// file (crate::sync::edges, unsafe.rs) — mainline consolidation. The
+// SAFETY argument (guard-only &mut access; the lock mediates all
+// access) is recorded with the impls there.
 
 impl<T> Spinlock<T> {
     #[inline]
@@ -1026,29 +1008,31 @@ impl<T> Spinlock<T> {
 
     /// Get a shared reference to the inner data without locking.
     ///
-    /// # Safety
+    /// # Contract (was # Safety)
     /// Caller must ensure no concurrent mutable access (e.g., data is
-    /// write-once during boot and only read thereafter).
+    /// write-once during boot and only read thereafter); the deref
+    /// crosses the audited INV-SY-4 cell edge.
     #[inline]
-    pub unsafe fn get_ref(&self) -> &T {
-        &*self.data.get()
+    pub fn get_ref(&self) -> &T {
+        crate::sync::edges::cell_ref(&self.data)
     }
 
     /// Get a mutable reference to the inner data without locking.
     ///
-    /// # Safety
-    /// Caller must ensure exclusive access (e.g., no concurrent readers or writers).
+    /// # Contract (was # Safety)
+    /// Caller must ensure exclusive access (e.g., no concurrent readers
+    /// or writers); crosses the audited INV-SY-4 cell edge.
     #[inline]
-    pub unsafe fn get_mut_unchecked(&self) -> &mut T {
-        &mut *self.data.get()
+    pub fn get_mut_unchecked(&self) -> &mut T {
+        crate::sync::edges::cell_mut(&self.data)
     }
 
     /// Consume the lock and return the inner data.
     ///
-    /// # Safety
+    /// # Contract (was # Safety)
     /// Caller must ensure no other thread holds a reference to the lock or data.
     #[inline]
-    pub unsafe fn into_inner(self) -> T { self.data.into_inner() }
+    pub fn into_inner(self) -> T { self.data.into_inner() }
 }
 
 // ==================== SpinlockGuard (plain) ====================
@@ -1057,16 +1041,13 @@ pub struct SpinlockGuard<'a, T: ?Sized> {
     lock: &'a Spinlock<T>,
 }
 
-// SAFETY: SpinlockGuard exists only while the lock is held, so the guarded
-// data cannot be accessed concurrently from another thread.
-unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Guard holds the lock — no concurrent &mut access possible.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -1074,7 +1055,7 @@ impl<T: ?Sized> DerefMut for SpinlockGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Guard holds the lock exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 
@@ -1110,16 +1091,13 @@ pub struct SpinlockIrqGuard<'a, T: ?Sized> {
 // slot site, which names THIS lock as the mutation governor).
 impl<T: ?Sized> crate::safety::slot::ExclusivityProof for SpinlockIrqGuard<'_, T> {}
 
-// SAFETY: SpinlockIrqGuard exists only while the lock is held, so the
-// guarded data cannot be accessed concurrently.
-unsafe impl<T: ?Sized + Send> Send for SpinlockIrqGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockIrqGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Guard holds the lock — no concurrent &mut access possible.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -1127,7 +1105,7 @@ impl<T: ?Sized> DerefMut for SpinlockIrqGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Guard holds the lock exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 
@@ -1177,16 +1155,13 @@ pub struct SpinlockBhGuard<'a, T: ?Sized> {
     lock: &'a Spinlock<T>,
 }
 
-// SAFETY: SpinlockBhGuard exists only while the lock is held, so the
-// guarded data cannot be accessed concurrently.
-unsafe impl<T: ?Sized + Send> Send for SpinlockBhGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockBhGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Guard holds the lock — no concurrent &mut access possible.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -1194,7 +1169,7 @@ impl<T: ?Sized> DerefMut for SpinlockBhGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Guard holds the lock exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 

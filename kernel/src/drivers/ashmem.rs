@@ -30,6 +30,7 @@
 //! (get_page at map, put_page at unmap/exit), so pages survive until the
 //! last mapping is gone even if every fd was closed first. Linux hangs
 //! the same lifetime off the shmem backing file's vm_file refcount.
+#![forbid(unsafe_code)]
 
 use crate::arch::mm::map_user_page;
 use crate::arch::mm::memory_layout::{PhysAddr as MmPhysAddr, VirtAddr as MmVirtAddr};
@@ -132,8 +133,8 @@ impl Drop for AshmemPages {
             let freed_by_us = if page.is_null() {
                 true
             } else {
-                // SAFETY: descriptor exists for this in-RAM page.
-                unsafe { (*page).put_page() == 0 }
+                // Descriptor exists for this in-RAM page (INV-DRV-RAW).
+                crate::drivers::edges::raw_mut(page).put_page() == 0
             };
             if freed_by_us {
                 free_pages(*p, 0);
@@ -330,11 +331,10 @@ fn ashmem_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         };
         let src = crate::arch::mm::memory_layout::phys_to_virt(MmPhysAddr::new(phys as u64))
             .bits() as *const u8;
-        // SAFETY: src is the kernel linear map of a live pool page; the
-        // destination is the syscall-validated user buffer slice.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.add(in_pg), buf.as_mut_ptr().add(done), chunk);
-        }
+        // src is the kernel linear map of a live pool page; the
+        // destination is the syscall-validated user buffer slice (the
+        // audited INV-DRV-COPY edge with offsets).
+        crate::drivers::edges::copy_bytes_offset(src, in_pg, buf.as_mut_ptr(), done, chunk);
         done += chunk;
     }
     file.set_pos((pos + done) as u64);
@@ -741,7 +741,8 @@ pub fn ashmem_mmap(
         }
     }
     address_space.add_rss(npages as u64);
-    // SAFETY: fresh user PTEs need a flush before first use on any hart.
-    unsafe { crate::arch::mm::asid::flush_tlb_all(); }
+    // Fresh user PTEs need a flush before first use on any hart
+    // (INV-DRV-TLB edge).
+    crate::drivers::edges::flush_tlb_all();
     Ok(placement)
 }

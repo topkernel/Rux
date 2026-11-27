@@ -18,6 +18,7 @@
 //!   - Sequence counter low bit: even = no writer, odd = writer active.
 //!   - Writer: increment (odd) → write data → increment (even).
 //!   - Reader: read seq → snapshot data → re-read seq → retry if changed.
+#![forbid(unsafe_code)]
 
 // (INV-SEQLOCK-1: the seqlock family — data cells are read under the
 // even-sequence validation (odd = writer in flight); writers hold the
@@ -117,9 +118,6 @@ pub struct SeqLock<T: Copy> {
     data: UnsafeCell<T>,
 }
 
-// Safety: writers have exclusive access; readers get a Copy snapshot.
-unsafe impl<T: Copy + Send> Send for SeqLock<T> {}
-unsafe impl<T: Copy + Send> Sync for SeqLock<T> {}
 
 impl<T: Copy> SeqLock<T> {
     #[inline]
@@ -183,8 +181,10 @@ impl<T: Copy> SeqLock<T> {
     ///
     /// # Safety
     /// Caller must hold preemption disabled for the duration of this call.
+    /// # Contract (was # Safety)
+    /// Caller must hold preemption disabled for the duration of this call.
     #[inline]
-    pub unsafe fn read_preempt_disabled(&self) -> T {
+    pub fn read_preempt_disabled(&self) -> T {
         self.read_inner()
     }
 
@@ -203,8 +203,9 @@ impl<T: Copy> SeqLock<T> {
                 core::hint::spin_loop();
                 continue;
             }
-            // SAFETY: preemption is disabled and sequence is even (no writer).
-            let snapshot = unsafe { core::ptr::read_volatile(self.data.get()) };
+            // Preemption is disabled and sequence is even (no writer);
+            // the snapshot crosses the audited INV-SY-8 volatile edge.
+            let snapshot = crate::sync::edges::volatile_read_cell(self.data.get());
             if self.raw.read_retry(seq) {
                 core::hint::spin_loop();
                 continue;
@@ -228,20 +229,19 @@ pub struct SeqLockWriteGuard<'a, T: Copy> {
     irq_state: bool,
 }
 
-unsafe impl<T: Copy + Send> Send for SeqLockWriteGuard<'_, T> {}
 
 impl<T: Copy> Deref for SeqLockWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
 impl<T: Copy> DerefMut for SeqLockWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 

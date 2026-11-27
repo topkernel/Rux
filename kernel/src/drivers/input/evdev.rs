@@ -13,6 +13,7 @@
 //! - EVIOCGRAB (exclusive access) / EVIOCGKEY / EVIOCGLED / EVIOCGSW
 //! - blocking read (sleep until an event arrives) and poll reporting POLLIN
 //! - 24-byte input_event passthrough including EV_SYN/SYN_REPORT packets
+#![forbid(unsafe_code)]
 
 use super::event::*;
 use alloc::collections::vec_deque::VecDeque;
@@ -587,8 +588,9 @@ pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
 // as the file lives (the one audited deref is below).
 fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
     let devno = file.private_data_ptr().map(|p| {
-        // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime).
-        unsafe { *(p as *const DevNo) }
+        // devfs_open stored a Box<DevNo> (file-lifetime); the read
+        // crosses the audited INV-DRV-RAW edge.
+        crate::drivers::edges::raw_read(p as *const DevNo)
     })?;
     if devno == DEV_EVDEV_KEYBOARD {
         evdev_keyboard()
@@ -667,8 +669,9 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
 // Same contract as device_of_file.
 fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
     let devno = file.private_data_ptr().map(|p| {
-        // SAFETY: as device_of_file (Box<DevNo>, file-lifetime).
-        unsafe { *(p as *const DevNo) }
+        // As device_of_file (Box<DevNo>, file-lifetime); the audited
+        // INV-DRV-RAW edge.
+        crate::drivers::edges::raw_read(p as *const DevNo)
     })?;
     if devno == DEV_EVDEV_KEYBOARD {
         evdev_keyboard().map(|d| (d, devno.minor))
@@ -841,8 +844,8 @@ fn evdev_file_close(file: &File) -> i32 {
     // devfs_open.
     {
         if let Some(ptr) = file.private_data_ptr() {
-            // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime).
-            let devno = unsafe { *(ptr as *const DevNo) };
+            // devfs_open stored a Box<DevNo> (file-lifetime).
+            let devno = crate::drivers::edges::raw_read(ptr as *const DevNo);
             // The file description is going away — drop its epoll
             // notification registration.
             if let Some(dev) = device_of_devno(devno) {
@@ -857,8 +860,9 @@ fn evdev_file_close(file: &File) -> i32 {
                     d.grabbed.store(false, Ordering::Release);
                 }
             }
-            // SAFETY: the Box<DevNo> devfs_open stored (sole ref).
-            drop(unsafe { Box::from_raw(ptr as *mut DevNo) });
+            // The Box<DevNo> devfs_open stored (sole ref); reclaim
+            // crosses the audited INV-DRV-BOX edge.
+            drop(crate::drivers::edges::box_take(ptr as *mut DevNo));
         }
     }
     0
@@ -944,7 +948,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
                 if input_echo_budget(n) {
                     // SAFETY: task is the current task parking here (the
                     // wait-queue callback passes current's raw handle).
-                    let pid = unsafe { (*task).pid() };
+                    let pid = crate::sched::edges::task_shared(task).pid();
                     let mut l = HuntLine::new();
                     l.push(b"INPW[");
                     l.u64(n);
@@ -989,7 +993,7 @@ pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
             let steal = dropped > 1;
             if steal || input_echo_budget(n) {
                 // SAFETY: task is the current task leaving the wait.
-                let pid = unsafe { (*task).pid() };
+                let pid = crate::sched::edges::task_shared(task).pid();
                 let mut l = HuntLine::new();
                 l.push(b"INPW[");
                 l.u64(n);

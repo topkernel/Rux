@@ -2,6 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+#![forbid(unsafe_code)]
 
 //! Framebuffer basic drawing interface
 //!
@@ -51,8 +52,6 @@ pub struct FrameBuffer {
     fb: crate::safety::mmio::MmioRegion,
 }
 
-unsafe impl Send for FrameBuffer {}
-unsafe impl Sync for FrameBuffer {}
 
 impl FrameBuffer {
     /// Create a new Framebuffer

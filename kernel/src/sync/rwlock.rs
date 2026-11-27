@@ -13,6 +13,7 @@
 //!   write_irqsave()  — save IRQ + preempt disable + write lock
 //!   read_bh()        — disable BH + read lock
 //!   write_bh()       — disable BH + write lock
+#![forbid(unsafe_code)]
 
 // (INV-RWLOCK-1: the rwlock family — reader counts and the writer
 // word are atomics with the acquire/release pairing documented at the
@@ -207,12 +208,6 @@ pub struct RwSpinlock<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: RwSpinlock<T> mediates all access to the inner data: shared (&T) via
-// read-locked guards, exclusive (&mut T) via write-locked guards.  Send allows
-// moving between threads; Sync allows shared references across threads because
-// the rwlock serialises access.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlock<T> {}
-unsafe impl<T: ?Sized + Send + Sync> Sync for RwSpinlock<T> {}
 
 impl<T: ?Sized + fmt::Debug> fmt::Debug for RwSpinlock<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -340,7 +335,7 @@ impl<T> RwSpinlock<T> {
     /// # Safety
     /// Caller must ensure no other thread holds a reference to the lock or data.
     #[inline]
-    pub unsafe fn into_inner(self) -> T {
+    pub fn into_inner(self) -> T {
         self.data.into_inner()
     }
 }
@@ -351,16 +346,13 @@ pub struct RwSpinlockReadGuard<'a, T: ?Sized> {
     lock: &'a RwSpinlock<T>,
 }
 
-// SAFETY: ReadGuard exists only while a read lock is held, preventing any
-// writer from obtaining exclusive access to the data.
-unsafe impl<T: ?Sized + Sync> Send for RwSpinlockReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Read lock is held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -378,16 +370,13 @@ pub struct RwSpinlockWriteGuard<'a, T: ?Sized> {
     lock: &'a RwSpinlock<T>,
 }
 
-// SAFETY: WriteGuard exists only while the write lock is held exclusively,
-// so no other thread can access the data.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlockWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Write lock is held exclusively — no concurrent access.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -395,7 +384,7 @@ impl<T: ?Sized> DerefMut for RwSpinlockWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Write lock is held exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 
@@ -414,16 +403,13 @@ pub struct RwSpinlockIrqReadGuard<'a, T: ?Sized> {
     flags: bool,
 }
 
-// SAFETY: IrqReadGuard exists only while a read lock + IRQ disable is held,
-// preventing any writer from accessing the data.
-unsafe impl<T: ?Sized + Sync> Send for RwSpinlockIrqReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockIrqReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Read lock is held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -443,16 +429,13 @@ pub struct RwSpinlockIrqWriteGuard<'a, T: ?Sized> {
     flags: bool,
 }
 
-// SAFETY: IrqWriteGuard exists only while the write lock + IRQ disable is
-// held exclusively, so no other thread can access the data.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlockIrqWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockIrqWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Write lock is held exclusively — no concurrent access.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -460,7 +443,7 @@ impl<T: ?Sized> DerefMut for RwSpinlockIrqWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Write lock is held exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 
@@ -479,16 +462,13 @@ pub struct RwSpinlockBhReadGuard<'a, T: ?Sized> {
     lock: &'a RwSpinlock<T>,
 }
 
-// SAFETY: BhReadGuard exists only while a read lock + BH disable is held,
-// preventing any writer from accessing the data.
-unsafe impl<T: ?Sized + Sync> Send for RwSpinlockBhReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockBhReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Read lock is held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -506,16 +486,13 @@ pub struct RwSpinlockBhWriteGuard<'a, T: ?Sized> {
     lock: &'a RwSpinlock<T>,
 }
 
-// SAFETY: BhWriteGuard exists only while the write lock + BH disable is
-// held exclusively, so no other thread can access the data.
-unsafe impl<T: ?Sized + Send> Send for RwSpinlockBhWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwSpinlockBhWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: Write lock is held exclusively — no concurrent access.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -523,7 +500,7 @@ impl<T: ?Sized> DerefMut for RwSpinlockBhWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: Write lock is held exclusively — no other access possible.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 

@@ -9,6 +9,7 @@
 //! - PS/2 driver (x86 compatible, not available on RISC-V)
 //! - evdev character device interface
 //! - Input event definitions
+#![forbid(unsafe_code)]
 
 use crate::println;
 use alloc::sync::Arc;
@@ -56,7 +57,7 @@ pub static INPUT_POINTER: Spinlock<Option<VirtioInputDevice>> = Spinlock::new(No
 /// virtio-input probe, scheduled by the hard-IRQ top half.
 // SAFETY: touched from the probe (single-threaded init context) and from
 // tasklet_schedule in hard-IRQ context, which is the API's designed use.
-static mut INPUT_BH_TASKLET: crate::interrupt::tasklet::TaskletStruct =
+pub(crate) static mut INPUT_BH_TASKLET: crate::interrupt::tasklet::TaskletStruct =
     crate::interrupt::tasklet::TaskletStruct::new();
 
 /// dev_id → ISR capability address for the registered input functions
@@ -239,7 +240,7 @@ pub fn init_virtio_input() -> (usize, usize) {
 
     // Arm the bottom-half tasklet before any device IRQ is registered
     // (single-threaded kernel-init context).
-    unsafe { INPUT_BH_TASKLET.init(input_bh_run) };
+    crate::drivers::edges::input_bh_tasklet_init(input_bh_run);
 
     // Probe VirtIO Input devices via the shared ECAM walker (0x8000 stride
     // per slot + all 8 functions). The old inline walk here enumerated

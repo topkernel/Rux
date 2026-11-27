@@ -5,6 +5,7 @@
 //! Interrupt controller driver
 //!
 //! Supports GICv3 (ARM64), PLIC (RISC-V64), and CLINT (RISC-V64)
+#![forbid(unsafe_code)]
 
 
 #[cfg(feature = "aarch64")]

@@ -34,6 +34,7 @@
 //! The module is deliberately small: `T: Copy` for the const
 //! initializer (per-row constructors can come later), and the GRQ
 //! typed lock key named in §3 is the follow-on slice, not this one.
+#![forbid(unsafe_code)]
 
 // (INV-PERCPU-1: the per-CPU bank family — banks are addressed by
 // cpu id through the fixed static array (bounds by construction on
@@ -59,14 +60,14 @@ pub fn reentry_events() -> usize {
 /// share one (the allocator rows are written under IF=0 on every
 /// fast-path op — line splitting between CPUs is measurable traffic).
 #[repr(C, align(64))]
-struct Row<T> {
-    val: T,
+pub(crate) struct Row<T> {
+    pub(crate) val: T,
     // Plain bool, not AtomicBool: the flag is only ever read/written
     // by the cpu that owns the row, under the same IF=0 exclusivity
     // that guards `val` (an atomic would buy nothing and forfeit the
     // Copy bound the const row initializer needs). Stores go through
     // the raw pointer in the guard, never through a shared reference.
-    in_use: bool,
+    pub(crate) in_use: bool,
 }
 
 // Row participates in const array-repeat initialization (`[Row { .. };
@@ -106,9 +107,6 @@ pub struct CpuLocal<T, const N: usize> {
     rows: UnsafeCell<[Row<T>; N]>,
 }
 
-// SAFETY: see the struct comment — rows are cpu-private by
-// construction of `with`.
-unsafe impl<T, const N: usize> Sync for CpuLocal<T, N> {}
 
 impl<T: Copy, const N: usize> CpuLocal<T, N> {
     /// Const constructor: every cpu's row starts as a copy of `val`.
@@ -144,14 +142,11 @@ impl<T, const N: usize> CpuLocal<T, N> {
         // second live guard, so the &mut handed out is exclusive. All
         // access goes through raw pointers derived from the UnsafeCell
         // — never through a `&`-path (the D-7 incident family).
-        let row = unsafe { rows.cast::<Row<T>>().add(cpu) }; // *mut Row<T>
-        let (val, in_use): (*mut T, *mut bool) = unsafe {
-            (
-                core::ptr::addr_of_mut!((*row).val),
-                core::ptr::addr_of_mut!((*row).in_use),
-            )
-        };
-        if unsafe { *in_use } {
+        // The raw row walk crosses the audited INV-SY-6 edge.
+        let row = crate::sync::edges::cpu_local_row_ptr(rows, cpu); // *mut Row<T>
+        let (val, in_use): (*mut T, *mut bool) =
+            crate::sync::edges::cpu_local_field_ptrs(row);
+        if crate::sync::edges::cpu_local_in_use(in_use) {
             // Same slot, same cpu, a guard is already live (the outer
             // window still holds — flags were saved with IRQs already
             // off and false restores nothing). Refuse the alias,
@@ -162,9 +157,9 @@ impl<T, const N: usize> CpuLocal<T, N> {
             crate::arch::cpu::restore_irq(flags);
             return None;
         }
-        unsafe { *in_use = true };
+        crate::sync::edges::cpu_local_in_use_set(in_use, true);
         let guard = CpuLocalRef {
-            val: unsafe { &mut *val },
+            val: crate::sync::edges::cpu_local_val(val),
             cpu,
             flags,
             preempt_guard: false,
@@ -214,23 +209,20 @@ impl<T, const N: usize> CpuLocal<T, N> {
         // access — the r8final divergence family); interrupt context is
         // excluded by the caller-side routing documented on this method.
         // The in_use flag read/set refuses a second live guard.
-        let row = unsafe { rows.cast::<Row<T>>().add(cpu) }; // *mut Row<T>
-        let (val, in_use): (*mut T, *mut bool) = unsafe {
-            (
-                core::ptr::addr_of_mut!((*row).val),
-                core::ptr::addr_of_mut!((*row).in_use),
-            )
-        };
-        if unsafe { *in_use } {
+        // The raw row walk crosses the audited INV-SY-6 edge.
+        let row = crate::sync::edges::cpu_local_row_ptr(rows, cpu); // *mut Row<T>
+        let (val, in_use): (*mut T, *mut bool) =
+            crate::sync::edges::cpu_local_field_ptrs(row);
+        if crate::sync::edges::cpu_local_in_use(in_use) {
             // Same refusal semantics as `with` (see there).
             REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
             crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
             crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
             return None;
         }
-        unsafe { *in_use = true };
+        crate::sync::edges::cpu_local_in_use_set(in_use, true);
         let guard = CpuLocalRef {
-            val: unsafe { &mut *val },
+            val: crate::sync::edges::cpu_local_val(val),
             cpu,
             flags: false,
             preempt_guard: true,
@@ -284,9 +276,9 @@ impl<T> DerefMut for CpuLocalRef<'_, T> {
 impl<T> Drop for CpuLocalRef<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: same-cpu exclusivity still holds until the restore
-        // below; the raw store is the only writer.
-        unsafe { *self.in_use = false };
+        // Same-cpu exclusivity still holds until the restore below;
+        // the raw store (INV-SY-6 edge) is the only writer.
+        crate::sync::edges::cpu_local_in_use_set(self.in_use, false);
         if self.preempt_guard {
             crate::interrupt::preempt::preempt_count_sub(
                 crate::interrupt::preempt::PREEMPT_OFFSET,

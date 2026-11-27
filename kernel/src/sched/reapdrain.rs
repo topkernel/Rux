@@ -50,6 +50,7 @@
 //! a task whose frame is truly abandoned passes every leg and its
 //! stack is unreachable by construction (stacks are per-task and the
 //! tp register no longer names it on any hart).
+#![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -107,11 +108,11 @@ pub struct ReapClaim(core::ptr::NonNull<Task>);
 static CLAIM_DROPPED: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
-// The claim crosses CPUs by design (reaper mints, the ticking CPU
-// burns); the exclusivity is the linear type itself plus the
-// unreachability contract minted on — the same Send/Sync declaration
-// every queue handle in this subsystem carries.
-unsafe impl Send for ReapClaim {}
+// The Send commitment moved to the subsystem's one audited unsafe
+// file (crate::sched::edges, unsafe.rs) — mainline consolidation: the
+// claim crosses CPUs by design (reaper mints, the ticking CPU burns);
+// the exclusivity is the linear type itself plus the unreachability
+// contract minted on.
 
 impl ReapClaim {
     /// Mint the storage-free obligation for `task`.
@@ -140,11 +141,11 @@ impl ReapClaim {
     /// alive by postponing the free).
     #[inline]
     fn task(&self) -> &Task {
-        // SAFETY: the claim owns the free; until into_free runs the
-        // page is mapped and immutable to everyone else (DEAD,
-        // unlinked) — the same argument every task_shared caller
-        // makes, now with the obligation typed.
-        unsafe { self.0.as_ref() }
+        // The claim owns the free; until into_free runs the page is
+        // mapped and immutable to everyone else (DEAD, unlinked) —
+        // the same argument every task_shared caller makes, now with
+        // the obligation typed. Crosses the audited INV-SCE-2 edge.
+        crate::sched::edges::task_shared(self.0.as_ptr())
     }
 
     /// The channel boundary: hand the obligation back to a

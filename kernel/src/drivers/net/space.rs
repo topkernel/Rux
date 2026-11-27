@@ -3,6 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Network device base class
+#![forbid(unsafe_code)]
 
 use crate::net::buffer::SkBuff;
 use crate::sync::spinlock::Spinlock;
@@ -103,12 +104,6 @@ pub struct NetDevice {
     pub rx_queue_len: u32,
 }
 
-unsafe impl Send for NetDevice {}
-// SAFETY (round-5): NetDevice's cross-thread state (stats, flags) is
-// mutated under the NetRx softirq / syscall discipline each op
-// documents; the priv_ raw slot is driver-owned and set before
-// registration. Sync was implicit in the old `static mut` usage.
-unsafe impl Sync for NetDevice {}
 
 /// Device status flags
 pub mod dev_flags {

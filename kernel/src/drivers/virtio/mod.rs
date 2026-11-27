@@ -3,6 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! VirtIO block device driver
+#![forbid(unsafe_code)]
 
 use crate::sync::spinlock::{Spinlock, SpinlockIrqGuard};
 
@@ -82,12 +83,6 @@ pub struct VirtIOBlkDevice {
     queue_size: u16,
 }
 
-// SAFETY: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks
-// serialize all mutable access to shared fields.
-unsafe impl Send for VirtIOBlkDevice {}
-// SAFETY: All shared state is protected by Spinlocks (irqsafe where needed),
-// ensuring no data races across threads/CPUs.
-unsafe impl Sync for VirtIOBlkDevice {}
 
 impl VirtIOBlkDevice {
     /// Create new VirtIO block device
@@ -1029,52 +1024,29 @@ static VIRTIO_BLK: crate::safety::slot::OnceSlot<VirtIOBlkDevice> =
 
 /// Maximum number of PCI virtio-blk disks (OH boots six: updater/system/
 /// vendor/sys_prod/chip_prod/userdata as vda..vdf; two spare letters).
-pub const MAX_PCI_BLK_DISKS: usize = 8;
-
-// ============================================================================
-// SUBMIT-2X: pooled io_bufs (per-CPU 64-byte free lists)
-//
-// Every virtio-blk chain allocates one 64-byte header+resp block (the
-// R17-C combined allocation) at submit and frees it at completion. At
-// depth-1 4 KiB direct-I/O rates that is two global-allocator lock
-// round trips per I/O (alloc on the submitting CPU, dealloc on the
-// completion CPU) plus the allocator's size-class search — measured as
-// a named residual on the dio-conc open list ("64 B io_buf alloc/free
-// per request"). The pool below keeps one free list per CPU behind an
-// uncontended IRQ-save spinlock (the walker frees in hardirq on the
-// COMPLETION CPU, so plain per-CPU data is not enough); overflow
-// drains to the heap, underflow refills from it.
-//
-// Lifetime shape is unchanged from the heap free this replaces: a
-// buffer enters the pool only after its chain's used-ring entry was
-// consumed by the walker (device done DMA-ing the response byte) or
-// after a submit error path that built no chain. The timeout/abandon
-// path keeps its deliberate leak (R21-N2) by simply not returning the
-// buffer. Buffers parked in the pool carry the intrusive next pointer
-// in their first 8 bytes; alloc re-initializes the header before any
-// chain sees it.
-// ============================================================================
-
-/// Size/align of the pooled io_buf (the R17-C header+resp block).
-const IO_BUF_LAYOUT: alloc::alloc::Layout = unsafe {
-    // SAFETY: 64 with align 16 is a valid layout (const-stable unwrap on
-    // an infallible constructor).
-    alloc::alloc::Layout::from_size_align_unchecked(64, 16)
+// The io_buf pool family moved to the subsystem's one audited unsafe
+// file (crate::drivers::edges) — mainline consolidation; these
+// re-exports keep the crate::drivers::virtio:: paths stable.
+pub(crate) use crate::drivers::edges::{
+    io_buf_alloc, io_buf_free, io_buf_init, io_buf_release,
+    begin_delivery, deliver_completion,
 };
+
+pub const MAX_PCI_BLK_DISKS: usize = 8;
 /// Per-CPU pool depth cap. Deep enough to ride out bursty windows
 /// (a 64-request read window submits 64 chains from one CPU) without
 // unbounded retention; excess frees go to the heap.
-const IO_BUF_POOL_CAP: usize = 256;
+pub(crate) const IO_BUF_POOL_CAP: usize = 256;
 
-struct IoBufFreelist {
+pub(crate) struct IoBufFreelist {
     /// Parked-buffer chain head, 0 = empty. Stored as usize (address);
     /// the intrusive next pointer lives in the first 8 bytes of each
     /// parked buffer.
-    head: usize,
-    count: usize,
+    pub(crate) head: usize,
+    pub(crate) count: usize,
 }
 
-static IO_BUF_POOLS: [Spinlock<IoBufFreelist>; crate::config::MAX_CPUS] =
+pub(crate) static IO_BUF_POOLS: [Spinlock<IoBufFreelist>; crate::config::MAX_CPUS] =
     [const {
         Spinlock::new(IoBufFreelist {
             head: 0,
@@ -1082,112 +1054,6 @@ static IO_BUF_POOLS: [Spinlock<IoBufFreelist>; crate::config::MAX_CPUS] =
         })
     }; crate::config::MAX_CPUS];
 
-/// Allocate one 64-byte io_buf: per-CPU pool first, heap on underflow.
-/// Returns null on heap OOM (callers already handle that shape).
-pub(crate) fn io_buf_alloc() -> *mut u8 {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu < IO_BUF_POOLS.len() {
-        let mut pl = IO_BUF_POOLS[cpu].lock_irqsave();
-        if pl.head != 0 {
-            // SAFETY: parked buffers were allocated with IO_BUF_LAYOUT;
-            // the first 8 bytes hold the intrusive next pointer.
-            let p = pl.head as *mut u8;
-            pl.head = unsafe { *(p as *mut usize) };
-            pl.count -= 1;
-            return p;
-        }
-    }
-    // SAFETY: IO_BUF_LAYOUT is a non-zero-size valid layout.
-    unsafe { alloc::alloc::alloc(IO_BUF_LAYOUT) }
-}
-
-/// Return one 64-byte io_buf: per-CPU pool while under the cap, heap
-/// beyond it. `p` must have come from `io_buf_alloc` (or an identical
-/// 64/16 heap allocation) and must be dead from the device's point of
-/// view (see the lifetime note above).
-pub(crate) fn io_buf_free(p: *mut u8) {
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu < IO_BUF_POOLS.len() {
-        let mut pl = IO_BUF_POOLS[cpu].lock_irqsave();
-        if pl.count < IO_BUF_POOL_CAP {
-            // SAFETY: p is a live 64-byte, 16-aligned block; parking the
-            // next pointer in its first 8 bytes is safe because every
-            // consumer re-initializes the header before use.
-            unsafe { *(p as *mut usize) = pl.head };
-            pl.head = p as usize;
-            pl.count += 1;
-            return;
-        }
-    }
-    // SAFETY: p was allocated with IO_BUF_LAYOUT.
-    unsafe { alloc::alloc::dealloc(p, IO_BUF_LAYOUT) };
-}
-
-/// Split one pooled 64-byte io_buf into its typed halves and
-/// initialize them (INV-SAFECALL-1: header at offset 0, response at
-/// +48 — the R17-C combined block; THE one audited carve edge for the
-/// pool shape; `io_buf` must come from `io_buf_alloc`).
-pub(crate) fn io_buf_init(
-    io_buf: *mut u8,
-    type_: u32,
-    sector: u64,
-) -> (*mut queue::VirtIOBlkReqHeader, *mut queue::VirtIOBlkResp) {
-    // SAFETY: io_buf is non-null (callers check), 64 bytes, 16-aligned;
-    // +48 leaves 16 bytes for the response — both in bounds. The
-    // initializations follow immediately.
-    unsafe {
-        let header_ptr = io_buf as *mut queue::VirtIOBlkReqHeader;
-        let resp_ptr = io_buf.add(48) as *mut queue::VirtIOBlkResp;
-        *header_ptr = queue::VirtIOBlkReqHeader {
-            type_,
-            reserved: 0,
-            sector,
-        };
-        (*resp_ptr).status = 0xFF;
-        (header_ptr, resp_ptr)
-    }
-}
-
-/// Release a pending entry's io block: the per-CPU pool when the layout
-/// is the pooled R17-C shape, the heap otherwise (INV-SAFECALL-1: the
-/// ONE audited free edge for the pending-walker family; `ptr`/`layout`
-/// come from a PendingIo the walker just retired).
-pub(crate) fn io_buf_release(ptr: *mut u8, layout: alloc::alloc::Layout) {
-    if ptr.is_null() {
-        return; // tombstone shape: nothing was ever allocated
-    }
-    if layout.size() == IO_BUF_LAYOUT.size() && layout.align() == IO_BUF_LAYOUT.align() {
-        io_buf_free(ptr);
-    } else {
-        // SAFETY: dealloc with the exact layout the submitter allocated
-        // with (non-pool shape).
-        unsafe { alloc::alloc::dealloc(ptr, layout) };
-    }
-}
-
-/// Deliver a pending entry's completion (INV-SAFECALL-1: the ONE
-/// audited deref edge; the delivering-protocol count taken under the
-/// table lock keeps the IoCompletion (and its waiter's stack) alive
-/// across the call).
-/// Mark a pending's completion as under delivery (the walker-vs-abandon
-/// handshake; same audited-deref discipline as [`deliver_completion`]).
-pub(crate) fn begin_delivery(completion: *mut crate::fs::io_completion::IoCompletion) {
-    // SAFETY: the count protocol keeps the IoCompletion alive; callers
-    // hold the pending-table lock that serializes the handshake.
-    unsafe { (*completion).begin_delivery(); }
-}
-
-pub(crate) fn deliver_completion(
-    completion: *mut crate::fs::io_completion::IoCompletion,
-    status: i32,
-    token: usize,
-) {
-    // SAFETY: see doc — count protocol + retire order.
-    unsafe {
-        (*completion).complete_with_token(status, token);
-        (*completion).end_delivery();
-    }
-}
 
 /// PCI virtio-blk devices (one per slot; slot 0 is the boot disk when the
 /// boot probe found PCI disks). Each slot owns its complete I/O engine:
@@ -1257,29 +1123,6 @@ static PCI_BLK_HOLDER_CTX: [core::sync::atomic::AtomicU32; MAX_PCI_BLK_DISKS] =
 static PCI_BLK_SPIN_PRINT_AT: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
 
-/// Capture the caller's return address (the virtio acquire site) for
-/// holder forensics — same technique as spinlock.rs's
-/// caller_return_address().
-#[inline]
-fn pci_blk_acquire_site() -> usize {
-    let ra: usize;
-    #[cfg(feature = "riscv64")]
-    // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(feature = "x86_64")]
-    // SAFETY: frame pointers are forced on, so [rbp+8] is this inlined
-    // helper's caller's return address.
-    unsafe {
-        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
-    {
-        ra = 0;
-    }
-    ra
-}
 
 /// Lock-free console byte (the holder may be wedged holding printk's
 /// lock — same discipline as RawSpinlock::deadlock_warn).
@@ -1287,7 +1130,7 @@ fn pci_blk_acquire_site() -> usize {
 fn wedge_put(b: u8) {
     // SAFETY: putchar_no_lock is a byte-wise polling UART write usable
     // from any context, including with interrupts disabled.
-    unsafe { crate::console::putchar_no_lock(b) }
+    crate::console::putchar_no_lock(b)
 }
 
 /// Lock-free hex printer (usize, no leading zeros beyond the top nibble
@@ -1458,7 +1301,7 @@ pub(crate) fn pci_blk_lock(slot: usize) -> PciBlkGuard {
     // with a print-at-first-contention version: 50 transient holds in
     // 3 min of dd/sync churn, all held_ms=0).
     const CONTEND_SPIN: u32 = 100_000_000;
-    let site = pci_blk_acquire_site();
+    let site = crate::drivers::edges::pci_blk_acquire_site_raw();
     let mut i = 0u32;
     while i < CONTEND_SPIN {
         if let Some(g) = PCI_BLK_LOCKS[slot].try_lock_irqsave() {
@@ -1490,7 +1333,7 @@ pub(crate) fn pci_blk_lock(slot: usize) -> PciBlkGuard {
 /// returns) — the restart loop / ksoftirqd / the next IRQ each get a
 /// fresh chance while task-context holders always win the race.
 pub(crate) fn pci_blk_lock_defer(slot: usize, tries: u32) -> Option<PciBlkGuard> {
-    let site = pci_blk_acquire_site();
+    let site = crate::drivers::edges::pci_blk_acquire_site_raw();
     let mut i = 0u32;
     while i < tries {
         if let Some(g) = PCI_BLK_LOCKS[slot].try_lock_irqsave() {
@@ -1571,7 +1414,7 @@ static VIRTIO_MMIO_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync
 const MAX_PENDING_IO: usize = 16;
 
 /// Pending async I/O request for MMIO VirtIO.
-struct PendingIo {
+pub(crate) struct PendingIo {
     /// Completion token to signal when done. NULL = TOMBSTONE: the entry
     /// exists only to keep the chain's descriptor window reserved until
     /// the completion walker consumes the chain's used-ring entry. Used
@@ -1638,9 +1481,6 @@ struct PendingIo {
     n_descs: u16,
 }
 
-// SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
-// from IRQ/softirq context; raw pointers within are not shared across threads.
-unsafe impl Send for PendingIo {}
 
 /// Pending async I/O requests for MMIO VirtIO block device.
 /// Indexed by (expected_used_idx % MAX_PENDING_IO).
@@ -2000,7 +1840,7 @@ pub fn pci_pending_slot_reservable_len(
     // a redundant second acquisition inside that window (one of the 5
     // per-submit acquisitions the dio-conc open list named).
     // SAFETY: BLK lock held by the caller on this disk.
-    let table = unsafe { PCI_BLK_PENDING[disk].get_ref() };
+    let table = PCI_BLK_PENDING[disk].get_ref();
     if table[slot].is_some() {
         return false;
     }
@@ -2040,7 +1880,7 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
     // SUBMIT-2X: BLK lock held by the caller serializes the table —
     // direct access, no second lock acquisition inside the window.
     // SAFETY: BLK lock held by the caller on this disk.
-    let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
+    let table = PCI_BLK_PENDING[disk].get_mut_unchecked();
     debug_assert!(
         table[slot].is_none()
             || !table.iter().any(|e| match e {
@@ -2087,7 +1927,7 @@ pub fn pci_flag_sync_tombstone_timed_out(disk: usize, ordinal: u16) {
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
     // SUBMIT-2X: caller holds the BLK lock (see pci_publish_sync_chain).
     // SAFETY: BLK lock held by the caller on this disk.
-    let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
+    let table = PCI_BLK_PENDING[disk].get_mut_unchecked();
     if let Some(p) = table[slot].as_mut() {
         if p.completion.is_null() {
             p.timed_out = true;
@@ -2149,7 +1989,7 @@ pub fn abandon_pending_completion(
     for disk in 0..MAX_PCI_BLK_DISKS {
         let _blk = pci_blk_lock(disk);
         // SAFETY: BLK lock held on this disk; abandon only tombstones.
-        let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
+        let table = PCI_BLK_PENDING[disk].get_mut_unchecked();
         for slot in table.iter_mut() {
             if let Some(p) = slot {
                 if p.completion == comp && !p.completion.is_null() {
@@ -2241,7 +2081,7 @@ pub fn abandon_pending_completion(
     // IoCompletion usually lives on its kernel stack: without this
     // handoff, a late complete() fired into the recycled stack page was
     // the wandering corruption behind ftest01's cross-file bad-verify.
-    if !unsafe { (*comp).wait_deliveries() } {
+    if !crate::drivers::edges::raw_ref(comp).wait_deliveries() {
         crate::pr_err!(
             "virtio: delivery handoff overran spin budget during abandon"
         );
@@ -2491,7 +2331,7 @@ fn pci_submit_data_async_sg(
                     // second table lock (was one of the 5 per-submit
                     // acquisitions).
                     // SAFETY: BLK lock held (the _guard above).
-                    let table = unsafe { PCI_BLK_PENDING[slot].get_mut_unchecked() };
+                    let table = PCI_BLK_PENDING[slot].get_mut_unchecked();
                     table[prev_expected as usize % MAX_PENDING_IO_PCI] = Some(PendingIo {
                         completion: completion as *const _ as *mut _,
                         resp_ptr: resp_ptr as *mut u8,
@@ -3104,7 +2944,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                     // takes the same lock) — direct access, no second
                     // table-lock acquisition per completed chain.
                     // SAFETY: BLK lock held (the _guard above).
-                    let table = unsafe { PCI_BLK_PENDING[slot].get_mut_unchecked() };
+                    let table = PCI_BLK_PENDING[slot].get_mut_unchecked();
                     let positional_match = match table[ordinal_slot].as_ref() {
                         Some(p) => p.head_desc == entry_id,
                         None => false,
@@ -3139,9 +2979,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                     // ftest01 "2048*25 bad verify" wandering corruption).
                     if let Some(p) = fired.as_ref() {
                         if !p.completion.is_null() {
-                            unsafe {
-                                (*p.completion).begin_delivery();
-                            }
+                            crate::drivers::edges::begin_delivery(p.completion);
                         }
                     }
                 }
@@ -3711,7 +3549,7 @@ pub fn get_pci_gen_disk_at(slot: usize) -> Option<&'static GenDisk> {
         return None;
     }
     // SAFETY: get_disk returns a valid raw pointer to a registered GenDisk.
-    crate::drivers::blkdev::get_disk(8 + slot as u32).map(|ptr| unsafe { &*ptr })
+    crate::drivers::blkdev::get_disk(8 + slot as u32).map(|ptr| crate::drivers::edges::raw_ref(ptr))
 }
 
 /// Resolve a vdX disk NAME to its GenDisk ("vdb" -> slot 1). Returns None

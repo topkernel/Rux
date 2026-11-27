@@ -2,6 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+#![forbid(unsafe_code)]
 
 //! Simplified framebuffer driver (for QEMU RISC-V virt platform)
 //!

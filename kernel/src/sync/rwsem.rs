@@ -96,6 +96,7 @@
 //! NOT usable from interrupt context (a waiter must be able to call
 //! `schedule()`). `try_read`/`try_write` never sleep and are safe
 //! anywhere (the fuxstuck census relies on this).
+#![forbid(unsafe_code)]
 
 // (INV-RWSEM-1: the rwsem family — the count word's atomic protocol
 // pairs with the waitqueue; guard derefs ride the held semaphore
@@ -209,13 +210,6 @@ pub struct RwSemaphore {
     name: &'static str,
 }
 
-// SAFETY: same contract as WaitQueueHead/SleepMutex — the raw task
-// pointers inside the wait list are only ever passed to
-// sched::wake_up_process (whose own guards handle stale targets);
-// every list mutation is serialized by wait_lock; a queued waiter
-// cannot exit (UNINTERRUPTIBLE), so entries never dangle.
-unsafe impl Send for RwSemaphore {}
-unsafe impl Sync for RwSemaphore {}
 
 impl RwSemaphore {
     pub const fn new(name: &'static str) -> Self {
@@ -1141,10 +1135,6 @@ pub struct Rwsem<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: Rwsem<T> mediates all access to the inner data: shared (&T)
-// via read-locked guards, exclusive (&mut T) via write-locked guards.
-unsafe impl<T: ?Sized + Send> Send for Rwsem<T> {}
-unsafe impl<T: ?Sized + Send + Sync> Sync for Rwsem<T> {}
 
 impl<T: ?Sized + fmt::Debug> fmt::Debug for Rwsem<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1228,16 +1218,13 @@ pub struct RwsemReadGuard<'a, T: ?Sized> {
     lock: &'a Rwsem<T>,
 }
 
-// SAFETY: guard exists only while the read lock is held, preventing
-// any writer from obtaining exclusive access to the data.
-unsafe impl<T: ?Sized + Sync> Send for RwsemReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwsemReadGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: read lock held — no &mut access can occur concurrently.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -1252,15 +1239,13 @@ pub struct RwsemWriteGuard<'a, T: ?Sized> {
     lock: &'a Rwsem<T>,
 }
 
-// SAFETY: guard exists only while the write lock is held exclusively.
-unsafe impl<T: ?Sized + Send> Send for RwsemWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwsemWriteGuard<'_, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: write lock held exclusively.
-        unsafe { &*self.lock.data.get() }
+        crate::sync::edges::cell_ref(&self.lock.data)
     }
 }
 
@@ -1268,7 +1253,7 @@ impl<T: ?Sized> DerefMut for RwsemWriteGuard<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: write lock held exclusively.
-        unsafe { &mut *self.lock.data.get() }
+        crate::sync::edges::cell_mut(&self.lock.data)
     }
 }
 

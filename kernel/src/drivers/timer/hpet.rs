@@ -33,6 +33,7 @@
 //!   start at the latched value and track virtual time;
 //! - GEN_CFG.LEGACY_RT_CNF (bit 1) must stay CLEAR so the PIT (IRQ0
 //!   fallback tick + calibration window) keeps working.
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

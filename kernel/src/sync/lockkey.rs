@@ -42,6 +42,7 @@
 //! The IRQ-save/preempt discipline is deliberately NOT part of the key:
 //! that window is typed by CpuLocal's guard (D-7); the key types only
 //! the ORDER fact. One mechanism per concern.
+#![forbid(unsafe_code)]
 
 use core::marker::PhantomData;
 
@@ -123,13 +124,10 @@ impl CanNestInside<FutexBucketKey> for WaiterSlotKey {}
 /// acquire paths inline to the same instructions; the ONLY new API is
 /// `lock_nested`, the compile-checked nesting acquisition.
 pub struct KeyedRawSpinlock<K: NestKey> {
-    raw: RawSpinlock,
+    pub(crate) raw: RawSpinlock,
     _key: PhantomData<K>,
 }
 
-// SAFETY: RawSpinlock's atomic protocol is the synchronization; the
-// key is zero-sized and carries no data.
-unsafe impl<K: NestKey> Sync for KeyedRawSpinlock<K> {}
 
 impl<K: NestKey> KeyedRawSpinlock<K> {
     pub const fn new() -> Self {
@@ -239,9 +237,6 @@ pub struct KeyedSpinlock<K: NestKey, T> {
     _key: PhantomData<K>,
 }
 
-// SAFETY: same rule as Spinlock itself — the atomic protocol
-// synchronizes; the key is zero-sized and carries no data.
-unsafe impl<K: NestKey, T: Send> Sync for KeyedSpinlock<K, T> {}
 
 impl<K: NestKey, T> KeyedSpinlock<K, T> {
     pub const fn new(data: T) -> Self {
@@ -331,7 +326,7 @@ pub struct KeyedGuard<'a, K: NestKey> {
 impl<K: NestKey> Drop for KeyedGuard<'_, K> {
     #[inline]
     fn drop(&mut self) {
-        unsafe { (*self.lock).raw.unlock() };
+        crate::sync::edges::keyed_raw_unlock(self.lock);
     }
 }
 

@@ -18,6 +18,13 @@
 //! 4. fair_sched_class - CFS
 //! 5. idle_sched_class - Per-CPU idle task
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): the former `edges` collection renamed to
+// `unsafe.rs` on disk (2026-11-25 edges->unsafe.rs ruling), module
+// named `edges` so every existing call site stays stable. It holds the
+// whole subsystem's unsafe: the INV-SCE edges, the former side_edges
+// entries, and every Send/Sync commitment.
+#[path = "unsafe.rs"]
 pub mod edges;
 pub mod reapdrain;
 pub mod sched;
@@ -30,7 +37,6 @@ pub mod idle;
 pub mod fair;
 pub mod cgroup;
 pub mod wakewatch;
-pub mod side_edges;
 pub mod stats;
 
 pub use sched::{
