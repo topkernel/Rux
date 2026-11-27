@@ -274,33 +274,6 @@ impl EvdevDevice {
 /// Push event (called from softirq context)
 pub fn push_event(&self, event: InputEvent) {
         {
-            // rux:inputtrace (retired dfx=inputtrace): the input arrival trace (release-visible via
-            // the raw UART path — this is the datum that says whether the
-            // guest's event source reaches the device at all). Line
-            // rides the taskdump funnel (obs-hygiene): one atomic write,
-            // not per-byte uart_putc_raw the kmsg flood could splice.
-            if crate::trace::EVENT_INPUTTRACE.armed() {
-                let n = self.events_pushed.fetch_add(1, Ordering::Relaxed);
-                if n < 24 {
-                    let nm: alloc::vec::Vec<u8> = self
-                        .name
-                        .iter()
-                        .take_while(|&&c| c != 0)
-                        .copied()
-                        .collect();
-                    let line = alloc::format!(
-                        "IN-EV n={} name={} type={} code={} val={}\n",
-                        n,
-                        String::from_utf8_lossy(&nm),
-                        event.type_,
-                        event.code,
-                        event.value
-                    );
-                    crate::debug::taskdump::taskdump_raw_line(line.as_bytes());
-                }
-            }
-        }
-        {
             let mut queue = self.event_queue.lock_irqsave();
             if queue.len() >= EVENT_QUEUE_SIZE {
                 queue.pop_front();
@@ -314,7 +287,7 @@ pub fn push_event(&self, event: InputEvent) {
         // wake_up_all() split EMPTY / DELIVERED / REFUSED / STICKY / GONE
         // for every parked poller, with the GRQ linkage snapshot after.
         // Off by default like every tracepoint; the serial echo rides the
-        // same armed() gate with the INEV budget discipline.
+        // same armed() gate with the read-echo budget discipline.
         if crate::trace::EVENT_EVDEV_WAKE.armed() {
             self.wake_pollq_probed();
         } else {
@@ -456,7 +429,7 @@ pub fn push_event(&self, event: InputEvent) {
     /// Read event
     pub fn pop_event(&self) -> Option<InputEvent> {
         let ev = self.event_queue.lock_irqsave().pop_front();
-        // input:evdev_wake hunt: name the consumer even when the INRD
+        // input:evdev_wake hunt: name the consumer even when the read
         // echo tears on the raw UART — one short line per pop (budgeted),
         // first-8-chars device name + remaining depth.
         if ev.is_some() && crate::trace::EVENT_EVDEV_WAKE.armed() {
@@ -720,27 +693,6 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // rig reads its verdict off serial).
                 if crate::trace::EVENT_EVDEV_READ.armed() {
                     crate::trace::trace_evdev_read(node, event.type_, event.code, event.value);
-                    use core::sync::atomic::{AtomicU64, Ordering};
-                    static RD_ECHO_N: AtomicU64 = AtomicU64::new(0);
-                    let n = RD_ECHO_N.fetch_add(1, Ordering::Relaxed);
-                    if input_echo_budget(n) {
-                        let (pid, tgid) = current_pid_tgid();
-                        itt_msg(b"INRD[");
-                        itt_u64(n);
-                        itt_msg(b"] pid=");
-                        itt_u64(pid);
-                        itt_msg(b"(");
-                        itt_u64(tgid);
-                        itt_msg(b") node=event");
-                        itt_u64(node.saturating_sub(64) as u64);
-                        itt_msg(b" type=");
-                        itt_u64(event.type_ as u64);
-                        itt_msg(b" code=");
-                        itt_u64(event.code as u64);
-                        itt_msg(b" value=");
-                        itt_i64(event.value as i64);
-                        itt_msg(b"\n");
-                    }
                 }
                 // rux:inputtrace (retired dfx=inputtrace): the userspace READ hop — pid, which node,
                 // how many events remained after this one. If this prints
@@ -802,40 +754,11 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
     if crate::trace::EVENT_EVDEV_OPEN.armed() {
         latch_opener_pid(crate::process::current_pid() as u32);
     }
-    // The tracepoint path first (it's the policy instrument; the dfx
-    // prints below are the frozen legacy view of the same event).
+    // The tracepoint is the policy instrument (the dfx print family was
+    // deleted with the OH hunt-print sweep).
     if crate::trace::EVENT_EVDEV_OPEN.armed() {
         crate::trace::trace_evdev_open(node);
-        use core::sync::atomic::{AtomicU64, Ordering};
-        static OP_ECHO_N: AtomicU64 = AtomicU64::new(0);
-        let n = OP_ECHO_N.fetch_add(1, Ordering::Relaxed);
-        if n < 64 {
-            let (pid, tgid) = current_pid_tgid();
-            itt_msg(b"INOP[");
-            itt_u64(n);
-            itt_msg(b"] pid=");
-            itt_u64(pid);
-            itt_msg(b"(");
-            itt_u64(tgid);
-            itt_msg(b") node=event");
-            itt_u64(node.saturating_sub(64) as u64);
-            itt_msg(b" file_id=");
-            itt_u64(file.file_id);
-            itt_msg(b"\n");
-        }
     }
-    if !crate::trace::EVENT_INPUTTRACE.armed() {
-        return;
-    }
-    let nm: alloc::vec::Vec<u8> = dev
-        .name
-        .iter()
-        .take_while(|&&c| c != 0)
-        .copied()
-        .collect();
-    let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
-    // obs-hygiene: line-atomic funnel instead of per-byte raw writes.
-    crate::debug::taskdump::taskdump_raw_line(s.as_bytes());
 }
 
 /// evdev close function
@@ -891,32 +814,6 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         if device.has_event() {
             ready |= POLLIN | POLLRDNORM;
         }
-        // rux:inputtrace (retired dfx=inputtrace) (leg-9 epoll hunt): one line per POLL dispatch,
-        // raw-console (loglevel-proof; pr_info is dropped at loglevel=3).
-        // The r13ep2/r13ep3 A/B proved the virtqueues ARE drained during
-        // an epoll-only boot (14 INPTRC) yet epoll_wait returned idle —
-        // this line ties every dispatch to its caller's file and result,
-        // splitting "dispatch never ran" from "dispatch ran, reported
-        // ready, but the waiter still idled". Rate-limited: first 600
-        // then 1-in-50 (a spinning poller must not flood the console).
-        if crate::trace::EVENT_INPUTTRACE.armed() {
-            use core::sync::atomic::{AtomicU64, Ordering};
-            static PL_N: AtomicU64 = AtomicU64::new(0);
-            let n = PL_N.fetch_add(1, Ordering::Relaxed);
-            if n < 600 || n % 50 == 0 {
-                it_msg(b"INPPL[");
-                it_u64(n);
-                it_msg(b"] file=");
-                it_u64(file.file_id);
-                it_msg(b" mask=");
-                it_u64(events as u64);
-                it_msg(b" ready=");
-                it_u64(ready as u64);
-                it_msg(b" has=");
-                it_u64(if device.has_event() { 1 } else { 0 });
-                it_msg(b"\n");
-            }
-        }
     }
     if events & POLLOUT != 0 {
         // evdev is never writable.
@@ -958,7 +855,7 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
                     for &c in device.name.iter().take_while(|&&c| c != 0).take(10) {
                         l.push(&[c]);
                     }
-                    // f= correlates the registration with the INOP open
+                    // f= correlates the registration with the open echo
                     // line (which node this file really is).
                     l.push(b" f=");
                     l.u64(file.file_id);
@@ -1574,85 +1471,6 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
             event.code,
             event.value,
         );
-        use core::sync::atomic::{AtomicU64, Ordering};
-        static ECHO_N: AtomicU64 = AtomicU64::new(0);
-        let n = ECHO_N.fetch_add(1, Ordering::Relaxed);
-        if input_echo_budget(n) {
-            itt_msg(b"INEV[");
-            itt_u64(n);
-            itt_msg(b"] dev=");
-            itt_msg(if is_pointer { b"ptr" } else { b"kbd" });
-            itt_msg(b" type=");
-            itt_u64(event.type_ as u64);
-            itt_msg(b" code=");
-            itt_u64(event.code as u64);
-            itt_msg(b" value=");
-            itt_i64(event.value as i64);
-            itt_msg(b"\n");
-        }
-    }
-
-    if crate::trace::EVENT_INPUTTRACE.armed() {
-        static PN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-        let pn = PN.fetch_add(1, Ordering::Relaxed);
-        if pn < 10 {
-            crate::pr_warn!("IN-PUSH enter #{} is_ptr={}", pn, is_pointer);
-        }
-    }
-
-    // rux:inputtrace (retired dfx=inputtrace): payload trace to hunt phantom event streams. Prints
-    // every event with a monotonically increasing ordinal so serial-log
-    // frequency analysis works; rate-limited so a flooding stream cannot
-    // wedge the serial console; gated by a runtime switch (default OFF).
-    // Writes go through the raw console path (putchar_no_lock), NOT
-    // pr_info!: session boots run loglevel=3, and printk's pre-ring
-    // filter drops KERN_INFO whole — the first deployment of this trace
-    // (leg-6 r6win/r8win runs, kernel with b3af8cfc) silently produced
-    // zero INPTRC lines for exactly that reason. Raw bytes are the same
-    // convention as sched/wakewatch's ww_msg. EV_SYN (type 0) is the
-    // high-rate filler: first 200 then 1-in-1000. Payload events
-    // (type != 0) carry the actual signal: first 500 then 1-in-100,
-    // enough to survive a phantom flood while keeping full detail in
-    // the common case (a quiet -display none boot has no events at
-    // all, so anything printed here IS the anomaly).
-    if crate::trace::EVENT_INPUTTRACE.armed() {
-        use core::sync::atomic::{AtomicU64, Ordering};
-        static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
-        static TRACE_SYN_SEQ: AtomicU64 = AtomicU64::new(0);
-        let is_syn = event.type_ == 0;
-        let print = if is_syn {
-            let n = TRACE_SYN_SEQ.fetch_add(1, Ordering::Relaxed);
-            n < 200 || n % 1000 == 0
-        } else {
-            let n = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
-            n < 500 || n % 100 == 0
-        };
-        if print {
-            let tag = if is_syn { "syn" } else if is_pointer { "ptr" } else { "kbd" };
-            let n = if is_syn {
-                TRACE_SYN_SEQ.load(Ordering::Relaxed)
-            } else {
-                TRACE_SEQ.load(Ordering::Relaxed)
-            };
-            // Hand-rolled formatting on the raw console path (same shape
-            // as sched/wakewatch's ww_msg/ww_u64): this can fire from the
-            // virtio-input IRQ context and must not touch printk locks.
-            it_msg(b"INPTRC[");
-            it_u64(n);
-            it_msg(b"] dev=");
-            it_msg(match tag {
-                "syn" => b"syn",
-                "ptr" => b"ptr",
-                _ => b"kbd",
-            });
-            it_msg(b" type=");
-            it_u64(event.type_ as u64);
-            it_msg(b" code=");
-            it_u64(event.code as u64);
-            it_msg(b" value=");
-            it_i64(event.value as i64);
-            it_msg(b"\n");
-        }
     }
     // Keyboard events feed the Ctrl-Alt-Del detector (SA_CAD semantics):
     // track Ctrl/Alt state and latch on a Delete press with both held.
@@ -1768,118 +1586,6 @@ impl HuntLine {
         // kmsg-flood splice class), not the bare per-byte raw writes.
         crate::debug::taskdump::line_atomic_write(&self.buf[..self.n]);
         self.n = 0;
-    }
-}
-
-// obs-hygiene: the INRD/INOP echo lines were the remaining per-byte
-// writers of the input hunt family — stage them per CPU and flush whole
-// lines through the same emit-lock-coordinated write the HuntLine
-// bursts take, so a kmsg-flood record can no longer splice an INRD line
-// mid-flight (the dhardware "missing lines" class), and two CPUs'
-// echo lines cannot byte-mix (per-CPU stage — the taskdump DUMP_STAGES
-// lesson: a shared stage locked per byte still mixes concurrent
-// writers inside one flushed line).
-struct IttStage {
-    buf: [u8; 128],
-    n: usize,
-}
-
-static ITT_STAGES: [crate::sync::spinlock::Spinlock<IttStage>; crate::config::MAX_CPUS] =
-    [const {
-        crate::sync::spinlock::Spinlock::new(IttStage { buf: [0; 128], n: 0 })
-    }; crate::config::MAX_CPUS];
-
-fn itt_msg(msg: &[u8]) {
-    let cpu = (crate::arch::cpu_id() as usize) % crate::config::MAX_CPUS;
-    for &b in msg {
-        let mut st = ITT_STAGES[cpu].lock_irqsave();
-        let at = st.n;
-        st.buf[at] = b;
-        st.n = at + 1;
-        if b == b'\n' || st.n == st.buf.len() {
-            crate::debug::taskdump::line_atomic_write(&st.buf[..st.n]);
-            st.n = 0;
-        }
-    }
-}
-
-fn itt_u64(mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        buf[0] = b'0';
-        n = 1;
-    } else {
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-    }
-    for i in (0..n).rev() {
-        itt_msg(&[buf[i]]);
-    }
-}
-
-fn itt_i64(v: i64) {
-    if v < 0 {
-        itt_msg(b"-");
-        itt_u64(v.unsigned_abs());
-    } else {
-        itt_u64(v as u64);
-    }
-}
-
-/// The current task's (tid, tgid) for the echo lines — the boot-5 hunt
-/// spent a whole taskdump roundtrip to learn that the evdev opener
-/// (pid 618) was audio_server's thread inside tgid 408; carrying the
-/// tgid in the echo names the process at read/open time directly.
-fn current_pid_tgid() -> (u64, u64) {
-    match crate::sched::current() {
-        // SAFETY: cur is the running task; pid/tgid are const reads.
-        Some(cur) => (cur.pid() as u64, cur.tgid() as u64),
-        None => (0, 0),
-    }
-}
-
-// Raw-console writers for the rux:inputtrace (retired dfx=inputtrace) path (same shape as
-// sched/wakewatch's ww_msg/ww_u64): printk is unusable here because the
-// trace must survive loglevel=3 boots, and the callers can be in IRQ
-// context, so no printk locks.
-fn it_msg(msg: &[u8]) {
-    if !cfg!(debug_assertions) { return; } // release: diag output off
-
-    for &b in msg {
-        crate::console::putchar_no_lock(b);
-    }
-}
-
-fn it_u64(mut v: u64) {
-    if !cfg!(debug_assertions) { return; } // release: diag output off
-
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        buf[0] = b'0';
-        n = 1;
-    } else {
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-    }
-    for i in (0..n).rev() {
-        crate::console::putchar_no_lock(buf[i]);
-    }
-}
-
-fn it_i64(v: i64) {
-    if v < 0 {
-        it_msg(b"-");
-        it_u64(v.unsigned_abs());
-    } else {
-        it_u64(v as u64);
     }
 }
 
