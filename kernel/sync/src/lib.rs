@@ -50,6 +50,7 @@ extern crate alloc;
 pub mod futex_diag;
 pub mod condvar;
 pub mod futex;
+pub mod spinlock;
 
 // The framework's whole sync module at the historical path (the union
 // the sibling services consumed — the merged view `pub use sync;` in the

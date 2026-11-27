@@ -10027,17 +10027,6 @@ fn bh_enable() {
     );
 }
 
-// ==================== Free functions (C-style API) ====================
-
-#[inline(always)]
-pub fn raw_spin_lock(l: &RawSpinlock) { l.lock(); }
-#[inline(always)]
-pub fn raw_spin_unlock(l: &RawSpinlock) { l.unlock(); }
-#[inline(always)]
-pub fn raw_spin_is_locked(l: &RawSpinlock) -> bool { l.is_locked() }
-#[inline(always)]
-pub fn raw_spin_trylock(l: &mut RawSpinlock) -> bool { l.try_lock() }
-
 // ═══════════════ rwlock ═════════════════════════════════════════
 // (was rwlock.rs)
 // Read-Write Spinlock
