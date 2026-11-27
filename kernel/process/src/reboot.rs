@@ -299,13 +299,34 @@ pub fn shutdown_cascade(cmd: u32) {
             #[cfg(feature = "riscv64")]
             sbi_legacy_shutdown();
             #[cfg(feature = "x86_64")]
-            machine_park();
+            {
+                // POWER_OFF: the real ACPI S5 edge (Linux machine_power_off
+                // -> pm_power_off). The machine must actually go down
+                // here: this path runs in the CALLER's task context and
+                // never returns, so the calling task ends parked
+                // mid-syscall — exactly Linux's shape (kernel_power_off
+                // never returns to sys_reboot either, and nobody can
+                // observe the parked caller because the machine is gone).
+                // With the old per-CPU machine_park stand-in the OTHER
+                // CPUs kept scheduling: the parked task was observable
+                // (parent wait4 nch=1 nz=0 forever) and QEMU never
+                // exited. HALT keeps power-on semantics: CPUs parked,
+                // machine alive.
+                if cmd != LINUX_REBOOT_CMD_HALT {
+                    crate::println!("reboot: ACPI S5 power off");
+                    crate::boot_edges::x86_acpi_power_off();
+                }
+                machine_park();
+            }
         }
     }
 }
 
-/// Park the CPU with interrupts waiting (x86_64 stand-in for the SBI
-/// shutdown path until an ACPI/8259 reset driver lands).
+/// Park the CPU with interrupts waiting — the LAST-RESORT x86_64
+/// machine-down state, reached only when every real edge (8042/0xcf9
+/// reset pulse for RESTART, ACPI S5 for POWER_OFF) was ignored by the
+/// platform. Parks the calling CPU only; the honest equivalent of
+/// Linux's kernel_halt park when no reset/poweroff edge fires.
 #[cfg(feature = "x86_64")]
 pub(crate) fn machine_park() -> ! {
     loop {

@@ -699,7 +699,7 @@ fdbd7d505d6e	kernel/core/src/boot_edges.rs	panic_hex	103	raw-construct	INV:INV-B
 e94bfed60857	kernel/core/src/boot_edges.rs	rawframes_line	125	volatile,ptr-ops	INV:INV-BOOT-RAWFRAMES-1
 2f92f522ffac	kernel/core/src/boot_edges.rs	x86_panic_reset	171	asm	INV:INV-SYSC-4
 6bed9c96c8ff	kernel/core/src/boot_edges.rs	x86_reboot_pulse	202		INV:INV-SYSC-4
-1858d44c159d	kernel/core/src/boot_edges.rs	sbi_shutdown_ecall	215	asm	INV:INV-SYSC-4
+c3467237788b	kernel/core/src/boot_edges.rs	sbi_shutdown_ecall	247	asm	INV:INV-SYSC-4
 10756d11ad39	kernel/core/src/cmdline.rs	fdt_u8	60		INV:INV-FDT-1
 d49accd56575	kernel/core/src/cmdline.rs	fdt_add	69		INV:INV-FDT-1
 96a27f6b5c50	kernel/core/src/cmdline.rs	fdt_u32	76	ptr-ops	INV:INV-FDT-1

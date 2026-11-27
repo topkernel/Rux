@@ -739,3 +739,8 @@ rux::process::(types::)?TaskBorrow as .*deref::Deref(Mut)?>::deref(_mut)?$
 rux::process::(types::)?TaskRef as .*deref::Deref(Mut)?>::deref(_mut)?$
 rux::process::(hotpath::)?(types::)?current_pgid::\{closure#\d+\}$
 rux::process::(hotpath::)?(types::)?find_task_by_pid$
+
+# --- rebootfix merge gate (2026-11-27): the new x86 ACPI S5 power-off edge
+# (reboot(POWER_OFF) hang fix) exists only in the current build — zero base
+# references, an intentional addition, not a move.
+x86_acpi_power_off$

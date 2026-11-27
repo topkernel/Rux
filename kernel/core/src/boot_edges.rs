@@ -208,6 +208,38 @@ pub fn x86_reboot_pulse() {
     }
 }
 
+/// ACPI S5 power-off — the x86_64 machine_power_off edge (Linux walks
+/// pm_power_off()/ACPI S5 in machine_power_off; Rux had only a per-CPU
+/// park here, which left every OTHER CPU and task alive after a
+/// reboot(POWER_OFF): the calling task stranded mid-syscall, the parent's
+/// wait4 parked forever — the sampler boots never terminated).
+///
+/// Device-side effect owned by the caller (the reboot cascade behind
+/// sys_reboot's CAP_SYS_BOOT gate, or the init-exit fallback); the port
+/// writes themselves are INV-XE-PIO-1-safe (outw touches registers
+/// only). Decoder bases: QEMU q35/ICH9 PMBASE is 0x600 (PM1_CNT at
+/// 0x604); legacy i440fx/piix4 PMBASE is 0xB000 (PM1_CNT 0xB004) — on a
+/// given machine exactly one decodes, the other write is a no-op.
+/// SLP_EN (bit 13) with SLP_TYP=0 (S5) is the request QEMU answers by
+/// terminating the VM (SHUTDOWN_CAUSE_GUEST, process exit 0). Real
+/// hardware takes its PM1a_CNT base from the FADT — no ACPI table
+/// parser exists yet (honest gap in the safety ledger §5); a machine
+/// that ignores both decoders falls back to the cascade's machine_park.
+#[cfg(feature = "x86_64")]
+pub fn x86_acpi_power_off() {
+    const PM1A_CNT_Q35: u16 = 0x604;
+    const PM1A_CNT_PIIX4: u16 = 0xB004;
+    const SLP_EN_S5: u16 = 0x2000; // SLP_EN | SLP_TYP=0 (S5)
+    crate::arch::cpu::outw(PM1A_CNT_Q35, SLP_EN_S5);
+    crate::arch::cpu::outw(PM1A_CNT_PIIX4, SLP_EN_S5);
+    // QEMU terminates the VM asynchronously; give the write time to
+    // land before the caller parks (same delay discipline as the
+    // 8042 pulse). Never reached when the platform honours S5.
+    for _ in 0..10_000_000 {
+        core::hint::spin_loop();
+    }
+}
+
 #[cfg(feature = "riscv64")]
 pub fn sbi_shutdown_ecall() {
     // SAFETY: INV-SYSC-4 — privileged SBI ecall; reached only after the

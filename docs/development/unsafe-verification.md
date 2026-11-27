@@ -35,10 +35,10 @@ FILE` owns one), and the gate fails on a drop that
 
 ## Re-bank provenance
 
-- artifacts kept by id: **1722**
-- recovered from reference versions: **0**
-- references consulted: HEAD, MERGE_HEAD, 795744824
-- annotated regions, baseline -> this bank: **2270 -> 1722**
+- artifacts kept by id: **1721**
+- recovered from reference versions: **1** (same-file 1, edited-site 0, file-move 0, moved-item 0)
+- references consulted: HEAD, MERGE_HEAD, 1ae2a43c2
+- annotated regions, baseline -> this bank: **1729 -> 1722**
 
 ## Per-subsystem
 
@@ -2017,7 +2017,7 @@ FILE` owns one), and the gate fails on a drop that
 | 125 | rawframes_line | block | volatile,ptr-ops | INV:INV-BOOT-RAWFRAMES-1 | `e94bfed60857` |
 | 171 | x86_panic_reset | block | asm | INV:INV-SYSC-4 | `2f92f522ffac` |
 | 202 | x86_reboot_pulse | block | - | INV:INV-SYSC-4 | `6bed9c96c8ff` |
-| 215 | sbi_shutdown_ecall | block | asm | INV:INV-SYSC-4 | `1858d44c159d` |
+| 247 | sbi_shutdown_ecall | block | asm | INV:INV-SYSC-4 | `c3467237788b` |
 
 ### kernel/core/src/cmdline.rs (4)
 
