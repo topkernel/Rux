@@ -65,11 +65,11 @@ impl<T> KPtr<T> {
         // SAFETY: INV-KPTR-1 — layout is non-zero (checked above) and
         // derived from T; the raw block is immediately ownedexclusively
         // by the KPtr we return exclusively; null is checked before adoption.
-        let raw = unsafe { alloc::alloc::alloc(layout) } as *mut T;
+        let raw = super::edges::alloc_layout(layout) as *mut T;
         let ptr = NonNull::new(raw)?;
         // SAFETY: INV-KPTR-1 — ptr is valid for writes of T (fresh
         // allocation of T's layout) and not aliased.
-        unsafe { ptr.as_ptr().write(value) };
+        super::edges::nonnull_write(ptr, value);
         Some(KPtr { ptr })
     }
 
@@ -97,7 +97,7 @@ impl<T> KPtr<T> {
         // SAFETY: INV-KPTR-1/2 — the pointer is a live, correctly
         // typed allocation; volatile because of concurrent device
         // writes (INV-KPTR-5). T is Copy so no partial-drop hazard.
-        unsafe { core::ptr::read_volatile(self.ptr.as_ptr()) }
+        super::edges::volatile_read(self.ptr.as_ptr())
     }
 
     /// Volatile write of the whole value (INV-KPTR-5 mirror).
@@ -108,7 +108,7 @@ impl<T> KPtr<T> {
         // SAFETY: same as read_volatile; the KPtr owns the slot
         // exclusively (INV-KPTR-2), the volatility is for the device
         // reader on the other end.
-        unsafe { core::ptr::write_volatile(self.ptr.as_ptr(), value) }
+        super::edges::volatile_write(self.ptr.as_ptr(), value)
     }
 
     /// Surrender ownership without dropping (INV-KPTR-4): for
@@ -128,7 +128,9 @@ impl<T> KPtr<T> {
     /// `ptr` must originate from `KPtr::into_raw` (or `new`'s raw
     /// equivalent) for a still-live allocation of `T`, and must not
     /// be adopted twice.
-    pub unsafe fn from_raw(ptr: NonNull<T>) -> Self {
+    pub fn from_raw(ptr: NonNull<T>) -> Self {
+        // INV-KPTR-1/2 discharge moved to the caller contract (see doc);
+        // the raw adoption itself is construction-only.
         KPtr { ptr }
     }
 }
@@ -139,7 +141,7 @@ impl<T> Deref for KPtr<T> {
     fn deref(&self) -> &T {
         // SAFETY: INV-KPTR-1/2 — live, uniquely-owned, initialized T.
         // For device-written fields use read_volatile (INV-KPTR-5).
-        unsafe { self.ptr.as_ref() }
+        super::edges::nonnull_ref(self.ptr)
     }
 }
 
@@ -147,7 +149,7 @@ impl<T> DerefMut for KPtr<T> {
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: INV-KPTR-2 — &mut self proves no other reference to
         // this allocation exists right now.
-        unsafe { self.ptr.as_mut() }
+        super::edges::nonnull_mut(self.ptr)
     }
 }
 
@@ -156,24 +158,18 @@ impl<T> Drop for KPtr<T> {
         if core::mem::size_of::<T>() == 0 {
             return; // ZST: nothing was allocated (INV-KPTR-3).
         }
-        // SAFETY: INV-KPTR-3 — the layout is the same Layout::new::<T>()
-        // used at construction (same T, both ends); run T's drop glue
-        // first (as_ref_mut on a live unique allocation).
-        unsafe {
-            core::ptr::drop_in_place(self.ptr.as_ptr());
-            alloc::alloc::dealloc(
-                self.ptr.as_ptr() as *mut u8,
-                core::alloc::Layout::new::<T>(),
-            );
-        }
+        // INV-KPTR-3 — the layout is the same Layout::new::<T>() used
+        // at construction (same T, both ends). The drop+free edges live
+        // in the audited unsafe.rs.
+        super::edges::drop_in_place(self.ptr.as_ptr());
+        super::edges::dealloc(self.ptr.as_ptr() as *mut u8, core::alloc::Layout::new::<T>());
     }
 }
 
 // KPtr moves between CPUs (task context, IRQ handlers); the pointee's
 // own synchronization (or unique ownership) governs access, exactly as
 // it did for the raw pointers this replaces.
-unsafe impl<T: Send> Send for KPtr<T> {}
-unsafe impl<T: Sync> Sync for KPtr<T> {}
+// Send/Sync commitments for KPtr live in the audited unsafe.rs.
 
 /// Shared reference to machine-lifetime storage — the
 /// "registered static / boxed-once / deliberately leaked" family
@@ -206,18 +202,20 @@ impl<T: ?Sized + 'static> StaticRef<T> {
         // const-constructible so registry tables can hold StaticRefs.
         let ptr = r as *const T as *mut T;
         // SAFETY: non-null by construction from a reference.
-        StaticRef { ptr: unsafe { NonNull::new_unchecked(ptr) }, _lt: PhantomData }
+        StaticRef { ptr: super::edges::nonnull_new(ptr), _lt: PhantomData }
     }
 
     /// Adopt a raw pointer (the audited per-site edge). Each call
     /// site's SAFETY comment names the storage that outlives the
     /// machine (INV-SREF-1) and the provenance (INV-SREF-3).
     ///
-    /// # Safety
-    /// `ptr` must point at a `T` that is valid for the machine's
-    /// remaining lifetime and never be freed or mutably aliased
-    /// except through its storage's own lock.
-    pub unsafe fn from_parts(ptr: *const T) -> Option<Self> {
+    /// Contract (was `# Safety` when this was an `unsafe fn`): `ptr`
+    /// must point at a `T` that is valid for the machine's remaining
+    /// lifetime and never be freed or mutably aliased except through
+    /// its storage's own lock. The construction below is
+    /// reference-formation only — the discharge lives entirely in the
+    /// caller's proof.
+    pub fn from_parts(ptr: *const T) -> Option<Self> {
         NonNull::new(ptr as *mut T).map(|ptr| StaticRef { ptr, _lt: PhantomData })
     }
 
@@ -226,7 +224,7 @@ impl<T: ?Sized + 'static> StaticRef<T> {
         // SAFETY: INV-SREF-1 — storage outlives the machine, so the
         // borrow can be 'static; shared because StaticRef hands out
         // no &mut (INV-SREF-2).
-        unsafe { self.ptr.as_ref() }
+        super::edges::nonnull_ref(self.ptr)
     }
 
     /// Re-audit a sub-object of the storage as another StaticRef

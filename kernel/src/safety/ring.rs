@@ -50,8 +50,7 @@ pub struct SpscRing<T: Copy, const N: usize> {
 // lifetime; slot access is bounded (INV-RING-1) and the producer /
 // consumer hand-off is the atomics' own synchronization. T: Copy means
 // the slots never run drop glue.
-unsafe impl<T: Copy + Send, const N: usize> Send for SpscRing<T, N> {}
-unsafe impl<T: Copy + Send, const N: usize> Sync for SpscRing<T, N> {}
+// Send/Sync commitments for SpscRing live in the audited unsafe.rs.
 
 impl<T: Copy, const N: usize> SpscRing<T, N> {
     /// Const constructor for `static` use (the one audited edge:
@@ -84,12 +83,8 @@ impl<T: Copy, const N: usize> SpscRing<T, N> {
             return; // full: drop
         }
         let idx = tail & Self::MASK;
-        // SAFETY: INV-RING-1 — idx is within 0..N (mask discipline);
-        // the slot is owned by the single producer until `tail`
-        // publishes it. Storing a `MaybeUninit` is a plain Copy store.
-        unsafe {
-            (*self.slots.get())[idx].get().write(MaybeUninit::new(val));
-        }
+        // Producer slot edge lives in the audited unsafe.rs (INV-RING-1).
+        super::edges::ring_slot_write(&self.slots, idx, val);
         self.tail.store(next, Ordering::Release);
     }
 
@@ -103,13 +98,9 @@ impl<T: Copy, const N: usize> SpscRing<T, N> {
                 return None;
             }
             let idx = head & Self::MASK;
-            // SAFETY: INV-RING-1 — idx is within 0..N; the Acquire on
-            // `tail` above ordered the producer's store before this
-            // read; the CAS below is what transfers the slot to this
-            // consumer. INV-RING-3 — volatile read, T: Copy, no drop.
-            let slot_ptr =
-                unsafe { (*self.slots.get())[idx].get() } as *const MaybeUninit<T>;
-            let val = unsafe { core::ptr::read_volatile(slot_ptr as *const T) };
+            // Consumer slot edge lives in the audited unsafe.rs
+            // (INV-RING-1/3).
+            let val = super::edges::ring_slot_read(&self.slots, idx);
             let next = (head + 1) & Self::MASK;
             match self.head.compare_exchange_weak(
                 head,

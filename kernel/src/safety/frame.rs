@@ -70,7 +70,7 @@ impl KernelStackWindow {
         }
         // SAFETY: INV-WINDOW-1/2 — bounds and alignment checked above;
         // INV-WINDOW-3 — volatile read of possibly-live stack memory.
-        Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
+        Some(super::edges::volatile_read(addr as *const u64))
     }
 
     /// Read the saved frame words at a candidate frame pointer into

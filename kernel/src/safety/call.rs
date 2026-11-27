@@ -57,25 +57,8 @@
 /// The generated function is `#[inline(always)]`; the doc (including
 /// the INV line) lands on the wrapper; the unsafe call exists only in
 /// the expansion.
-#[macro_export]
-macro_rules! safe_call {
-    ($(#[$m:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty = unsafe $callee:expr $(;)?) => {
-        $(#[$m])*
-        #[inline(always)]
-        $vis fn $name($($arg: $ty),*) -> $ret {
-            // SAFETY: INV-SAFECALL-1 — this wrapper's doc names the
-            // discharged invariant; the types carry the proof
-            // (INV-SAFECALL-2).
-            $callee($($arg),*)
-        }
-    };
-    ($(#[$m:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),* $(,)?) = unsafe $callee:expr $(;)?) => {
-        $crate::safe_call! {
-            $(#[$m])*
-            $vis fn $name($($arg: $ty),*) -> () = unsafe $callee;
-        }
-    };
-}
+// The `safe_call!` macro definition lives in the audited unsafe.rs
+// (the expansion carries the unsafe call; INV-SAFECALL-1/2/3).
 
 /// Compile-time same-size/repr assertion for cast edges
 /// (INV-SAFECAST-1). Emit as a `const _: () = ...;` in the module
@@ -106,5 +89,5 @@ pub fn safety_cast<Src: Copy, Dst: Copy>(src: Src) -> Dst {
     // are Copy (no drop glue to skip); this is the ONE audited cast
     // edge for kernel layout casts (transmute_copy copies exactly
     // size_of::<Dst>() bytes, which the assert proves == Src's).
-    unsafe { core::mem::transmute_copy(&src) }
+    super::edges::transmute_copy(&src)
 }
