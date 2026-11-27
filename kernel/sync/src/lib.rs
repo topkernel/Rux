@@ -43,135 +43,25 @@ pub use rux::{pr_info, pr_warn, pr_err, pr_debug, println};
 extern crate alloc;
 
 // The service files (THIS crate's own — the sole copies), flat at the
-// crate root (seed-core-design 2c.2).
+// crate root (seed-core-design 2c.2). `futex` is the historical
+// `sync::futex` union view (staying hotpath re-exports + this crate's
+// own moved items), turned from the lib.rs inline block into a real
+// file by the sync shrink lane (2026-11-27).
 pub mod futex_diag;
 pub mod condvar;
+pub mod futex;
 
 // The framework's whole sync module at the historical path (the union
 // the sibling services consumed — the merged view `pub use sync;` in the
-// ipc/process/syscall crates resolves through it) — the explicit `pub mod
-// futex` below shadows the glob's futex module and re-exports BOTH
-// halves: the staying mechanism from the framework and the moved
-// diagnostic family from this crate's futex_diag.
+// ipc/process/syscall crates resolves through it).
 pub use rux::sync::{r#unsafe, hotpath::*, types::*};
+// The moved futex names keep their historical crate-root surface too
+// (the hotpath::* glob no longer carries them after the move).
+pub use crate::futex::{
+    FUTEX_CMP_REQUEUE_PI, FUTEX_FD, FUTEX_WAIT_REQUEUE_PI, FUXPARK_J, FUXPARK_TID,
+    futex_wait, fuxwatch_over_budget, fuxwatch_read_word, waiter_of,
+};
 
-pub mod futex {
-    // The names the framework's futex module exported before it became a
-    // section of rux::sync::hotpath (seed-core pass 2), spelled out: a glob
-    // over hotpath would re-export every section's public items.
-    pub use rux::sync::types::{FuxWakeOp, FutexKey, Waiter, FutexChain};
-    pub use rux::sync::hotpath::{
-        FUTEX_WAIT,
-        FUTEX_WAKE,
-        FUTEX_FD,
-        FUTEX_REQUEUE,
-        FUTEX_CMP_REQUEUE,
-        FUTEX_WAKE_OP,
-        FUTEX_LOCK_PI,
-        FUTEX_UNLOCK_PI,
-        FUTEX_TRYLOCK_PI,
-        FUTEX_WAIT_BITSET,
-        FUTEX_WAKE_BITSET,
-        FUTEX_WAIT_REQUEUE_PI,
-        FUTEX_CMP_REQUEUE_PI,
-        FUTEX_LOCK_PI2,
-        FUTEX_PRIVATE_FLAG,
-        FUTEX_CLOCK_REALTIME,
-        FUTEX_CMD_MASK,
-        FXDV_PID,
-        FXRS_TGID,
-        FXRS_WORDS,
-        fxrs_word_add,
-        fxrs_word_watched,
-        FUXW_RING_SZ,
-        FUXW_RINGS,
-        fuxw_push,
-        FUX_POOL_USED,
-        FUX_POOL_FULL_J,
-        RWFRZ_WATCH,
-        RWFRZ_WATCH_BUDGET,
-        RWFRZ_EXIT_WATCH_TGID,
-        FUTEX_BITSET_MATCH_ANY,
-        FLAGS_SHARED,
-        FLAGS_CLOCKRT,
-        FUTEX_OP_SET,
-        FUTEX_OP_ADD,
-        FUTEX_OP_OR,
-        FUTEX_OP_ANDN,
-        FUTEX_OP_XOR,
-        FUTEX_OP_CMP_EQ,
-        FUTEX_OP_CMP_NE,
-        FUTEX_OP_CMP_LT,
-        FUTEX_OP_CMP_LE,
-        FUTEX_OP_CMP_GT,
-        FUTEX_OP_CMP_GE,
-        task_futex_mm_id,
-        WAITER_POOL,
-        HASH_SIZE,
-        HASH_HEADS,
-        waiter_of,
-        FUXWATCH_ADDR,
-        FUXWATCH2_ADDR,
-        FUXWATCH_DELAY_S,
-        FUXWATCH_MM_DONE,
-        FUXWATCH1_TGID,
-        FUXWATCH2_TGID,
-        FUXPARK_WORD,
-        FUXPARK_TID,
-        FUXPARK_TGID,
-        FUXPARK_J,
-        fuxwatch_retire_page,
-        fuxwatch_retire_all,
-        FUXWATCH_OWNER_TID,
-        FUXWATCH_OWNER_J,
-        fuxwatch_arm_round,
-        fuxwatch_page_matches,
-        fuxwatch_mm_armed,
-        fuxwatch_over_budget,
-        fuxwatch_log_write,
-        fuxwatch_read_word,
-        fuxwatch_take_step,
-        fuxwatch_page_watched,
-        fuxwatch_read_word_at,
-        fuxwatch_addr,
-        fuxwatch2_addr,
-        rd_word,
-        HEAPMAP_ARM,
-        OH68_KEY,
-        OH68_OWNER_CTX,
-        FUXWATCH_OWNER_TASK,
-        oh68_fs_base,
-        oh68_ctx_of,
-        oh68_latch_owner_task,
-        futex_stuck_census,
-        futex_hash,
-        futex_wake,
-        futex_wake_in_mm,
-        futex_wait,
-        futex_wait_timeout,
-        futex_cleanup,
-        futex_wait_bitset,
-        futex_parse_timeout_ns,
-        futex_wake_bitset,
-        futex_to_flags,
-        futex_requeue,
-        FUTEX_OP_OPARG_SHIFT,
-        futex_wake_op_decode,
-        futex_wake_op,
-        do_futex,
-        sys_futex_handler,
-        RWFRZ_UADDR,
-        RWFRZ_OPLOG,
-        apppark_rets_public,
-        apppark_rets,
-        rwfz_emit_prio,
-        rwfz_stack_frames,
-    };
-    // compiled in the core only with its futex tracer feature
-    #[cfg(feature = "debug-futex-trace")]
-    pub use rux::sync::hotpath::debug_dump_futex_state;
-    pub use crate::futex_diag::*;
-}
 
 // the guest-test module that followed the files (the framework's
 // tests/mod.rs row is gated with the move note); the framework's

@@ -45,8 +45,9 @@
 // watch statics, the waiter pool + hash heads, and the walker helpers
 // that stayed framework-side.
 #[allow(unused_imports)]
+use crate::futex::{FUXPARK_J, FUXPARK_TID};
 use rux::sync::{
-    hotpath::FUXPARK_J, hotpath::FUXPARK_TGID, hotpath::FUXPARK_TID, hotpath::FUXPARK_WORD, hotpath::FUXWATCH1_TGID,
+    hotpath::FUXPARK_TGID, hotpath::FUXPARK_WORD, hotpath::FUXWATCH1_TGID,
     hotpath::FUXWATCH2_TGID, hotpath::FUXWATCH_ADDR, hotpath::FUXWATCH2_ADDR, hotpath::FUXWATCH_DELAY_S,
     hotpath::FUXWATCH_MM_DONE, hotpath::FUXWATCH_OWNER_TASK, hotpath::FUXW_RING_SZ, hotpath::FUXW_RINGS,
     hotpath::FXDV_PID, hotpath::FXRS_TGID, hotpath::HASH_HEADS, hotpath::HASH_SIZE, hotpath::HEAPMAP_ARM, hotpath::OH68_KEY,
