@@ -4506,8 +4506,35 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
         let manager = get_tcp_manager_locked(&_table_g);
 
+        // R-NETTX-4 (2026-11-28, lat_connect EMFILE hunt): a slot this
+        // segment drove to TCP_CLOSE with NO fd pin is released HERE —
+        // synchronously, under the table lock we already hold — instead of
+        // waiting for the next 10 ms timer-tick sweep. The tick sweep stays
+        // as the backstop, but connect-churn workloads (lmbench
+        // lat_connect: 500+ loopback connects inside one tick window)
+        // exhaust the fixed table within a single tick otherwise: every
+        // accepted-and-closed child parks in LAST_ACK → CLOSE and holds its
+        // slot until the sweep, so socket() hit EMFILE with 509 eligible
+        // corpses on the books. Safety: user_refs == 0 means no VFS socket
+        // wraps the slot (accept's pin, R21-N4), so nobody can observe the
+        // freed index; parent_fd/orphaned keep fresh pre-connect slots and
+        // pinned sockets untouched (same predicate as the tick sweep).
+        let mut dead_slot: Option<usize> = None;
         match manager.handle_tcp_packet(skb, src_ip, dest_ip, &mut tx) {
-            Ok(w) => wake = w,
+            Ok(w) => {
+                wake = w;
+                if let Some(wv) = wake {
+                    let fd = wv.socket as usize;
+                    if let Some(sk) = tcp_socket_get(wv.socket) {
+                        if sk.state == TcpState::TCP_CLOSE
+                            && sk.user_refs.load(Ordering::Acquire) == 0
+                            && (sk.parent_fd.is_some() || sk.orphaned)
+                        {
+                            dead_slot = Some(fd);
+                        }
+                    }
+                }
+            }
             Err(()) => {
                 // No matching connection found — send RST (RFC 793 §3.9).
                 // R35: recorded into `tx` and emitted after the lock drops.
@@ -4515,6 +4542,9 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                     let _ = tcp_send_reset(src_ip, dest_ip, &tcp_hdr, &mut tx);
                 }
             }
+        }
+        if let Some(fd) = dead_slot {
+            tcp_socket_table_mut().free(fd);
         }
     }
 
@@ -4651,13 +4681,33 @@ pub fn tcp_rcv6(
 
     {
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
+        // R-NETTX-4: synchronous fd-less CLOSE-corpse release, same
+        // rationale and predicate as tcp_rcv (the v6 churn hits the same
+        // fixed-table exhaustion).
+        let mut dead_slot: Option<usize> = None;
         match get_tcp_manager_locked(&_table_g).handle_tcp_packet6(skb, src6, dest6, &mut tx) {
-            Ok(w) => wake = w,
+            Ok(w) => {
+                wake = w;
+                if let Some(wv) = wake {
+                    let fd = wv.socket as usize;
+                    if let Some(sk) = tcp_socket_get(wv.socket) {
+                        if sk.state == TcpState::TCP_CLOSE
+                            && sk.user_refs.load(Ordering::Acquire) == 0
+                            && (sk.parent_fd.is_some() || sk.orphaned)
+                        {
+                            dead_slot = Some(fd);
+                        }
+                    }
+                }
+            }
             Err(()) => {
                 if !tcp_hdr.rst() && !crate::net::ipv6::is_multicast(dest6) {
                     let _ = tcp_send_reset6(src6, dest6, &tcp_hdr, &mut tx);
                 }
             }
+        }
+        if let Some(fd) = dead_slot {
+            tcp_socket_table_mut().free(fd);
         }
     }
 
