@@ -70,8 +70,6 @@ pub mod ledger;
 /// Zero-put / free-refusal attribution counters (freelist-drift family):
 /// which release site orphaned the census's refcount-0 pages.
 pub mod driftwatch;
-#[cfg(feature = "x86_64")]
-pub mod scribble;
 /// CLOCK_MONOTONIC jump tripwire (rux:monowatch (retired dfx=monowatch)): samples the shared
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.

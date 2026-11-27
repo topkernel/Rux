@@ -32,17 +32,10 @@
 //! (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) name instruments
 //! whose probe bodies no longer exist — see `dead_dfx_tokens`.
 //!
-//! What survives here is deliberate, not leftover:
-//!
-//! - BEHAVIOR INJECTION (`claiminject`, `oncpuinject`): these CHANGE
-//!   kernel scheduling/rejection behavior to reproduce wedge shapes —
-//!   they are fault injectors, not observability, and have no
-//!   tracepoint form.
-//! - GDB-PARK ACTIONS (`scribblepark`, `scribblepid1`,
-//!   `scribblesweep`): they PARK a CPU at a chosen moment so an
-//!   external gdb session can arm watchpoints — an action taken on
-//!   the machine, not an observation of it. They arm the `rux:scribble`
-//!   detection engine as a side effect.
+//! What survives here is deliberate, not leftover — BEHAVIOR INJECTION
+//! only (`claiminject`, `oncpuinject`): these CHANGE kernel
+//! scheduling/rejection behavior to reproduce wedge shapes — they are
+//! fault injectors, not observability, and have no tracepoint form.
 //! Per the observability policy the table must not grow — new
 //! observability goes through tracepoints.
 
@@ -67,9 +60,6 @@ macro_rules! dfx_switch_table {
         $m! {
             ClaimInject => "claiminject",
             OncpuInject => "oncpuinject",
-            ScribblePark => "scribblepark",
-            ScribblePid1 => "scribblepid1",
-            ScribbleSweep => "scribblesweep",
         }
     };
 }
@@ -100,26 +90,9 @@ pub enum DfxSwitch {
     /// unless explicitly requested; never enable in production or LTP
     /// runs. PERMANENT SWITCH (dfx-migrate round 5): fault injector.
     OncpuInject,
-    /// Also park (scribble_park breakpoint) on the first confirmed hit
-    /// so a gdb session can arm QEMU watchpoints on the victim address.
-    /// PERMANENT SWITCH (dfx-migrate round 5): parking a CPU for an
-    /// external debugger is an action, not observation. Arming it also
-    /// arms the `rux:scribble` detection engine.
-    ScribblePark,
-    /// Park when pid 1 registers — the init task's Task struct and
-    /// kernel stack live at boot-fixed addresses for the whole run, so
-    /// a gdb session can arm persistent watchpoints on them.
-    /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
-    /// `rux:scribble` as a side effect.
-    ScribblePid1,
-    /// Park when the 64th task registers (early in the fork/exec storm)
-    /// so gdb can arm quiet-region watchpoints across the live set.
-    /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
-    /// `rux:scribble` as a side effect.
-    ScribbleSweep,
 }
 
-const SWITCH_COUNT: usize = 5;
+const SWITCH_COUNT: usize = 2;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -157,14 +130,11 @@ impl DfxSwitch {
             // 4 dead tokens thpark/syncguard/syncwatch/pctlmon whose
             // probe bodies no longer exist) left the table, so the six
             // permanent switches (injection + gdb-park + the PTE-mutating
-            // detector) compacted to 0..4 in table order. Cmdline lookup
+            // detector) compacted to 0..1 in table order. Cmdline lookup
             // is by name, so the shift is invisible to users; indices
             // only key the SWITCHES array.
             DfxSwitch::ClaimInject => 0,
             DfxSwitch::OncpuInject => 1,
-            DfxSwitch::ScribblePark => 2,
-            DfxSwitch::ScribblePid1 => 3,
-            DfxSwitch::ScribbleSweep => 4,
         }
     }
 
@@ -214,37 +184,6 @@ pub fn enabled(switch: DfxSwitch) -> bool {
 /// files under /sys/kernel/debug/dfx/).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
-    // The gdb-park switches park the machine for an external debugger
-    // (an ACTION — why they stayed out of the trace framework) but
-    // they also need the scribble detection engine live, so arming
-    // them arms `rux:scribble` too.
-    #[cfg(feature = "x86_64")]
-    {
-        if let DfxSwitch::ScribblePark = switch {
-            super::scribble::PARK.store(on, Ordering::Relaxed);
-            if on {
-                crate::trace::EVENT_SCRIBBLE
-                    .enabled
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-        if let DfxSwitch::ScribblePid1 = switch {
-            super::scribble::PARK_PID1.store(on, Ordering::Relaxed);
-            if on {
-                crate::trace::EVENT_SCRIBBLE
-                    .enabled
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-        if let DfxSwitch::ScribbleSweep = switch {
-            super::scribble::PARK_SWEEP.store(on, Ordering::Relaxed);
-            if on {
-                crate::trace::EVENT_SCRIBBLE
-                    .enabled
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-    }
     #[cfg(not(feature = "x86_64"))]
     {
         let _ = (switch, on);

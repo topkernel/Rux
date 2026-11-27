@@ -1044,8 +1044,6 @@ pub(crate) fn handle_general_protection(regs: &mut PtRegs) {
         // huks-wedge lane (hw5): group death (Linux do_group_exit).
         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::crash_report(b"#GP", regs);
         panic!(
             "trap: #GP in kernel mode at rip={:#x}, error={:#x}",
             regs.rip, regs.orig_rax

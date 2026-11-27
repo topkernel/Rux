@@ -3126,58 +3126,6 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 );
             }
         }
-        // Scribble hunter (rux:scribble (retired dfx=scribble)): stop tracking before the page
-        // is dropped/deallocated (it may be recycled immediately).
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::unregister(task_ptr);
-        // Scribble hunter: freed-while-linked UAF check — a Task page
-        // returned to the heap while still linked in its class tree
-        // gets recycled as BTreeMap nodes / new Tasks, and subsequent
-        // tree ops write node pointers into the recycled page (the
-        // Task-pointer-fragment scribble family). Loud if it happens.
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed() {
-            if let Some(grq_guard) = try_grq_lock() {
-                use core::sync::atomic::Ordering as O;
-                let policy = crate::sched::edges::task_shared(task_ptr).policy();
-                let linked = match policy {
-                    SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task_ptr),
-                    SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task_ptr),
-                    _ => grq_guard.cfs_rq.is_linked(task_ptr),
-                };
-                let flagged = crate::sched::edges::task_shared(task_ptr).pid() == TASK_POISON;
-                if linked || flagged {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
-                    for &b in MSG {
-                        putchar(b);
-                    }
-                    let mut v = task_ptr as usize;
-                    for _ in 0..16 {
-                        let n = (v >> 60) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    const M2: &[u8] = b" linked=0x";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    putchar(b'0' + linked as u8);
-                    const M3: &[u8] = b" poison=0x";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    let p = crate::sched::edges::task_shared(task_ptr).pid() as usize;
-                    for sh in (0..8u32).rev() {
-                        let n = ((p >> (sh * 4)) & 0xF) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    }
-                    putchar(b'\n');
-                }
-                drop(grq_guard);
-                let _ = O::Relaxed;
-            }
-        }
         // Heap-v3 leak fix: run the Task field destructors BEFORE returning
         // the page. The Task owns heap memory in plain (non-Arc) fields —
         // exe_path: Box<[u8]> (re-set on every execve by set_exe_path),
@@ -3838,21 +3786,6 @@ fn __schedule() {
     // poisoned -> next __schedule runs on the poison) must be healed here,
     // before any dereference: fall back to the hardware truth (tp, the
     // arch per-CPU current_task) and resync the slot.
-    #[cfg(feature = "x86_64")]
-    if crate::trace::EVENT_SCRIBBLE.armed()
-        && !crate::debug::scribble::task_plausible(prev)
-    {
-        let tp0: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
-        crate::debug::scribble::bad_switch_arg(0, prev as u64, tp0 as u64);
-        if crate::debug::scribble::task_plausible(tp0) {
-            this_cpu_mut().current = tp0;
-            prev = tp0;
-        } else {
-            // No sane task identity left on this CPU — freeze for gdb
-            // instead of switching through garbage.
-            crate::debug::scribble::scribble_switch_park(prev as u64, 0);
-        }
-    }
 
     // R55 (multi-mode form-B): the slot-resolved prev must be the task the
     // hardware is actually executing (tp). A mismatch means ti_cpu was
@@ -3866,12 +3799,6 @@ fn __schedule() {
     // shape that produced every phantom capture).
     let tp: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
     if !tp.is_null() && tp != prev {
-        // Scribble hunter tripwire: name the divergence the moment the
-        // scheduler sees it (slot task vs the task the hardware runs).
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed() {
-            crate::debug::scribble::slot_divergence(cpu_id, tp, prev);
-        }
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
         let home = {
             let mut found = usize::MAX;
@@ -5196,27 +5123,6 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
         // lock here, so the ownership picture is stable. A task that is
         // STILL another CPU's published current (sched slot) or still
         // carries another CPU's running_on_cpu claim is being resumed
-        // while it executes — the pick only got here because the on_cpu
-        // byte read false, i.e. the ownership word {ti_on_cpu, claim} was
-        // reset outside the publish protocol (x86-scribble3: the word
-        // held a kernel-static pointer; a single 8-byte store yields
-        // {false, -1}). Name the seed the moment the scheduler first
-        // sees it, with the pre-mark state.
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed() {
-            let me = crate::arch::cpu_id() as usize;
-            let mut owner_slot: i32 = -1;
-            for c in 0..crate::config::MAX_CPUS {
-                if c != me && cpu_state(c).current == task {
-                    owner_slot = c as i32;
-                    break;
-                }
-            }
-            let claim = task.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
-            if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
-                crate::debug::scribble::double_seed(task_ptr, me as u64, owner_slot, claim);
-            }
-        }
         // R74 (riscv64 double-run seed tripwire, always on): same check as
         // the x86 scribble hunter's double_seed, SBI-direct and
         // unconditional — the r74g capture ended with TWO harts both
@@ -5251,14 +5157,6 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
                 r56_print_pid(b"", tp_is_task as u32, b"\n");
             }
         }
-        // Scribble hunter: record the pick (rux:scribble (retired dfx=scribble)).
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::ring_log(
-            crate::arch::cpu_id() as usize,
-            1,
-            task_ptr as u64,
-            0,
-        );
         // R56-heal: publish the FULL ownership qword {on_cpu = true,
         // claim = this cpu} — not just the on_cpu byte — plus the pick
         // state. A fresh pick publishes PICKED: the switch-in must affirm
@@ -5571,14 +5469,6 @@ fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool {
     // wake — the idle fast path in __schedule then never triggered again.
     let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            // Scribble hunter: record the class insert (rux:scribble (retired dfx=scribble)).
-            #[cfg(feature = "x86_64")]
-            crate::debug::scribble::ring_log(
-                crate::arch::cpu_id() as usize,
-                3,
-                task_ptr as u64,
-                1,
-            );
             grq.rt_rq.enqueue(task_ptr, false)
         }
         SchedPolicy::Deadline => {
@@ -5627,14 +5517,6 @@ fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool {
             grq.dl_rq.enqueue(task_ptr)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
-            // Scribble hunter: record the class insert (rux:scribble (retired dfx=scribble)).
-            #[cfg(feature = "x86_64")]
-            crate::debug::scribble::ring_log(
-                crate::arch::cpu_id() as usize,
-                3,
-                task_ptr as u64,
-                0,
-            );
             grq.cfs_rq.enqueue(task_ptr)
         }
         SchedPolicy::Idle => {
@@ -10101,37 +9983,8 @@ fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // R65 hunt (garbage-next guard): __switch_to saves callee registers
     // through `prev` and resumes through `next` (thread.sp/ret_addr are
-    // read from it), so a non-Task pointer here IS the self-propagating
-    // cross-stack engine (x86-scribble3 ring capture: PUB events whose
-    // prev/next are kernel-stack addresses, 0x18 apart). Refuse the
-    // garbage resume — switch to this CPU's idle task instead — and
-    // report; the pick-side seed tripwire names the producer.
-    #[cfg(feature = "x86_64")]
-    let next: &mut Task = {
-        let np = next as *mut Task;
-        if crate::trace::EVENT_SCRIBBLE.armed()
-            && !crate::debug::scribble::task_plausible(np)
-        {
-            crate::debug::scribble::bad_switch_arg(1, np as u64, prev as *mut Task as u64);
-            let idle = cpu_state(cpu_id).idle;
-            if !idle.is_null() {
-                // Keep the ownership slots consistent with what actually
-                // resumes (__schedule already published the garbage next
-                // into the sched slot before calling us).
-                this_cpu_mut().current = idle;
-                // r11: supersede the garbage pick's generation (probe
-                // path; the slot tag stays as the probe left it).
-                pick_gen_supersede(cpu_id, idle);
-                crate::sched::edges::task_mut(idle)
-            } else {
-                // No idle pointer (early boot): freeze for gdb.
-                crate::debug::scribble::scribble_switch_park(np as u64, 1);
-                crate::sched::edges::task_mut(np)
-            }
-        } else {
-            next
-        }
-    };
+    // read from it).
+    let next: &mut Task = next;
 
     next.set_ti_cpu(cpu_id as i32);
 
@@ -12049,8 +11902,6 @@ pub fn cpu_idle_loop() -> ! {
         }
         ph(floor.wrapping_sub(sp));
         putchar(b'\n');
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::ring_dump();
     }
 
     loop {

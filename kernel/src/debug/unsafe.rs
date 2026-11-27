@@ -506,21 +506,6 @@ pub(crate) fn gs_cpu_dword_read() -> u32 {
     id
 }
 
-/// The GS-pairing triple for the scribble tripwire: (gs:[0] cpu id,
-/// IA32_KERNEL_GS_BASE, IA32_GS_BASE) (INV-FOR-4 gs-data arm; the MSR
-/// reads are data-safe primitives).
-#[cfg(feature = "x86_64")]
-pub(crate) fn gs_pairing_read() -> (u32, u64, u64) {
-    let id = gs_cpu_dword_read();
-    // SAFETY: INV-FOR-4 — MSR data reads.
-    unsafe {
-        (
-            id,
-            crate::arch::x86_64::cpu::rdmsr(0xC000_0101),
-            crate::arch::x86_64::cpu::rdmsr(0xC000_0102),
-        )
-    }
-}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-5: the deliberate-fault family (the provoke-oops and
@@ -573,23 +558,6 @@ pub(crate) fn console_put_raw(b: u8) {
     /// caller runs in the locked-down diagnostic context.
     unsafe { crate::console::putchar_no_lock(b) }
 }
-
-/// The scribble report buffer, mutably (INV-FOR-6 report arm: writes
-/// are bounded by the len check at the single putc call site; the
-/// Sync commitment below covers the gdb-read-after-death sharing).
-#[cfg(feature = "x86_64")]
-pub(crate) fn scribble_report_buf_mut() -> &'static mut [u8; 4096] {
-    // SAFETY: INV-FOR-6 — bounded diagnostic writes to the fixed
-    /// static buffer; readers are post-mortem (gdb) or under the
-    /// REPORT_LOCK.
-    unsafe { &mut *crate::debug::scribble::REPORT_BUF.0.get() }
-}
-
-// SAFETY: ReportBuf is written only under the REPORT_LOCK claim (one
-// reporter at a time) with a bounds-checked index, and read post-mortem
-// by gdb or after the lock releases; the content is diagnostic bytes.
-#[cfg(feature = "x86_64")]
-unsafe impl Sync for crate::debug::scribble::ReportBuf {}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-7: the memwatch frame-walk family (the walk_fp_chain bodies —

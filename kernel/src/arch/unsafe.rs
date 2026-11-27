@@ -11184,41 +11184,13 @@ pub mod x86_64 {
             let prev = unsafe { crate::process::task_ref::TaskBorrow::from_raw(prev) };
             let next = unsafe { crate::process::task_ref::TaskBorrow::from_raw(next) };
             let cpu = crate::arch::cpu_id() as i32;
-            // R65 witness: prev must still carry its pick mark here. A clear mark
-            // at publish entry means the R49 heal (or a scribble) reset the
-            // ownership word inside the switch-out window — name it.
-            if let Some(prev) = &prev {
-                if crate::trace::EVENT_SCRIBBLE.armed() && !prev.on_cpu() {
-                    crate::debug::scribble::switch_window_heal(prev.as_ptr() as u64);
-                }
-            }
+
             // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
             // registers are restored. A claim held by another CPU is a double-run
             // — the two CPUs would execute one task on one kernel stack (the SMP
             // fork/exec/exit crash family; caught live twice with the pre-GS-fix
             // kernel, silent since the trap_exit cli/swapgs fix).
             if let Some(next) = &next {
-                // R65 hunt: never publish a non-Task `next` into the per-CPU
-                // current slot — a poisoned slot makes the NEXT __schedule run
-                // its whole prev-side bookkeeping through garbage (the
-                // self-propagating half of the x86-scribble3 cascade). Report and
-                // keep the previous current instead.
-                if crate::trace::EVENT_SCRIBBLE.armed()
-                    && !crate::debug::scribble::task_plausible(next.as_ptr())
-                {
-                    crate::debug::scribble::bad_switch_arg(
-                        2,
-                        next.as_ptr() as u64,
-                        prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
-                    );
-                    crate::debug::scribble::ring_log(
-                        crate::arch::cpu_id() as usize,
-                        2,
-                        prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
-                        next.as_ptr() as u64,
-                    );
-                    return 1;
-                }
                 // R56-heal (affirm gate): resume only what our pick still owns.
                 // try_affirm_pick CASes ti_pick_state PICKED → LIVE atomically —
                 // the exclusive right to restore this task's registers. The old
@@ -11228,18 +11200,8 @@ pub mod x86_64 {
                 if next.pid() != 0 {
                     if let Err(observed) = next.try_affirm_pick() {
                         // Not ours: REVOKED by the slot-capture steal, or a
-                        // protocol breach. Report through the scribble hunter
-                        // when armed, then abort — the asm repairs nothing of
+                        // protocol breach. Abort — the asm repairs nothing of
                         // next and returns with prev still running.
-                        if crate::trace::EVENT_SCRIBBLE.armed() {
-                            crate::debug::scribble::double_run(
-                                next.pid() as u64,
-                                cpu as u64,
-                                observed as u64,
-                                prev.as_ref().map(|p| p.pid() as u64).unwrap_or(0),
-                                next.as_ptr() as u64,
-                            );
-                        }
                         return 1;
                     }
                 }
@@ -11323,22 +11285,8 @@ pub mod x86_64 {
                         // run on the static AP boot stacks (their kstack fields are
                         // never used), so a "foreign" sp here is not automatically
                         // corruption — repinning would break a mid-loop resume.
-                        crate::debug::scribble::ring_dump();
                     }
                 }
-            }
-            // Scribble hunter (rux:scribble (retired dfx=scribble)): record the switch completion.
-            crate::debug::scribble::ring_log(
-                crate::arch::cpu_id() as usize,
-                2,
-                prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
-                next.as_ref().map(|n| n.as_ptr() as u64).unwrap_or(0),
-            );
-            // Scribble hunter (rux:scribble (retired dfx=scribble)): quiesce point — prev's context is
-            // fully saved here, so any tracked field off its shadow was written
-            // by someone else while it ran.
-            if let Some(prev) = &prev {
-                crate::debug::scribble::quiesce(prev.as_ptr());
             }
             0 // proceed with the resume
         } }
@@ -12829,8 +12777,6 @@ pub mod x86_64 {
                         thread.set_tp(addr);
                         crate::arch::x86_64::cpu::wrmsr(MSR_FS_BASE, addr);
                     }
-                    // Scribble hunter: absorb this legitimate in-run write.
-                    crate::debug::scribble::note_thread_write(current);
                     0
                 }
                 ARCH_GET_FS => {
@@ -12854,8 +12800,6 @@ pub mod x86_64 {
                         // The ACTIVE GS base (percpu) is untouched, as before.
                         crate::arch::x86_64::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
                     }
-                    // Scribble hunter: absorb this legitimate in-run write.
-                    crate::debug::scribble::note_thread_write(current);
                     0
                 }
                 ARCH_GET_GS => {
@@ -12912,8 +12856,6 @@ pub mod x86_64 {
                     // SAFETY: single CR0 bit set.
                     crate::arch::x86_64::cpu::stts();
                 }
-                // Scribble hunter: absorb this legitimate in-run write.
-                crate::debug::scribble::note_thread_write(current);
             }
         } }
     }
@@ -13671,8 +13613,6 @@ pub mod x86_64 {
                         // (softbus/accountmgr/foundation/distributeddata/mmi).
                         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
                     } else {
-                        #[cfg(feature = "x86_64")]
-                        crate::debug::scribble::crash_report(b"#PF-segv", regs);
                         // The riscv64 mm layer returns KernelPanic for kernel
                         // faults; until the x86 twin grows that, do NOT silently
                         // iretq back into the faulting rip (infinite fault loop).
@@ -13719,8 +13659,6 @@ pub mod x86_64 {
                         // — see the SEGV_MAPERR arm above for the full rationale.
                         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
                     } else {
-                        #[cfg(feature = "x86_64")]
-                        crate::debug::scribble::crash_report(b"#PF-perm", regs);
                         // Oops path (Tranche 5): report + policy, like the
                         // Segfault arm above.
                         crate::debug::oops::oops(
@@ -13764,8 +13702,6 @@ pub mod x86_64 {
                             crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                         }
                     } else {
-                        #[cfg(feature = "x86_64")]
-                        crate::debug::scribble::crash_report(b"#PF-bus", regs);
                         // Oops path (Tranche 5): report + policy, like the
                         // Segfault arm above.
                         crate::debug::oops::oops(
@@ -13869,10 +13805,6 @@ pub mod x86_64 {
                             unsafe { core::arch::asm!("hlt") };
                         }
                     }
-                    // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
-                    // tables live from the debugger).
-                    #[cfg(feature = "x86_64")]
-                    crate::debug::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
                     // Raw serial print (printk may be wedged on a lock this CPU
                     // holds), then halt — the twin's R9 discipline.
                     // uart_putc_raw writes the serial port directly (no locks).
@@ -15153,8 +15085,6 @@ pub mod x86_64 {
                 // A kernel-mode #UD is always a kernel bug; skipping it would
                 // corrupt execution. The Oops path prints the report and
                 // applies the policy (Tranche 5, the riscv64 twin's).
-                #[cfg(feature = "x86_64")]
-                crate::debug::scribble::crash_report(b"#UD", regs);
                 crate::debug::oops::oops(
                     crate::debug::oops::Kind::IllegalInstruction,
                     &|w: &mut crate::debug::backtrace::ConsoleWriter| {
@@ -15436,14 +15366,6 @@ pub mod x86_64 {
                     utime_ripsample_report();
                 }
             }
-
-            // 1.5 Scribble hunter (rux:scribble (retired dfx=scribble)): GS-pairing tripwire + verify
-            // quiescent tasks' tracked scheduling fields against their shadows +
-            // scheduler-consistency scan (double-run seed detection).
-            // Throttled inside; no-op unless the runtime switch is on.
-            crate::debug::scribble::verify_gs();
-            crate::debug::scribble::verify();
-            crate::debug::scribble::verify_consistency();
 
             // 2. Scheduler tick
             crate::sched::scheduler_tick();
@@ -15958,7 +15880,6 @@ pub mod x86_64 {
                 scribble_put_hex(t);
             }
             scribble_put_str(b"\n");
-            crate::debug::scribble::ring_dump();
         } }
 
         // INV-ARCH-TRAP-53 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16000,15 +15921,6 @@ pub mod x86_64 {
         #[no_mangle]
         pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> !  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
-            // Forensics: full scribble crash capture (raw console; gated on
-            // rux:scribble (retired dfx=scribble) inside crash_report itself).
-            if !regs.is_null() {
-                // SAFETY: diagnostic reads of the frame trap_exit just validated
-                // (and rejected); the memory is the current task's stack.
-                unsafe {
-                    crate::debug::scribble::crash_report(b"BAD-FRAME", &*regs);
-                }
-            }
             // Route the owner out like any fatal-user-fault: SIGSEGV, default
             // disposition kills. do_exit never returns.
             // huks-wedge lane (hw5): GROUP death — Linux's fixup_bad_iret
