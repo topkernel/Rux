@@ -8616,6 +8616,27 @@ pub fn scheduler_tick() {
             } else {
                 cur
             };
+            // tp-truth lane (p23-p1panic): the sched slot and the arch
+            // tp slot are two words and they CAN diverge (leakorigin v3:
+            // "a stale sched slot names someone else while the task
+            // still runs"). The heal's own safety argument — "this runs
+            // in the tick IRQ on the task's own CPU, so the task cannot
+            // be concurrently inside a count mutation" — is only sound
+            // for the task THIS CPU ACTUALLY EXECUTES (the tp-named
+            // task). Adjudicating a diverged slot zeroes a count that
+            // may be mid-mutation on another CPU or feeds the phantom
+            // bar observations that never belonged to this CPU (the
+            // same invalid-observation family the tail's TICK-GHOST
+            // gate already resolves to tp). Mirror the tail's
+            // resolution: trust tp.
+            let cur = {
+                let tp = crate::arch::cpu::get_thread_id() as *mut Task;
+                if !cur.is_null() && !tp.is_null() && !core::ptr::eq(cur, tp) {
+                    tp
+                } else {
+                    cur
+                }
+            };
             if !cur.is_null() {
                 // The probe samples from inside the tick hardirq, so the
                 // sampled count legitimately carries THIS tick's own
