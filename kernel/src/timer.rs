@@ -1361,9 +1361,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                         // the pinned wake target (pin held by the token's
                         // id through the wheel's removal discipline);
                         // TaskBorrow's short-read contract.
-                        if let Some(t) = unsafe {
-                            crate::process::task_ref::TaskBorrow::from_raw(task)
-                        } {
+                        if let Some(t) = super::timer::edges::task_borrow_from_raw(task) {
                             let (onrq, key, stb) = (
                                 t.sched_entity().on_rq.load(Ordering::Relaxed),
                                 t.sched_entity().timeline_key().is_some(),
@@ -1386,9 +1384,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                     // which, live.
                     if !ok {
                         // Same pinned-target adopt as above.
-                        let (st, on_rq, pk) = match unsafe {
-                            crate::process::task_ref::TaskBorrow::from_raw(task)
-                        } {
+                        let (st, on_rq, pk) = match super::timer::edges::task_borrow_from_raw(task) {
                             Some(t) => (
                                 t.state().bits(),
                                 t.sched_entity().on_rq.load(Ordering::Relaxed),
@@ -1777,10 +1773,7 @@ fn ww_heartbeat(now_time: u64) {
                 {
                 let pid = task.pid();
                 if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
-                let q = unsafe {
-                    core::ptr::read_volatile(
-                        core::ptr::addr_of!(task.ti_on_cpu) as *const u64)
-                };
+                let q = super::timer::edges::ti_on_cpu_volatile_read(task);
                 let st = task.state().bits();
                 let linked = match task.policy() {
                     crate::process::task::SchedPolicy::Fifo
