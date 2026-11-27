@@ -18,6 +18,7 @@
 //! Output rides the taskdump raw-UART path (no printk, no allocation) so
 //! it is safe from the timer softirq context that hosts the periodic dump.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use super::taskdump::{taskdump_dec, taskdump_raw_line};
@@ -178,24 +179,23 @@ pub fn plausible_fp(fp: u64) -> bool {
         && crate::arch::mm::is_linear_mapping(fp as usize)
 }
 
+// The frame-pointer walk family (INV-FOR-7): the per-arch raw bodies
+// (plausibility-gated volatile frame-word reads) live in the audited
+// unsafe file (forensics_edges::walk_fp_chain_raw). Layout notes:
+// riscv64 stores s0 at the TOP of the frame (saved ra at [fp-8], saved
+// s0 at [fp-0x10]); SysV x86_64 stores the saved rbp AT [rbp] with the
+// return address at [rbp+8] (running the riscv64 layout on x86_64
+// dereferenced the frame's LOCAL VARIABLES — locals that happened to
+// hold kernel pointers passed the plausibility gate, so nearly every
+// allocation interned a UNIQUE garbage chain, exhausting PSITE_SLOTS
+// within the first minutes of a boot and dropping every real call site
+// from the MEMPSITES attribution; observed live on the pt4 audit boot);
+// aarch64 AAPCS64 stores the saved x29 (caller fp) at [fp] and lr at
+// [fp+8] — the x86_64 walk shape.
 #[inline(never)]
-#[cfg(feature = "riscv64")]
-pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
-    for slot in out.iter_mut() {
-        *slot = 0;
-        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
-            return;
-        }
-        let ra = core::ptr::read_volatile((fp - 8) as *const u64);
-        let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
-        *slot = ra;
-        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
-            return;
-        }
-        fp = next;
-    }
+pub fn walk_fp_chain(fp: u64, out: &mut [u64]) {
+    crate::dfx::forensics_edges::walk_fp_chain_raw(fp, out)
 }
-
 /// x86_64 twin. The riscv64 walk above reads the RISC-V frame layout
 /// (s0 at the TOP of the frame: saved ra at [fp-8], saved s0 at
 /// [fp-0x10]); SysV x86_64 stores the saved rbp AT [rbp] with the return
@@ -207,51 +207,6 @@ pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
 /// MEMPSITES attribution (observed live on the pt4 audit boot: f2 slots
 /// full of ASCII data like 0x49657069505d737d, top net=198 against
 /// 442k page frees).
-/// aarch64 twin: AAPCS64 frame layout stores the saved x29 (caller fp)
-/// at [fp] and lr at [fp+8] — the same walk shape as the x86_64 SysV
-/// twin below (NOT the riscv64 top-of-frame layout).
-#[inline(never)]
-#[cfg(feature = "aarch64")]
-pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
-    for slot in out.iter_mut() {
-        *slot = 0;
-        if !(fp >= 0xffff_8000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
-            return;
-        }
-        // AAPCS64: [fp] = caller's saved x29, [fp+8] = this frame's
-        // return address. Stacks grow down, so the caller's fp is
-        // strictly greater than the current one.
-        let next = core::ptr::read_volatile(fp as *const u64);
-        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
-        *slot = ra;
-        if !(next >= 0xffff_8000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
-            return;
-        }
-        fp = next;
-    }
-}
-
-#[inline(never)]
-#[cfg(feature = "x86_64")]
-pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
-    for slot in out.iter_mut() {
-        *slot = 0;
-        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
-            return;
-        }
-        // SysV: [fp] = caller's saved rbp, [fp+8] = this frame's return
-        // address. Stacks grow down, so the caller's rbp is strictly
-        // greater than the current one (same ascending check as riscv64).
-        let next = core::ptr::read_volatile(fp as *const u64);
-        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
-        *slot = ra;
-        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
-            return;
-        }
-        fp = next;
-    }
-}
-
 fn chain_key(bucket: usize, frames: &[u64; SITE_FRAMES]) -> usize {
     // keep 0 as the "empty slot" sentinel
     let mut key = bucket.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
@@ -702,9 +657,8 @@ pub fn note_page_alloc(phys: usize, order: usize, frames: &[u64; SITE_FRAMES]) {
     let pages = 1usize << order;
     let mut i = first;
     while i < first + pages && i < PPAGE_TABLE_ENTRIES {
-        unsafe {
-            (*table)[i].store(sid as u8, Ordering::Relaxed);
-        }
+        // INV-FOR-2 ppage edge (memwatch's own table, in-bounds idx).
+        crate::dfx::forensics_edges::ppage_site_store(table, i, sid as u8);
         i += 1;
     }
 }
@@ -724,16 +678,16 @@ pub fn note_page_free(phys: usize, order: usize) {
     if table.is_null() {
         return;
     }
-    let sid = unsafe { (*table)[first].load(Ordering::Relaxed) };
+    // INV-FOR-2 ppage edge (memwatch's own table, in-bounds idx).
+    let sid = crate::dfx::forensics_edges::ppage_site_load(table, first);
     if sid == 0 || sid as usize > PSITE_SLOTS {
         return;
     }
     let pages = 1usize << order;
     let mut i = first;
     while i < first + pages && i < PPAGE_TABLE_ENTRIES {
-        unsafe {
-            (*table)[i].store(0, Ordering::Relaxed);
-        }
+        // INV-FOR-2 ppage edge (memwatch's own table, in-bounds idx).
+        crate::dfx::forensics_edges::ppage_site_store(table, i, 0);
         i += 1;
     }
     PSITES[sid as usize - 1].frees.fetch_add(1, Ordering::Relaxed);
@@ -774,54 +728,10 @@ fn put_dec(v: u64) {
 /// Read-only walk; diagnostic noise under concurrency is acceptable.
 fn kroot_pollution() {
     taskdump_raw_line(b"MEMKROOT l1=");
-    let mut l1n = 0u64;
-    let mut l0n = 0u64;
-    let mut min_va = u64::MAX;
-    let mut max_va = 0u64;
-    let mut user_leaves = 0u64;
-    unsafe {
-        let root_ptr = &raw const crate::arch::mm::mmu_init::ROOT_PAGE_TABLE;
-        let root = &*root_ptr;
-        for i in 0..2usize {
-            let pte2 = root.get(i);
-            if !pte2.is_valid() || pte2.is_leaf() {
-                continue;
-            }
-            l1n += 1;
-            let t1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                pte2.ppn() << 12,
-            );
-            if t1.is_null() {
-                continue;
-            }
-            for j in 0..512usize {
-                let pte1 = (*t1).get(j);
-                if !pte1.is_valid() {
-                    continue;
-                }
-                let va = ((i as u64) << 30) | ((j as u64) << 21);
-                if va < min_va { min_va = va; }
-                if va + (1 << 21) > max_va { max_va = va + (1 << 21); }
-                if pte1.is_leaf() {
-                    if pte1.is_user() { user_leaves += 1; }
-                    continue;
-                }
-                l0n += 1;
-                let t0 = crate::arch::mm::mmu_init::get_page_table_virt(
-                    pte1.ppn() << 12,
-                );
-                if t0.is_null() {
-                    continue;
-                }
-                for k in 0..512usize {
-                    let pte0 = (*t0).get(k);
-                    if pte0.is_valid() && pte0.is_leaf() && pte0.is_user() {
-                        user_leaves += 1;
-                    }
-                }
-            }
-        }
-    }
+    // INV-FOR-2 pgtable-walk edge: the read-only root/sub-table walk
+    // lives in the audited unsafe file; this fn only formats.
+    let (l1n, l0n, user_leaves, min_va, max_va) =
+        crate::dfx::forensics_edges::kroot_pollution_scan();
     put_dec(l1n);
     taskdump_raw_line(b" l0=");
     put_dec(l0n);

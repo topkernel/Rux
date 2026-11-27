@@ -28,6 +28,7 @@
 //! All state lives in this module's static table (single-auditor,
 //! no locks needed); zero cost when the switch is off.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 const TABLE_N: usize = 192;
@@ -112,9 +113,9 @@ pub fn tick() {
         return;
     }
     let now = crate::drivers::timer::get_jiffies() as u64;
-    // SAFETY: single-auditor (heartbeat CAS admits one CPU; the table
-    // is only touched from this path).
-    unsafe { audit(now) };
+    // Single-auditor (heartbeat CAS admits one CPU; the table is only
+    // touched from this path). audit is plain safe code.
+    audit(now);
 }
 
 /// Collect this round's stuck entries (>= 8 s old), print them.

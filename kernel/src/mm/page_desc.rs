@@ -28,6 +28,10 @@
 //! - **INV-REF-5**: `_mapcount > -1` ⟺ page is mapped in `(_mapcount + 1)` page tables.
 //!
 //! - **INV-REF-6**: If `Cow` flag is set ⟹ `_refcount >= 2` AND the PTE `W` bit is clear.
+//!
+//! Mainline consolidation (2026-11-27): zero unsafe keywords — the raw
+//! vmemmap pointer accesses are the audited edge's INV-MM-2 arms
+//! (`crate::mm::edges`: page_of / page_ref_of / copy_page_contents_raw).
 //!   This is the COW pre-condition: the page is shared read-only among multiple mappings.
 //!
 
@@ -35,6 +39,8 @@
 // pfn through the linear vmemmap array (bounds by the managed-range
 // check); the flag words are the same lock-free atomics every reader
 // uses.)
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::page::{PhysAddr, PhysFrame, PhysFrameNr, VirtAddr, PAGE_SIZE};
@@ -879,21 +885,13 @@ impl Page {
 
 /// Copy contents of one physical page to another.
 ///
-/// Both `src_pfn` and `dst_pfn` must be valid page frame numbers.
-/// The pages must not overlap.
-///
-/// # Safety
-/// - src_pfn and dst_pfn must be valid
-/// - The source page must contain valid data
-/// - The caller must ensure no concurrent writes to either page
-pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
-    use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
-    // pfn_to_phys yields a physical address; it must go through the linear
-    // mapping (phys_to_virt) before dereference — the raw PA has no mapping
-    // once the MMU is on.
-    let src = phys_to_virt(PhysAddr(super::zone::pfn_to_phys(src_pfn) as u64)).0 as usize as *const u8;
-    let dst = phys_to_virt(PhysAddr(super::zone::pfn_to_phys(dst_pfn) as u64)).0 as usize as *mut u8;
-    core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE);
+/// Both `src_pfn` and `dst_pfn` must be valid page frame numbers and
+/// the pages must not overlap; the caller must ensure no concurrent
+/// writes to either page. These are the audited edge's INV-MM-2 copy
+/// arm contracts (`crate::mm::edges::copy_page_contents_raw` holds the
+/// raw body and the full safety argument).
+pub fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
+    crate::mm::edges::copy_page_contents_raw(src_pfn, dst_pfn)
 }
 
 // ========== Global page array (mem_map) ==========
@@ -1048,12 +1046,10 @@ pub fn mark_non_ram_pages(regions: &[crate::cmdline::MemoryRegion]) {
         if is_ram(pfn) {
             continue;
         }
-        let page = pfn_to_page(pfn);
-        if !page.is_null() {
-            // SAFETY: boot-time single-threaded init; descriptor in span.
-            unsafe {
-                (*page).init_reserved();
-            }
+        // INV-MM-2 init arm (audited edge): boot-time single-threaded
+        // init; descriptor in span (None = outside vmemmap span).
+        if let Some(page) = super::edges::page_of(pfn) {
+            page.init_reserved();
             marked += 1;
         }
     }
@@ -1096,11 +1092,10 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
     // wasted work.)
     for i in 0..init_count {
         let pfn = start_pfn + i;
-        let page = pfn_to_page(pfn);
-        if !page.is_null() {
-            unsafe {
-                (*page).init_free();
-            }
+        // INV-MM-2 init arm (audited edge): boot-time walk; None =
+        // outside the vmemmap span.
+        if let Some(page) = super::edges::page_of(pfn) {
+            page.init_free();
         }
     }
 
@@ -1118,11 +1113,8 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
         }
         let mut addr = res_start;
         while addr < res_end {
-            let page = pfn_to_page(addr / PAGE_SIZE);
-            if !page.is_null() {
-                unsafe {
-                    (*page).init_reserved();
-                }
+            if let Some(page) = super::edges::page_of(addr / PAGE_SIZE) {
+                page.init_reserved();
             }
             addr += PAGE_SIZE;
         }
@@ -1285,58 +1277,40 @@ pub fn page_desc_stats() -> PageDescStats {
     // for total_pages above.
     let live_pages = live_pages.min(crate::mm::vmemmap::vmemmap_stats().nr_pages);
     for i in 0..live_pages {
-        let page = pfn_to_page(base_pfn + i);
-        if page.is_null() {
+        // INV-FRAME-1 typed view (the safe accessor below): None =
+        // outside the mapped vmemmap range — exactly the bound the raw
+        // null check used to provide.
+        let Some(page) = page_desc(base_pfn + i) else {
             continue;
+        };
+        if page.refcount() == 0 {
+            stats.free_pages += 1;
+        } else {
+            stats.used_pages += 1;
         }
-        unsafe {
-            if (*page).refcount() == 0 {
-                stats.free_pages += 1;
-            } else {
-                stats.used_pages += 1;
-            }
 
-            if (*page).is_reserved() {
-                stats.reserved_pages += 1;
-            }
+        if page.is_reserved() {
+            stats.reserved_pages += 1;
+        }
 
-            if (*page).is_mapped() {
-                stats.mapped_pages += 1;
-            }
+        if page.is_mapped() {
+            stats.mapped_pages += 1;
+        }
 
-            if (*page).is_dirty() {
-                stats.dirty_pages += 1;
-            }
+        if page.is_dirty() {
+            stats.dirty_pages += 1;
+        }
 
-            if (*page).is_cow() {
-                stats.cow_pages += 1;
-            }
+        if page.is_cow() {
+            stats.cow_pages += 1;
+        }
 
-            if (*page).is_anonymous() {
-                stats.anonymous_pages += 1;
-            }
+        if page.is_anonymous() {
+            stats.anonymous_pages += 1;
         }
     }
 
     stats
-}
-
-/// Get Page reference for a physical frame
-///
-/// # Safety
-/// Caller must ensure pfn is in valid range
-#[inline]
-pub unsafe fn get_page(pfn: PhysFrameNr) -> &'static Page {
-    &*pfn_to_page(pfn)
-}
-
-/// Get mutable Page reference for a physical frame
-///
-/// # Safety
-/// Caller must ensure pfn is in valid range and there are no other references
-#[inline]
-pub unsafe fn get_page_mut(pfn: PhysFrameNr) -> &'static mut Page {
-    &mut *pfn_to_page_mut(pfn)
 }
 
 /// Safe shared view of a frame's page descriptor (unsafe-slim round 2).
@@ -1348,16 +1322,10 @@ pub unsafe fn get_page_mut(pfn: PhysFrameNr) -> &'static mut Page {
 /// holders alias the same frame. This is the typed replacement for the
 /// `let p = pfn_to_page_mut(pfn); if !p.is_null() { unsafe { (*p)... } }`
 /// idiom — out-of-range pfns return None (the null check, lifted into
-/// the type).
+/// the type). The raw deref is the audited edge's INV-MM-2 shared arm
+/// (`crate::mm::edges::page_ref_of`).
 #[inline]
 pub fn page_desc(pfn: PhysFrameNr) -> Option<&'static Page> {
-    let p = pfn_to_page(pfn);
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: INV-FRAME-1 — vmemmap descriptors exist for the whole
-    // machine lifetime; non-null check above mirrors pfn_to_page's
-    // range validation.
-    Some(unsafe { &*p })
+    crate::mm::edges::page_ref_of(pfn)
 }
 

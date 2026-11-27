@@ -37,6 +37,11 @@
 //! run with IRQs off), one report per distinct victim address (8-entry
 //! ring), hard cap of 16 printed reports so the console cannot flood.
 
+// deny (not forbid): this file owns #[no_mangle] gdb-park symbols and
+// asm-read statics — the unsafe_attributes lint (part of the unsafe_code
+// group) needs item-level allows below; the boundary is the same: ZERO
+// unsafe keywords (mainline-gate checked).
+#![deny(unsafe_code)]
 use crate::console::uart_putc_raw as putchar;
 use crate::process::task::{task_offsets as offs, Task};
 use crate::sched::sched::TASK_POISON;
@@ -146,26 +151,24 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
     pmsg(b" task=0x");
     phex(task as u64);
     pmsg(b" pid=");
-    unsafe { pdec(rq32(task, offs::TASK_PID) as u64); }
+    pdec(rq32(task, offs::TASK_PID) as u64);
     pmsg(b" comm=");
-    unsafe {
-        for &c in (*task).comm().iter() {
-            if c == 0 {
-                break;
-            }
-            putchar(if (0x20..0x7f).contains(&c) { c } else { b'.' });
+    // INV-FOR-1 comm edge (stable field; a racing writer tears at worst).
+    for &c in crate::dfx::forensics_edges::t_comm(task).iter() {
+        if c == 0 {
+            break;
         }
+        putchar(if (0x20..0x7f).contains(&c) { c } else { b'.' });
     }
     pmsg(b" kstack=0x");
-    unsafe {
-        match (*task).get_kernel_stack() {
-            Some(bottom) => {
-                phex(bottom as u64);
-                pmsg(b"-0x");
-                phex(bottom as u64 + crate::config::KERNEL_STACK_SIZE as u64);
-            }
-            None => pmsg(b"none"),
+    // INV-FOR-1 stack-pointer edge (best-effort diagnostic read).
+    match crate::dfx::forensics_edges::t_get_kernel_stack(task) {
+        Some(bottom) => {
+            phex(bottom as u64);
+            pmsg(b"-0x");
+            phex(bottom as u64 + crate::config::KERNEL_STACK_SIZE as u64);
         }
+        None => pmsg(b"none"),
     }
     for (name, v) in bad.iter() {
         if name.is_empty() {
@@ -185,7 +188,7 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
         pmsg(b":");
         for col in 0..4 {
             putchar(b' ');
-            unsafe { phex(rq64(task, row * 0x20 + col * 8)); }
+            phex(rq64(task, row * 0x20 + col * 8));
         }
         putchar(b'\n');
     }
@@ -198,12 +201,9 @@ pub fn dump_victim(tag: &[u8], task: *mut Task) {
 }
 
 fn text_range() -> (u64, u64) {
-    // _stext/_etext: same linker symbols the R74 sp-gate compares against.
-    extern "C" {
-        static _stext: u8;
-        static _etext: u8;
-    }
-    unsafe { (&_stext as *const u8 as u64, &_etext as *const u8 as u64) }
+    // _stext/_etext: same linker symbols the R74 sp-gate compares
+    // against (the address-taking is the audited INV-FOR-2 edge).
+    crate::dfx::forensics_edges::kernel_text_range_raw()
 }
 
 /// Field validation: returns up to four implausible (name, value) pairs.
@@ -221,7 +221,7 @@ fn text_range() -> (u64, u64) {
 /// - running_on_cpu: -1 or a valid CPU id.
 /// - state word: never TASK_POISON while still hashed (freed-while-
 ///   linked), and no freed-paint qword in the header (recycled page).
-unsafe fn bad_fields(task: *mut Task) -> Fields {
+fn bad_fields(task: *mut Task) -> Fields {
     let mut bad = NO_FIELDS;
     let mut n = 0usize;
     macro_rules! push {
@@ -290,7 +290,7 @@ pub fn audit_tick() {
             return;
         }
         let task = task as *const crate::process::task::Task as *mut crate::process::task::Task;
-        let bad = unsafe { bad_fields(task) };
+        let bad = bad_fields(task);
         if !bad[0].0.is_empty() {
             report(b"audit", task, &bad);
         }
@@ -315,15 +315,13 @@ pub struct WatchSnap {
 }
 
 pub fn watch_snap(task: *mut Task) -> WatchSnap {
-    unsafe {
-        WatchSnap {
-            ksp: rq64(task, offs::TI_KERNEL_SP),
-            user_sp: rq64(task, offs::TI_USER_SP),
-            preempt: rq32(task, offs::TI_PREEMPT_COUNT),
-            pick: rq32(task, offs::TI_PICK_STATE),
-            claim: rq32(task, offs::TI_RUNNING_ON_CPU) as i32,
-            flags: rq32(task, offs::TI_FLAGS),
-        }
+    WatchSnap {
+        ksp: rq64(task, offs::TI_KERNEL_SP),
+        user_sp: rq64(task, offs::TI_USER_SP),
+        preempt: rq32(task, offs::TI_PREEMPT_COUNT),
+        pick: rq32(task, offs::TI_PICK_STATE),
+        claim: rq32(task, offs::TI_RUNNING_ON_CPU) as i32,
+        flags: rq32(task, offs::TI_FLAGS),
     }
 }
 
@@ -344,7 +342,7 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
     pmsg(b" task=0x");
     phex(task as u64);
     pmsg(b" pid=");
-    unsafe { pdec(rq32(task, offs::TASK_PID) as u64); }
+    pdec(rq32(task, offs::TASK_PID) as u64);
     pmsg(b"\n  old: ksp=0x");
     phex(old.ksp);
     pmsg(b" user_sp=0x");
@@ -377,14 +375,14 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
         pmsg(b":");
         for col in 0..4 {
             putchar(b' ');
-            unsafe { phex(rq64(task, row * 0x20 + col * 8)); }
+            phex(rq64(task, row * 0x20 + col * 8));
         }
         putchar(b'\n');
     }
     pmsg(b"R83-AROUND +0x40:");
     for i in 0..8 {
         putchar(b' ');
-        unsafe { phex(rq64(task, 0x40 + i * 8)); }
+        phex(rq64(task, 0x40 + i * 8));
     }
     putchar(b'\n');
 }
@@ -445,7 +443,7 @@ pub fn sched_tick_audit() {
                         return;
                     }
                     let task = task as *const crate::process::task::Task as *mut crate::process::task::Task;
-                    let bad = unsafe { bad_fields(task) };
+                    let bad = bad_fields(task);
                     if !bad[0].0.is_empty() {
                         report(b"tick-hash", task, &bad);
                     }
@@ -504,16 +502,15 @@ fn magic_scan(next_off: &AtomicU64) {
     )
     .0 as usize;
     let end = start + SLICE.min(heap_len - off) as usize;
-    // SAFETY: diagnostic reads of the linear-mapped kernel heap.
-    unsafe {
-        let mut p = start;
-        while p < end {
-            let v = core::ptr::read_volatile(p as *const u64);
-            if (v >> 32) as u32 == R84_MAGIC_HI {
-                magic_report(p as u64, v);
-            }
-            p += 8;
+    // INV-FOR-2 volatile-read edges: diagnostic reads of the
+    // linear-mapped kernel heap.
+    let mut p = start;
+    while p < end {
+        let v = crate::dfx::forensics_edges::diag_read_qword(p);
+        if (v >> 32) as u32 == R84_MAGIC_HI {
+            magic_report(p as u64, v);
         }
+        p += 8;
     }
 }
 
@@ -545,8 +542,8 @@ fn magic_report(addr: u64, v: u64) {
         pmsg(b":");
         for col in 0..4 {
             let p = base + row * 0x20 + col * 8;
-            // SAFETY: diagnostic read of the kernel heap neighborhood.
-            unsafe { phex(core::ptr::read_volatile(p as *const u64)); }
+            // INV-FOR-2 volatile-read edge: kernel heap neighborhood.
+            phex(crate::dfx::forensics_edges::diag_read_qword(p));
             putchar(b' ');
         }
         putchar(b'\n');
@@ -567,6 +564,7 @@ fn magic_report(addr: u64, v: u64) {
 /// site: 1 = .Lreturn_user store, 2 = .Lcheck_resched_kernel store,
 ///       3 = .Lreturn_user post-schedule reload, 4 = same, kernel path,
 ///       5 = .Lfrom_user entry ksp load.
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
     use core::sync::atomic::AtomicU64 as A64;
@@ -619,17 +617,9 @@ fn word_is_ascii(v: u64) -> bool {
 /// True when the exact 8 bytes appear anywhere in the cmdline blob
 /// (unaligned search — the observed words are unaligned slices).
 fn word_in_cmdline(v: u64) -> bool {
-    let ptr = crate::cmdline::CMDLINE_PTR.load(Ordering::Acquire) as usize;
-    let len = crate::cmdline::CMDLINE_LEN.load(Ordering::Acquire);
-    if ptr == 0 || len < 8 {
-        return false;
-    }
-    let needle = v.to_le_bytes();
-    // SAFETY: blob is [ptr, ptr+len) for the whole boot; read-only scan.
-    unsafe {
-        let blob = core::slice::from_raw_parts(ptr as *const u8, len);
-        blob.windows(8).any(|w| w == needle)
-    }
+    // INV-FOR-12 edge: the blob scan (the blob is [ptr, ptr+len) for
+    // the whole boot; read-only).
+    crate::dfx::forensics_edges::cmdline_contains_qword(v)
 }
 
 /// Scan one live task's kernel stack for foreign shapes. Reports at
@@ -638,7 +628,9 @@ pub fn stack_foreign_scan(task: *mut Task) {
     if !crate::trace::EVENT_SCRIBBLE.armed() {
         return;
     }
-    let t = unsafe { &*task };
+    // INV-FOR-3 raw-ref edge (the caller's SCRIBBLE gate proves the
+    // task pointer came from the slot table).
+    let t = crate::dfx::forensics_edges::raw_ref(task);
     let bottom = t.kernel_stack_bottom();
     if bottom == 0 {
         return;
@@ -652,8 +644,9 @@ pub fn stack_foreign_scan(task: *mut Task) {
     let mut dense_best = 0u32;
     let mut first_hit = (0usize, 0u64);
     for off in (0..depth).step_by(8) {
-        // SAFETY: within the task's own kernel stack allocation.
-        let v = unsafe { core::ptr::read_volatile((bottom + off) as *const u64) };
+        // INV-FOR-2 volatile-read edge: within the task's own kernel
+        // stack allocation.
+        let v = crate::dfx::forensics_edges::diag_read_qword(bottom + off);
         if word_is_ascii(v) {
             dense_run += 1;
             if dense_run > dense_best {

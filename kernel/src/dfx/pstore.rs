@@ -53,6 +53,7 @@
 //! The region is one record deep: the next panic overwrites it, the
 //! same last-panic contract the reference's console backend has.
 
+#![forbid(unsafe_code)]
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
@@ -66,25 +67,25 @@ pub const PSTORE_RAM_SIZE: usize = 128 * 1024;
 const SINK_SIZE: usize = 16 * 1024;
 
 /// The record magic: "RUXPST02".
-const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST02");
+pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST02");
 
 /// The record header, 32 bytes, at the region start.
 #[repr(C)]
-struct RecordHeader {
-    magic: u64,
-    version: u32,
+pub(crate) struct RecordHeader {
+    pub(crate) magic: u64,
+    pub(crate) version: u32,
     /// Payload length in bytes (after this header).
-    length: u32,
+    pub(crate) length: u32,
     /// jiffies at the capture (the record's timestamp).
-    jiffies: u32,
+    pub(crate) jiffies: u32,
     /// Record kind: 0 = console (the panic report, exposed as
     /// console-ramoops-0), 1 = dmesg (the oops report, exposed as
     /// dmesg-ramoops-0) — the reference pstore's two ramoops flavors.
-    kind: u32,
-    _reserved: [u32; 2],
+    pub(crate) kind: u32,
+    pub(crate) _reserved: [u32; 2],
 }
 
-const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 2;
 
 /// Console flavor — the panic report (`console-ramoops-0`).
 pub const KIND_CONSOLE: u32 = 0;
@@ -169,10 +170,10 @@ pub fn early_scan() {
     let Some(virt) = region_virt() else {
         return;
     };
-    // SAFETY: the region is reserved RAM, mapped by the linear map; the
-    // header reads are plain loads of memory no writer touches (the
-    // previous boot is gone).
-    let hdr = unsafe { &*(virt as *const RecordHeader) };
+    // INV-FOR-3 raw-ref edge: the region is reserved RAM, mapped by
+    // the linear map; the header reads are plain loads of memory no
+    // writer touches (the previous boot is gone).
+    let hdr = crate::dfx::forensics_edges::raw_ref(virt as *const RecordHeader);
     if hdr.magic != MAGIC || hdr.version != VERSION {
         return;
     }
@@ -184,10 +185,9 @@ pub fn early_scan() {
     };
     HAS_RECORD.store(true, Ordering::Release);
     RECORD_KIND.store(kind, Ordering::Release);
-    // SAFETY: same region; this boot now owns it. Clear only the magic.
-    unsafe {
-        core::ptr::write_volatile(virt as *mut u64, 0);
-    }
+    // INV-FOR-2 volatile-write edge: same region; this boot now owns
+    // it. Clear only the magic.
+    crate::dfx::forensics_edges::diag_write_qword(virt as *mut u64, 0);
     crate::pr_info!(
         "pstore: previous boot's {} record found ({} bytes) — /sys/fs/pstore/{}, jiffies {}",
         if kind == KIND_DMESG { "dmesg" } else { "console" },
@@ -221,14 +221,16 @@ pub fn read_record() -> alloc::vec::Vec<u8> {
     let Some(virt) = region_virt() else {
         return alloc::vec::Vec::new();
     };
-    // SAFETY: reserved, mapped, owned by this boot since early_scan
-    // cleared the magic; no writer exists until the next panic (and a
-    // next panic would overwrite with a full new header first).
-    let hdr = unsafe { &*(virt as *const RecordHeader) };
+    // INV-FOR-3 / INV-FOR-2 edges: reserved, mapped, owned by this
+    // boot since early_scan cleared the magic; no writer exists until
+    // the next panic (and a next panic would overwrite with a full new
+    // header first).
+    let hdr = crate::dfx::forensics_edges::raw_ref(virt as *const RecordHeader);
     let length = (hdr.length as usize).min(PSTORE_RAM_SIZE - size_of::<RecordHeader>());
-    let bytes = unsafe {
-        core::slice::from_raw_parts(virt.add(size_of::<RecordHeader>()), length)
-    };
+    let bytes = crate::dfx::forensics_edges::diag_bytes(
+        (virt.addr() + size_of::<RecordHeader>()) as *const u8,
+        length,
+    );
     bytes.to_vec()
 }
 
@@ -293,62 +295,25 @@ fn write_record(kind: u32, hw: &HeadWriter) {
     // record.
     SINK_ARMED.store(false, Ordering::Release);
 
-    // SAFETY: reserved, mapped RAM owned by this dying boot; nothing
-    // else touches it (the other CPUs are already stopped or on their
-    // way; a racing capture on another CPU at worst interleaves bytes —
-    // the record is a forensic artifact, not a protocol).
-    unsafe {
-        let budget = PSTORE_RAM_SIZE - size_of::<RecordHeader>();
-        let limit = virt.addr() + size_of::<RecordHeader>() + budget;
-        let mut dst = virt.add(size_of::<RecordHeader>());
-        let mut write = |src: &[u8]| {
-            let take = src.len().min(limit - dst.addr());
-            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, take);
-            dst = dst.add(take);
-        };
-
-        // 1. The identity head.
-        write(&hw.buf[..hw.len]);
-
-        // 2. The staged report — the static sink, copied ring-wise
-        // (atomic loads; every byte ever sunk sits at SINK[s %
-        // SINK_SIZE], the newest SINK_SIZE bytes are kept, oldest-first).
-        write(b"--- report (as printed) ---\n");
-        let at = SINK_AT.load(Ordering::Relaxed);
-        let first = at.saturating_sub(SINK_SIZE);
-        for s in first..at {
-            let b = SINK[s % SINK_SIZE].0.load(Ordering::Relaxed);
-            if dst.addr() >= limit {
-                break;
-            }
-            core::ptr::write_volatile(dst, b);
-            dst = dst.add(1);
-        }
-
-        // 3. The console tail, formatted straight into the region's
-        // remaining space (try-lock inside — a stopped CPU may hold the
-        // printk ring; the panic path must never wait).
-        if dst.addr() < limit {
-            let tail = core::slice::from_raw_parts_mut(dst, limit - dst.addr());
-            let n = crate::printk::ring_tail_into(tail);
-            dst = dst.add(n);
-        }
-        let length = dst.addr() - virt.addr() - size_of::<RecordHeader>();
-
-        // Header last-word-first: everything but the magic now, magic
-        // LAST — a crash inside this function must not leave a record
-        // the next boot would trust halfway.
-        let hdr = virt as *mut RecordHeader;
-        core::ptr::write_volatile(&mut (*hdr).version, VERSION);
-        core::ptr::write_volatile(
-            &mut (*hdr).jiffies,
-            crate::drivers::timer::get_jiffies() as u32,
-        );
-        core::ptr::write_volatile(&mut (*hdr).kind, kind);
-        core::ptr::write_volatile(&mut (*hdr)._reserved, [0; 2]);
-        core::ptr::write_volatile(&mut (*hdr).length, length as u32);
-        core::ptr::write_volatile(&mut (*hdr).magic, MAGIC);
+    // INV-FOR-11 capture edge: reserved, mapped RAM owned by this
+    // dying boot; nothing else touches it (the other CPUs are already
+    // stopped or on their way; a racing capture on another CPU at
+    // worst interleaves bytes — the record is a forensic artifact, not
+    // a protocol). The sink bytes are reconstructed here (atomic loads,
+    // ring-wise oldest-first); the raw bounded copy + header publish
+    // lives in the audited edge.
+    let at = SINK_AT.load(Ordering::Relaxed);
+    let first = at.saturating_sub(SINK_SIZE);
+    let mut sink = alloc::vec::Vec::with_capacity(at - first);
+    for s in first..at {
+        sink.push(SINK[s % SINK_SIZE].0.load(Ordering::Relaxed));
     }
+    let _head_len = crate::dfx::forensics_edges::pstore_capture_write(
+        virt,
+        kind,
+        &hw.buf[..hw.len],
+        &sink,
+    );
 }
 
 /// Stack-buffer fmt sink for the record head (no allocation).

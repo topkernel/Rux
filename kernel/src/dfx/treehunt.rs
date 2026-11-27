@@ -36,6 +36,7 @@
 //! Per-(pid,kind) dedupe ring plus a 64-lines/60-s cap; zero cost when
 //! rux:treehunt (retired dfx=treehunt) is off.
 
+#![forbid(unsafe_code)]
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 static LINES: AtomicU32 = AtomicU32::new(0);
@@ -72,85 +73,88 @@ pub fn tick() {
     // slowtask::audit + futex_stuck_census at BUCKET_LOCK[22]). Try-walk:
     // a skipped bucket only misses tasks for this 60 s window.
     crate::sched::for_each_task_try(|task| {
-        // SAFETY: callback runs under the pid-hash bucket lock; reads of
-        // the task's own fields and diagnostic reads of plausible peer
+        // Callback runs under the pid-hash bucket lock; reads of the
+        // task's own fields and diagnostic reads of plausible peer
         // pointers only; no writes except the diagnostic counters.
-        unsafe {
-            let t = &*task;
-            let pid = t.pid();
-            if pid == 0 {
-                return;
-            }
-            let state = t.state();
-            if state.is_dead() || state.contains(crate::process::task::TaskState::ZOMBIE) {
-                return;
-            }
-            let parent = t.parent_ptr();
-            let leader = t.group_leader_ptr();
-            let is_member = leader as *const _ != task as *const _;
+        // The adoptions are the audited edges' INV-FOR-1/INV-FOR-3 arms.
+        let t = crate::dfx::forensics_edges::raw_ref(task);
+        let pid = t.pid();
+        if pid == 0 {
+            return;
+        }
+        let state = t.state();
+        if state.is_dead() || state.contains(crate::process::task::TaskState::ZOMBIE) {
+            return;
+        }
+        let parent = t.parent_ptr();
+        let leader = t.group_leader_ptr();
+        let is_member = leader as *const _ != task as *const _;
 
-            // Class 1: parent pointer names implausible memory.
-            if let Some(p) = parent {
-                if !crate::process::task::Task::is_plausible_task_ptr(p) {
-                    // Shape the holder and the target page so the serial
-                    // line separates freed-Task-page (a real missed
-                    // unlink) from recycled-garbage (long-stale pointer)
-                    // from never-a-task addresses (pointer corruption).
-                    let member = is_member as u64;
-                    let lpid = if is_member { (*leader).pid() as u64 } else { 0 };
-                    // Read the target's first word ONLY inside the
-                    // kernel linear map (sc304 lesson: the implausible
-                    // pointer may be user-range — reading it would fault
-                    // in timer context). Outside the window, mark 0xBAD.
-                    const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
-                    const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
-                    let pa = p as usize;
-                    let w0 = if pa >= MAP_BASE && pa + 8 < MAP_BASE + MAP_SPAN {
-                        // SAFETY: diagnostic read of one word from a
-                        // kernel-linear-map address — mapped for the
-                        // machine's whole RAM, cannot fault.
-                        unsafe { core::ptr::read_volatile(pa as *const u64) }
-                    } else {
-                        0xBAD_BAD_BAD_BAD_BAD
-                    };
-                    hit3(pid, p as usize, member, lpid, w0, t.state().bits() as u64);
+        // Class 1: parent pointer names implausible memory.
+        if let Some(p) = parent {
+            if !crate::process::task::Task::is_plausible_task_ptr(p) {
+                // Shape the holder and the target page so the serial
+                // line separates freed-Task-page (a real missed
+                // unlink) from recycled-garbage (long-stale pointer)
+                // from never-a-task addresses (pointer corruption).
+                let member = is_member as u64;
+                let lpid = if is_member {
+                    crate::dfx::forensics_edges::t_pid(leader) as u64
+                } else {
+                    0
+                };
+                // Read the target's first word ONLY inside the kernel
+                // linear map (sc304 lesson: the implausible pointer may
+                // be user-range — reading it would fault in timer
+                // context). Outside the window, mark 0xBAD.
+                const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+                const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
+                let pa = p as usize;
+                let w0 = if pa >= MAP_BASE && pa + 8 < MAP_BASE + MAP_SPAN {
+                    // INV-FOR-2 volatile-read edge: one word from a
+                    // kernel-linear-map address — mapped for the
+                    // machine's whole RAM, cannot fault.
+                    crate::dfx::forensics_edges::diag_read_qword(pa)
+                } else {
+                    0xBAD_BAD_BAD_BAD_BAD
+                };
+                hit3(pid, p as usize, member, lpid, w0, t.state().bits() as u64);
+                return;
+            }
+        }
+
+        // Class 2: member snapshot diverged from the leader's parent.
+        if is_member
+            && crate::process::task::Task::is_plausible_task_ptr(leader)
+        {
+            let l = crate::dfx::forensics_edges::raw_ref(leader);
+            let lst = l.state();
+            if !lst.is_dead() && !lst.contains(crate::process::task::TaskState::ZOMBIE) {
+                let lp = l.parent_ptr();
+                let same = match (parent, lp) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a as *const _ == b as *const _,
+                    _ => false,
+                };
+                if !same {
+                    hit2(
+                        pid,
+                        parent.map(|p| p as usize).unwrap_or(0),
+                        l.pid(),
+                        lp.map(|p| p as usize).unwrap_or(0),
+                    );
                     return;
                 }
             }
+        }
 
-            // Class 2: member snapshot diverged from the leader's parent.
-            if is_member
-                && crate::process::task::Task::is_plausible_task_ptr(leader)
-            {
-                let l = &*leader;
-                let lst = l.state();
-                if !lst.is_dead() && !lst.contains(crate::process::task::TaskState::ZOMBIE) {
-                    let lp = l.parent_ptr();
-                    let same = match (parent, lp) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => a as *const _ == b as *const _,
-                        _ => false,
-                    };
-                    if !same {
-                        hit2(
-                            pid,
-                            parent.map(|p| p as usize).unwrap_or(0),
-                            l.pid(),
-                            lp.map(|p| p as usize).unwrap_or(0),
-                        );
-                        return;
-                    }
-                }
-            }
-
-            // Class 3: parent set but not linked (leader-shaped tasks —
-            // members carry head == null by design, skip them).
-            if parent.is_some()
-                && !is_member
-                && t.parent_children_head_ptr().is_null()
-            {
-                hit(pid, 3, parent.map(|p| p as usize).unwrap_or(0), 0);
-            }
+        // Class 3: parent set but not linked (leader-shaped tasks —
+        // members carry head == null by design, skip them).
+        if parent.is_some()
+            && !is_member
+            && t.parent_children_head_ptr().is_null()
+        {
+            hit(pid, 3, parent.map(|p| p as usize).unwrap_or(0), 0);
         }
     });
 }

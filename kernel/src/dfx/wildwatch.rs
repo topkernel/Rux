@@ -33,6 +33,7 @@
 //! canary is pattern-filled at arm time and verified from the timer
 //! softirq cadence (rux:wildwatch (retired dfx=wildwatch) gates everything; zero cost when off).
 
+#![forbid(unsafe_code)]
 #[cfg(feature = "x86_64")]
 pub use x86::*;
 #[cfg(not(feature = "x86_64"))]
@@ -107,12 +108,13 @@ mod x86 {
         let mut ok_pages = 0usize;
         let mut fail_pages = 0usize;
         let mut guarded_aliases = 0usize;
-        // SAFETY: the only linking store per split is one aligned 8-byte
-        // store; concurrent readers stay consistent under either mapping.
-        unsafe {
+        // INV-FOR-8 guard edges: the only linking store per split is
+        // one aligned 8-byte store; concurrent readers stay consistent
+        // under either mapping.
+        {
             // Alias 1: link-time kernel-half VAs (the statics themselves).
             for va in (start..start + len).step_by(4096) {
-                if protect_page(va) {
+                if crate::dfx::forensics_edges::protect_page_raw(va) {
                     ok_pages += 1;
                 } else {
                     fail_pages += 1;
@@ -123,16 +125,16 @@ mod x86 {
             // then guard the linear-map alias and (if under 2GB) the low
             // identity alias.
             for va in (start..start + len).step_by(4096) {
-                let Some(phys) = resolve_phys(va) else {
+                let Some(phys) = crate::dfx::forensics_edges::resolve_phys_raw(va) else {
                     continue;
                 };
                 let lin = phys
                     .wrapping_add(crate::arch::mm::memory_layout::PAGE_OFFSET as u64);
-                if lin != va as u64 && protect_page(lin as usize) {
+                if lin != va as u64 && crate::dfx::forensics_edges::protect_page_raw(lin as usize) {
                     guarded_aliases += 1;
                 }
                 if phys < 0x8000_0000 {
-                    if phys as usize != va && protect_page(phys as usize) {
+                    if phys as usize != va && crate::dfx::forensics_edges::protect_page_raw(phys as usize) {
                         guarded_aliases += 1;
                     }
                 }
@@ -165,9 +167,9 @@ mod x86 {
                     start + 4096,
                     crate::arch::cpu_id()
                 );
-                // SAFETY: deliberate wild-store emulation onto the RO
-                // guard page — this instruction MUST page-fault.
-                unsafe { victim.write_volatile(0xdead_beef_dead_beef) };
+                // INV-FOR-5 deliberate-smash edge onto the RO guard
+                // page — this instruction MUST page-fault.
+                crate::dfx::forensics_edges::diag_write_qword(victim, 0xdead_beef_dead_beef);
                 crate::pr_err!("WILDWATCH-SELFTEST(arm) FAULT NOT TAKEN");
             }
         } else if tries < 30 {
@@ -184,17 +186,14 @@ mod x86 {
     /// Set CR0.WP on the CURRENT cpu (idempotent). With WP clear, ring-0
     /// stores ignore page RW bits — the guard pages would be writable.
     fn enable_write_protect() {
-        // SAFETY: one CR0 read-modify-write; WP is a boot-time-static bit.
-        unsafe {
-            let cr0 = crate::arch::cpu::read_cr0();
-            crate::arch::cpu::write_cr0(cr0 | 0x1_0000);
-        }
+        // INV-FOR-8 CR0 edge: one CR0 read-modify-write; WP is a
+        // boot-time-static bit.
+        crate::dfx::forensics_edges::cr0_set_write_protect();
     }
 
     fn fill_canary(start: usize) {
         // Only the FIRST page of the cluster is canary (hpet::GUARD
         // layout: canary page, then the live members).
-        let page = start as *mut u64;
         for i in 0..512usize {
             let salt = i as u64;
             let v = if i & 1 == 0 {
@@ -202,8 +201,12 @@ mod x86 {
             } else {
                 !(CANARY_MAGIC ^ (salt << 32))
             };
-            // SAFETY: kernel .bss page, written once before RO arming.
-            unsafe { page.add(i).write_volatile(v) };
+            // INV-FOR-2 volatile-write edge: kernel .bss page, written
+            // once before RO arming.
+            crate::dfx::forensics_edges::diag_write_qword(
+                (start + i * 8) as *mut u64,
+                v,
+            );
         }
     }
 
@@ -228,9 +231,9 @@ mod x86 {
                 let (start, _len) = crate::drivers::timer::hpet::wild_guard_range();
                 let victim = (start + 4096) as *mut u64; // GUARD.base_locked
                 crate::pr_err!("WILDWATCH-SELFTEST firing: deliberate store to {:#x}", start + 4096);
-                // SAFETY: deliberate wild-store emulation onto the RO
-                // guard page — this instruction MUST page-fault.
-                unsafe { victim.write_volatile(0xdead_beef_dead_beef) };
+                // INV-FOR-5 deliberate-smash edge onto the RO guard
+                // page — this instruction MUST page-fault.
+                crate::dfx::forensics_edges::diag_write_qword(victim, 0xdead_beef_dead_beef);
                 // If control returns here the trap did NOT fire — the
                 // tripwire is broken; scream.
                 crate::pr_err!("WILDWATCH-SELFTEST FAULT NOT TAKEN — guard page is NOT read-only!");
@@ -248,15 +251,15 @@ mod x86 {
             let e = ARMED_END[r].load(Ordering::Relaxed);
             let su = s as usize;
             let canary_end = (su + 4096).min(e as usize);
-            let page = su as *const u64;
             for i in 0..((canary_end - su) / 8) {
                 let expect = if i & 1 == 0 {
                     CANARY_MAGIC ^ ((i as u64) << 32)
                 } else {
                     !(CANARY_MAGIC ^ ((i as u64) << 32))
                 };
-                // SAFETY: registered armed kernel page.
-                let v = unsafe { page.add(i).read_volatile() };
+                // INV-FOR-2 volatile-read edge: registered armed
+                // kernel page.
+                let v = crate::dfx::forensics_edges::diag_read_qword(su + i * 8);
                 if v != expect {
                     if !CANARY_REPORTED[r].swap(true, Ordering::AcqRel) {
                         crate::pr_err!(
@@ -299,181 +302,31 @@ mod x86 {
     /// boot-time tables come from the early pool INSIDE the kernel image,
     /// whose kernel-half VAs are valid by the constant VMA-LMA offset —
     /// use that translation for image-phys, arch helper otherwise.
-    fn table_virt(phys: u64) -> *mut crate::arch::mm::pagetable::PageTable {
+    pub(crate) fn table_virt(phys: u64) -> *mut crate::arch::mm::pagetable::PageTable {
         use crate::arch::mm::memory_layout::{KERNEL_ENTRY, KERNEL_MAP};
         let end = crate::arch::mm::mmu_init::kernel_image_phys_end();
-        // SAFETY: read-only access of the boot-constant VMA-LMA offset
-        // (written once during mmu init, before any wildwatch code runs).
-        let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+        // INV-FOR-8 edges: the boot-constant VMA-LMA offset (written
+        // once during mmu init) and the arch frame translation.
+        let offset = crate::dfx::forensics_edges::va_kernel_pa_offset_raw();
         if phys >= KERNEL_ENTRY && phys < end {
             let va = phys.wrapping_add(offset);
             return va as *mut _;
         }
-        // SAFETY: same contract as the arch helper.
-        unsafe { crate::arch::mm::mmu_init::get_page_table_virt(phys) }
+        crate::dfx::forensics_edges::get_page_table_virt_raw(phys)
     }
 
     /// Resolve the physical address a kernel-half VA maps to (leaf walk).
     /// Full 4-level walk: PML4 -> PDPT -> PD -> PTE.
     fn resolve_phys(va: usize) -> Option<u64> {
-        // SAFETY: read-only walk of the shared kernel root.
-        unsafe {
-            let root = table_virt(crate::arch::mm::mmu_init::root_static_phys());
-            let pml4i = (va >> 39) & 0x1ff;
-            let pdpti = (va >> 30) & 0x1ff;
-            let pdi = (va >> 21) & 0x1ff;
-            let pti = (va >> 12) & 0x1ff;
-            let pml4e = (*root).get(pml4i);
-            if !pml4e.is_table() {
-                return None;
-            }
-            let pdpt = &mut *table_virt(pml4e.phys_addr());
-            let pd_e = pdpt.get(pdpti);
-            if !pd_e.is_table() {
-                return None;
-            }
-            let pd = &mut *table_virt(pd_e.phys_addr());
-            let pmd = pd.get(pdi);
-            if !pmd.is_valid() {
-                return None;
-            }
-            if pmd.is_leaf() {
-                return Some(pmd.phys_addr() | ((va as u64) & 0x1F_FFFF));
-            }
-            let pt = &mut *table_virt(pmd.phys_addr());
-            let pte = pt.get(pti);
-            if !pte.is_valid() {
-                return None;
-            }
-            Some(pte.phys_addr() | ((va as u64) & 0xFFF))
-        }
+        // INV-FOR-8 walk edge: read-only walk of the shared kernel root.
+        crate::dfx::forensics_edges::resolve_phys_raw(va)
     }
 
-    /// Clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf if
-    /// needed. Returns true when the leaf reads back read-only.
-    ///
-    /// SAFETY (caller): runs pre-SMP from dfx::init on the BSP; the
-    /// linking store is one aligned 8-byte store, so the old and new
-    /// translations are both consistent for concurrent readers.
-    unsafe fn protect_page(va: usize) -> bool {
-        use crate::arch::mm::pagetable::PageTable;
-
-        let root = table_virt(crate::arch::mm::mmu_init::root_static_phys());
-        let pml4i = (va >> 39) & 0x1ff;
-        let pdpti = (va >> 30) & 0x1ff;
-        let pdi = (va >> 21) & 0x1ff;
-        let pti = (va >> 12) & 0x1ff;
-
-        // Full 4-level walk. (An earlier draft read PML4[i] and used its
-        // PDPT page directly as the PD — one level short; every guard
-        // read as zeros. The gdb cross-check below is what caught it.)
-        let pml4e = (*root).get(pml4i);
-        if !pml4e.is_table() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pml4[{:}]={:#x} not a table link",
-                va,
-                pml4i,
-                pml4e.bits()
-            );
-            return false;
-        }
-        let pdpt: &mut PageTable = &mut *table_virt(pml4e.phys_addr());
-        let pd_e = pdpt.get(pdpti);
-        if !pd_e.is_valid() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pdpt[{:}]={:#x} invalid",
-                va,
-                pdpti,
-                pd_e.bits()
-            );
-            return false;
-        }
-        if pd_e.is_leaf() {
-            // 1GiB leaf — split not implemented (no guard region lands
-            // under one today); fail loudly rather than silently skip.
-            crate::pr_err!(
-                "wildwatch: va={:#x} pdpt[{:}] is a 1GiB leaf (split unsupported)",
-                va,
-                pdpti
-            );
-            return false;
-        }
-        let pd: &mut PageTable = &mut *table_virt(pd_e.phys_addr());
-        let pmd = pd.get(pdi);
-        if !pmd.is_valid() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pml4i={} pdpti={} pdi={} pti={} pd[{:+}]={:#x} pd[{}]={:#x} pd[{}]={:#x} pd[{}]={:#x} (cr3={:#x})",
-                va,
-                pml4i,
-                pdpti,
-                pdi,
-                pti,
-                pdi as isize - 1,
-                pd.get(pdi.wrapping_sub(1)).bits(),
-                pdi,
-                pmd.bits(),
-                pdi + 1,
-                pd.get(pdi + 1).bits(),
-                pdi + 2,
-                pd.get(pdi + 2).bits(),
-                crate::arch::cpu::read_cr3()
-            );
-            return false;
-        }
-
-        if pmd.is_table() {
-            // Already 4KiB entries: flip this one's RW off.
-            let pt: &mut PageTable = &mut *table_virt(pmd.phys_addr());
-            let mut e = pt.get(pti);
-            if !e.is_valid() {
-                crate::pr_err!(
-                    "wildwatch: va={:#x} cr3={:#x} pml4[{}]={:#x} pdpt[{}]={:#x} pd[{}]={:#x} pt[{}]={:#x} invalid",
-                    va,
-                    crate::arch::cpu::read_cr3(),
-                    pml4i,
-                    pml4e.bits(),
-                    pdpti,
-                    pd_e.bits(),
-                    pdi,
-                    pmd.bits(),
-                    pti,
-                    e.bits()
-                );
-                return false;
-            }
-            e = PageTableEntry::from_bits(e.bits() & !PageTableEntry::RW);
-            pt.set(pti, e);
-            crate::arch::cpu::invlpg(va as u64);
-            return !pt.get(pti).is_writable();
-        }
-
-        // 2MiB leaf: split into a fresh 4KiB table replicating the leaf,
-        // with the target page's RW cleared.
-        let phys2m = pmd.phys_addr();
-        // Keep the flag bits that apply per-page; PS (7) and GLOBAL (8)
-        // are dropped for children of a split.
-        let mut flags = pmd.bits() & 0xFFF & !PageTableEntry::PS & !PageTableEntry::GLOBAL;
-        // A supervisor leaf never carries US; keep whatever it carried.
-        flags |= PageTableEntry::P;
-        let Some(newpt_phys) = crate::arch::mm::mmu_init::alloc_page_table() else {
-            return false;
-        };
-        let newpt: &mut PageTable =
-            &mut *table_virt(newpt_phys);
-        for i in 0..512u64 {
-            let mut bits = (phys2m + i * 4096) | flags;
-            if i as usize == pti {
-                bits &= !PageTableEntry::RW;
-            }
-            newpt.set(i as usize, PageTableEntry::from_bits(bits));
-        }
-        // One aligned 8-byte linking store replaces the huge leaf.
-        pd.set(
-            pdi,
-            PageTableEntry::from_bits(newpt_phys | PageTableEntry::P | PageTableEntry::RW),
-        );
-        crate::arch::cpu::invlpg(va as u64);
-        let pt: &mut PageTable = &mut *table_virt(pd.get(pdi).phys_addr());
-        !pt.get(pti).is_writable()
+    /// Clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf
+    /// if needed. Returns true when the leaf reads back read-only. The
+    /// raw walk/link lives in the audited unsafe file (INV-FOR-8,
+    /// forensics_edges::protect_page_raw).
+    fn protect_page(va: usize) -> bool {
+        crate::dfx::forensics_edges::protect_page_raw(va)
     }
 }
