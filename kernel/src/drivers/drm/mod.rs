@@ -26,6 +26,7 @@
 //! primary plane), mirroring how QEMU virtio-gpu presents itself. The
 //! plane exposes the rockchip-style "NAME"/"PLANE_MASK" enum/bitmask
 //! properties the OH composer matches planes with.
+#![forbid(unsafe_code)]
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::collections::BTreeMap;
@@ -569,10 +570,6 @@ pub struct GemObject {
 
 }
 
-// SAFETY: the object's mutable state is a single AtomicU32; kva/phys are
-// stable for the object's lifetime.
-unsafe impl Send for GemObject {}
-unsafe impl Sync for GemObject {}
 
 impl Drop for GemObject {
     fn drop(&mut self) {
@@ -584,7 +581,7 @@ impl Drop for GemObject {
         }
         // SAFETY: kva was allocated with exactly this layout in
         // create_dumb and never reallocated.
-        unsafe { dealloc(self.kva, self.layout) };
+        crate::drivers::edges::raw_dealloc(self.kva, self.layout);
     }
 }
 
@@ -683,8 +680,9 @@ fn prime_close(file: &crate::fs::file::File) -> i32 {
     // Box<Arc<GemObject>>; reconstruct and drop it once here.
     if let Some(ptr) = file.private_data_ptr() {
         file.clear_private_data();
-        // SAFETY: the Box<Arc<GemObject>> the export stored (sole ref).
-        drop(unsafe { alloc::boxed::Box::from_raw(ptr as *mut Arc<GemObject>) });
+        // The Box<Arc<GemObject>> the export stored (sole ref); the
+        // reclaim crosses the audited INV-DRV-BOX edge.
+        drop(crate::drivers::edges::box_take(ptr as *mut Arc<GemObject>));
     }
     0
 }
@@ -780,8 +778,8 @@ fn prime_file_gem(file: &crate::fs::file::File) -> Option<Arc<GemObject>> {
     // private_data holds a Box<Arc<GemObject>> installed at export (the
     // one audited deref is the clone).
     let ptr = file.private_data_ptr()?;
-    // SAFETY: Box<Arc<GemObject>> stored by the export path.
-    Some(unsafe { (*(ptr as *const Arc<GemObject>)).clone() })
+    // Box<Arc<GemObject>> stored by the export path (INV-DRV-RAW edge).
+    Some(crate::drivers::edges::raw_ref(ptr as *const Arc<GemObject>).clone())
 }
 
 // ============================================================================
@@ -821,9 +819,10 @@ fn copy_out<const N: usize>(arg: usize, buf: &[u8; N], size: usize) -> bool {
 /// arrays are plain ids; the byte relabeling is layout-only).
 mod bytemod {
     pub fn u32_slice_as_bytes(v: &[u32]) -> &[u8] {
-        // SAFETY: [u32] and its byte image have identical size/align
-        // requirements; the relabel borrows v's own lifetime.
-        unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
+        // [u32] and its byte image have identical size/align
+        // requirements; the relabel crosses the audited INV-DRV-SLICE
+        // edge and borrows v's own lifetime.
+        crate::drivers::edges::slice_u8(v.as_ptr() as *const u8, v.len() * 4)
     }
 }
 
@@ -1633,8 +1632,8 @@ fn create_dumb(arg: usize) -> i64 {
         Ok(l) => l,
         Err(_) => return -22,
     };
-    // SAFETY: layout has non-zero size; null-checked below.
-    let kva = unsafe { alloc_zeroed(layout) };
+    // Layout has non-zero size; null-checked below (INV-DRV-ALLOC).
+    let kva = crate::drivers::edges::raw_alloc_zeroed(layout);
     if kva.is_null() {
         return -12; // ENOMEM
     }
@@ -1825,11 +1824,11 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
             // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
             // an imported smaller buffer made the unclamped reads walk past the
             // allocation).
-            unsafe {
+            {
                 let base = gem.kva as *const u32;
                 let words = gem.size / 4;
                 for i in 0..words {
-                    let v = base.add(i).read_volatile();
+                    let v = crate::drivers::edges::volatile_read_u32_at(base, i);
                     if v != 0 {
                         nz += 1;
                         if v == 0xff00_0000 {
@@ -1840,7 +1839,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
                 let row_words = 983040 / 1280; // pitch/4 for these buffers
                 let s = |off: usize| -> u32 {
                     if off < words {
-                        base.add(off).read_volatile()
+                        crate::drivers::edges::volatile_read_u32_at(base, off)
                     } else {
                         0
                     }
@@ -2032,11 +2031,11 @@ fn present_fb(fb_id: u32) -> i64 {
         // word-aligned reads stay inside the allocation (sample offsets are
         // clamped to words — the fixed 720-wide sample geometry only fits
         // full-size frame GEMs).
-        unsafe {
+        {
             let base = gem.kva as *const u32;
             let words = gem.size / 4;
             for i in 0..words {
-                let v = base.add(i).read_volatile();
+                let v = crate::drivers::edges::volatile_read_u32_at(base, i);
                 if v != 0 {
                     nz += 1;
                 }
@@ -2044,9 +2043,9 @@ fn present_fb(fb_id: u32) -> i64 {
             let row_words = (pitch / 4) as usize;
             let vis_words = width as usize;
             for row in 0..height as usize {
-                let rowp = base.add(row * row_words);
+                let rowp = crate::drivers::edges::u32_offset(base, row * row_words);
                 for col in (0..vis_words).step_by(2) {
-                    let v = rowp.add(col).read_volatile();
+                    let v = crate::drivers::edges::volatile_read_u32_at(rowp, col);
                     if v != 0 && v != 0xff00_0000 {
                         paint += 1;
                     }
@@ -2056,7 +2055,7 @@ fn present_fb(fb_id: u32) -> i64 {
             let last_row = (height as usize - 1).saturating_mul(row_words);
             let s = |off: usize| -> u32 {
                 if off < words {
-                    base.add(off).read_volatile()
+                    crate::drivers::edges::volatile_read_u32_at(base, off)
                 } else {
                     0
                 }

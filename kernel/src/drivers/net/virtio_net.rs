@@ -3,6 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! VirtIO network device driver
+#![forbid(unsafe_code)]
 
 use crate::drivers::virtio::queue;
 use crate::drivers::virtio::virtio_pci::VirtIOPCI;
@@ -69,9 +70,6 @@ pub struct VirtIONetDevice {
     rx_last_used: Spinlock<u16>,
 }
 
-// SAFETY: All shared state is protected by Spinlocks (irqsave where needed),
-// ensuring no data races across threads/CPUs.
-unsafe impl Send for VirtIONetDevice {}
 
 impl VirtIONetDevice {
     /// Create new VirtIO network device
@@ -563,8 +561,8 @@ impl VirtIONetDevice {
         // SAFETY: buf_virt is the linear-mapping address of the device-completed
         // RX buffer of total_len bytes; the buffer remains valid until after
         // this function returns.
-        let hdr_and_data = unsafe {
-            core::slice::from_raw_parts(buf_virt as *const u8, total_len)
+        let hdr_and_data = {
+            crate::drivers::edges::slice_u8(buf_virt as *const u8, total_len)
         };
 
         // Skip VirtIO-Net header, keep only Ethernet frame
@@ -631,12 +629,10 @@ impl VirtIONetDevice {
         let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
         // SAFETY: Buffer was allocated with identical layout in refill_rx_buffers();
         // from_size_align cannot fail because buf_size and align are the same constants.
-        unsafe {
-            if let Ok(layout) = alloc::alloc::Layout::from_size_align(buf_size, 64) {
-                alloc::alloc::dealloc(addr as *mut u8, layout);
-            } else {
-                crate::pr_err!("virtio_net: invalid RX dealloc layout buf_size={}", buf_size);
-            }
+        if let Ok(layout) = alloc::alloc::Layout::from_size_align(buf_size, 64) {
+            crate::drivers::edges::raw_dealloc(addr as *mut u8, layout);
+        } else {
+            crate::pr_err!("virtio_net: invalid RX dealloc layout buf_size={}", buf_size);
         }
     }
 
@@ -663,7 +659,7 @@ impl VirtIONetDevice {
             };
 
             // SAFETY: Layout is valid (checked above); null check follows immediately.
-            let buf_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
+            let buf_ptr = crate::drivers::edges::raw_alloc(layout) as *mut u8;
             if buf_ptr.is_null() {
                 continue;
             }
@@ -674,8 +670,9 @@ impl VirtIONetDevice {
             let desc_idx = match queue.alloc_desc_chain(1) {
                 Some(idx) => idx,
                 None => {
-                    // SAFETY: buf_ptr was just allocated with layout; no submit occurred.
-                    unsafe { alloc::alloc::dealloc(buf_ptr, layout); }
+                    // buf_ptr was just allocated with layout; no submit
+                    // occurred (INV-DRV-ALLOC edge).
+                    crate::drivers::edges::raw_dealloc(buf_ptr, layout);
                     continue;
                 }
             };

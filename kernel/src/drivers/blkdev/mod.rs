@@ -9,6 +9,7 @@
 //! - `struct block_device`: Block device instance
 //! - `struct request_queue`: Request queue
 //! - `struct bio`: I/O descriptor
+#![forbid(unsafe_code)]
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -96,8 +97,6 @@ pub struct GenDisk {
     pub async_write_sg_fn: Option<fn(&GenDisk, u64, &[DmaSeg], &crate::fs::io_completion::IoCompletion) -> i32>,
 }
 
-unsafe impl Send for GenDisk {}
-unsafe impl Sync for GenDisk {}
 
 impl GenDisk {
     /// Create new block device
@@ -151,7 +150,7 @@ impl GenDisk {
         // SAFETY: INV-BLKDEV-3 — drivers store an init-time, machine-
         // lifetime object in the slot; the shared borrow here never
         // outlives the disk's registration.
-        self.private_data.map(|p| unsafe { &*(p as *const T) })
+        self.private_data.map(|p| crate::drivers::edges::raw_ref(p as *const T))
     }
 
     /// Set request handler function
@@ -232,15 +231,13 @@ pub enum ReqCmd {
     Flush,
 }
 
-struct BlockDeviceManager {
+pub(crate) struct BlockDeviceManager {
     /// Block device list
     disks: Spinlock<Vec<Option<Box<GenDisk>>>>,
     /// Device number allocator
     major_next: AtomicU32,
 }
 
-unsafe impl Send for BlockDeviceManager {}
-unsafe impl Sync for BlockDeviceManager {}
 
 impl BlockDeviceManager {
     const fn new() -> Self {
@@ -283,7 +280,7 @@ impl BlockDeviceManager {
                 if gd.major == major {
                     // SAFETY: INV-BLKDEV-1 above — the Box outlives the
                     // lock and the machine; the allocation is stable.
-                    return Some(unsafe { &*(gd.as_ref() as *const GenDisk) });
+                    return Some(crate::drivers::edges::raw_ref(gd.as_ref() as *const GenDisk));
                 }
             }
         }

@@ -5,6 +5,7 @@
 //! RISC-V Timer driver
 //!
 //! Uses SBI calls or sstc extension to set timer
+#![forbid(unsafe_code)]
 
 use riscv::register::time;
 use crate::sbi;
@@ -159,19 +160,6 @@ pub fn monotonic_ns_since_boot() -> u64 {
     ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
 }
 
-/// Set timer using stimecmp CSR (sstc extension)
-///
-/// This is more direct than SBI and avoids potential issues
-#[inline]
-fn set_timer_stimecmp(deadline: u64) {
-    unsafe {
-        asm!(
-            "csrw stimecmp, {0}",
-            in(reg) deadline,
-            options(nomem, nostack)
-        );
-    }
-}
 
 /// Set timer using SBI call (fallback)
 #[inline]

@@ -5,6 +5,7 @@
 //! VirtIO virtual queue
 //!
 //! Queue implementation fully compliant with VirtIO specification
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
@@ -141,8 +142,6 @@ struct Vring {
     off_used: usize,
 }
 
-unsafe impl Send for VirtQueue {}
-unsafe impl Sync for VirtQueue {}
 
 // ---- Safe used-ring / response readers (safe-call discipline,
 // INV-SAFECALL-1..3): the ONE audited volatile edge per shape; every
@@ -160,7 +159,7 @@ pub fn used_ring_idx(used_ring: *const UsedRing) -> u16 {
     // SAFETY: the invariant above — a live vring's used ring; the u16
     // at +2 is within the allocation; volatile because the device
     // writes it (INV-DMA-3).
-    unsafe { core::ptr::read_volatile((used_ring as usize + 2) as *const u16) }
+    crate::drivers::edges::volatile_read_u16((used_ring as usize + 2) as *const u16)
 }
 
 /// Read a used-ring entry's descriptor id (device-written) volatily.
@@ -173,9 +172,7 @@ pub fn used_ring_elem_id(used_ring: *const UsedRing, slot: usize) -> u32 {
     }
     // SAFETY: live used ring; the entry at +4+slot*8 is within the
     // allocation for slot < queue_size; volatile device-written memory.
-    unsafe {
-        core::ptr::read_volatile((used_ring as usize + 4 + slot * 8) as *const u32)
-    }
+    crate::drivers::edges::volatile_read_u32((used_ring as usize + 4 + slot * 8) as *const u32)
 }
 
 /// True once the device has written THIS request's response byte.
@@ -195,7 +192,7 @@ pub fn resp_status_byte(resp_status: *const u8) -> u8 {
     }
     // SAFETY: caller-owned response byte of a live request; volatile
     // so each poll re-reads DMA memory (INV-DMA-3).
-    unsafe { core::ptr::read_volatile(resp_status) }
+    crate::drivers::edges::volatile_read_u8(resp_status)
 }
 
 /// r-strand instrument (lat_fs conviction round, 2026-11-19): the sync
@@ -400,42 +397,29 @@ impl VirtQueue {
         #[cfg(feature = "riscv64")]
         let sie_backup: u64;
         #[cfg(feature = "riscv64")]
-        // SAFETY: reading sie and clearing SEIE (bit 9) via a register-based
-        // csrc is valid in S-mode; the mask register is a scratch local.
-        unsafe {
-            core::arch::asm!(
-                "csrr {sie}, sie",
-                "li {mask}, {seie}",
-                "csrc sie, {mask}",
-                sie = out(reg) sie_backup,
-                mask = out(reg) _,
-                seie = const 1 << 9,
-            );
-        }
+        // Reading sie and clearing SEIE (bit 9) crosses the audited
+        // INV-DRV-CSR edge.
+        let sie_backup: u64 = crate::drivers::edges::riscv_mask_seie();
 
         // RISC-V MMIO fence: fence w, o
         // This ensures all previous writes (to descriptor table, available ring)
         // are visible before the MMIO write to the notify register.
         // MMIO write fence: RISCV_FENCE(w, o)
         #[cfg(feature = "riscv64")]
-        unsafe {
-            core::arch::asm!("fence w, o");
-        }
+        crate::drivers::edges::fence_w_o();
 
-        // SAFETY: queue_notify is a valid MMIO address for the VirtIO notify register;
-        // volatile write ensures the store reaches the device.
-        unsafe {
-            match self.notify_width {
-                NotifyWidth::W16 => {
-                    // virtio-pci notify capability (matches Linux iowrite16)
-                    let queue_notify = self.queue_notify as *mut u16;
-                    core::ptr::write_volatile(queue_notify, self.queue_index);
-                }
-                NotifyWidth::W32 => {
-                    // virtio-mmio QueueNotify: QEMU drops any access != 4 bytes
-                    let queue_notify = self.queue_notify as *mut u32;
-                    core::ptr::write_volatile(queue_notify, self.queue_index as u32);
-                }
+        // queue_notify is a valid MMIO address for the VirtIO notify
+        // register; the volatile write crosses the INV-DRV-MMIO edge.
+        match self.notify_width {
+            NotifyWidth::W16 => {
+                // virtio-pci notify capability (matches Linux iowrite16)
+                crate::drivers::edges::mmio_write16(
+                    self.queue_notify as *mut u16, self.queue_index);
+            }
+            NotifyWidth::W32 => {
+                // virtio-mmio QueueNotify: QEMU drops any access != 4 bytes
+                crate::drivers::edges::mmio_write32(
+                    self.queue_notify as *mut u32, self.queue_index as u32);
             }
         }
 
@@ -448,19 +432,12 @@ impl VirtQueue {
         // fetch and did not order the notify store at all (review ARCH:
         // fence i,ir 用反, weakly-ordered platform risk).
         #[cfg(feature = "riscv64")]
-        unsafe {
-            core::arch::asm!("fence iorw, iorw");
-        }
+        crate::drivers::edges::fence_iorw();
 
         // Restore interrupts
         #[cfg(feature = "riscv64")]
-        // SAFETY: writing sie CSR to restore the previous interrupt-enable state is valid on S-mode.
-        unsafe {
-            core::arch::asm!(
-                "csrw sie, {sie}",
-                sie = in(reg) sie_backup,
-            );
-        }
+        // Restoring sie crosses the audited INV-DRV-CSR edge.
+        crate::drivers::edges::riscv_sie_restore(sie_backup);
     }
 
     /// Wait for device to complete request
@@ -1437,10 +1414,10 @@ break 'wait_done prev_used;
         let vr = self.vring.as_ref()?;
         let base = vr.desc.as_ptr() as *mut Desc;
         if (idx as usize) < vr.desc.len() {
-            // SAFETY: idx bounds-checked above; the slot's range is
-            // disjoint from every other slot (INV-DMA-2); caller's
-            // device lock provides the exclusion.
-            Some(unsafe { &mut *base.add(idx as usize) })
+            // idx bounds-checked above; the slot's range is disjoint
+            // from every other slot (INV-DMA-2); caller's device lock
+            // provides the exclusion (the audited raw_mut edge).
+            Some(crate::drivers::edges::raw_mut(crate::drivers::edges::ptr_add(base, idx as usize)))
         } else {
             None
         }
@@ -1451,9 +1428,9 @@ break 'wait_done prev_used;
     pub(crate) fn avail_header_mut(&self) -> Option<&mut AvailRing> {
         let vr = self.vring.as_ref()?;
         let base = vr.avail.as_ptr();
-        // SAFETY: disjoint slot (INV-DMA-2); the avail header is
-        // driver-written; caller's device lock serializes.
-        Some(unsafe { &mut *base })
+        // Disjoint slot (INV-DMA-2); the avail header is driver-written;
+        // caller's device lock serializes (the audited raw_mut edge).
+        Some(crate::drivers::edges::raw_mut(base))
     }
 
     /// Volatile write of avail ring slot `ring_idx` (device reads).

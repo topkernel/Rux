@@ -29,6 +29,7 @@
 //! Model: REALTIME = monotonic (CLINT `time` CSR) + WALL_EPOCH_OFFSET_SECS
 //! (syscall/time.rs). `rtc_init_wall_clock()` reads the device once at
 //! boot and derives the offset; settimeofday/clock_settime re-derive it.
+#![forbid(unsafe_code)]
 
 /// MMIO base of the goldfish RTC on the QEMU virt platform.
 pub const GOLDFISH_RTC_BASE: u64 = 0x101_000;
@@ -42,7 +43,7 @@ pub const GOLDFISH_RTC_BASE: u64 = 0x101_000;
 /// ioremapped into the kernel-half dynamic alias arena at init — same
 /// treatment the virtio BARs get — and GOLDFISH_RTC_VA carries the
 /// resolved kernel VA (still valid under every user CR3).
-pub static GOLDFISH_RTC_VA: core::sync::atomic::AtomicU64 =
+pub(crate) static GOLDFISH_RTC_VA: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0x101_000);
 
 /// Size of the mapped device region (one page — the register file is
@@ -52,16 +53,6 @@ pub const GOLDFISH_RTC_SIZE: u64 = 0x1000;
 const REG_TIME_LOW: u64 = 0x00;
 const REG_TIME_HIGH: u64 = 0x04;
 
-/// Read one 32-bit device register.
-///
-/// # Safety (internal)
-/// The page at GOLDFISH_RTC_BASE is identity-mapped with device flags by
-/// `setup_device_mappings()`; this helper is only reachable after that.
-#[inline]
-fn read_reg(offset: u64) -> u32 {
-    let va = GOLDFISH_RTC_VA.load(core::sync::atomic::Ordering::Relaxed);
-    unsafe { core::ptr::read_volatile((va + offset) as *const u32) }
-}
 
 /// Resolve the device page into the kernel-half dynamic alias arena.
 /// Called once from rtc init before the first register read; the atomic
@@ -84,9 +75,9 @@ pub fn rtc_init_alias() {
 /// retries until it is stable — same protocol here.
 pub fn read_ns() -> u64 {
     loop {
-        let hi1 = read_reg(REG_TIME_HIGH) as u64;
-        let lo = read_reg(REG_TIME_LOW) as u64;
-        let hi2 = read_reg(REG_TIME_HIGH) as u64;
+        let hi1 = crate::drivers::edges::rtc_read_reg(REG_TIME_HIGH) as u64;
+        let lo = crate::drivers::edges::rtc_read_reg(REG_TIME_LOW) as u64;
+        let hi2 = crate::drivers::edges::rtc_read_reg(REG_TIME_HIGH) as u64;
         if hi1 == hi2 {
             return (hi1 << 32) | lo;
         }

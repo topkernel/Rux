@@ -5,6 +5,7 @@
 //! VirtIO-GPU device driver
 //!
 //! Implements VirtIO-GPU PCI device initialization and framebuffer management
+#![forbid(unsafe_code)]
 
 use crate::println;
 use crate::drivers::pci::{self, virtio_device};
@@ -152,8 +153,6 @@ struct RespNoData {
     header: GpuCtrlHeader,
 }
 
-unsafe impl Send for VirtioGpuDevice {}
-unsafe impl Sync for VirtioGpuDevice {}
 
 impl VirtioGpuDevice {
     /// Create a new VirtIO-GPU device
@@ -341,7 +340,7 @@ impl VirtioGpuDevice {
 
         // Step 2: Allocate framebuffer
         let layout = Layout::from_size_align(fb_size, 4096).ok()?;
-        let fb_ptr = unsafe { alloc_zeroed(layout) };
+        let fb_ptr = crate::drivers::edges::raw_alloc_zeroed(layout);
 
         if fb_ptr.is_null() {
             return None;
@@ -733,17 +732,17 @@ impl VirtioGpuDevice {
         let io_layout = Layout::from_size_align(cmd_size + resp_size, 16).ok()?;
         // SAFETY: Layout is non-zero-sized (both parts are >= 24 bytes);
         // null check follows immediately.
-        let io_buf = unsafe { alloc(io_layout) };
+        let io_buf = crate::drivers::edges::raw_alloc(io_layout);
         if io_buf.is_null() {
             return None;
         }
         let cmd_ptr = io_buf as *const u8;
         // SAFETY: io_buf is cmd_size + resp_size bytes; +cmd_size is in
         // bounds and resp_size bytes remain after it.
-        let resp_ptr = unsafe { io_buf.add(cmd_size) } as *mut u8;
+        let resp_ptr = crate::drivers::edges::ptr_add(io_buf, cmd_size) as *mut u8;
         // SAFETY: cmd references at least cmd_size initialized bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(cmd as *const CMD as *const u8, io_buf, cmd_size);
+        {
+            crate::drivers::edges::copy_bytes(cmd as *const CMD as *const u8, io_buf, cmd_size);
         }
 
         // Set by the polling loop below; read after the block is released.
@@ -794,10 +793,9 @@ impl VirtioGpuDevice {
 
             // RISC-V needs to flush CPU cache to memory
             #[cfg(feature = "riscv64")]
-            // SAFETY: bare cache/memory fence instruction, no operands.
-            unsafe {
-                core::arch::asm!("fence");
-            }
+            // Bare cache/memory fence instruction, no operands
+            // (INV-DRV-FENCE edge).
+            crate::drivers::edges::fence_full();
 
             queue.write_avail_idx(((idx as u16).wrapping_add(1)));
             fence(Ordering::SeqCst);
@@ -865,13 +863,11 @@ impl VirtioGpuDevice {
                 // the caller's buffer before the block is freed.
                 // SAFETY: the device wrote resp_size bytes at resp_ptr
                 // (desc1 was the device-writable half of the chain).
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        resp_ptr,
-                        resp as *mut RESP as *mut u8,
-                        resp_size,
-                    );
-                }
+                crate::drivers::edges::copy_bytes(
+                    resp_ptr,
+                    resp as *mut RESP as *mut u8,
+                    resp_size,
+                );
             }
         }
 
@@ -886,7 +882,7 @@ impl VirtioGpuDevice {
         if completed {
             // SAFETY: io_buf was allocated above with io_layout; the chain is
             // complete, so the device no longer accesses the block.
-            unsafe { dealloc(io_buf, io_layout) };
+            crate::drivers::edges::raw_dealloc(io_buf, io_layout);
         }
 
         if completed {
@@ -932,8 +928,8 @@ impl Drop for VirtioGpuDevice {
     fn drop(&mut self) {
         if !self.fb_ptr.is_null() {
             if let Some(layout) = self.fb_layout {
-                unsafe {
-                    dealloc(self.fb_ptr, layout);
+                {
+                    crate::drivers::edges::raw_dealloc(self.fb_ptr, layout);
                 }
             }
         }

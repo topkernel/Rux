@@ -2,6 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+#![forbid(unsafe_code)]
 
 //! GPU driver module
 //!
@@ -72,7 +73,7 @@ pub fn flush_framebuffer() -> bool {
             None => return false,
         }
     };
-    unsafe { (*device).flush() };
+    crate::drivers::edges::raw_ref(device).flush();
     true
 }
 
@@ -91,5 +92,5 @@ pub fn with_gpu_device<R>(f: impl FnOnce(&VirtioGpuDevice) -> R) -> Option<R> {
             None => return None,
         }
     };
-    Some(f(unsafe { &*device }))
+    Some(f(crate::drivers::edges::raw_ref(device)))
 }

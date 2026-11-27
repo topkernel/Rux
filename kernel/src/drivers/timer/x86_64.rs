@@ -24,6 +24,7 @@
 //! (that ran 4x fast on the riscv64 twin before review批次7): the tick
 //! handler derives jiffies from the timebase (`floor(elapsed/period)`),
 //! which is idempotent under concurrent tick handlers on any CPU.
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
@@ -44,12 +45,12 @@ pub const HZ: u64 = crate::config::KERNEL_HZ as u64;
 const TIME_SLICE_TICKS: u64 = CLOCK_FREQ / HZ;
 
 /// PIT I/O ports (channel 0 data, mode/command register)
-const PIT_CH0_DATA: u16 = 0x40;
-const PIT_MODE_CMD: u16 = 0x43;
+pub(crate) const PIT_CH0_DATA: u16 = 0x40;
+pub(crate) const PIT_MODE_CMD: u16 = 0x43;
 
 /// Mode/command byte: channel 0, lobyte/hibyte access, mode 3 (square wave),
 /// binary count.
-const PIT_CH0_MODE3_BIN: u8 = 0x36;
+pub(crate) const PIT_CH0_MODE3_BIN: u8 = 0x36;
 
 /// Fractional shift used by the TSC -> nominal-domain mapping (pub for
 /// hpet::calibrate_tsc — keep in sync with the promotion math).
@@ -446,15 +447,10 @@ pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
 /// not arm (IRQ0 fallback); idempotent.
 pub fn init() {
     let divisor = (PIT_INPUT_FREQ / HZ) as u16;
-    // SAFETY: ports 0x40/0x43 are the fixed 8254 channel-0 data and
-    // mode/command registers; this is the standard programming sequence.
-    unsafe {
-        outb(PIT_MODE_CMD, PIT_CH0_MODE3_BIN);
-        io_wait();
-        outb(PIT_CH0_DATA, (divisor & 0xff) as u8);
-        io_wait();
-        outb(PIT_CH0_DATA, (divisor >> 8) as u8);
-    }
+    // Ports 0x40/0x43 are the fixed 8254 channel-0 data and
+    // mode/command registers; the programming sequence crosses the
+    // audited INV-DRV-PIT edge.
+    crate::drivers::edges::pit_program_ch0(divisor);
 }
 
 /// Arm the LAPIC timer in one-shot mode at the absolute nominal-domain

@@ -5,6 +5,13 @@
 //! Device driver module
 
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): every raw edge the drivers inline crosses
+// one audited family here (INV-DRV-*); every other file is safe with a
+// file-level forbid.
+#[path = "unsafe.rs"]
+pub mod edges;
+
 pub mod intc;
 pub mod timer;
 pub mod rtc;

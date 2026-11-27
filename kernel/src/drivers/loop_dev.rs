@@ -13,6 +13,7 @@
 //!
 //! /dev/loop-control answers LOOP_CTL_GET_FREE with the first unbound
 //! minor (Linux loop control semantics).
+#![forbid(unsafe_code)]
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -476,9 +477,9 @@ fn loop_devno_of(file: &crate::fs::file::File) -> Option<DevNo> {
         return None;
     }
     file.private_data_ptr().map(|pd| {
-        // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime) in the
-        // slot; read-only here.
-        unsafe { *(pd.cast_const() as *const DevNo) }
+        // devfs_open stored a Box<DevNo> (file-lifetime) in the slot;
+        // read-only here (INV-DRV-RAW edge).
+        crate::drivers::edges::raw_read(pd.cast_const() as *const DevNo)
     })
 }
 
@@ -511,9 +512,9 @@ pub fn loop_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
             Some(b) => b,
             None => break,
         };
-        // SAFETY: bh from bread; b_data is block_size bytes.
-        unsafe {
-            let data = &(*bh).b_data;
+        // bh from bread; b_data is block_size bytes (INV-DRV-RAW edge).
+        {
+            let data = &crate::drivers::edges::raw_ref(bh).b_data;
             buf[done..done + want].copy_from_slice(&data[in_off..in_off + want]);
             crate::fs::bio::brelse(bh);
         }
@@ -555,13 +556,13 @@ pub fn loop_file_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
             Some(b) => b,
             None => break,
         };
-        // SAFETY: bh from bread; b_data writable and block-sized.
-        unsafe {
+        // bh from bread; b_data writable and block-sized (INV-DRV-RAW).
+        {
             {
-                let data = &mut (*bh).b_data;
+                let data = &mut crate::drivers::edges::raw_mut(bh).b_data;
                 data[in_off..in_off + want].copy_from_slice(&buf[done..done + want]);
             }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            crate::drivers::edges::raw_mut(bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             let r = crate::fs::bio::sync_dirty_buffer(bh);
             crate::fs::bio::brelse(bh);
             if r.is_err() {
@@ -718,9 +719,9 @@ pub fn loop_file_ioctl(
         return None;
     }
     let Some(pd) = file.private_data_ptr() else { return None };
-    // SAFETY: devfs_open stored a Box<DevNo> (file-lifetime) in the
-    // slot; read-only here.
-    let devno = unsafe { *(pd.cast_const() as *const DevNo) };
+    // devfs_open stored a Box<DevNo> (file-lifetime) in the slot;
+    // read-only here (INV-DRV-RAW edge).
+    let devno = crate::drivers::edges::raw_read(pd.cast_const() as *const DevNo);
     let is_loop = devno.major == LOOP_MAJOR && (devno.minor as usize) < N_LOOPS;
     let idx = devno.minor as usize;
     // Linux loop_ioctl order: ENXIO for any loop-specific request on an

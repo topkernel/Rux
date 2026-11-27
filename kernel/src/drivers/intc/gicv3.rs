@@ -24,6 +24,7 @@
 //!
 //! All GIC regions are low MMIO below RAM base and are accessed through
 //! the kernel-half MMIO alias (`mmio_alias`) — never raw phys VAs.
+#![forbid(unsafe_code)]
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -192,50 +193,6 @@ fn wait_not_set(addr: usize, bit: u32) {
     }
 }
 
-// ==================== ICC_* system registers ====================
-
-/// Read ICC_IAR1_EL1 — acknowledge the highest-priority pending
-/// Group-1 interrupt (priority drop). Returns the INTID.
-#[inline]
-pub fn iar1_read() -> u32 {
-    let v: u64;
-    // SAFETY: ICC_IAR1_EL1 read is the GIC acknowledge; side effect is
-    // the priority drop for the returned INTID.
-    unsafe { asm!("mrs {}, icc_iar1_el1", out(reg) v, options(nomem, nostack)) };
-    v as u32 & 0xFF_FFFF
-}
-
-/// Write ICC_EOIR1_EL1 — end of interrupt (priority drop completion +
-/// deactivation; ICC_CTLR_EL1.EOImode stays 0 = single-write EOI).
-#[inline]
-pub fn eoir1_write(intid: u32) {
-    // SAFETY: EOIR1 write deactivates the previously acknowledged INTID.
-    unsafe {
-        asm!("msr icc_eoir1_el1, {}",
-             in(reg) intid as u64, options(nomem, nostack))
-    };
-}
-
-/// Generate an SGI (ICC_SGI1R_EL1) to the target list.
-///
-/// GICv3 field layout (unlike the GICv2 GICD_SGIR encoding this driver
-/// originally used): INTID [27:24], TargetList [15:0], Aff1 [23:16],
-/// IRM [40], Aff2 [39:32], Aff3 [55:48]. QEMU virt keeps every cpu in
-/// one cluster (Aff1/2/3 = 0), so a TargetList bit for Aff0 selects the
-/// cpu. The old (1<<aff0)<<8 | intid encoding put the target bit at
-/// [15:8]+n and the INTID at [3:0]; the emulated GIC decoded a
-/// TargetList of 0x100 (no cpu has Aff0=8) and silently dropped the SGI
-/// — the IPI facility never fired.
-#[inline]
-pub fn send_sgi(target_aff0: u8, intid: u32) {
-    let sgi = (((intid as u64) & 0xF) << 24) | (1u64 << (target_aff0 & 0xF));
-    // SAFETY: SGI1R write raises the SGI on the target core(s).
-    unsafe {
-        asm!("dsb st",
-             "msr icc_sgi1r_el1, {}",
-             in(reg) sgi, options(nomem, nostack))
-    };
-}
 
 // ==================== Distributor ====================
 
@@ -312,7 +269,7 @@ static RD_BASE_PER_CPU: [AtomicU64; crate::config::MAX_CPUS] =
 
 /// Locate this CPU's RD_base frame by matching GICR_TYPER.AffinityValue
 /// against MPIDR. Frames walk 2*64KB apart until the Last marker.
-fn find_my_rd_base() -> Option<usize> {
+pub(crate) fn find_my_rd_base() -> Option<usize> {
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
         let cached = RD_BASE_PER_CPU[cpu].load(Ordering::Acquire);
@@ -349,7 +306,7 @@ fn find_my_rd_base() -> Option<usize> {
 /// Configure this CPU's redistributor SGI/PPI bank: all INTID 0-31
 /// Group 1, priorities set, everything but the IPI SGI + timer PPI
 /// left disabled (enabled on demand by enable_ppi / request_irq).
-fn redist_configure_local(rd: usize) {
+pub(crate) fn redist_configure_local(rd: usize) {
     // Wake the frame if it slept (PSCI-off CPUs can re-enter sleep;
     // QEMU clears ProcessorSleep itself, the poll is for real HW).
     let waker = rd + gicr::WAKER;
@@ -384,36 +341,6 @@ fn redist_configure_local(rd: usize) {
     
 }
 
-/// Enable the CPU interface system registers (ICC_*): SRE, PMR, group-1
-/// enable. Called per CPU from the boot path (trap::enable_external_interrupt
-/// / secondary_cpu_entry). Idempotent.
-// IRREDUCIBLE F-ROW (F-GIC-A1): ICC_* system-register programming —
-// reference kernel drivers/irqchip/irq-gic-v3.c gic_cpu_init; the
-// GICv3 CPU-interface enable sequence is register-file access with no
-// safe shape (one audited block per sequence).
-pub fn enable_cpu_interface() {
-    // SAFETY: ICC_* system-register programming below is the standard
-    // GICv3 CPU-interface enable sequence for Group 1 at EL1.
-    unsafe {
-        // 1. System-register access (QEMU fixes SRE=1; set defensively).
-        let sre: u64;
-        asm!("mrs {}, icc_sre_el1", out(reg) sre, options(nomem, nostack));
-        if sre & 1 == 0 {
-            asm!("msr icc_sre_el1, {}", in(reg) 1u64, options(nomem, nostack));
-            asm!("isb", options(nomem, nostack));
-        }
-
-        // 2. Per-CPU redistributor: locate + configure SGI/PPI bank.
-        if let Some(rd) = find_my_rd_base() {
-            redist_configure_local(rd);
-        }
-
-        // 3. Unmask priorities and forward Group 1 to EL1.
-        asm!("msr icc_pmr_el1, {}", in(reg) 0xFFu64, options(nomem, nostack));
-        asm!("msr icc_igrpen1_el1, {}", in(reg) 1u64, options(nomem, nostack));
-        asm!("isb", options(nomem, nostack));
-    }
-}
 
 /// Enable a per-CPU interrupt (PPI/SGI INTID < 32) on THIS cpu's
 /// redistributor frame. Idempotent.
@@ -554,4 +481,20 @@ pub fn init() {
     );
     crate::print_status("intc", "IRQ domain + chip registered", true);
 
+}
+
+pub fn iar1_read() -> u32 {
+    crate::drivers::edges::gicv3_iar1_read()
+}
+
+pub fn eoir1_write(intid: u32) {
+    crate::drivers::edges::gicv3_eoir1_write(intid)
+}
+
+pub fn send_sgi(target_aff0: u8, intid: u32) {
+    crate::drivers::edges::gicv3_send_sgi(target_aff0, intid)
+}
+
+pub fn enable_cpu_interface() {
+    crate::drivers::edges::gicv3_enable_cpu_interface()
 }

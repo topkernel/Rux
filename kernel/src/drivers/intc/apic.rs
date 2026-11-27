@@ -27,10 +27,11 @@
 //! against PIT channel 2 (the speaker-counter one-shot window), which
 //! also yields the TSC frequency for the timekeeping driver
 //! (`drivers::timer`).
+#![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use crate::arch::cpu::{inb, outb, rdmsr, wrmsr};
+use crate::arch::cpu::{inb, outb};
 
 // ---------------------------------------------------------------------------
 // Register map
@@ -94,7 +95,7 @@ const LVT_EXTINT: u32 = 0x7 << 8;
 // ---------------------------------------------------------------------------
 
 /// x2APIC active (per-machine: all CPUs switch together).
-static X2APIC: AtomicBool = AtomicBool::new(false);
+pub(crate) static X2APIC: AtomicBool = AtomicBool::new(false);
 /// Driver initialized on this CPU (guards MSR writes that would #GP
 /// before x2APIC is enabled).
 static READY: AtomicBool = AtomicBool::new(false);
@@ -127,43 +128,6 @@ fn ONESHOT_LVT_LIVE_INVALIDATE() {
 /// Calibrated TSC frequency (Hz).
 pub static TSC_FREQ: AtomicU64 = AtomicU64::new(0);
 
-// ---------------------------------------------------------------------------
-// Register access
-// ---------------------------------------------------------------------------
-
-/// Read a LAPIC register in whichever mode is active.
-#[inline]
-fn reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
-    if X2APIC.load(Ordering::Acquire) {
-        // SAFETY: x2APIC MSR read; READY gates first use.
-        unsafe { rdmsr(msr_x2apic) as u32 }
-    } else {
-        // Linux fixmap discipline: the LAPIC window is accessed through the
-        // kernel-half device alias (shared into every mm), never through a
-        // low identity VA — trap-context EOIs run under user CR3s too.
-        let va = crate::arch::mm::memory_layout::device_alias(
-            crate::arch::mm::memory_layout::LAPIC_BASE as u64,
-        ) as usize + reg_xapic as usize;
-        // SAFETY: MMIO read of the local APIC window (kernel-half alias,
-        // mapped once at setup_device_mappings time).
-        unsafe { core::ptr::read_volatile(va as *const u32) }
-    }
-}
-
-/// Write a LAPIC register in whichever mode is active.
-#[inline]
-fn reg_write(reg_xapic: u32, msr_x2apic: u32, value: u32) {
-    if X2APIC.load(Ordering::Acquire) {
-        // SAFETY: x2APIC MSR write; READY gates first use.
-        unsafe { wrmsr(msr_x2apic, value as u64) };
-    } else {
-        let va = crate::arch::mm::memory_layout::device_alias(
-            crate::arch::mm::memory_layout::LAPIC_BASE as u64,
-        ) as usize + reg_xapic as usize;
-        // SAFETY: MMIO write to the local APIC window (kernel-half alias).
-        unsafe { core::ptr::write_volatile(va as *mut u32, value) };
-    }
-}
 
 /// Acknowledge the highest-priority in-service interrupt on this CPU's
 /// local APIC.  No-op until the driver is initialized (an EOI MSR write
@@ -302,43 +266,10 @@ fn kvm_pv_send_ipi(dest: u32, vector: u8) -> bool {
     if !KVM_PV_IPI.load(Ordering::Acquire) {
         return false;
     }
-    // IRREDUCIBLE F-ROW (F-HVCALL-X1): the KVM hypercall ABI
-    // (vmmcall/vmcall with the RBX-shuttle push/mov/pop bracket) —
-    // reference kernel arch/x86/kernel/kvm.c __send_ipi_mask's hc()
-    // twin; a register protocol with no memory operands has no safe
-    // shape. The bitmap is a single-bit cluster with min=dest
-    // (bitmap_low=1, bitmap_high=0).
-    unsafe fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
-        let ret: i64;
-        // The KVM ABI passes arg1 in RBX, which LLVM reserves — shuttle
-        // it through any free GPR with an explicit push/mov/pop bracket
-        // (stack-neutral; that is why nostack is not claimed).
-        if vmmcall {
-            core::arch::asm!(
-                "push rbx",
-                "mov rbx, {b}",
-                "vmmcall",
-                "pop rbx",
-                b = in(reg) a1,
-                in("rax") nr, in("rcx") a2, in("rdx") a3, in("rsi") a4,
-                lateout("rax") ret,
-            );
-        } else {
-            core::arch::asm!(
-                "push rbx",
-                "mov rbx, {b}",
-                "vmcall",
-                "pop rbx",
-                b = in(reg) a1,
-                in("rax") nr, in("rcx") a2, in("rdx") a3, in("rsi") a4,
-                lateout("rax") ret,
-            );
-        }
-        ret
-    }
+
     let vmmcall = KVM_HC_VMMCALL.load(Ordering::Acquire);
     // SAFETY: register-only protocol, see hc.
-    let ret = unsafe { hc(KVM_HC_SEND_IPI, 1, 0, dest as u64, vector as u64, vmmcall) };
+    let ret = hc(KVM_HC_SEND_IPI, 1, 0, dest as u64, vector as u64, vmmcall);
     ret == 0
 }
 
@@ -364,7 +295,7 @@ fn send_icr(dest: u32, cmd: u32) {
         // posted; back-to-back MSR writes serialize sufficiently.
         let icr = ((dest as u64) << 32) | cmd as u64;
         // SAFETY: x2APIC ICR write.
-        unsafe { wrmsr(X2APIC_ICR, icr) };
+        crate::drivers::edges::msr_write(X2APIC_ICR, icr) };
     } else {
         // Wait for Delivery Status (bit 12) to clear.
         while reg_read(XAPIC_ICR_LO, X2APIC_ICR) & (1 << 12) != 0 {
@@ -559,26 +490,6 @@ pub static TICK_ARM_RING: [[TickArmEvent; TICK_ARM_RING_SLOTS]; crate::config::M
 pub static TICK_ARM_IDX: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
 
-#[inline(always)]
-fn tick_arm_ra() -> u64 {
-    #[cfg(feature = "x86_64")]
-    {
-        let ra: u64;
-        // SAFETY: pure register-relative read, no side effects.
-        unsafe {
-            core::arch::asm!(
-                "mov {}, qword ptr [rbp + 8]",
-                out(reg) ra,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-        ra
-    }
-    #[cfg(not(feature = "x86_64"))]
-    {
-        0
-    }
-}
 
 /// Record one timer event: refresh the scalar last-* fields the TICKTRAP
 /// line reads AND append to the freeze ring (single SEQ bump per event).
@@ -1014,16 +925,14 @@ fn ensure_phys_mapped(phys: usize, len: usize) {
         | crate::arch::mm::pagetable::PageTableEntry::ACCESSED
         | crate::arch::mm::pagetable::PageTableEntry::DIRTY;
     let page_offset = crate::arch::mm::memory_layout::PAGE_OFFSET as u64;
-    // SAFETY: kernel-only linear-map VAs for firmware table regions;
-    // the regions are reserved (never handed to the page allocator).
-    unsafe {
-        crate::arch::mm::mmu_init::map_kernel_region(
-            page_offset + start as u64,
-            start as u64,
-            (end - start) as u64,
-            flags,
-        );
-    }
+    // Kernel-only linear-map VAs for reserved firmware-table regions
+    // cross the audited INV-DRV-MAP edge.
+    crate::drivers::edges::map_reserved_region(
+        page_offset + start as u64,
+        start as u64,
+        (end - start) as u64,
+        flags,
+    );
     LAST_MAPPED_START.store(start as u64, Ordering::Release);
     LAST_MAPPED_END.store(end as u64, Ordering::Release);
 }
@@ -1294,7 +1203,7 @@ fn parse_madt(madt_phys: usize) -> usize {
 fn this_lapic_id_raw() -> u32 {
     if X2APIC.load(Ordering::Acquire) {
         // SAFETY: x2APIC enabled by init_x2apic_or_mmio before this runs.
-        unsafe { rdmsr(X2APIC_ID) as u32 }
+        crate::drivers::edges::msr_read(X2APIC_ID) as u32 }
     } else {
         reg_read(XAPIC_ID, X2APIC_ID) >> 24
     }
@@ -1335,14 +1244,15 @@ fn init_x2apic_or_mmio() -> bool {
     let has_x2 = crate::arch::cpu::cpuid(1, 0).2 & (1 << 21) != 0
         && crate::cmdline::get_param("apic").as_deref() != Some("xapic");
 
-    // SAFETY: IA32_APIC_BASE programming of this CPU.
-    unsafe {
-        let base = rdmsr(MSR_IA32_APIC_BASE);
+    // IA32_APIC_BASE programming of this CPU crosses the audited
+    // INV-DRV-MSR edge (msr_read/msr_write).
+    {
+        let base = crate::drivers::edges::msr_read(MSR_IA32_APIC_BASE);
         let mut new = base | APIC_BASE_ENABLE;
         if has_x2 {
             new |= APIC_BASE_X2APIC;
         }
-        wrmsr(MSR_IA32_APIC_BASE, new);
+        crate::drivers::edges::msr_write(MSR_IA32_APIC_BASE, new);
     }
 
     if has_x2 {
@@ -1350,13 +1260,13 @@ fn init_x2apic_or_mmio() -> bool {
         // to it: any functioning APIC reads SVR nonzero (reset 0xFF);
         // an unbacked range reads 0.
         // SAFETY: x2APIC MSR read gated on the EXTD write above.
-        let svr = unsafe { rdmsr(X2APIC_SVR) };
+        let svr = crate::drivers::edges::msr_read(X2APIC_SVR) };
         if svr == 0 {
             // Fall back to MMIO xAPIC: clear EXTD, keep global enable.
-            // SAFETY: IA32_APIC_BASE programming of this CPU.
-            unsafe {
-                let base = rdmsr(MSR_IA32_APIC_BASE);
-                wrmsr(MSR_IA32_APIC_BASE, base & !APIC_BASE_X2APIC | APIC_BASE_ENABLE);
+            // IA32_APIC_BASE programming of this CPU (INV-DRV-MSR edge).
+            {
+                let base = crate::drivers::edges::msr_read(MSR_IA32_APIC_BASE);
+                crate::drivers::edges::msr_write(MSR_IA32_APIC_BASE, base & !APIC_BASE_X2APIC | APIC_BASE_ENABLE);
             }
             return false;
         }
@@ -1418,12 +1328,12 @@ pub fn init() {
 /// BSP chose, program the LVTs, and arm the timer (the CPU still runs
 /// with IF clear until the caller enables interrupts).
 pub fn init_secondary() {
-    // SAFETY: IA32_APIC_BASE programming of this CPU.
-    unsafe {
-        let base = rdmsr(MSR_IA32_APIC_BASE)
+    // IA32_APIC_BASE programming of this CPU (INV-DRV-MSR edge).
+    {
+        let base = crate::drivers::edges::msr_read(MSR_IA32_APIC_BASE)
             | APIC_BASE_ENABLE
             | if X2APIC.load(Ordering::Acquire) { APIC_BASE_X2APIC } else { 0 };
-        wrmsr(MSR_IA32_APIC_BASE, base);
+        crate::drivers::edges::msr_write(MSR_IA32_APIC_BASE, base);
     }
     READY.store(true, Ordering::Release);
 
@@ -1433,4 +1343,21 @@ pub fn init_secondary() {
     reg_write(XAPIC_LVT_LINT1, X2APIC_LVT_LINT1, LVT_MASKED);
 
     timer_start();
+}
+
+fn reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
+    crate::drivers::edges::apic_reg_read(reg_xapic, msr_x2apic)
+}
+
+fn reg_write(reg_xapic: u32, msr_x2apic: u32, value: u32) {
+    crate::drivers::edges::apic_reg_write(reg_xapic, msr_x2apic, value)
+}
+
+fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
+    crate::drivers::edges::apic_hc_raw(nr, a1, a2, a3, a4, vmmcall)
+}
+
+#[inline(always)]
+fn tick_arm_ra() -> u64 {
+    crate::drivers::edges::tick_arm_ra()
 }
