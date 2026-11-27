@@ -20,6 +20,11 @@
 //!
 //! Everything here is feature-gated: default builds compile none of it,
 //! and normal builds are untouched.
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the one
+//! minicov capture edge lives in kernel/src/unsafe.rs
+//! (INV-COV-CAPTURE-1).
+#![forbid(unsafe_code)]
 
 #![allow(dead_code)]
 
@@ -74,9 +79,7 @@ fn capture_profile() -> Result<Vec<u8>, i32> {
         return Err(-5); // -EIO: caller prints a clear diagnostic
     }
     let mut buf = Vec::new();
-    unsafe {
-        minicov::capture_coverage(&mut buf).map_err(|_| -5)?;
-    }
+    crate::boot_edges::capture_coverage(&mut buf)?;
     Ok(buf)
 }
 

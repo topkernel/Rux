@@ -25,6 +25,10 @@
 //! gzip wrapper (magic/header parsing, CRC32 + ISIZE verification) —
 //! small, allocation-light, and sufficient for the one-shot boot unpack.
 //! (zstd/xz/lz4 initrds are not supported yet.)
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the one
+//! image-slice edge lives in kernel/src/unsafe.rs (INV-INITRD-1).
+#![forbid(unsafe_code)]
 
 use crate::fs::rootfs::RootFSSuperBlock;
 use alloc::vec::Vec;
@@ -97,11 +101,10 @@ pub fn load() -> Result<CpioStats, &'static str> {
     let virt = crate::arch::mm::phys_to_virt(
         crate::arch::mm::PhysAddr::new(start as u64),
     ).bits();
-    // SAFETY: [start, end) is reserved RAM owned by the initrd; the range
-    // was validated (end > start, inside RAM) by the FDT parse.
-    let raw: &[u8] = unsafe {
-        core::slice::from_raw_parts(virt as *const u8, end - start)
-    };
+    // INV-INITRD-1 (the audited edge): [start, end) is reserved RAM
+    // owned by the initrd; the range was validated (end > start, inside
+    // RAM) by the FDT parse.
+    let raw: &[u8] = crate::boot_edges::initrd_raw_slice(virt, end - start);
 
     let cpio: CpioSource = if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
         CpioSource::Owned(gunzip(raw)?)

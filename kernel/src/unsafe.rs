@@ -448,3 +448,40 @@ pub fn com1_rep_outsb(port: u16, chunk: &[u8]) {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// INV-COV-CAPTURE-1: the minicov profile-capture edge (moved from cov.rs,
+// the cov-dump feature's one unsafe).
+// ---------------------------------------------------------------------------
+
+/// Capture the whole-program coverage profile into `buf`.
+///
+/// INV-COV-CAPTURE-1 (cov-dump builds only): `capture_coverage` walks
+/// the `__llvm_prf_*` sections rustc emitted for THIS image; it is not
+/// thread-safe, which is fine — the suite hook runs it once on the test
+/// CPU after all other test work has completed. `buf` is plain heap
+/// memory; the runtime writes bytes through the CoverageWriter impl and
+/// never retains references.
+#[cfg(feature = "cov-dump")]
+pub fn capture_coverage(buf: &mut alloc::vec::Vec<u8>) -> Result<(), i32> {
+    // SAFETY: INV-COV-CAPTURE-1 — single-CPU post-suite capture into a
+    // plain heap buffer.
+    unsafe { minicov::capture_coverage(buf).map_err(|_| -5) }
+}
+
+// ---------------------------------------------------------------------------
+// INV-INITRD-1: the unpacked initrd image slice (moved from initrd.rs,
+// the initrd lane's one unsafe).
+// ---------------------------------------------------------------------------
+
+/// The initrd image as a byte slice over the reserved RAM range.
+///
+/// INV-INITRD-1: [virt, virt+len) is the reserved initrd RAM the FDT
+/// parse validated (end > start, inside RAM), read through the
+/// permanent linear mapping (phys_to_virt of the reserved range); the
+/// range is owned by the initrd for the whole boot and never written
+/// through this slice.
+pub fn initrd_raw_slice(virt: usize, len: usize) -> &'static [u8] {
+    // SAFETY: INV-INITRD-1 — reserved, validated, machine-lifetime RAM.
+    unsafe { core::slice::from_raw_parts(virt as *const u8, len) }
+}
