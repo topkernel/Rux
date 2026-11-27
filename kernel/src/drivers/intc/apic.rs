@@ -1203,7 +1203,7 @@ fn parse_madt(madt_phys: usize) -> usize {
 fn this_lapic_id_raw() -> u32 {
     if X2APIC.load(Ordering::Acquire) {
         // SAFETY: x2APIC enabled by init_x2apic_or_mmio before this runs.
-        crate::drivers::edges::msr_read(X2APIC_ID) as u32 }
+        crate::drivers::edges::msr_read(X2APIC_ID) as u32
     } else {
         reg_read(XAPIC_ID, X2APIC_ID) >> 24
     }
