@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -100,39 +101,17 @@ pub trait LsmHooks {
 // ==================== Global LSM chain ====================
 
 /// Maximum number of LSMs that can be registered.
-const MAX_LSM_COUNT: usize = 4;
+pub(crate) const MAX_LSM_COUNT: usize = 4;
 
-/// Registered LSM modules (ordered by priority).
-static mut LSM_CHAIN: [Option<&'static dyn LsmHooks>; MAX_LSM_COUNT] = [None; MAX_LSM_COUNT];
-
-/// Number of registered LSMs.
-static mut LSM_COUNT: usize = 0;
+// The LSM chain statics and their raw accesses live in security/unsafe.rs
+// (this subsystem's one audited unsafe file, INV-SEC-LSMCHAIN-1).
 
 /// Register an LSM module.  Called during `security_init()`.
 ///
-/// # Safety
-/// Must be called only during kernel init (single-threaded).
+/// Init-time only (single-threaded boot) — the sorted insert into the
+/// chain runs in the audited `edges::chain_register`.
 pub fn register_lsm(lsm: &'static dyn LsmHooks) {
-    unsafe {
-        if LSM_COUNT >= MAX_LSM_COUNT {
-            crate::pr_err!("security: too many LSM modules, ignoring {}", lsm.name());
-            return;
-        }
-        // Insert in sorted order (by order value).
-        let mut pos = LSM_COUNT;
-        for i in 0..LSM_COUNT {
-            if lsm.order() < LSM_CHAIN[i].unwrap().order() {
-                pos = i;
-                break;
-            }
-        }
-        // Shift entries right to make room.
-        for i in (pos..LSM_COUNT).rev() {
-            LSM_CHAIN[i + 1] = LSM_CHAIN[i];
-        }
-        LSM_CHAIN[pos] = Some(lsm);
-        LSM_COUNT += 1;
-    }
+    super::edges::chain_register(lsm);
 }
 
 /// True when the capability LSM is the only registered module (the boot
@@ -141,9 +120,7 @@ pub fn register_lsm(lsm: &'static dyn LsmHooks) {
 ///
 /// (perf-gap-hunt) Read on the DAC hot path — one usize load.
 pub fn chain_is_capability_only() -> bool {
-    // SAFETY: LSM_COUNT is written only during kernel init
-    // (single-threaded, before the first syscall) and frozen after.
-    unsafe { LSM_COUNT == 1 }
+    super::edges::chain_is_capability_only()
 }
 
 /// Dispatch a security hook through the registered LSM chain.
@@ -151,17 +128,7 @@ pub fn chain_is_capability_only() -> bool {
 /// Returns 0 if all LSMs allow (or have no opinion).
 /// Returns the first negative result if any LSM denies.
 pub fn security_hook_call(hook: HookId, args: &mut HookArgs) -> LsmResult {
-    unsafe {
-        for i in 0..LSM_COUNT {
-            if let Some(lsm) = LSM_CHAIN[i] {
-                let result = lsm.call(hook, args);
-                if result < 0 {
-                    return result;
-                }
-            }
-        }
-        0
-    }
+    super::edges::chain_dispatch(hook, args)
 }
 
 /// Check if a credential has the given capability, going through the LSM chain.
@@ -191,5 +158,5 @@ pub fn security_signal_send(
 
 /// Return the number of registered LSMs (for diagnostics).
 pub fn lsm_count() -> usize {
-    unsafe { LSM_COUNT }
+    super::edges::chain_len()
 }

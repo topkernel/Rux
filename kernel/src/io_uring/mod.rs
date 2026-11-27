@@ -22,6 +22,12 @@ use crate::mm::page_alloc::{alloc_pages, free_pages};
 use crate::mm::zone::GfpFlags;
 use crate::sync::spinlock::Spinlock;
 
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): module named `edges` per the sibling
+// convention; the #[path] keeps the FILE name the gate requires.
+#[path = "unsafe.rs"]
+pub(super) mod edges;
+
 // ==================== UAPI Constants ====================
 
 // Opcodes
@@ -213,9 +219,9 @@ impl IoUring {
     fn unref(&self) {
         if self.refs.fetch_sub(1, core::sync::atomic::Ordering::AcqRel) == 1 {
             // Last reference: free the instance (and its ring regions via Drop).
-            // SAFETY: this instance was created by Box::into_raw (io_uring_create
-            // → into_raw at install) and no other references remain.
-            unsafe { drop(alloc::boxed::Box::from_raw(self as *const IoUring as *mut IoUring)); }
+            // Reclaim edge lives in the audited unsafe.rs
+            // (INV-IOURING-INSTANCE-1).
+            edges::box_reclaim(self as *const IoUring);
         }
     }
 }
@@ -232,8 +238,8 @@ impl Drop for IoUring {
 struct RingRef(*const IoUring);
 impl Drop for RingRef {
     fn drop(&mut self) {
-        // SAFETY: paired with a successful try_ref at construction.
-        unsafe { (*self.0).unref() };
+        // Unref edge lives in the audited unsafe.rs (INV-IOURING-INSTANCE-1).
+        edges::unref_at(self.0);
     }
 }
 
@@ -284,14 +290,10 @@ fn alloc_ring_region(size: usize) -> Option<RingRegion> {
         return None;
     }
 
-    let kvirt = unsafe {
-        crate::arch::mm::phys_to_virt(
-            crate::arch::mm::PhysAddr::new(phys as u64),
-        ).bits() as *mut u8
-    };
-
-    // Zero the memory
-    unsafe { core::ptr::write_bytes(kvirt, 0, npages * PAGE_SIZE); }
+    // Region edges (direct-map translation + pre-publication zero)
+    // live in the audited unsafe.rs (INV-IOURING-REGION-1).
+    let kvirt = edges::region_kvirt(phys);
+    edges::region_zero(kvirt, npages * PAGE_SIZE);
 
     Some(RingRegion {
         kvirt,
@@ -312,8 +314,8 @@ fn free_ring_region(region: &RingRegion) {
     for i in 0..region.npages {
         let page = crate::mm::pfn_to_page_mut(base_pfn + i);
         if !page.is_null() {
-            // SAFETY: page descriptor exists for this in-RAM page.
-            let r = unsafe { (*page).put_page() };
+            // Region edge lives in the audited unsafe.rs (INV-IOURING-REGION-1).
+            let r = edges::region_page_put(page);
             if r > 0 {
                 still_pinned = true;
             }
@@ -454,9 +456,8 @@ static LIFECYCLE_LOCK: Spinlock<()> = Spinlock::new(());
 fn pin_ring(file: &File) -> Option<RingRef> {
     let _guard = LIFECYCLE_LOCK.lock();
     let ptr = file.get_private_data()? as *const IoUring;
-    // SAFETY: ptr was installed by Box::into_raw for an IO_URING_OPS file
-    // and cannot be freed while we hold the lifecycle lock + a reference.
-    let ring = unsafe { &*ptr };
+    // Pinned deref edge lives in the audited unsafe.rs (INV-IOURING-PIN-1).
+    let ring = edges::ring_ref(ptr);
     if !ring.try_ref() {
         return None;
     }
@@ -470,9 +471,9 @@ fn io_uring_close(file: &File) -> i32 {
     // drop our reference; the final unref (which may free the ring) runs
     // under the lock.
     if let Some(ptr) = file.take_private_data() {
-        // SAFETY: ptr came from Box::into_raw at install time; the
-        // lifecycle lock serializes against every pin_ring reader.
-        unsafe { (*(ptr as *const IoUring)).unref(); }
+        // Unref edge lives in the audited unsafe.rs (INV-IOURING-PIN-1 +
+        // INV-IOURING-INSTANCE-1).
+        edges::unref_at(ptr as *const IoUring);
     }
     0
 }
@@ -508,10 +509,9 @@ pub fn io_uring_mmap_handler(
     // after — a concurrent close() could free the ring in between).
     let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = file.get_private_data().ok_or(-9)?;
-        // SAFETY: under the lifecycle lock, close() cannot clear+free the
-        // ring between the read and try_ref.
-        let ring = unsafe { &*(ring_ptr as *const IoUring) };
+        let ring_ptr = file.get_private_data().ok_or(-9)? as *const IoUring;
+        // Pinned deref edge lives in the audited unsafe.rs (INV-IOURING-PIN-1).
+        let ring = edges::ring_ref(ring_ptr);
         if !ring.try_ref() {
             return Err(-9); // EBADF: ring being torn down
         }
@@ -580,29 +580,9 @@ pub fn io_uring_mmap_handler(
         return Err(-12);
     }
 
-    unsafe {
-        let mut pte_flags = PageTableEntry::V | PageTableEntry::U
-            | PageTableEntry::A | PageTableEntry::D;
-        if prot & 0x1 != 0 { pte_flags |= PageTableEntry::R; }
-        if prot & 0x2 != 0 { pte_flags |= PageTableEntry::R | PageTableEntry::W; }
-
-        for i in 0..region.npages {
-            let va = vaddr + i * PAGE_SIZE;
-            let pa = region.phys + i * PAGE_SIZE;
-            map_page(user_ppn, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
-            // The user PTE now references the ring page: take a mapping
-            // reference so munmap's put_page cannot free a page the ring
-            // still owns (Wave-2 regression, review 2R.6). The final free
-            // happens in Drop only when every mapping is gone.
-            let page = crate::mm::pfn_to_page_mut(
-                crate::mm::phys_to_pfn(pa),
-            );
-            if !page.is_null() {
-                (*page).get_page();
-            }
-        }
-        crate::arch::mm::asid::flush_tlb_all();
-    }
+    // The page-install loop lives in the audited unsafe.rs
+    // (INV-IOURING-MMAP-1).
+    edges::map_region_pages(user_ppn, vaddr, region.phys, region.npages, prot);
 
     Ok(vaddr)
 }
@@ -880,29 +860,8 @@ impl IoUring {
     fn cq_hdr(&self) -> crate::safety::mmio::MmioRegion {
         crate::safety::mmio::MmioRegion::new(self.cq_ring.kvirt as usize, self.cq_ring.size)
     }
-    /// Read one SQE by index (caller validated `idx < sq_entries`).
-    fn sqe_at(&self, idx: u32) -> IoUringSqe {
-        let r = crate::safety::mmio::MmioRegion::new(
-            self.sqes.kvirt as usize,
-            self.sqes.size,
-        );
-        // IoUringSqe is 64 bytes of POD (repr(Rust) plain u64/u32 fields,
-        // no padding surprises — same layout liburing shares); read the
-        // four u64 words and the tail u32 through the window.
-        // SAFETY: INV-IOURING-RING-1 + idx < sq_entries (checked by every
-        // caller) keeps 0..64 inside the SQE-array window.
-        unsafe { core::ptr::read_volatile((r.base() + idx as usize * 64) as *const IoUringSqe) }
-    }
-    /// Write one CQE at slot `slot` (caller masked the slot).
-    fn cqe_write(&self, slot: usize, cqe: IoUringCqe) {
-        let r = self.cq_hdr();
-        let off = self.cq_cqes_off + slot * 16;
-        // SAFETY: INV-IOURING-RING-1; off+16 <= window by the setup-time
-        // cq_entries sizing (the window check is the backstop).
-        unsafe {
-            core::ptr::write_volatile((r.base() + off) as *mut IoUringCqe, cqe);
-        }
-    }
+    // sqe_at / cqe_write (the INV-IOURING-RING-1 window edges) live in
+    // the audited unsafe.rs.
 }
 
 // ==================== CQE Posting ====================
@@ -1021,7 +980,7 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
     let fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            unsafe { let _ = Box::from_raw(ring_ptr as *mut IoUring); }
+            edges::box_reclaim(ring_ptr as *const IoUring);
             return -(24i64) as u64; // EMFILE
         }
     };
@@ -1029,7 +988,7 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
     match fdtable.install_fd(fd, file) {
         Ok(()) => {}
         Err(_) => {
-            unsafe { let _ = Box::from_raw(ring_ptr as *mut IoUring); }
+            edges::box_reclaim(ring_ptr as *const IoUring);
             return -(12i64) as u64;
         }
     }
@@ -1070,13 +1029,13 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
     // discipline as pin_ring().
     let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = match unsafe { *file.private_data.get() } {
-            Some(p) => p as *const IoUring,
+        // Privdata + pinned-deref edges live in the audited unsafe.rs
+        // (INV-IOURING-PRIVDATA-1 / INV-IOURING-PIN-1).
+        let ring_ptr = match edges::privdata_read(&file) {
+            Some(p) => p,
             None => return -(9i64) as u64, // EBADF
         };
-        // SAFETY: under the lifecycle lock, close() cannot clear+free the
-        // ring between the read and try_ref.
-        let ring = unsafe { &*ring_ptr };
+        let ring = edges::ring_ref(ring_ptr);
         if !ring.try_ref() {
             return -(9i64) as u64; // EBADF: ring being torn down
         }
@@ -1101,12 +1060,8 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
     // always returned 0 and callers could not distinguish "woke with N
     // completions" from "timeout/nothing" (review批次6 M).
     if submitted == 0 {
-        let head = unsafe {
-            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
-        };
-        let tail = unsafe {
-            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_tail_off) as *const u32)
-        };
+        let (head, tail) =
+            edges::cq_counts(ring.cq_ring.kvirt, ring.cq_head_off, ring.cq_tail_off);
         (tail.wrapping_sub(head)) as u64
     } else {
         submitted as u64
@@ -1137,13 +1092,13 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
     // discipline as pin_ring().
     let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
-        let ring_ptr = match unsafe { *file.private_data.get() } {
-            Some(p) => p as *const IoUring,
+        // Privdata + pinned-deref edges live in the audited unsafe.rs
+        // (INV-IOURING-PRIVDATA-1 / INV-IOURING-PIN-1).
+        let ring_ptr = match edges::privdata_read(&file) {
+            Some(p) => p,
             None => return -(9i64) as u64, // EBADF
         };
-        // SAFETY: under the lifecycle lock, close() cannot clear+free the
-        // ring between the read and try_ref.
-        let ring = unsafe { &*ring_ptr };
+        let ring = edges::ring_ref(ring_ptr);
         if !ring.try_ref() {
             return -(9i64) as u64; // EBADF: ring being torn down
         }

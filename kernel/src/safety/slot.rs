@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -45,8 +46,7 @@ pub struct OnceSlot<T> {
 // SAFETY (INV-SLOT-1/2/3): publication happens-before any concurrent
 // get (Release/Acquire pair); mutation beyond publication requires the
 // governing lock via ExclusivityProof, so T's own Send+Sync bounds hold.
-unsafe impl<T: Send + Sync> Sync for OnceSlot<T> {}
-unsafe impl<T: Send> Send for OnceSlot<T> {}
+// Send/Sync commitments for OnceSlot live in the audited unsafe.rs.
 
 impl<T> OnceSlot<T> {
     /// An empty slot.
@@ -73,11 +73,8 @@ impl<T> OnceSlot<T> {
             return false; // double publish: refuse (INV-SLOT-1)
         }
         let addr = self.value.get() as *const T;
-        // SAFETY: INV-SLOT-1 — not yet published, so no reader can be
-        // concurrently reading the cell (readers only read a set flag).
-        unsafe {
-            (*self.value.get()).write(make(addr));
-        }
+        // Slot-write edge lives in the audited unsafe.rs (INV-SLOT-1).
+        super::edges::slot_write(self.value.get(), || make(addr));
         // INV-SLOT-2: the Release store orders the value write before
         // any Acquire load of the flag that observes true.
         self.published.store(true, Ordering::Release);
@@ -90,7 +87,7 @@ impl<T> OnceSlot<T> {
             // SAFETY: INV-SLOT-1/2 — the flag is set, so the value was
             // written before our Acquire; it is never overwritten or
             // dropped afterwards.
-            Some(unsafe { (*self.value.get()).assume_init_ref() })
+            Some(super::edges::slot_ref(self.value.get()))
         } else {
             None
         }
@@ -105,7 +102,7 @@ impl<T> OnceSlot<T> {
         if self.published.load(Ordering::Acquire) {
             // SAFETY: INV-SLOT-3 — exclusivity is proven by the guard
             // token; INV-SLOT-1/2 as in `get`.
-            Some(unsafe { (*self.value.get()).assume_init_mut() })
+            Some(super::edges::slot_mut(self.value.get()))
         } else {
             None
         }

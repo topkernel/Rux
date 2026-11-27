@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -205,9 +206,9 @@ fn can_stop_full_tick(cpu: usize) -> bool {
     // current->tick_dep_mask / signal->tick_dep_mask equivalent:
     // POSIX CPU timers need the tick to elapse.
     if let Some(task) = crate::sched::current() {
-        unsafe {
-            let virt = (*task).itimer_virt[0].load(Ordering::Acquire);
-            let prof = (*task).itimer_prof[0].load(Ordering::Acquire);
+        {
+            let virt = task.itimer_virt[0].load(Ordering::Acquire);
+            let prof = task.itimer_prof[0].load(Ordering::Acquire);
             if virt != 0 || prof != 0 {
                 return false;
             }
