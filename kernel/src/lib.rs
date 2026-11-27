@@ -131,10 +131,13 @@ pub mod boot_edges;
 pub mod initrd;
 pub mod syscall;
 // The syscall tree is #![forbid(unsafe_code)] (the Layer-1 structural
-// boundary); the subsystem's audited unsafe edges live OUTSIDE the
-// tree — same file, declared here so the forbid does not apply to it.
-// syscall::edges re-exports it so existing paths stay valid.
-#[path = "syscall/edges.rs"]
+// boundary); the subsystem's ONE audited unsafe file lives OUTSIDE the
+// tree — declared here so the forbid does not apply to it. The FILE is
+// `syscall/unsafe.rs` (2026-11-25 edges->unsafe.rs naming decision,
+// git-mv'd to keep history); the module keeps its historical identifier
+// so every `crate::syscall_edges` / `crate::syscall::edges` call site
+// stays stable.
+#[path = "syscall/unsafe.rs"]
 pub(crate) mod syscall_edges;
 pub mod interrupt;
 pub mod dfx;
