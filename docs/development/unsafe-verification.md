@@ -1887,7 +1887,7 @@ FILE` owns one), and the gate fails on a drop that
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 111 | test_skb_push_pull | block | ptr-ops | INV:INV-TESTHARNESS-1 | `73353fb36b52` |
+| 113 | test_skb_push_pull | block | ptr-ops | INV:INV-TESTHARNESS-1 | `13040b5f8da8` |
 
 ### kernel/core/src/tests/preemptive_scheduler.rs (1)
 

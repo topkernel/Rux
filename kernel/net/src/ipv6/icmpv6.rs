@@ -13,7 +13,7 @@ use super::{
     is_local_addr, is_unspecified, multicast_mac, neigh_update, solicited_node_multicast,
     transport_checksum6, Ipv6Addr, IPV6_ADDR_ALL_NODES, IPV6_ADDR_ALL_ROUTERS, IPV6_HDR_LEN,
 };
-use rux::net::hotpath::alloc_skb;
+use crate::buffer::alloc_skb;
 
 /// ICMPv6 header length
 pub const ICMPV6_HDR_LEN: usize = 4;

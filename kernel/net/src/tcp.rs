@@ -744,7 +744,7 @@ impl TcpTxBatch {
         for d in self.descs.drain(..) {
             tcp_trace_out(&d);
             let data = &self.arena[d.off..d.off + d.len];
-            let mut skb = match rux::net::hotpath::alloc_skb(1500) {
+            let mut skb = match crate::buffer::alloc_skb(1500) {
                 Some(s) => s,
                 None => continue, // R35: allocation failure outside the lock — drop, no panic
             };

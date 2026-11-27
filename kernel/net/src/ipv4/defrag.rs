@@ -234,7 +234,7 @@ pub fn ip_defrag(
 
 /// Rebuild a full-datagram skb and run the normal IP dispatch.
 fn dispatch_reassembled(hdr: [u8; IPHDR_LEN], payload: &[u8], src_ip: u32, dest_ip: u32) {
-    let mut skb = match rux::net::hotpath::alloc_skb((IPHDR_LEN + payload.len()) as u32) {
+    let mut skb = match crate::buffer::alloc_skb((IPHDR_LEN + payload.len()) as u32) {
         Some(s) => s,
         None => return, // drop — peer retransmits and we retry
     };

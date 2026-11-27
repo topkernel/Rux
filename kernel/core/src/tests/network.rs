@@ -5,7 +5,9 @@
 
 //! Network subsystem test
 
-use crate::net::hotpath::{alloc_skb, kfree_skb};
+// alloc_skb/kfree_skb moved to the net service crate (shrink stage);
+// this test re-routes to the pinned substrate methods (soft).
+use crate::net::types::SkBuff;
 use crate::drivers::hotpath::{loopback_init, loopback_send, loopback};
 use super::{test_pass, test_fail, test_group_start};
 
@@ -31,7 +33,7 @@ pub fn test_network() {
 
 fn test_skb_alloc() {
     // Allocate 1500 byte SkBuff
-    let skb = alloc_skb(1500);
+    let skb = SkBuff::alloc(1500);
     if skb.is_none() {
         test_fail("SkBuff alloc", "failed");
         return;
@@ -42,7 +44,7 @@ fn test_skb_alloc() {
     let empty_ok = skb.is_empty();
 
     // Free SkBuff
-    kfree_skb(skb);
+    skb.free();
 
     if len_ok && empty_ok {
         test_pass("SkBuff alloc/free");
@@ -52,7 +54,7 @@ fn test_skb_alloc() {
 }
 
 fn test_skb_data_ops() {
-    let mut skb = match alloc_skb(1500) {
+    let mut skb = match SkBuff::alloc(1500) {
         Some(s) => s,
         None => {
             test_fail("SkBuff data ops", "alloc failed");
@@ -85,7 +87,7 @@ fn test_skb_data_ops() {
 }
 
 fn test_skb_push_pull() {
-    let mut skb = match alloc_skb(1500) {
+    let mut skb = match SkBuff::alloc(1500) {
         Some(s) => s,
         None => {
             test_fail("SkBuff push/pull", "alloc failed");
@@ -153,7 +155,7 @@ fn test_loopback() {
     }
 
     // Test sending packet
-    let skb = match alloc_skb(100) {
+    let skb = match SkBuff::alloc(100) {
         Some(s) => s,
         None => {
             test_fail("loopback send", "SkBuff alloc failed");

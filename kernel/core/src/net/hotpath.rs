@@ -30,7 +30,6 @@
 //! is a never-used `pub(crate)` fn, dead-code warned at base).
 
 use super::types::{EthProtocol, IpProtocol, SkBuff};
-use core::sync::atomic::AtomicU64;
 
 // pass 3 (seed-core §2c.5): the audited unsafe operations moved to
 // net::r#unsafe; the historical net::hotpath:: paths of the pub ones
@@ -121,8 +120,9 @@ impl Drop for SkBuff {
     }
 }
 
-/// SkBuff global allocator ID
-static SKBUFF_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(0);
+// (SKBUFF_ALLOCATOR_ID, a never-referenced static, deleted at the shrink
+// stage — the allocation table's zero-user class: no qualified reference
+// anywhere in the tree.)
 
 impl SkBuff {
 
@@ -212,25 +212,10 @@ impl SkBuff {
 
 }
 
-/// Helper function to allocate SkBuff
-///
-/// # Arguments
-/// - `size`: Data size
-///
-/// # Returns
-/// The allocated SkBuff
-pub fn alloc_skb(size: u32) -> Option<SkBuff> {
-    SkBuff::alloc(size)
-}
-
-/// Helper function to free SkBuff
-///
-/// # Arguments
-/// - `skb`: SkBuff to free
-pub fn kfree_skb(skb: SkBuff) {
-    skb.free();
-}
-
+// alloc_skb / kfree_skb (the free-helper pair) moved to the net service
+// crate at the shrink stage (allocation-table MOVE-FREE): crate-local in
+// kernel/net/src/buffer.rs, re-exported at the crate's root. The core-side
+// callers reach the pinned substrate directly (SkBuff::alloc / .free()).
 
 // ==================== Net-family header-view edges (round-5) ====================
 

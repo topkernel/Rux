@@ -1747,7 +1747,7 @@ ae6ff235c61a	kernel/core/src/tests/listhead.rs	test_listhead	92		INV:INV-TESTHAR
 1cf7d09c6b48	kernel/core/src/tests/mod.rs	setup_boot_task_fdtable	506		INV:INV-TESTHARNESS-1
 f02513581256	kernel/core/src/tests/net_pins.rs	test_net_pins	59	ptr-ops	INV:INV-TESTHARNESS-1
 25f6997d7159	kernel/core/src/tests/net_pins.rs	test_net_pins	166		INV:INV-TESTHARNESS-1
-73353fb36b52	kernel/core/src/tests/network.rs	test_skb_push_pull	111	ptr-ops	INV:INV-TESTHARNESS-1
+13040b5f8da8	kernel/core/src/tests/network.rs	test_skb_push_pull	113	ptr-ops	INV:INV-TESTHARNESS-1
 eddf826945dc	kernel/core/src/tests/preemptive_scheduler.rs	test_preemptive_scheduler	37	ptr-ops	INV:INV-TESTHARNESS-1
 a907fbf446b7	kernel/core/src/tests/process_tree.rs	test_process_tree	38		INV:INV-TESTHARNESS-1
 3e51a85ebb7a	kernel/core/src/tests/reparent_safety.rs	test_plausible_task_ptr	53	volatile,ptr-ops	INV:INV-TESTHARNESS-1

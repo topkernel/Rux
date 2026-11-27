@@ -30,7 +30,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::types::{File, FileFlags, FileOps};
-use rux::net::{hotpath::alloc_skb, hotpath::kfree_skb, types::SkBuff};
+use crate::buffer::{alloc_skb, kfree_skb};
+use rux::net::types::SkBuff;
 use crate::socket::{SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
 use crate::process::types::WaitQueueHead;
 use crate::sync::types::Spinlock;

@@ -37,10 +37,18 @@ extern crate alloc;
 
 // The service files, flat at the crate root (seed-core-design 2c.2).
 pub mod arp;
-// buffer.rs (the raw-memory substrate: allocator calls, pointer
-// arithmetic, slice construction — 22 unsafe constructs) stays
-// FRAMEWORK-side (the unsafe.rs pattern); the crate consumes it
-// via the re-export below.
+// The SkBuff substrate (the raw-memory buffer.rs of the old layout:
+// allocator calls, pointer arithmetic, slice construction — 22 unsafe
+// constructs) stays FRAMEWORK-side (the unsafe.rs pattern): the type and
+// its alloc/release bodies live in rux::net::{types, unsafe}; the crate
+// consumes them via the re-exports below.
+//
+// The free-helper pair (alloc_skb/kfree_skb) FLIPPED at the shrink stage:
+// crate-local now (src/buffer.rs), re-exported here at the root — the
+// reverse of the pre-move direction, where the crate reached them through
+// the framework's hotpath re-export.
+pub mod buffer;
+pub use crate::buffer::{alloc_skb, kfree_skb};
 pub use rux::net::{types, hotpath};
 pub use rux::net::hotpath::file_arc;
 pub use rux::net::hotpath::take_file_arc as reclaim_file_arc;
