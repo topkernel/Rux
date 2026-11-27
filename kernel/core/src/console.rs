@@ -823,7 +823,7 @@ fn tty_isig_deliver(signo: i32) {
     // Target the tty foreground process group; fall back to the caller's.
     let mut pgid = crate::fs::hotpath::tty::console_fg_pgid();
     if pgid == 0 {
-        pgid = crate::process::hotpath::current_pgid();
+        pgid = crate::api::process::current_pgid();
     }
     if pgid != 0 {
         crate::signal::send_signal_to_pgid(pgid, signo);

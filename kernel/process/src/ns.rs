@@ -1,0 +1,965 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! NAMESPACES (the movable policy half; p23-shrink-process): the six
+//! namespace KINDS stayed in `rux::process::types` (Task fields, orphan
+//! rule); this file carries everything that was policy in the old
+//! core/src/process/hotpath.rs ns section: the init-ns singletons, the
+//! current-task ns accessors, the mount-table bookkeeping, vpid
+//! translation, copy/unshare/setns, and the /proc/[pid]/ns file/fd
+//! machinery.
+//!
+//! Core-side consumers that stay framework-side until their own
+//! subsystem pass (fs/ipc hotpath lanes) reach these rows through the
+//! NsHooks table in rux::api::process (mount, procfs-ns and
+//! /proc/sysvipc call sites — all cold by measurement). The crate-side
+//! consumers (syscall, fs, signal) call this module directly.
+//!
+//! task_same_pid_ns stayed core-side hotpath.rs: the one HOT member of
+//! the section (53 union samples, lm1000).
+
+#![forbid(unsafe_code)]
+use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::String;
+use rux::sync::types::Spinlock;
+use rux::process::types::{
+    IpcNamespace, MountEntry, MountNamespace, NetNamespace, NsFileContent,
+    NsKind, NsRef, PidNamespace, Task, UserNamespace, UtsNamespace,
+};
+// The six clone-flag values stay core-side (read in-file by the pinned
+// impl NsKind::clone_flag); this module only consumes them.
+use rux::process::hotpath::{
+    CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER,
+    CLONE_NEWUTS,
+};
+
+// ============================================================================
+// CLONE_NEW* flag values (mirror process::fork; duplicated so this module
+// has no dependency on the fork path)
+// ============================================================================
+
+pub const CLONE_NEWCGROUP: u64 = 0x02000000;
+
+/// All namespace-creating CLONE flags.
+pub const CLONE_NEWMASK: u64 = CLONE_NEWNS
+    | CLONE_NEWCGROUP
+    | CLONE_NEWUTS
+    | CLONE_NEWIPC
+    | CLONE_NEWUSER
+    | CLONE_NEWPID
+    | CLONE_NEWNET;
+
+/// Global mount-ID allocator (Linux mnt_id_start discipline: monotonic,
+/// never reused). Starts above the synthesized boot-layout ids (1-6 in
+/// procfs::mounts).
+static NEXT_MOUNT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(16);
+
+/// Allocate the next mount ID.
+pub fn alloc_mount_id() -> u32 {
+    NEXT_MOUNT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// sc98: record a freshly attached mount in the CURRENT namespace so its
+/// Drop can detach it when the namespace dies (see MountNamespace::vfs_mounts).
+pub fn ns_track_vfsmount(mnt: Arc<crate::fs::types::VfsMountInternal>) {
+    let ns = current_mnt_ns();
+    ns.vfs_mounts.lock().push(mnt);
+}
+
+/// True when the caller runs in the init (boot) mount namespace — mounts
+/// made there must NOT pollute private namespaces' teardown lists (they
+/// are tracked in the init ns, which never drops) and vice versa.
+pub fn in_init_mnt_ns() -> bool {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_mount.clone())
+        .map(|ns| Arc::ptr_eq(&ns, &init_mnt_ns()))
+        .unwrap_or(true)
+}
+
+// ============================================================================
+// Init namespaces (lazily created singletons)
+// ============================================================================
+
+/// nsfs-style inum allocator. High base avoids colliding with the procfs
+/// pid-dir ino scheme (pid * 10000 + offset).
+static NEXT_NS_INUM: AtomicU64 = AtomicU64::new(0xEA00_0001);
+
+fn alloc_ns_inum() -> u64 {
+    NEXT_NS_INUM.fetch_add(1, Ordering::Relaxed)
+}
+
+static INIT_UTS: Spinlock<Option<Arc<UtsNamespace>>> = Spinlock::new(None);
+static INIT_MNT: Spinlock<Option<Arc<MountNamespace>>> = Spinlock::new(None);
+static INIT_PID: Spinlock<Option<Arc<PidNamespace>>> = Spinlock::new(None);
+static INIT_NET: Spinlock<Option<Arc<NetNamespace>>> = Spinlock::new(None);
+static INIT_IPC: Spinlock<Option<Arc<IpcNamespace>>> = Spinlock::new(None);
+static INIT_USER: Spinlock<Option<Arc<UserNamespace>>> = Spinlock::new(None);
+
+/// The initial UTS namespace, seeded with hostname "rux".
+pub fn init_uts_ns() -> Arc<UtsNamespace> {
+    let mut guard = INIT_UTS.lock();
+    if let Some(ns) = guard.as_ref() {
+        return ns.clone();
+    }
+    let ns = Arc::new(UtsNamespace::new(alloc_ns_inum()));
+    ns.set_hostname(b"rux");
+    *guard = Some(ns.clone());
+    ns
+}
+
+/// The initial mount namespace; its table seeds from the boot-time global
+/// registry (rootfs row included).
+pub fn init_mnt_ns() -> Arc<MountNamespace> {
+    let mut guard = INIT_MNT.lock();
+    if let Some(ns) = guard.as_ref() {
+        return ns.clone();
+    }
+    let ns = Arc::new(MountNamespace::new(alloc_ns_inum(), boot_mount_entries()));
+    *guard = Some(ns.clone());
+    ns
+}
+
+pub fn init_pid_ns() -> Arc<PidNamespace> {
+    let mut guard = INIT_PID.lock();
+    if let Some(ns) = guard.as_ref() {
+        return ns.clone();
+    }
+    let ns = Arc::new(PidNamespace::new(alloc_ns_inum(), None));
+    *guard = Some(ns.clone());
+    ns
+}
+
+pub fn init_net_ns() -> Arc<NetNamespace> {
+    let mut guard = INIT_NET.lock();
+    if let Some(ns) = guard.as_ref() {
+        return ns.clone();
+    }
+    let ns = Arc::new(NetNamespace {
+        inum: alloc_ns_inum(),
+    });
+    *guard = Some(ns.clone());
+    ns
+}
+
+pub fn init_ipc_ns() -> Arc<IpcNamespace> {
+    let mut guard = INIT_IPC.lock();
+    if let Some(ns) = guard.as_ref() {
+        return ns.clone();
+    }
+    let ns = Arc::new(IpcNamespace {
+        inum: alloc_ns_inum(),
+    });
+    *guard = Some(ns.clone());
+    ns
+}
+
+pub fn init_user_ns() -> Arc<UserNamespace> {
+    let mut guard = INIT_USER.lock();
+    if let Some(ns) = guard.as_ref() {
+        return ns.clone();
+    }
+    let ns = Arc::new(UserNamespace {
+        inum: alloc_ns_inum(),
+        parent: None,
+    });
+    *guard = Some(ns.clone());
+    ns
+}
+
+/// True when `ns` IS the init pid namespace (identity translation zone).
+pub fn is_init_pid_ns(ns: &Arc<PidNamespace>) -> bool {
+    Arc::ptr_eq(ns, &init_pid_ns())
+}
+
+/// The pid of `task` as seen from `ns`: its own-ns pid (chain tip),
+/// an intermediate upid-chain entry, or None when the task has no pid
+/// in that namespace (reference task_pid_nr_ns — an ancestor-ns task
+/// is INVISIBLE in a descendant ns). The init-ns view is the global
+/// pid and is handled by the callers (they see `None` slot == init).
+fn upid_in_ns(task: &Task, ns: &Arc<PidNamespace>) -> Option<u32> {
+    if let Some(own) = task.ns_pid.as_ref() {
+        if Arc::ptr_eq(own, ns) {
+            return Some(task.ns_local_pid);
+        }
+    }
+    for (a, nr) in &task.ns_upids {
+        if Arc::ptr_eq(a, ns) {
+            return Some(*nr);
+        }
+    }
+    None
+}
+
+/// Reverse of [`translate_sender_pid_ns`]: resolve a pid NUMBER written
+/// by a caller living in `caller_ns` (e.g. fcntl F_SETOWN's argument) to
+/// the GLOBAL pid of the task it names. None when no task matches —
+/// callers map that to ESRCH-style failure.
+pub fn resolve_local_pid_to_global(local: u32, caller_ns: Option<&Arc<PidNamespace>>) -> Option<u32> {
+    match caller_ns {
+        None => {
+            let t = rux::process::hotpath::find_task_by_pid(local)?;
+            Some(t.pid())
+        }
+        Some(ns) => {
+            let mut found = None;
+            rux::process::hotpath::pid_hash_for_each_task(|t| {
+                if found.is_none() && upid_in_ns(t, ns) == Some(local) {
+                    found = Some(t.pid());
+                }
+            });
+            found
+        }
+    }
+}
+
+/// Translate a sender's GLOBAL pid into the pid the RECEIVER sees:
+/// the sender's pid inside `receiver_ns`, or 0 when the sender has no
+/// pid there (reference task_pid_nr_ns — the pid the signal's siginfo
+/// must carry). Views: same ns → the own-ns pid; an ANCESTOR ns → the
+/// upid-chain entry that ns assigned the sender (init ns → the global
+/// pid); anything else (descendant or sibling ns) → 0 — the task is
+/// invisible there.
+pub fn translate_sender_pid_ns(sender_global_pid: u32, receiver_ns: Option<&Arc<PidNamespace>>) -> u32 {
+    // TaskRef owns the pin (lookup_pinned/task_put paired in Drop), so
+    // the sender Task stays alive across the call.
+    let Some(sender) = rux::process::types::TaskRef::lookup(sender_global_pid) else {
+        return sender_global_pid;
+    };
+    match receiver_ns {
+        // Init-ns receiver (None slot): every task's init view is
+        // its global pid.
+        None => sender.pid(),
+        Some(r) if is_init_pid_ns(r) => sender.pid(),
+        Some(r) => upid_in_ns(&sender, r).unwrap_or(0),
+    }
+}
+
+// ============================================================================
+// Current-task accessors (None slot == initial namespace)
+// ============================================================================
+
+pub fn current_uts_ns() -> Arc<UtsNamespace> {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_uts.clone())
+        .unwrap_or_else(init_uts_ns)
+}
+
+pub fn current_mnt_ns() -> Arc<MountNamespace> {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_mount.clone())
+        .unwrap_or_else(init_mnt_ns)
+}
+
+/// Pid namespace of the current task (never None).
+pub fn current_pid_ns() -> Arc<PidNamespace> {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_pid.clone())
+        .unwrap_or_else(init_pid_ns)
+}
+
+#[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
+pub fn current_net_ns() -> Arc<NetNamespace> {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_net.clone())
+        .unwrap_or_else(init_net_ns)
+}
+
+#[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
+pub fn current_ipc_ns() -> Arc<IpcNamespace> {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_ipc.clone())
+        .unwrap_or_else(init_ipc_ns)
+}
+
+#[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
+pub fn current_user_ns() -> Arc<UserNamespace> {
+    crate::sched::hotpath::current()
+        .and_then(|t| t.ns_user.clone())
+        .unwrap_or_else(init_user_ns)
+}
+
+// ============================================================================
+// Mount-table bookkeeping (fs::mount routes here)
+// ============================================================================
+
+/// Boot-time seed for the initial mount namespace (the hardcoded rootfs row
+/// plus anything registered before the first ns access).
+fn boot_mount_entries() -> Vec<MountEntry> {
+    // Read the legacy global registry (populated by do_mount at boot) and
+    // stamp each row with a permanent id.
+    crate::fs::hotpath::get_global_mounts()
+        .into_iter()
+        .map(|(d, m, f, fl)| MountEntry {
+            mount_id: alloc_mount_id(),
+            device: d,
+            mount_point: m,
+            fs_type: f,
+            flags: fl,
+        })
+        .collect()
+}
+
+/// Register a mount in the CURRENT mount namespace (fs::mount::register_mount
+/// routes here). Re-mounting over an existing mountpoint replaces the row.
+pub fn ns_register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
+    let ns = current_mnt_ns();
+    let mut table = ns.mounts.lock();
+    // Same-mountpoint re-registration (remount flag refresh, row
+    // relocation) keeps the row's id — Linux remount keeps mnt_id.
+    let existing_id = table
+        .iter()
+        .find(|e| e.mount_point == mount_point)
+        .map(|e| e.mount_id);
+    table.retain(|e| e.mount_point != mount_point);
+    let mount_id = existing_id.unwrap_or_else(alloc_mount_id);
+    table.push(MountEntry {
+        mount_id,
+        device: String::from(device),
+        mount_point: String::from(mount_point),
+        fs_type: String::from(fs_type),
+        flags: String::from(flags),
+    });
+}
+
+/// Drop a mount row from the current namespace (umount bookkeeping).
+pub fn ns_unregister_mount(mount_point: &str) {
+    let ns = current_mnt_ns();
+    let mut table = ns.mounts.lock();
+    table.retain(|e| e.mount_point != mount_point);
+}
+
+/// Snapshot of the current namespace's mount table.
+pub fn ns_get_mounts() -> Vec<MountEntry> {
+    current_mnt_ns().mounts.lock().clone()
+}
+
+/// True when `path` is a mountpoint of the current mount namespace.
+pub fn ns_is_mountpoint(path: &str) -> bool {
+    let norm = crate::fs::hotpath::path_normalize(path);
+    let ns = current_mnt_ns();
+    let table = ns.mounts.lock();
+    table.iter().any(|e| e.mount_point == norm)
+}
+
+// ============================================================================
+// PID translation (vpids)
+// ============================================================================
+
+/// Pid namespace that NEW children of `task` land in (honors a previous
+/// unshare(CLONE_NEWPID) / setns(pid_ns_fd)).
+pub fn task_pid_ns_for_children(task: &Task) -> Arc<PidNamespace> {
+    task.ns_pid_for_children
+        .clone()
+        .or_else(|| task.ns_pid.clone())
+        .unwrap_or_else(init_pid_ns)
+}
+
+/// Translate a caller-namespace pid into the global pid of its thread-group
+/// LEADER. Identity in the init namespace. None when no live leader matches
+/// (the caller's namespace cannot see that pid).
+pub fn resolve_vpid(local: u32) -> Option<u32> {
+    let ns = current_pid_ns();
+    if is_init_pid_ns(&ns) {
+        return Some(local);
+    }
+    let mut found: Option<u32> = None;
+    // SAFETY: callback receives hash-table task pointers; we only read
+    // pid/ns fields that are immutable after fork-enqueue.
+    {
+        rux::process::hotpath::pid_hash_for_each_task(|task| {
+            if found.is_some() {
+                return;
+            }
+            if upid_in_ns(task, &ns) == Some(local) && task.pid() == task.tgid() {
+                found = Some(task.pid());
+            }
+        });
+    }
+    found
+}
+
+/// Translate a caller-namespace TID into the global tid — the THREAD-level
+/// variant of resolve_vpid (any task in the caller's namespace matches, not
+/// just thread-group leaders). This is the reference's find_vpid(pid) as
+/// used by do_tgkill/do_send_specific: tgkill(2) takes caller-ns numbers
+/// (musl raise() passes getpid()/gettid() results, which are ns-local), so
+/// resolving them globally misfires inside a pid namespace.
+pub fn resolve_vtid(local: u32) -> Option<u32> {
+    let ns = current_pid_ns();
+    if is_init_pid_ns(&ns) {
+        return Some(local);
+    }
+    let mut found: Option<u32> = None;
+    // SAFETY: callback receives hash-table task pointers; we only read
+    // pid/ns fields that are immutable after fork-enqueue.
+    {
+        rux::process::hotpath::pid_hash_for_each_task(|task| {
+            if found.is_some() {
+                return;
+            }
+            if upid_in_ns(task, &ns) == Some(local) {
+                found = Some(task.pid());
+            }
+        });
+    }
+    found
+}
+
+/// Global pid of a task as seen from the CURRENT task's pid namespace.
+/// Same-ns and ancestor-ns views resolve through the own-ns pid / upid
+/// chain; the init-ns view is the global pid; a task has NO pid in a
+/// descendant or sibling ns (0), per reference task_pid_nr_ns.
+#[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
+pub fn task_vpid(task: &Task) -> u32 {
+    let ns = current_pid_ns();
+    if is_init_pid_ns(&ns) {
+        return task.pid();
+    }
+    upid_in_ns(task, &ns).unwrap_or(0)
+}
+
+/// wait4(2) reporting: a reaped child's pid as seen from the caller's pid
+/// namespace. Falls back to the global pid when the task already left the
+/// hash (late translation) or lives in another namespace.
+pub fn wait_vpid(global_pid: u32) -> u32 {
+    let ns = current_pid_ns();
+    if is_init_pid_ns(&ns) {
+        return global_pid;
+    }
+    match rux::process::hotpath::find_task_by_pid(global_pid) {
+        Some(t) => upid_in_ns(&t, &ns).unwrap_or(global_pid),
+        None => global_pid,
+    }
+}
+
+// ============================================================================
+// fork / unshare / setns
+// ============================================================================
+
+/// Capability gate for namespace creation (Linux copy_namespaces in
+/// kernel/fork.c): only the act of CREATING a namespace is gated. A request
+/// without any CLONE_NEW* bit (a plain fork/clone that shares the parent's
+/// namespaces) passes unconditionally. CLONE_NEWUSER is exempt: an
+/// unprivileged user may create a user namespace (the new userns then owns
+/// the process, where it holds all capabilities).
+///
+/// The old condition inverted this: it demanded CAP_SYS_ADMIN whenever
+/// CLONE_NEWUSER was ABSENT — i.e. for every plain fork — so any process
+/// that had dropped privileges (setuid04 after setuid(nobody)) got EPERM
+/// from fork().
+fn check_ns_capability(flags: u64) -> Result<(), i32> {
+    // Bits (other than CLONE_NEWUSER) that would create a new namespace.
+    let gated = flags & !CLONE_NEWUSER;
+    if gated == 0 {
+        return Ok(());
+    }
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return Err(-1); // EPERM
+    }
+    Ok(())
+}
+
+/// Namespace half of copy_process: the child either shares the parent's
+/// namespace objects (plain Arc clone — fork default) or gets fresh ones
+/// for every CLONE_NEW* bit. `child` is not yet runnable.
+pub fn copy_namespaces(parent: &Task, child: &mut Task, flags: u64) -> Result<(), i32> {
+    check_ns_capability(flags & CLONE_NEWMASK)?;
+
+    // --- UTS ---
+    if flags & CLONE_NEWUTS != 0 {
+        let ns = Arc::new(UtsNamespace::new(alloc_ns_inum()));
+        // Linux copy_utsname: the child starts with a COPY of the parent's
+        // names, then diverges.
+        let (hn, dn) = match parent.ns_uts.as_ref() {
+            Some(p) => (p.get_hostname(), p.get_domainname()),
+            None => (
+                init_uts_ns().get_hostname(),
+                init_uts_ns().get_domainname(),
+            ),
+        };
+        ns.set_hostname(&hn);
+        ns.set_domainname(&dn);
+        child.ns_uts = Some(ns);
+    } else {
+        child.ns_uts = parent.ns_uts.clone();
+    }
+
+    // --- mount ---
+    if flags & CLONE_NEWNS != 0 {
+        let table = match parent.ns_mount.as_ref() {
+            Some(p) => p.mounts.lock().clone(),
+            None => init_mnt_ns().mounts.lock().clone(),
+        };
+        let ns = Arc::new(MountNamespace::new(alloc_ns_inum(), table));
+        // Inherit the parent's pivot anchor: CLONE_NEWNS inside a pivoted
+        // ns keeps the same view (the copy sees the same ns root).
+        if let Some(p) = parent.ns_mount.as_ref() {
+            *ns.root.lock() = p.root.lock().clone();
+        }
+        child.ns_mount = Some(ns);
+    } else {
+        child.ns_mount = parent.ns_mount.clone();
+    }
+
+    // --- pid ---
+    let parent_ns = parent.ns_pid.clone().unwrap_or_else(init_pid_ns);
+    if flags & CLONE_NEWPID != 0 {
+        let ns = Arc::new(PidNamespace::new(alloc_ns_inum(), Some(parent_ns)));
+        child.ns_pid = Some(ns.clone());
+        // The namespace init: first local pid is 1.
+        child.ns_local_pid = ns.alloc_local_pid();
+        // Reference alloc_pid: the task also gets a number in EVERY
+        // ancestor namespace. The init-ns number is the global pid
+        // (root view, by construction); intermediate levels go on the
+        // upid chain. Without the chain, a depth-2 task's clone(2)
+        // return (creator-ns view) and its wait/kill lookups mismatched
+        // — the kselftest memfd nested-sysctl child aborted with ECHILD
+        // (waitpid on its own just-spawned child).
+        let mut ancestor = ns.parent.clone();
+        while let Some(ans) = ancestor {
+            if is_init_pid_ns(&ans) {
+                break;
+            }
+            child.ns_upids.push((ans.clone(), ans.alloc_local_pid()));
+            ancestor = ans.parent.clone();
+        }
+    } else {
+        // Children land where the parent's ns_pid_for_children points
+        // (unshare(CLONE_NEWPID) / setns(pid_ns_fd) semantics).
+        let target = task_pid_ns_for_children(parent);
+        if is_init_pid_ns(&target) {
+            child.ns_pid = None; // slot None == initial namespace
+            child.ns_local_pid = child.pid(); // identity in the init ns
+        } else {
+            child.ns_pid = Some(target.clone());
+            child.ns_local_pid = target.alloc_local_pid();
+            // Same upid-chain build: the ancestors between the target
+            // ns and init each assign the child a number.
+            let mut ancestor = target.parent.clone();
+            while let Some(ans) = ancestor {
+                if is_init_pid_ns(&ans) {
+                    break;
+                }
+                child.ns_upids.push((ans.clone(), ans.alloc_local_pid()));
+                ancestor = ans.parent.clone();
+            }
+        }
+    }
+
+    // --- stubs ---
+    if flags & CLONE_NEWNET != 0 {
+        child.ns_net = Some(Arc::new(NetNamespace {
+            inum: alloc_ns_inum(),
+        }));
+    } else {
+        child.ns_net = parent.ns_net.clone();
+    }
+    if flags & CLONE_NEWIPC != 0 {
+        child.ns_ipc = Some(Arc::new(IpcNamespace {
+            inum: alloc_ns_inum(),
+        }));
+    } else {
+        child.ns_ipc = parent.ns_ipc.clone();
+    }
+    if flags & CLONE_NEWUSER != 0 {
+        let p = parent.ns_user.clone();
+        child.ns_user = Some(Arc::new(UserNamespace {
+            inum: alloc_ns_inum(),
+            parent: p,
+        }));
+    } else {
+        child.ns_user = parent.ns_user.clone();
+    }
+
+    Ok(())
+}
+
+/// unshare(2) namespace half: give the CALLING task fresh namespaces for
+/// every CLONE_NEW* bit. CLONE_NEWPID only switches the children target
+/// (Linux: the caller keeps its own pids).
+pub fn unshare_namespaces(flags: u64) -> Result<(), i32> {
+    let nsflags = flags & CLONE_NEWMASK;
+    if nsflags == 0 {
+        return Ok(());
+    }
+    check_ns_capability(nsflags)?;
+
+    let Some(task) = crate::sched::hotpath::current() else {
+        return Err(-1); // EPERM
+    };
+
+    // We are mutating the current task's own ns slots; no other CPU
+    // holds a reference through them concurrently (fork takes the
+    // parent's slots under the same task context).
+    {
+        if nsflags & CLONE_NEWUTS != 0 {
+            let old = task_uts_of(task);
+            let ns = Arc::new(UtsNamespace::new(alloc_ns_inum()));
+            ns.set_hostname(&old.get_hostname());
+            ns.set_domainname(&old.get_domainname());
+            task.ns_uts = Some(ns);
+        }
+        if nsflags & CLONE_NEWNS != 0 {
+            let table = task_mnt_table_of(task);
+            let old_root = task
+                .ns_mount
+                .as_ref()
+                .map(|p| p.root.lock().clone())
+                .unwrap_or_else(|| crate::fs::hotpath::get_vfs_root());
+            let ns = Arc::new(MountNamespace::new(alloc_ns_inum(), table));
+            // Inherit the previous ns's pivot anchor (see the clone site).
+            *ns.root.lock() = old_root;
+            task.ns_mount = Some(ns);
+        }
+        if nsflags & CLONE_NEWPID != 0 {
+            // The caller itself stays where it is; only future children are
+            // created inside the new namespace.
+            let cur = task
+                .ns_pid
+                .clone()
+                .unwrap_or_else(init_pid_ns);
+            task.ns_pid_for_children = Some(Arc::new(PidNamespace::new(
+                alloc_ns_inum(),
+                Some(cur),
+            )));
+        }
+        if nsflags & CLONE_NEWNET != 0 {
+            task.ns_net = Some(Arc::new(NetNamespace {
+                inum: alloc_ns_inum(),
+            }));
+        }
+        if nsflags & CLONE_NEWIPC != 0 {
+            task.ns_ipc = Some(Arc::new(IpcNamespace {
+                inum: alloc_ns_inum(),
+            }));
+        }
+        if nsflags & CLONE_NEWUSER != 0 {
+            let p = task.ns_user.clone();
+            task.ns_user = Some(Arc::new(UserNamespace {
+                inum: alloc_ns_inum(),
+                parent: p,
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// The current task's (or the init) UTS namespace.
+fn task_uts_of(task: &Task) -> Arc<UtsNamespace> {
+    task.ns_uts.clone().unwrap_or_else(init_uts_ns)
+}
+
+/// The current task's (or the init) mount table snapshot.
+fn task_mnt_table_of(task: &Task) -> Vec<MountEntry> {
+    match task.ns_mount.as_ref() {
+        Some(a) => a.mounts.lock().clone(),
+        None => init_mnt_ns().mounts.lock().clone(),
+    }
+}
+
+/// Open-ns-fd registry: nsfs inum → handle. Entries keep the namespace
+/// alive while any fd references it (bounded by distinct-ns count).
+static NS_FD_TABLE: Spinlock<Vec<(u64, NsRef)>> = Spinlock::new(Vec::new());
+
+fn ns_fd_register(handle: NsRef) {
+    let inum = handle.inum();
+    let mut table = NS_FD_TABLE.lock();
+    if !table.iter().any(|(i, _)| *i == inum) {
+        table.push((inum, handle));
+    }
+}
+
+fn ns_fd_lookup(inum: u64) -> Option<NsRef> {
+    let table = NS_FD_TABLE.lock();
+    table
+        .iter()
+        .find(|(i, _)| *i == inum)
+        .map(|(_, h)| h.clone())
+}
+
+/// The namespace handle of `pid`'s `kind` slot (falls back to the init
+/// namespace for tasks whose slot is None).
+pub fn task_ns_handle(task: &Task, kind: NsKind) -> NsRef {
+    match kind {
+        NsKind::Uts => NsRef::Uts(task.ns_uts.clone().unwrap_or_else(init_uts_ns)),
+        NsKind::Mnt => NsRef::Mnt(task.ns_mount.clone().unwrap_or_else(init_mnt_ns)),
+        NsKind::Pid => NsRef::Pid(task.ns_pid.clone().unwrap_or_else(init_pid_ns)),
+        NsKind::Net => NsRef::Net(task.ns_net.clone().unwrap_or_else(init_net_ns)),
+        NsKind::Ipc => NsRef::Ipc(task.ns_ipc.clone().unwrap_or_else(init_ipc_ns)),
+        NsKind::User => NsRef::User(task.ns_user.clone().unwrap_or_else(init_user_ns)),
+    }
+}
+
+/// readlink(2) target for /proc/[pid]/ns/<kind>: "<kind>:[<inum>]".
+pub fn ns_link_target(pid: u32, kind: NsKind) -> Vec<u8> {
+    let handle = match rux::process::hotpath::find_task_by_pid(pid) {
+        Some(t) => task_ns_handle(t, kind),
+        None => return alloc::format!("{}:[{}]", kind.name(), fallback_inum(kind)).into_bytes(),
+    };
+    alloc::format!("{}:[{}]", kind.name(), handle.inum()).into_bytes()
+}
+
+/// Init-namespace inum for a dead task's ns link.
+fn fallback_inum(kind: NsKind) -> u64 {
+    task_ns_handle_init(kind).inum()
+}
+
+fn task_ns_handle_init(kind: NsKind) -> NsRef {
+    match kind {
+        NsKind::Uts => NsRef::Uts(init_uts_ns()),
+        NsKind::Mnt => NsRef::Mnt(init_mnt_ns()),
+        NsKind::Pid => NsRef::Pid(init_pid_ns()),
+        NsKind::Net => NsRef::Net(init_net_ns()),
+        NsKind::Ipc => NsRef::Ipc(init_ipc_ns()),
+        NsKind::User => NsRef::User(init_user_ns()),
+    }
+}
+
+/// nsfs file read payload (Linux /proc/<pid>/ns/<kind> read): "<kind>:[<inum>]\n".
+fn ns_file_content(handle: &NsRef) -> Vec<u8> {
+    let mut out = alloc::format!("{}:[{}]", handle.kind().name(), handle.inum()).into_bytes();
+    out.push(b'\n');
+    out
+}
+
+/// Open a namespace fd for (pid, kind) — the /proc/[pid]/ns/<kind> magic
+/// link target. Returns an fd whose inode ino is the ns inum and whose
+/// read() returns "<kind>:[<inum>]\n".
+pub fn open_ns_file(pid: u32, kind: NsKind, flags: u32) -> Result<usize, i32> {
+    let file = build_ns_file(pid, kind, flags)?;
+    // (unsafe-slim r3) get_file_fd_install is safe (un-signed, verified).
+    crate::fs::hotpath::get_file_fd_install(file)
+        .ok_or(crate::errno::Errno::TooManyOpenFiles.as_neg_i32())
+}
+
+/// Build the ns descriptor File for (pid, kind) without installing an fd
+/// (the generic VFS open path — file_open on a resolved ns magic link —
+/// installs it into the caller's table itself).
+pub fn build_ns_file(
+    pid: u32,
+    kind: NsKind,
+    flags: u32,
+) -> Result<Arc<crate::fs::types::File>, i32> {
+    let handle = rux::process::hotpath::find_task_by_pid(pid)
+        .map(|t| task_ns_handle(t, kind))
+        .ok_or(crate::errno::Errno::NoSuchProcess.as_neg_i32())?;
+
+    let content = alloc::boxed::Box::new(NsFileContent {
+        data: ns_file_content(&handle),
+    });
+
+    // Static FileOps; ownership of the boxed content moves to the File
+    // via set_private_data and is reclaimed in ns_file_close (the
+    // framework edge pair file_private_data_ref/_take_boxed,
+    // INV-PROC-NSFILE-1/2).
+    let file = Arc::new(crate::fs::types::File::new(crate::fs::types::FileFlags::new(flags)));
+    file.set_ops(&NS_FILE_OPS);
+    file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
+
+    let mut inode = crate::fs::types::Inode::new(
+        handle.inum(),
+        crate::fs::types::InodeMode::new(
+            crate::fs::types::InodeMode::S_IFREG | 0o444,
+        ),
+    );
+    inode.fs_id = crate::fs::hotpath::FS_ID_PROCFS;
+    file.set_inode(Arc::new(inode));
+
+    // Keep the namespace alive for the fd's lifetime.
+    ns_fd_register(handle);
+
+    Ok(file)
+}
+
+fn ns_file_read(file: &crate::fs::types::File, buf: &mut [u8]) -> isize {
+    // private_data is the NsFileContent installed by open_ns_file.
+    match rux::process::r#unsafe::file_private_data_ref::<NsFileContent>(file) {
+        Some(content) => {
+            let offset = file.get_pos() as usize;
+            let available = content.data.len().saturating_sub(offset);
+            let to_read = buf.len().min(available);
+            if to_read > 0 {
+                buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
+                file.set_pos((offset + to_read) as u64);
+                to_read as isize
+            } else {
+                0
+            }
+        }
+        None => -9, // EBADF
+    }
+}
+
+fn ns_file_close(file: &crate::fs::types::File) -> i32 {
+    // The exactly-once reclaim of the constructor's Box (see ns_file_read).
+    drop(rux::process::r#unsafe::file_private_data_take_boxed::<NsFileContent>(file));
+    0
+}
+
+pub(crate) static NS_FILE_OPS: crate::fs::types::FileOps = crate::fs::types::FileOps::builder()
+    .read(ns_file_read)
+    .close(ns_file_close)
+    .build();
+
+/// D-6 shape-test accessor: expose the private table to the unit-test
+/// group `fileops-caps` without widening the runtime API.
+/// Intercept /proc/[pid]/ns/<kind> opens from sys_openat. Returns
+/// Some(fd-or-negative-errno) when the path matched.
+pub fn try_open_ns_path(path: &str, flags: u32) -> Option<i64> {
+    // (perf-syscall lane) prefix gate before the parts Vec — this runs on
+    // EVERY openat (called from sys_openat's shortcut chain).
+    if !path.starts_with("/proc") {
+        return None;
+    }
+    let parts: Vec<&str> = path
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() != 4 || parts[0] != "proc" || parts[2] != "ns" {
+        return None;
+    }
+    let pid: u32 = if parts[1] == "self" {
+        rux::process::hotpath::current_pid()
+    } else {
+        match parts[1].parse::<u32>() {
+            Ok(p) => p,
+            Err(_) => return None,
+        }
+    };
+    let kind = NsKind::from_name(parts[3].as_bytes())?;
+    Some(match open_ns_file(pid, kind, flags) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    })
+}
+
+// ============================================================================
+// setns(2)
+// ============================================================================
+
+/// setns(fd, nstype): reassociate the calling thread with the namespace
+/// referenced by an ns fd (opened from /proc/[pid]/ns/<kind>).
+///
+/// PID namespaces follow Linux: the change only affects future children
+/// (ns_pid_for_children). Joining a user namespace is accepted but the
+/// mapping stays identity (stub).
+pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
+    if fd < 0 {
+        return Err(crate::errno::Errno::BadFileNumber.as_neg_i32());
+    }
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return Err(crate::errno::Errno::OperationNotPermitted.as_neg_i32());
+    }
+
+    // fd validated non-negative; get_file_fd returns an Arc clone.
+    let file = crate::fs::hotpath::get_file_fd(fd as usize)
+        .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    // The write-once inode cell has a safe read accessor (get_inode).
+    let ino = file
+        .get_inode()
+        .map(|i| i.ino)
+        .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    let handle = ns_fd_lookup(ino)
+        .ok_or(crate::errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    // nstype check: when nonzero it must name the fd's kind.
+    if nstype != 0 && nstype != handle.kind().clone_flag() {
+        return Err(crate::errno::Errno::BadFileNumber.as_neg_i32());
+    }
+
+    let Some(task) = crate::sched::hotpath::current() else {
+        return Err(crate::errno::Errno::OperationNotPermitted.as_neg_i32());
+    };
+
+    // current() yields &mut Task: ns slot writes need no unsafe.
+    match handle {
+        NsRef::Uts(ns) => task.ns_uts = Some(ns),
+        NsRef::Mnt(ns) => {
+            task.ns_mount = Some(ns.clone());
+            reanchor_root_for_mnt_ns(task, &ns);
+        }
+        NsRef::Net(ns) => task.ns_net = Some(ns),
+        NsRef::Ipc(ns) => task.ns_ipc = Some(ns),
+        NsRef::User(ns) => task.ns_user = Some(ns),
+        NsRef::Pid(ns) => {
+            // Cannot renumber ourselves: only future children enter.
+            task.ns_pid_for_children = Some(ns);
+        }
+    }
+    Ok(())
+}
+
+/// setns(CLONE_NEWNS) root re-anchoring — the pivot_root counterpart.
+///
+/// Reference behavior: switching mount namespaces revalidates the task's
+/// fs->root/cwd against the NEW namespace's mount tree; when the root is
+/// not reachable there it is reset to the new ns's root. Rux has one
+/// global dentry tree, so the ns "root" is the pivot anchor recorded by
+/// sys_pivot_root (a dentry distinct from the global root ⇔ this ns was
+/// pivoted). Two directions matter for OH beget's sandbox model:
+///  - EnterDefaultNamespace: a task pivoted into the sandbox jumps back
+///    to the real "/" (init does this right after `make sandbox ...`;
+///    without it init stays jailed → mkdir /storage/media ENOENT →
+///    StartUser(100) never runs → no launcher).
+///  - EnterSandbox: a task entering the pivoted sandbox ns gets the
+///    sandbox root as its "/" (every /system/bin service child).
+/// A plain-chrooted (non-pivot) task keeps its jail across setns —
+/// chroot is fs state, not namespace state.
+fn reanchor_root_for_mnt_ns(task: &mut Task, ns: &Arc<MountNamespace>) {
+    let Some(fs) = task.fs_arc() else { return };
+    let global_root = crate::fs::hotpath::get_vfs_root();
+    let ns_root = ns
+        .root
+        .lock()
+        .clone()
+        .or_else(|| global_root.clone());
+    // Pivoted ⇔ the ns root anchor is not the global VFS root.
+    let ns_is_pivoted = match (&ns_root, &global_root) {
+        (Some(n), Some(g)) => !Arc::ptr_eq(n, g),
+        // No global root recorded (pre-boot): treat as non-pivoted.
+        (Some(_), None) => false,
+        (None, _) => false,
+    };
+
+    if ns_is_pivoted {
+        let pivot_root = ns_root.unwrap();
+        let same_root = fs
+            .root_dentry()
+            .map(|rd| Arc::ptr_eq(&rd, &pivot_root))
+            .unwrap_or(false);
+        if !same_root {
+            let path = pivot_root.build_path();
+            fs.set_root_with_dentry(path.as_bytes(), Some(pivot_root));
+            fs.set_root_is_pivot(true);
+            // cwd outside the new root resets to it (pivot discipline).
+            let cwd = task.get_cwd();
+            let cwd_norm = crate::fs::hotpath::path_normalize(
+                core::str::from_utf8(&cwd).unwrap_or("/"),
+            );
+            if cwd_norm != "/" && !cwd_norm.starts_with(path.as_str()) {
+                fs.set_cwd(b"/");
+            }
+            crate::pr_info!(
+                "setns-mnt: pid {} re-anchored into pivoted ns root '{}'",
+                task.pid(),
+                path
+            );
+        }
+    } else if fs.root_is_pivot() {
+        // Leaving a pivoted ns for a non-pivoted one: root back to "/".
+        if let Some(g) = global_root.as_ref() {
+            fs.set_root_with_dentry(b"/", Some(g.clone()));
+            fs.set_root_is_pivot(false);
+            crate::pr_info!(
+                "setns-mnt: pid {} pivoted root reset to '/' (default ns)",
+                task.pid()
+            );
+        }
+    }
+}

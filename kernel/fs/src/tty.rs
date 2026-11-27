@@ -634,7 +634,7 @@ impl TtyDevice {
     fn send_isig(&self, signo: i32) {
         let mut pgid = self.fg_pgrp.load(Ordering::Acquire);
         if pgid == 0 {
-            pgid = crate::process::hotpath::current_pgid();
+            pgid = ::process::current_pgid();
         }
         if pgid != 0 {
             crate::signal::send_signal_to_pgid(pgid, signo);

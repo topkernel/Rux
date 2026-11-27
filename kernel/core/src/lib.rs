@@ -249,18 +249,10 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // task-kill defense.
     let kill_self = crate::interrupt::preempt::in_task()
         && crate::arch::cpu::get_interrupts_state()
-        && match crate::sched::hotpath::current() {
-            Some(task) => {
-                use crate::process::hotpath::TIF_MEMDIE;
-                if task.test_ti_flag(TIF_MEMDIE) {
-                    false
-                } else {
-                    task.set_ti_flag(TIF_MEMDIE);
-                    true
-                }
-            }
-            None => false,
-        };
+        // TIF_MEMDIE latch lives in the process crate's thread_flags
+        // (p23-shrink-process); the seam row keeps this cold alloc-failure
+        // path hook-shaped like the rest of the framework consumers.
+        && crate::api::process::memdie_latch();
     if kill_self {
         taskdump_raw_line(b"ALLOCTHROW -> SIGKILL current task (task-context ENOMEM)\n");
         crate::process::hotpath::do_exit(-9);
@@ -956,7 +948,7 @@ pub fn rust_main_tail() -> ! {
 
         // Initialize process scheduler
         {
-            crate::process::hotpath::init();
+            crate::api::process::pid_hash_init();
             sched::hotpath::init();
             print_status("sched", "CFS scheduler v1", true);
             print_status("sched", "runqueue per-CPU", true);

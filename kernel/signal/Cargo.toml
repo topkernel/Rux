@@ -28,13 +28,14 @@ edition = "2021"
 # remained in kernel/core/src/signal.rs.
 
 [dependencies]
+process = { path = "../process", default-features = false }
 rux = { path = "../core", package = "rux-core", default-features = false }
 
 [features]
 default = ["riscv64"]
-riscv64 = ["rux/riscv64"]
-x86_64 = ["rux/x86_64"]
-aarch64 = ["rux/aarch64"]
+riscv64 = ["rux/riscv64", "process/riscv64"]
+x86_64 = ["rux/x86_64", "process/x86_64"]
+aarch64 = ["rux/aarch64", "process/aarch64"]
 # Gates the guest test module + its run entry (make test forwards this
 # from bin's unit-test through the SERVICE-TEST SEAM).
 unit-test = ["rux/unit-test"]

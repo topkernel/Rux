@@ -17,7 +17,8 @@
 
 use core::sync::atomic::Ordering;
 
-use rux::process::{types::Task, types::TaskState, hotpath::TIF_MEMDIE};
+use ::process::thread_flags::TIF_MEMDIE;
+use rux::process::{types::Task, types::TaskState};
 use rux::mm::types::MmFlags;
 use crate::sync::types::Spinlock;
 

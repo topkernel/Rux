@@ -834,7 +834,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             // (4c81598 shell/job.c checks tcgetpgrp == getpgrp() with
             // no -1 handling, 100% CPU since boot as init).
             let pgid = if pgid == 0 {
-                crate::process::hotpath::current_pgid()
+                ::process::current_pgid()
             } else {
                 pgid
             };

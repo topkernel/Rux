@@ -1347,6 +1347,6 @@ pub enum NsRef {
     User(Arc<UserNamespace>),
 }
 
-pub(super) struct NsFileContent {
-    pub(super) data: Vec<u8>,
+pub struct NsFileContent {
+    pub data: Vec<u8>,
 }

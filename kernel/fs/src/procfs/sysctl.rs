@@ -31,7 +31,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// /proc/sys/kernel/hostname — Linux __NEW_UTS_LEN = 64 (65 with NUL).
 /// U1c: superseded by the per-UTS-namespace storage
-/// (rux::process::hotpath::current_uts_ns()); retained only as the boot seed
+/// (::process::ns::current_uts_ns()); retained only as the boot seed
 /// compatibility symbol.
 
 /// /proc/sys/kernel/pid_max — Linux default 32768 (riscv64 max 4194304).
@@ -108,7 +108,7 @@ pub static CORE_PATTERN: crate::sync::types::Spinlock<CorePattern> =
 pub fn generate_hostname() -> Vec<u8> {
     // U1c: hostname lives in the caller's UTS namespace (global sysctl
     // surface, per-namespace storage — Linux semantic).
-    let mut out = crate::process::hotpath::current_uts_ns().get_hostname();
+    let mut out = ::process::ns::current_uts_ns().get_hostname();
     out.push(b'\n');
     out
 }
@@ -116,7 +116,7 @@ pub fn generate_hostname() -> Vec<u8> {
 pub fn generate_domainname() -> Vec<u8> {
     // Same discipline as hostname: per-UTS-namespace storage behind the
     // global sysctl file. Default "(none)" mirrors init_uts_ns.
-    let mut out = crate::process::hotpath::current_uts_ns().get_domainname();
+    let mut out = ::process::ns::current_uts_ns().get_domainname();
     out.push(b'\n');
     out
 }
@@ -311,7 +311,7 @@ pub fn write_hostname(input: &[u8]) -> i32 {
     if s.len() > 64 {
         return -(crate::errno::constants::EINVAL as i32);
     }
-    if !crate::process::hotpath::current_uts_ns().set_hostname(s) {
+    if !::process::ns::current_uts_ns().set_hostname(s) {
         return -(crate::errno::constants::EINVAL as i32);
     }
     0
@@ -329,7 +329,7 @@ pub fn write_domainname(input: &[u8]) -> i32 {
     if s.len() > 64 {
         return -(crate::errno::constants::EINVAL as i32);
     }
-    if !crate::process::hotpath::current_uts_ns().set_domainname(s) {
+    if !::process::ns::current_uts_ns().set_domainname(s) {
         return -(crate::errno::constants::EINVAL as i32);
     }
     0

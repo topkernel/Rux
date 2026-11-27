@@ -429,7 +429,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // change within one syscall — the re-probe here (sched::current + fs
     // deref per call) ran on every open of every task.
     if not_rooted && (flags & O_CREAT) == 0 {
-        if let Some(rv) = rux::process::hotpath::try_open_ns_path(&full_path, flags) {
+        if let Some(rv) = ::process::ns::try_open_ns_path(&full_path, flags) {
             return rv;
         }
     }
@@ -1874,7 +1874,7 @@ fn handle_proc_ns_readlink(path: &str) -> Option<alloc::vec::Vec<u8>> {
         parts[1].parse().ok()?
     };
     let kind = rux::process::types::NsKind::from_name(parts[3].as_bytes())?;
-    Some(rux::process::hotpath::ns_link_target(pid, kind))
+    Some(::process::ns::ns_link_target(pid, kind))
 }
 
 /// Handle /proc/[pid]/fd/N readlink, returns symlink target or None
@@ -2555,7 +2555,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
                     MSMV_N.load(core::sync::atomic::Ordering::Relaxed),
                     source_abs,
                     target,
-                    rux::process::hotpath::in_init_mnt_ns(),
+                    ::process::ns::in_init_mnt_ns(),
                     ::process::current_pid()
                 );
             }
@@ -2566,7 +2566,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         // PRIVATE mount namespace this re-roots the CALLER only — the
         // global tree must not swap (see vfs_virtual_switch_root for the
         // failure chain this used to cause).
-        if target == "/" && !rux::process::hotpath::in_init_mnt_ns() {
+        if target == "/" && !::process::ns::in_init_mnt_ns() {
             return match ph.t(6, || {
                 rux::fs::hotpath::vfs_virtual_switch_root(&source_abs)
             }) {
@@ -3017,7 +3017,7 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     // mount vanished from /proc/mounts while staying mounted.
     if ret == 0 {
         let norm = rux::fs::hotpath::path_normalize(target);
-        rux::process::hotpath::ns_unregister_mount(&norm);
+        ::process::ns::ns_unregister_mount(&norm);
     }
     if ret != 0 {
         // b24: after the (now-working) sandbox pivot, OH init's cleanup
@@ -7005,7 +7005,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
     // private mount namespace re-roots the CALLER; the mount stays
     // attached at its crafted path and the global tree is untouched —
     // so the detach below must not run either.
-    if target == "/" && was_attached && !rux::process::hotpath::in_init_mnt_ns() {
+    if target == "/" && was_attached && !::process::ns::in_init_mnt_ns() {
         if let Some(p) = old_mp.as_ref() {
             return match rux::fs::hotpath::vfs_virtual_switch_root(p) {
                 Ok(()) => 0,
@@ -7065,7 +7065,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
             // Drop a stale row at the OLD mountpoint (the mount moved).
             if let Some(old) = old_mp.as_ref() {
                 if old != &target {
-                    rux::process::hotpath::ns_unregister_mount(old);
+                    ::process::ns::ns_unregister_mount(old);
                 }
             }
             rux::fs::hotpath::register_mount(

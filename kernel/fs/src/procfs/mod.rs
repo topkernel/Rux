@@ -1705,7 +1705,7 @@ fn procfs_getattr(inode: &Inode, stat: &mut rux::fs::types::Stat) -> i32 {
         {
             let kind = crate::process::types::NsKind::from_index(rem - NS_LINK_INO_OFF);
             let size = match kind {
-                Some(k) => crate::process::hotpath::ns_link_target(pid_val as u32, k).len() as i64,
+                Some(k) => ::process::ns::ns_link_target(pid_val as u32, k).len() as i64,
                 None => 0,
             };
             stat.st_ino = inode.ino;
@@ -1873,7 +1873,7 @@ fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
         // yields "<kind>:[<inum>]".
         if pid::is_valid_pid(pid_val) && rem >= NS_LINK_INO_OFF && rem < NS_LINK_INO_OFF + 6 {
             if let Some(kind) = crate::process::types::NsKind::from_index(rem - NS_LINK_INO_OFF) {
-                let target = crate::process::hotpath::ns_link_target(pid_val as u32, kind);
+                let target = ::process::ns::ns_link_target(pid_val as u32, kind);
                 let len = target.len().min(buf.len());
                 buf[..len].copy_from_slice(&target[..len]);
                 return len as isize;

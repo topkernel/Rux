@@ -9487,10 +9487,10 @@ fn check_not_readonly(pathname: &str) -> Result<(), i32> {
 /// without the global flag change (the sandbox is weaker, the system
 /// stays writable — the contained trade for the un-cloned ns model).
 fn ns_may_reflag(mnt: &Arc<VfsMountInternal>) -> bool {
-    if crate::process::hotpath::in_init_mnt_ns() {
+    if crate::api::process::in_init_mnt_ns() {
         return true;
     }
-    let ns = crate::process::hotpath::current_mnt_ns();
+    let ns = crate::api::process::current_mnt_ns();
     let tracked = ns.vfs_mounts.lock();
     tracked.iter().any(|m| Arc::ptr_eq(m, mnt))
 }
@@ -9514,7 +9514,7 @@ fn apply_mnt_flags(
     // and the PrivateTmp setup all died EROFS from exactly that leak.
     // The sandbox itself keeps its RO enforcement inside the namespace
     // through the per-mount mnt.flags guard (path_on_readonly_mount).
-    if !crate::process::hotpath::in_init_mnt_ns() {
+    if !crate::api::process::in_init_mnt_ns() {
         return;
     }
     // Keep the underlying ext4's own ro latch in sync — its
@@ -9790,7 +9790,7 @@ pub fn vfs_mount(
             // get_vfs_root() → VFS_STATE.lock() — self-deadlock under the
             // guard held here (sc98 first-boot DEADLOCK).
             drop(state);
-            crate::process::hotpath::ns_track_vfsmount(mnt_desc);
+            crate::api::process::ns_track_vfsmount(mnt_desc);
             return Some(mounted_root);
         } else {
             // Intermediate component — create if not exists
@@ -10748,7 +10748,7 @@ fn bind_clone_attach(
             drop(state);
             // sc98: MS_REC clones belong to the caller's namespace too —
             // a dying private ns must unmount them with the rest.
-            crate::process::hotpath::ns_track_vfsmount(mnt_desc);
+            crate::api::process::ns_track_vfsmount(mnt_desc);
             return;
         }
         // Intermediate component — dcache hit or fs lookup; never fabricate
@@ -10930,7 +10930,7 @@ pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
 
     // Namespace anchor: setns(CLONE_NEWNS) re-anchoring and Drop
     // bookkeeping read ns.root; record the crafted root like a pivot.
-    let ns = crate::process::hotpath::current_mnt_ns();
+    let ns = crate::api::process::current_mnt_ns();
     *ns.root.lock() = Some(mnt.root.clone());
     // Teardown tracking (mntput-on-nsput): the attach path usually
     // tracked this mount already — dedupe by identity so Drop unmounts
@@ -11187,7 +11187,7 @@ pub fn vfs_attach_mount_at(
     // ns_track_vfsmount must run AFTER dropping VFS_STATE (lazy
     // ns init reaches get_vfs_root() — see the sc98 note in vfs_mount).
     drop(state);
-    crate::process::hotpath::ns_track_vfsmount(mnt.clone());
+    crate::api::process::ns_track_vfsmount(mnt.clone());
     Ok(mountpoint)
 }
 
@@ -14663,7 +14663,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                         if let Some(kind) =
                             crate::process::types::NsKind::from_index(rem - self::procfs::PROCFS_NS_LINK_INO_OFF)
                         {
-                            let file = crate::process::hotpath::build_ns_file(
+                            let file = crate::api::process::build_ns_file(
                                 pid_val as u32,
                                 kind,
                                 flags,
@@ -15588,7 +15588,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     let caller_ns = crate::sched::hotpath::current()
                         .and_then(|t| t.ns_pid.clone());
                     let resolved = if kind == 1 {
-                        crate::process::hotpath::resolve_local_pid_to_global(
+                        crate::api::process::resolve_local_pid_to_global(
                             id as u32,
                             caller_ns.as_ref(),
                         )
@@ -15600,7 +15600,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                         if caller_ns.is_none() {
                             Some(id)
                         } else {
-                            crate::process::hotpath::resolve_local_pid_to_global(
+                            crate::api::process::resolve_local_pid_to_global(
                                 id as u32,
                                 caller_ns.as_ref(),
                             )
@@ -15655,7 +15655,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     crate::sched::hotpath::current()
                         .and_then(|t| t.ns_pid.clone())
                         .map(|ns| {
-                            crate::process::hotpath::translate_sender_pid_ns(
+                            crate::api::process::translate_sender_pid_ns(
                                 o.id as u32,
                                 Some(&ns),
                             ) as i32
@@ -15727,7 +15727,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 let resolved = if caller_ns.is_none() {
                     Some(opid)
                 } else if kind == 2 {
-                    crate::process::hotpath::resolve_local_pid_to_global(
+                    crate::api::process::resolve_local_pid_to_global(
                         opid as u32,
                         caller_ns.as_ref(),
                     )
@@ -15736,7 +15736,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                             .map(|t| t.pgid() as i32)
                     })
                 } else {
-                    crate::process::hotpath::resolve_local_pid_to_global(
+                    crate::api::process::resolve_local_pid_to_global(
                         opid as u32,
                         caller_ns.as_ref(),
                     )
@@ -17183,7 +17183,7 @@ static MOUNT_TABLE: Spinlock<Vec<(String, String, String, String)>> = Spinlock::
 /// compares; one boot printed 637 >=100 ms inter-tick gaps). The ns.rs
 /// namespace tables already use plain .lock(); MOUNT_TABLE now matches.
 pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
-    if crate::process::hotpath::in_init_mnt_ns() {
+    if crate::api::process::in_init_mnt_ns() {
         let mut table = MOUNT_TABLE.lock();
         table.retain(|(_, mp, _, _)| mp != mount_point);
         table.push((
@@ -17193,7 +17193,7 @@ pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &st
             String::from(flags),
         ));
     }
-    crate::process::hotpath::ns_register_mount(device, mount_point, fs_type, flags);
+    crate::api::process::ns_register_mount(device, mount_point, fs_type, flags);
 }
 
 /// Is `target` already registered as a mount of filesystem type
@@ -17226,7 +17226,7 @@ pub fn get_global_mounts() -> Vec<(String, String, String, String)> {
 /// Get the mounts visible to the CALLER (U1c: the current mount namespace;
 /// the init namespace table is seeded from the boot registry).
 pub fn get_mounts() -> Vec<(String, String, String, String)> {
-    crate::process::hotpath::ns_get_mounts()
+    crate::api::process::ns_get_mounts()
         .into_iter()
         .map(|e| (e.device, e.mount_point, e.fs_type, e.flags))
         .collect()
@@ -17237,7 +17237,7 @@ pub fn get_mounts() -> Vec<(String, String, String, String)> {
 /// output position (registry churn re-pairing positional ids with
 /// different mounts made systemd's monitor see phantom changes).
 pub fn get_mount_entries() -> Vec<crate::process::types::MountEntry> {
-    crate::process::hotpath::ns_get_mounts()
+    crate::api::process::ns_get_mounts()
 }
 
 

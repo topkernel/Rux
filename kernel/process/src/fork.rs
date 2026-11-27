@@ -632,7 +632,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // namespace — the same value clone(2) returns (a container
             // task's fork() must hand back the ns-local pid, not the
             // global one).
-            let tid_val = rux::process::hotpath::translate_sender_pid_ns(
+            let tid_val = crate::ns::translate_sender_pid_ns(
                 pid,
                 current.ns_pid.as_ref(),
             ) as i32;
@@ -1033,7 +1033,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // clone with EPERM when a non-user ns was requested without
         // CAP_SYS_ADMIN. ===
         if let Err(e) =
-            rux::process::hotpath::copy_namespaces(current, child, args.flags)
+            crate::ns::copy_namespaces(current, child, args.flags)
         {
             return unwind(task_ptr, e);
         }

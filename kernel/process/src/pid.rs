@@ -229,3 +229,12 @@ pub fn set_last_pid(v: u32) -> bool {
     alloc.next = v + 1;
     true
 }
+
+/// Initialize the PID hash table (call once during boot; moved from
+/// core/src/process/hotpath.rs, reached through the PidHooks
+/// pid_hash_init row). The hash statics are const-initialized (null
+/// heads, cleared locks), so this is a documented no-op kept for the
+/// historical lib.rs boot sequence shape.
+pub fn pid_hash_init() {
+    // AtomicPtr is already initialized to null via const, nothing extra needed.
+}
