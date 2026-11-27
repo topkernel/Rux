@@ -707,6 +707,16 @@ pub(crate) fn chunk_view_mut<'a>(fc: *mut crate::fs::buffer::FileChunk, off: usi
     unsafe { core::slice::from_raw_parts_mut((*fc).base_ptr().add(off), len) }
 }
 
+/// INV-FS-LINMAP-1: byte-slice view of the kernel linear map
+/// (`phys_to_virt` product): the caller's page-table walk proved the
+/// target page present and mapped, so [p, p+n) is readable kernel
+/// memory for the borrow's lifetime (read-only view; writes go through
+/// the write edges above).
+pub(crate) fn lin_slice<'a>(p: *const u8, n: usize) -> &'a [u8] {
+    // SAFETY: INV-FS-LINMAP-1.
+    unsafe { core::slice::from_raw_parts(p, n) }
+}
+
 /// INV-FS-VECFILL-1: fresh zeroed `Vec<u8>`: with_capacity reserves
 /// len bytes (no realloc for the writes below), write_bytes fills the
 /// reserved span with zeros (valid for u8), set_len commits.

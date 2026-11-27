@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -95,9 +96,9 @@ impl TmpfsPage {
 impl Drop for TmpfsPage {
     fn drop(&mut self) {
         if !self.sb.is_null() {
-            unsafe {
-                (*self.sb).used_pages.fetch_sub(1, Ordering::AcqRel);
-            }
+            crate::fs::edges::static_ref_unchecked(self.sb as *mut TmpfsSuperBlock)
+                .used_pages
+                .fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -197,15 +198,15 @@ impl TmpfsNode {
 
     /// Node name as a byte slice.
     pub fn name(&self) -> &[u8] {
-        // SAFETY: name is only mutated via set_name(), which requires the
+        // name is only mutated via set_name(), which requires the
         // parent's children lock (exclusive access).
-        unsafe { &*self.name.get() }
+        crate::fs::edges::cell_ref(&self.name).as_slice()
     }
 
     /// Rename in place. Caller must hold the parent's children lock.
     pub fn set_name(&self, new_name: Vec<u8>) {
-        // SAFETY: caller guarantees exclusive access (parent lock held).
-        unsafe { *self.name.get() = new_name; }
+        // caller guarantees exclusive access (parent lock held).
+        crate::fs::edges::cell_assign(&self.name, new_name);
     }
 
     pub fn is_dir(&self) -> bool {
@@ -287,17 +288,11 @@ impl TmpfsNode {
             // in it and never reach the node pages) — refusing it reads
             // stale NODE bytes (FXW FD-MISMATCH family).
             if let Some(frame) = cache.get_stale(self.fs_id, self.ino, page_idx as u64) {
-                // SAFETY: `frame` is the pinned cache page's kernel VA —
+                // `frame` is the pinned cache page's kernel VA —
                 // PAGE_SIZE readable bytes for the pin's lifetime;
                 // page_off + chunk <= PAGE_SIZE and done + chunk <=
                 // total by construction.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        frame.add(page_off),
-                        buf.as_mut_ptr().add(done),
-                        chunk,
-                    );
-                }
+                crate::fs::edges::page_copy_to_slice_at(frame, page_off, &mut buf[done..done + chunk]);
                 cache.put(self.fs_id, self.ino, page_idx as u64);
                 done += chunk;
                 continue;
@@ -611,8 +606,8 @@ impl TmpfsNode {
             // take data pages, and the root is always a directory.
             return true;
         }
-        unsafe {
-            let sb = &*self.sb;
+        {
+            let sb = crate::fs::edges::static_ref_unchecked(self.sb as *mut TmpfsSuperBlock);
             let limit = sb.page_limit_pages.load(Ordering::Acquire);
             if limit == 0 {
                 sb.used_pages.fetch_add(1, Ordering::AcqRel);
@@ -685,15 +680,15 @@ impl TmpfsSuperBlock {
     /// only the root needs stamping (children get the correct `sb` from
     /// `new_node`, which is only reachable through the final address).
     ///
-    /// # Safety (caller obligations)
-    /// `self_ptr` must point at this superblock's final storage and the
-    /// tree must not yet be published to other threads.
-    unsafe fn stamp_final_address(self_ptr: *mut TmpfsSuperBlock) {
-        // SAFETY: caller guarantees self_ptr is the final, valid address.
-        let root = Arc::as_ptr(&(*self_ptr).root_node) as *mut TmpfsNode;
-        // SAFETY: the tree is unpublished; the root node is uniquely
+    /// Caller obligations: `self_ptr` must point at this superblock's
+    /// final storage and the tree must not yet be published to other
+    /// threads (both edges below ride those same facts — INV-TMPFS-SB-1).
+    fn stamp_final_address(self_ptr: *mut TmpfsSuperBlock) {
+        let root =
+            Arc::as_ptr(&crate::fs::edges::raw_ref(self_ptr).root_node) as *mut TmpfsNode;
+        // the tree is unpublished; the root node is uniquely
         // reachable from this thread.
-        (*root).sb = self_ptr as *const TmpfsSuperBlock;
+        crate::fs::edges::raw_mut(root).sb = self_ptr as *const TmpfsSuperBlock;
     }
 
     fn alloc_ino(&self) -> u64 {
@@ -796,14 +791,14 @@ pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
     let instance = TMPFS_INSTANCE_COUNTER.fetch_add(1, Ordering::AcqRel);
     let sb = Box::new(TmpfsSuperBlock::new(instance, parse_size_pages(data)));
     let sb_ptr = Box::into_raw(sb) as *mut TmpfsSuperBlock; // leaked: mount lifetime
-    // Stamp the root's sb back-pointer with the FINAL (heap) address.
-    // SAFETY: sb_ptr is this superblock's final storage; the tree is not
+    // Stamp the root's sb back-pointer with the FINAL (heap) address:
+    // sb_ptr is this superblock's final storage; the tree is not
     // yet published (no dentry/inode references exist yet).
-    unsafe { TmpfsSuperBlock::stamp_final_address(sb_ptr); }
+    TmpfsSuperBlock::stamp_final_address(sb_ptr);
     TMPFS_INSTANCES.lock_irqsave().list.push(sb_ptr as *const TmpfsSuperBlock);
 
-    // SAFETY: sb_ptr is a leaked, valid superblock.
-    let root_node = unsafe { (*sb_ptr).root_node.clone() };
+    // sb_ptr is a leaked, valid superblock.
+    let root_node = crate::fs::edges::raw_ref(sb_ptr).root_node.clone();
     tmpfs_make_inode(&root_node)
 }
 
@@ -978,11 +973,9 @@ fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, 
     let sb = crate::fs::edges::static_ref_unchecked(node.sb as *mut TmpfsSuperBlock);
 
     let link = sb.new_node(name.to_vec(), TmpfsType::SymbolicLink);
-    // SAFETY: link is exclusively owned here (not yet in the tree).
-    unsafe {
-        let link_mut = Arc::as_ptr(&link) as *mut TmpfsNode;
-        (*link_mut).link_target = Some(target.to_vec());
-    }
+    // link is exclusively owned here (not yet in the tree).
+    crate::fs::edges::raw_mut(Arc::as_ptr(&link) as *mut TmpfsNode).link_target =
+        Some(target.to_vec());
     node.add_child(link.clone());
     Ok(tmpfs_make_inode(&link))
 }
@@ -1063,10 +1056,10 @@ fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     new_node.size.store(target_node.file_size(), Ordering::Release);
     *new_node.mode.lock() = *target_node.mode.lock();
     new_node.rdev.store(target_node.rdev.load(Ordering::Acquire), Ordering::Release);
-    // SAFETY: link_target is set before publication (add_child).
+    // link_target is set before publication (add_child).
     let new_link = {
-        let p = &mut new_node as *mut TmpfsNode;
-        unsafe { (*p).link_target = target_node.link_target.clone(); }
+        crate::fs::edges::raw_mut(&new_node as *const TmpfsNode as *mut TmpfsNode)
+            .link_target = target_node.link_target.clone();
         Arc::new(new_node)
     };
     dir_node.add_child(new_link);
@@ -1204,8 +1197,8 @@ fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     } else {
         // Hard links share the ino; count referencing entries.
         let sb = node.sb as *const TmpfsSuperBlock;
-        // SAFETY: sb is a leaked mount-lifetime superblock.
-        unsafe { tmpfs_count_links(&(*sb).root_node, node.ino) }
+        // sb is a leaked mount-lifetime superblock.
+        tmpfs_count_links(&crate::fs::edges::raw_ref(sb).root_node, node.ino)
     };
     stat.st_uid = node.uid.load(Ordering::Relaxed) as u32;
     stat.st_gid = node.gid.load(Ordering::Relaxed) as u32;
