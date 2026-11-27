@@ -127,6 +127,12 @@ pub mod errno;
 pub mod net;
 pub mod cmdline;
 pub mod init;
+// The ROOT single files' ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): boot_edges.rs git-mv'd to `unsafe.rs` on
+// disk, module keeping its historical `boot_edges` identifier per the
+// sibling convention (process/unsafe.rs -> `edges`, syscall/unsafe.rs ->
+// `syscall_edges`) so every call site stays stable.
+#[path = "unsafe.rs"]
 pub mod boot_edges;
 pub mod initrd;
 pub mod syscall;

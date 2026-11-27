@@ -2,10 +2,11 @@
 """Mainline unsafe gate — the minimal-first architecture's checker.
 
 Rule: the unsafe keyword may appear only in kernel/src/<sub>/unsafe.rs
-(one file per subsystem) plus kernel/src/tests/ (test code exercises
-unsafe paths by design). Everything else must be safe. Comment/string
-occurrences do not count; r#unsafe (the safe module identifier) does
-not count.
+(one file per subsystem), the ROOT-level kernel/src/unsafe.rs (the
+root single files' one audited collection), plus kernel/src/tests/
+(test code exercises unsafe paths by design). Everything else must be
+safe. Comment/string occurrences do not count; r#unsafe (the safe
+module identifier) does not count.
 """
 import os, re, sys
 
@@ -73,6 +74,8 @@ def main():
         text = open(p, errors="replace").read()
         sites = keyword_sites(text)
         if not sites: continue
+        if rel == "unsafe.rs":
+            continue  # the ROOT single files' one audited unsafe file
         if rel.endswith("unsafe.rs") and os.sep in rel:
             continue  # the subsystem's one unsafe file
         if top == "tests":

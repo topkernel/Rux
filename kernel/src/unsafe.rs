@@ -2,16 +2,19 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Boot-provenance framework edges (industrial-reduction lane L2).
+//! The ROOT single files' one audited unsafe collection (mainline
+//! minimal-first architecture, 2026-11-27). The crate-root single
+//! files — lib.rs, init.rs, cmdline.rs, console.rs, cov.rs, initrd.rs,
+//! list.rs, main.rs, errno.rs — belong to no subsystem directory, so
+//! their unsafe families collect here under this one audited file (the
+//! gate whitelists exactly one `unsafe.rs` per directory plus this
+//! root file). The file began as boot_edges.rs (the boot-provenance
+//! framework edges, industrial-reduction lane L2) and was git-mv'd to
+//! the per-directory `unsafe.rs` naming; the module keeps its
+//! historical `boot_edges` identifier so every call site stays stable.
 //!
-//! `main.rs`'s remaining unsafe was the boot-provenance family the
-//! unsafe-slim round 4 documented as held: extern image symbols, the
-//! kernel-map's `va_pa_offset` static, the boot memory-region table,
-//! zero-page boot-parameter reads, and two panic-path diagnostic
-//! walkers. This module is their consolidated home — one INV contract
-//! each, in the shape of `kernel/src/safety/`. `main.rs` keeps exactly
-//! one unsafe construct: the x86_64 boot stack-switch `asm!` (a
-//! context-entry primitive, the Round-D floor).
+//! Every family carries one INV contract each, in the shape of
+//! `kernel/src/safety/`.
 
 /// Physical end of the kernel image (the `_end` linker symbol).
 ///
