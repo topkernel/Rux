@@ -6065,3 +6065,11 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
         arm_print(2, word);
     }
 }
+
+/// Plain-priority emit (the `rwfz` tag): split-lines through
+/// defer_emit_line. Moved from the framework's rwfrz section (sync
+/// shrink lane 2026-11-27): zero staying-core callers, sole sibling
+/// consumers live in this file's scan family.
+pub fn rwfz_emit(s: &str) {
+    rwfz_emit_prio(s, false);
+}

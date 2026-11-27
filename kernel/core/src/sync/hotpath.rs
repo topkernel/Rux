@@ -6783,10 +6783,6 @@ pub fn rwfz_emit_prio(s: &str, prio: bool) {
     }
 }
 
-fn rwfz_emit(s: &str) {
-    rwfz_emit_prio(s, false);
-}
-
 /// One user-stack frame line resolved to its covering VMA (Session F's
 /// byte-match symbolization method). sc90: `scan_slots` parametrizes the
 /// stack window (64 for per-task dumps; the recursion holder needs 256 —
