@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MIT License
 //!
 //! Copyright (c) 2026 Fei Wang
@@ -2407,7 +2408,7 @@ fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 /// write: dispatch to the attribute store handler.
 fn sysfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode pointer set at open; read-only access here.
-    let inode = match unsafe { (*file.inode.get()).clone() } {
+    let inode = match crate::fs::edges::file_inode_arc(file) {
         Some(i) => i,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
