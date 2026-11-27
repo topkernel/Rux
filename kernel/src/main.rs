@@ -17,5 +17,5 @@
 use rux::*;
 
 #[cfg(not(feature = "skip_bin_link_check"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn __bin_composition_marker() {}
