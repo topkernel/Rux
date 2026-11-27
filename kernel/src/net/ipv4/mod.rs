@@ -156,7 +156,18 @@ pub fn ipv4_send_src_ttl(
     protocol: u8,
     ttl: u8,
 ) -> Result<(), ()> {
-    let total_len = skb.len as usize; // includes the pushed header
+    // R-NETTX-2 (2026-11-28, TCP-connect-hunt): tot_len counts the IP
+    // header TOO (RFC 791 §3.1), unlike the v6 payload_len this
+    // safe-edge rewrite was shaped after. The 5a9e1545d rewrite captured
+    // skb.len BEFORE the push_hdr (transport bytes only) — every IPv4
+    // packet declared 20 bytes short. The wire proof (netprobe SYN,
+    // filter-dump pcap): IP tot_len=40 over a 40-byte TCP header —
+    // tcpdump "bad hdr length 40 - too long, > 20", slirp dropped every
+    // SYN, no SYN-ACK ever. Compute the wire total from the transport
+    // length BEFORE the push (skb_push grows skb.len, but the closure
+    // cannot read it).
+    let transport_len = skb.len as usize;
+    let total_len = transport_len + IPHDR_LEN; // header included, per RFC 791
     if total_len > u16::MAX as usize {
         return Err(()); // Packet too large for IPv4
     }
