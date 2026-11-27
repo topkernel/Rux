@@ -299,6 +299,19 @@ pub fn preempt_count_sub2_at(
     }
 }
 
+/// USER-RETURN REPAIR (the per-CPU form of the UR-PC-REPAIR boundary
+/// fix): zero THIS cpu's word at the user-return boundary — the one
+/// point where any residue is provably phantom (the returning task's
+/// guard frames are fully unwound; the trap-exit IRQ accounting is
+/// complete). Called only from check_user_return with the capture line
+/// already emitted; budget/rate gates live there.
+#[inline]
+pub fn preempt_count_repair() {
+    if let Some(w) = this_word() {
+        w.cnt.store(0, core::sync::atomic::Ordering::Release);
+    }
+}
+
 /// R74: reset a corrupted (negative) preempt_count to zero. A negative
 /// count is never legal — it is the fingerprint of an unpaired decrement
 /// (double-executed guard drop during a double-run). Called only from
