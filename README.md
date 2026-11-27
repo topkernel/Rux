@@ -65,19 +65,11 @@ This is not "an assistant filling in a few lines." It places AI where subsystems
 
 ## Safety: the itemized bill, not the slogan
 
-**The surface.** The kernel tree (`kernel/`) is 421,180 lines ([structure](docs/architecture/structure.md)); the ledger below counts `kernel/src` Rust at 396,139 lines on its own basis (non-blank, generated files excluded) — the shares use that basis:
+**The surface.** The unsafe-consolidation campaign (completed 2026-11-27) collapsed the kernel's entire unsafe surface into **19 audited `unsafe.rs` files** — one collection per subsystem plus the root collection — and a machine gate (`scripts/gate_unsafe_mainline.py`) holds the boundary across the whole repo (rc=0): **zero unsafe outside the audited files**, and **401 files carry file-level `#![forbid(unsafe_code)]`**, so a violation is a compile error, never a review finding. The unsafe keyword occupies **1,022 of 375,622 kernel lines — 0.27%** (the pre-campaign census counted 6,396 ledgered unsafe regions). Every surviving unsafe block names its numbered INV contract inline — the audited file header carries the subsystem's contract list — and SAFETY-comment coverage is 65.5%, with every region keeping its row in the [verification ledger](docs/development/unsafe-verification.md). The defect classes that dominate C-kernel CVE history — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are **zero in safe code** (the adjudicated record behind this claim: [defect taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html)).
 
-| Series | Lines | Share |
-|---|---:|---:|
-| `unsafe { … }` block bodies | 8,759 | 2.2% |
-| `unsafe fn` / `unsafe impl` bodies | 2,539 | 0.6% |
-| **Dual series — the honest total** | **10,742** | **2.7%** |
+**The proofs.** 157 Kani harnesses discharge core unsafe routines for all inputs; 1,104 proptest cases run in CI; loom enumerates interleavings of the sync primitives; 4 SPIN models check the futex, interrupt/preempt, lock-ordering, and scheduler models; Miri runs on the verify crate.
 
-The unsafe that remains is a territory, not a population: **165 modules are compiler-enforced zero-unsafe** (`#![forbid(unsafe_code)]`; CI ratchets the set — a file that regresses fails the build), and what is left concentrates in the Framework layer — per-arch entry, page-table, and uaccess edges plus one named edge module per subsystem, each block under a numbered INV contract. 67% of unsafe blocks carry a written `// SAFETY:` contract, and CI fails when a region appears in the tree without a row in the [verification ledger](docs/development/unsafe-verification.md). The defect classes that dominate C-kernel CVE history — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are **zero in safe code** (the adjudicated record behind this claim: [defect taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html)).
-
-**The proofs.** 164 Kani harnesses discharge core unsafe routines for all inputs; 1,184 host-side tests run in CI; loom enumerates interleavings for the mutex, PI-chain, and timer primitives; 4 SPIN models check the futex, interrupt/preempt, lock-ordering, and scheduler models; Miri runs nightly.
-
-The claim is not "90% safe." The claim is: here is exactly what the remaining unsafe surface is, where it concentrates, which tool watches it, and what it has cost so far. Details: [safety & performance ledger](docs/architecture/safety-and-performance.md) · [security taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html).
+The claim is not "90% safe." The claim is: here is exactly what the remaining unsafe surface is — 19 audited files, machine-gated — which tool watches each piece, and what it has cost so far. Details: [safety & performance ledger](docs/architecture/safety-and-performance.md) · [security taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html).
 
 ## Performance: same machine, same accelerator
 
@@ -100,7 +92,7 @@ Full boards: [fio](https://topkernel.github.io/Rux/performance/fio.html) · [rt-
 | LTP compatibility list | **1,139 of 1,869** |
 | In-kernel suite | **1,584 cases**, every merge |
 | Architectures | riscv64 · x86_64 · aarch64 — build + boot regression, every push |
-| Formal verification | 164 Kani harnesses · 1,184 host tests · 4 SPIN models · 8 loom scenarios · Miri nightly |
+| Formal verification | 157 Kani harnesses · 1,104 proptest cases · 4 SPIN models · loom on the sync primitives · Miri on the verify crate |
 | Data integrity | fio `--verify`, e2fsck, hard-kill persistence batteries |
 | Stress fleet | `make ci` — 32 classes including fsfuzz, hours unattended |
 
@@ -126,7 +118,7 @@ Because the host can use KVM, x86_64 is the primary platform for both function a
 - **LTP**: 1,139 of 1,869 pass. Several hundred still fail; the TIMEOUT class is adjudicated case by case, and each failure that is not ours is recorded as such.
 - **lmbench**: 13 rows trail, the largest deficit file creation at 22–26× and loopback socket latency at 2.1–2.2×. Each row carries a measured decomposition of the gap.
 - **Direct I/O**: 1 MiB sequential streams sit at 0.75–0.83× of the reference.
-- **The unsafe surface**: 2.7% of the kernel (10,742 lines) still depends on human review. The campaign target is ≤5,000 lines (≤1%) with a per-block irreducibility proof — which primitive owns the block, why no safe shape exists, the reference counterpart — recorded in the [ledger](docs/development/unsafe-verification.md); the ladder is in [the plan](docs/development/unsafe-5000-plan.md).
+- **The unsafe surface**: 0.27% of the kernel (1,022 keyword lines), consolidated into 19 audited `unsafe.rs` files — zero unsafe outside them, machine-gated (`scripts/gate_unsafe_mainline.py`, rc=0), every surviving block under its numbered INV contract. What remains still depends on human review; the residual work is the per-block irreducibility proofs and the hardening layers above them ([the plan](docs/development/unsafe-5000-plan.md), [ledger](docs/development/unsafe-verification.md)).
 - **Formal verification**: Kani covers the core unsafe primitives, not every key path; loom and SPIN cover the concurrency primitives.
 - **The AI working model** at 400,000 lines is under observation, not settled.
 - **The 29 registered divergences** need their compatibility evidence kept current as the kernel moves.

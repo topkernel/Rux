@@ -24,9 +24,16 @@ Two properties make this codebase unusual; respect both:
    [docs/architecture/design-divergences.md](docs/architecture/design-divergences.md).
 2. **Every `unsafe` site carries a written safety contract**, and core
    unsafe code is proven for all inputs by Kani harnesses in
-   `kernel/verify/`. If you touch code that has a mirror in
-   `kernel/verify/`, you must update the mirror in the same change —
-   `scripts/verify_sync_check.py` enforces it and `make verify` runs it.
+   `kernel/verify/`. The unsafe surface lives only in the audited
+   `unsafe.rs` collections (19 files: one per subsystem plus the root
+   `kernel/src/unsafe.rs`) — everything else is safe Rust, 401 files
+   additionally carry file-level `#![forbid(unsafe_code)]`, and
+   `scripts/gate_unsafe_mainline.py` rejects any unsafe outside the
+   audited collections; new unsafe goes into the owning subsystem's
+   audited collection, under an INV contract. If you touch code that
+   has a mirror in `kernel/verify/`, you must update the mirror in the
+   same change — `scripts/verify_sync_check.py` enforces it and
+   `make verify` runs it.
 
 ## Environment
 
