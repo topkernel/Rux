@@ -438,6 +438,57 @@ the whole p4 family sits at sub-millisecond — re-adjudicate the open
 regression against a KVM p4 anchor before spending more on it.
 Board log: run/116pb1-boot.log, serial work/pbench-116pb1-serial.log.
 
+## Release/LTO same-rig A/B: the consolidation-layout family win (perf-opt lane, 2026-11-27, main a6d1cdc2a vs archive f1900270e)
+
+PROFILE CLASS: both kernels are RELEASE+LTO — this board's rows are
+only comparable within that class; the debug-KVM Tier-2 anchor above
+is untouched and a cross-class comparison is meaningless (the standing
+rule).
+
+Rig: pbench_boot.py, q35 KVM -cpu max smp2 2G, serial discipline,
+ABAB interleaved (r1/r2) + one reversed-order main-first round (r3;
+base-side r3 excluded as a TSC-clock escape flake). Probe:
+pbench_fullshort (stock probe with the exec loop 1000→40; the stock
+loop wedges at child ~14 identically on BOTH kernels — pre-existing at
+f1900270e, WEDGE-NOTES.txt). Sources: 3 main boards (r1-r3, image
+results) + 2 base boards; deltas from board medians
+(perf-opt/run/ab/DELTA-FINAL.txt).
+
+Cross-round reproduced improvement rows (base med → main med):
+
+| row | base | main | delta |
+|-----|------|------|-------|
+| p5a_pipe | 0.276 µs | 0.180 µs | **−34.7%** (base r2 noise component noted) |
+| p5c_stream_write | 0.331 µs | 0.220 µs | **−33.5%** |
+| p5b_dgram_send | 0.266 µs | 0.210 µs | **−20.9%** |
+| p5c3_stream_wrecv | 0.290 µs | 0.230 µs | **−20.8%** |
+| p5e_stream_send | 0.276 µs | 0.220 µs | **−20.1%** |
+| p5c2_stream_send | 0.286 µs | 0.230 µs | **−19.4%** |
+| p6_unlink | 11.030 µs | 9.317 µs | **−15.5%** |
+| p5b_dgram_recv_peek | 0.536 µs | 0.471 µs | **−12.1%** |
+| p6_stat | 0.356 µs | 0.281 µs | **−21.1%** (half-noise component noted) |
+| p6_getdents | 33.888 µs | 32.150 µs | −5.1% (boundary value) |
+
+Attribution: base..main carries ONLY consolidation commits in
+process/ipc/net/sched/sync/timer/mm/fs — the family win is the
+code-move second order (layout/inline), no single wrapper to name.
+Disassembly proof: base carried 11 surviving non-inlined
+PtTable::from_phys wrapper call sites on the page-fault path; main
+inlines them to ZERO, and no surviving wrapper call sites remain on
+the syscall-entry chain (trap→dispatch→table_lookup) or the per-CPU
+GS family (CpuLocal::with edges inlined by LTO).
+
+Cost side (recorded, rows NOT re-banked): p6_write_fsync +13.6% is a
+REPRODUCED regression that follows the kernel across the reversed
+round (med +6..14%, min parity 5223/5176 → 5421/5138/5756) — min
+parity says wait-latency distribution shift, NOT wrapper-call cost
+(disassembly: zero surviving consolidation-wrapper call sites on the
+commit/flush path); the debug-class Tier-2 anchor's p6_write_fsync row
+keeps its banked value until the hunt lands. p2_ctxsw +2.0% is below
+threshold, recorded flat. Cross-checks: the mm lane's claimed p3b_cow
++12.9% is REFUTED on this same rig (0.0% delta); no sync-path row
+regressed.
+
 ## Tier-1 volume re-bank on the tok-r4fix vehicle + vehicle protection (2026-11-14, gate-infra lane, main@f5416e8a4)
 
 > **RETRACTED (2026-11-15, gate-bank lane)**: the volume re-bank below

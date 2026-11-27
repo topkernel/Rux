@@ -39,6 +39,18 @@ machine gate enforces the boundary repo-wide.
      consolidation wrappers crossed the old LAYOUT-7 heap base
   6. 1000 Hz sampling is ready: the sampling carrier is zeroed, so
      1000 Hz session-level sampling starts from clean counters
+- **Consolidation-layout perf family (release/LTO same-rig A/B,
+  perf-opt lane)**: the IPC/fs pbench family improved across the board
+  — p5a_pipe 0.276→0.180 µs (−34.7%), p5c_stream_write 0.331→0.220
+  (−33.5%), p5b_dgram_send −20.9%, p5c3 −20.8%, p5e_stream_send
+  −20.1%, p5c2 −19.4%, p6_stat 0.356→0.281 µs (−21.1%), p6_unlink
+  11.030→9.317 µs (−15.5%), p5b_dgram_recv_peek −12.1%, p6_getdents
+  −5.1% — attributed to the code-move second order (layout/inline;
+  base's 11 non-inlined fault-path wrapper calls are zero on main);
+  the board's p6_write_fsync +13.6% is banked as a reproduced
+  regression with min-parity evidence (rows not re-banked until the
+  hunt lands). See perf-gate-baseline.md and
+  safety-and-performance.md §3.
 
 ### 2026-11-14 — Merge day: signal/epoll parity, OH lock screen, Ubuntu 24.04 at graphical.target
 
