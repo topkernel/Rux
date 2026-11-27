@@ -354,15 +354,15 @@ pub fn reap_drain_tick() {
     if dn < 8 || dn % 512 == 0 {
         let paced = PACED_BLOCKED.load(Ordering::Relaxed);
         let depth = depth;
-        crate::dfx::taskdump::taskdump_raw_line(b"REAP-DIAG run=");
-        crate::dfx::taskdump::taskdump_dec(dn as u64);
-        crate::dfx::taskdump::taskdump_raw_line(b" paced=");
-        crate::dfx::taskdump::taskdump_dec(paced as u64);
-        crate::dfx::taskdump::taskdump_raw_line(b" depth=");
-        crate::dfx::taskdump::taskdump_dec(depth as u64);
-        crate::dfx::taskdump::taskdump_raw_line(b" r85=");
-        crate::dfx::taskdump::taskdump_dec(R85_FREED.load(Ordering::Relaxed) as u64);
-        crate::dfx::taskdump::taskdump_raw_line(b"\n");
+        crate::debug::taskdump::taskdump_raw_line(b"REAP-DIAG run=");
+        crate::debug::taskdump::taskdump_dec(dn as u64);
+        crate::debug::taskdump::taskdump_raw_line(b" paced=");
+        crate::debug::taskdump::taskdump_dec(paced as u64);
+        crate::debug::taskdump::taskdump_raw_line(b" depth=");
+        crate::debug::taskdump::taskdump_dec(depth as u64);
+        crate::debug::taskdump::taskdump_raw_line(b" r85=");
+        crate::debug::taskdump::taskdump_dec(R85_FREED.load(Ordering::Relaxed) as u64);
+        crate::debug::taskdump::taskdump_raw_line(b"\n");
     }
     // Snapshot-and-clear of the switch-stage candidates.
     let mut batch: Vec<PendingReap> = {
