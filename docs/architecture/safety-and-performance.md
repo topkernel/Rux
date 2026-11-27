@@ -267,6 +267,31 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   + UTF-8 cmdline panic fix (830e3f8c). Test-harness-only panics
   (unit-test Vec drop) are excluded by method.
 
+### Bug-class ELIMINATED by structure: the guard add/drop cross-task
+split (p23-percpupreempt, 2026-11-28)
+
+The sc69-sc73 family (a guard's +PREEMPT_OFFSET booked by the
+acquire-time task, its -1 landing on the release-time task after a
+switch inside the bracket) had three layers of treatment stacked on
+it: the 119th per-CPU booked-task stack + remote
+release_hardirq_base_on, the s14 IRQ-PAIR capture, and the
+UR-PC-REPAIR boundary fix. The preempt_count per-CPU migration
+(fabba9439 / cf7c1c986 / e24696140, reference form
+pcpu_hot.preempt_count) removes the split surface itself: a
+bracket's add and sub always hit the same cpu word. Measured on the
+HZ=1000 sampling rig (the load that produced the family's crash
+faces): IRQ-PAIR-SPLIT x0 and IRQ-BOOK-SPLIT x0 across every window
+of the final rig batches — the booking-discipline probes, kept
+leakhunt-gated as migration witnesses, are silent by construction.
+Remediation machinery that existed only because counts could strand
+on innocent tasks is deleted (-2.2k lines): PREEMPT-HEAL,
+PARKED-HEAL, PICK-PC-ZERO, WAKE-HEAL, the parkwalk, and the booking
+stack. The schedule()-entry base check now mirrors the reference's
+__schedule_bug clamp (report + preempt_count_repair + proceed) and
+the user-return repair acts on the cpu word at the same provably-safe
+boundary. Gates on this tree: riscv64 unit suite 1597/1597, x86_64
+unit suite 1599/1599 (kernel_hz=100), tri-arch builds rc=0.
+
 ## 3. Performance, measured (each fast path IS a safe path)
 - lmbench, same host, same accel, both kernels under one q35+KVM rig
   (kernel e264a64b, standing table 2026-11-03): 4 rows ahead of the
