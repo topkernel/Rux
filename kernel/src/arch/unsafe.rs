@@ -4013,9 +4013,7 @@ pub mod riscv64 {
             // userspace, so the task's preempt_count must be exactly 0 (no
             // in-flight IRQ, every syscall-path guard dropped). A nonzero count
             // here is a leaked PREEMPT_OFFSET caught at the earliest possible
-            // moment; the probe's per-task acquire-site shadow names the guard
-            // construction that never balanced. Disabled-path cost: one relaxed
-            // load. (Coroutine note: after an in-handler schedule() this tail
+            // moment. (Coroutine note: after an in-handler schedule() this tail
             // runs in the incoming task's own frozen frame with its own regs, so
             // the check validates whichever task actually returns to user.)
             if frame.user_mode() {
@@ -4023,7 +4021,6 @@ pub mod riscv64 {
                 // syscall-heavy CPUs complete grace periods without waiting for
                 // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).
                 crate::sync::rcu::rcu_note_context_switch();
-                crate::debug::leakorigin::check_user_return();
             }
         } }
 
@@ -5251,11 +5248,6 @@ pub mod riscv64 {
                         let _ = write!(w,
                             "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
                             crate::sched::get_current_pid(), pc);
-                        // R83 (R74 producer hunt): the underflow victim's header may
-                        // already carry the foreign store — dump it while it is fresh.
-                        if let Some(cur) = crate::sched::current() {
-                            crate::debug::r83hunt::dump_victim(b"PREEMPT-UF", cur as *mut _);
-                        }
                         crate::interrupt::preempt::preempt_count_reset();
                     } else {
                         // Cannot sleep in interrupt context
@@ -10543,7 +10535,7 @@ pub mod x86_64 {
             // see cpu::enable_write_protect). Everything reachable here is
             // mapped RW, so arming WP this early is inert for boot itself; it
             // only starts biting once RO mappings appear (user COW pages,
-            // wildwatch guards). CR0 survives the later CR3 switch.
+            // guards). CR0 survives the later CR3 switch.
             crate::arch::cpu::enable_write_protect();
 
             let mbi: &MultibootInfo = unsafe {
@@ -11192,41 +11184,13 @@ pub mod x86_64 {
             let prev = unsafe { crate::process::task_ref::TaskBorrow::from_raw(prev) };
             let next = unsafe { crate::process::task_ref::TaskBorrow::from_raw(next) };
             let cpu = crate::arch::cpu_id() as i32;
-            // R65 witness: prev must still carry its pick mark here. A clear mark
-            // at publish entry means the R49 heal (or a scribble) reset the
-            // ownership word inside the switch-out window — name it.
-            if let Some(prev) = &prev {
-                if crate::trace::EVENT_SCRIBBLE.armed() && !prev.on_cpu() {
-                    crate::debug::scribble::switch_window_heal(prev.as_ptr() as u64);
-                }
-            }
+
             // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
             // registers are restored. A claim held by another CPU is a double-run
             // — the two CPUs would execute one task on one kernel stack (the SMP
             // fork/exec/exit crash family; caught live twice with the pre-GS-fix
             // kernel, silent since the trap_exit cli/swapgs fix).
             if let Some(next) = &next {
-                // R65 hunt: never publish a non-Task `next` into the per-CPU
-                // current slot — a poisoned slot makes the NEXT __schedule run
-                // its whole prev-side bookkeeping through garbage (the
-                // self-propagating half of the x86-scribble3 cascade). Report and
-                // keep the previous current instead.
-                if crate::trace::EVENT_SCRIBBLE.armed()
-                    && !crate::debug::scribble::task_plausible(next.as_ptr())
-                {
-                    crate::debug::scribble::bad_switch_arg(
-                        2,
-                        next.as_ptr() as u64,
-                        prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
-                    );
-                    crate::debug::scribble::ring_log(
-                        crate::arch::cpu_id() as usize,
-                        2,
-                        prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
-                        next.as_ptr() as u64,
-                    );
-                    return 1;
-                }
                 // R56-heal (affirm gate): resume only what our pick still owns.
                 // try_affirm_pick CASes ti_pick_state PICKED → LIVE atomically —
                 // the exclusive right to restore this task's registers. The old
@@ -11236,18 +11200,8 @@ pub mod x86_64 {
                 if next.pid() != 0 {
                     if let Err(observed) = next.try_affirm_pick() {
                         // Not ours: REVOKED by the slot-capture steal, or a
-                        // protocol breach. Report through the scribble hunter
-                        // when armed, then abort — the asm repairs nothing of
+                        // protocol breach. Abort — the asm repairs nothing of
                         // next and returns with prev still running.
-                        if crate::trace::EVENT_SCRIBBLE.armed() {
-                            crate::debug::scribble::double_run(
-                                next.pid() as u64,
-                                cpu as u64,
-                                observed as u64,
-                                prev.as_ref().map(|p| p.pid() as u64).unwrap_or(0),
-                                next.as_ptr() as u64,
-                            );
-                        }
                         return 1;
                     }
                 }
@@ -11331,22 +11285,8 @@ pub mod x86_64 {
                         // run on the static AP boot stacks (their kstack fields are
                         // never used), so a "foreign" sp here is not automatically
                         // corruption — repinning would break a mid-loop resume.
-                        crate::debug::scribble::ring_dump();
                     }
                 }
-            }
-            // Scribble hunter (rux:scribble (retired dfx=scribble)): record the switch completion.
-            crate::debug::scribble::ring_log(
-                crate::arch::cpu_id() as usize,
-                2,
-                prev.as_ref().map(|p| p.as_ptr() as u64).unwrap_or(0),
-                next.as_ref().map(|n| n.as_ptr() as u64).unwrap_or(0),
-            );
-            // Scribble hunter (rux:scribble (retired dfx=scribble)): quiesce point — prev's context is
-            // fully saved here, so any tracked field off its shadow was written
-            // by someone else while it ran.
-            if let Some(prev) = &prev {
-                crate::debug::scribble::quiesce(prev.as_ptr());
             }
             0 // proceed with the resume
         } }
@@ -11909,7 +11849,7 @@ pub mod x86_64 {
         /// linear map, and device windows are all mapped P|RW — WP only ever
         /// bites user-side COW/RO pages (the trap path resolves those: see
         /// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
-        /// kernel statics (rux:wildwatch (retired dfx=wildwatch)).
+        /// kernel statics.
         pub fn enable_write_protect()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
             // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
@@ -12416,27 +12356,6 @@ pub mod x86_64 {
                     // could deadlock on the runqueue lock the same way the
                     // riscv64 twin documents; the trap-exit path reschedules.
                     crate::sched::set_need_resched();
-                    // RT-2X item-7 hunt: prove DELIVERY of the resched IPI to
-                    // cpu0 (cmdline rt2xdbg=1, 200-line budget).
-                    if crate::arch::cpu_id() as usize == 0
-                        && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                    {
-                        static RIP: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        if RIP.fetch_add(1, Ordering::Relaxed) < 200 {
-                            use crate::debug::taskdump::putc_brief as putchar;
-                            for &b in b"RESCHED-IPI-RECV cpu=0 rip=0x" {
-                                putchar(b);
-                            }
-                            let mut v = regs.rip as u64;
-                            for _ in 0..16 {
-                                let n = (v >> 60) as u8;
-                                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                                v <<= 4;
-                            }
-                            putchar(b'\n');
-                        }
-                    }
                 }
                 VECTOR_CALL_FUNCTION => csd_flush_queue(),
                 VECTOR_TLB_FLUSH => {
@@ -12858,8 +12777,6 @@ pub mod x86_64 {
                         thread.set_tp(addr);
                         crate::arch::x86_64::cpu::wrmsr(MSR_FS_BASE, addr);
                     }
-                    // Scribble hunter: absorb this legitimate in-run write.
-                    crate::debug::scribble::note_thread_write(current);
                     0
                 }
                 ARCH_GET_FS => {
@@ -12883,8 +12800,6 @@ pub mod x86_64 {
                         // The ACTIVE GS base (percpu) is untouched, as before.
                         crate::arch::x86_64::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
                     }
-                    // Scribble hunter: absorb this legitimate in-run write.
-                    crate::debug::scribble::note_thread_write(current);
                     0
                 }
                 ARCH_GET_GS => {
@@ -12941,8 +12856,6 @@ pub mod x86_64 {
                     // SAFETY: single CR0 bit set.
                     crate::arch::x86_64::cpu::stts();
                 }
-                // Scribble hunter: absorb this legitimate in-run write.
-                crate::debug::scribble::note_thread_write(current);
             }
         } }
     }
@@ -13641,135 +13554,6 @@ pub mod x86_64 {
                 }
             }
 
-            // sc57 (57th): fuxwatch write watchpoint — a user WRITE fault on
-            // the watched page logs the writer, restores W for the retried
-            // instruction, and single-steps it via TF; the #DB hook re-clears
-            // W so the next write traps again. Zero cost when the param is
-            // absent (one relaxed load).
-            // 84th: KERNEL-mode WRITE faults on the watched page (a syscall's
-            // put_user — clock_gettime's timespec out-param lives on the same
-            // arena control page as the watched futex word) are handled here
-            // too: restore W, name the kernel writer, retry. Before, they fell
-            // to the kernel-fill path, hit the W-cleared PTE
-            // (PermissionDenied), surfaced as EFAULT — libc++ turned that into
-            // system_error and the daemons SIGABRT'd (ohw156 t=161.5 installs,
-            // ohw157/158 t=33.9 telecom — the instrument was killing its own
-            // subject). No TF single-step for kernel writers.
-            // huks-wedge lane (hw2): the over-budget check moved INSIDE — an
-            // over-budget skip left the W-cleared PTE with no handler and the
-            // write fell to do_page_fault → SEGV_ACCERR. Every fault on a page
-            // WE armed gets W restored and retried; only the log/step respects
-            // the budget (fuxwatch_log_write retires the watch at the trip).
-            if access & crate::arch::mm::page_fault::FaultFlags::WRITE != 0
-                && crate::sync::futex::fuxwatch_page_matches(fault_addr)
-            {
-                let is_user = access & crate::arch::mm::page_fault::FaultFlags::USER != 0;
-                let tid = crate::sched::get_current_pid() as u32;
-                let rip = regs.rip;
-                // Handle only mms WE armed (a fork-COW write fault on this VA
-                // in an un-armed mm falls through to the normal path).
-                let handled = crate::sched::current().and_then(|tk| {
-                    // SAFETY: current task accessor.
-                    let aspace = unsafe { (*tk).address_space() }?;
-                    let root = aspace.root_ppn();
-                    if !crate::sync::futex::fuxwatch_mm_armed(root) {
-                        // neverword lane (nw1 conviction, safety net): an mm the
-                        // arm round once covered but the ledger no longer lists
-                        // (slot-latch reopen, fork-inherit of a W-cleared PTE)
-                        // used to fall to do_page_fault -> present-RO PTE ->
-                        // SEGV_ACCERR and group-kill its process (nw1 samgr,
-                        // hg1 hilogd). A write fault on a WATCHED page with a
-                        // present+user+W-clear PTE in a writable mapping is a
-                        // leak of OUR watch, not a permission denial: restore W,
-                        // retry unlogged, warn once.
-                        let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-                        // SAFETY: read-only diagnostic walk of the faulting mm.
-                        let leaked = unsafe {
-                            crate::arch::mm::mm_ops::PageTableWalker::walk(
-                                root,
-                                fault_addr & !0xfff,
-                            )
-                        }
-                        .map(|(_, bits)| bits & 0x1 != 0 && bits & 0x4 != 0 && bits & 0x2 == 0)
-                        .unwrap_or(false);
-                        if leaked {
-                            // SAFETY: current mm's live root; one page, RW.
-                            unsafe {
-                                crate::arch::mm::mm_ops::mprotect_pte_range(
-                                    root,
-                                    fault_addr & !0xfff,
-                                    1,
-                                    0x3,
-                                );
-                            }
-                            drop(g);
-                            crate::arch::x86_64::mm::asid::flush_tlb_page(fault_addr);
-                            static LEAK_N: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            // HOTPATH-PRINT: budget-gated (20/boot) — the futex
-                            // watch fires per access to the watched word.
-                            if LEAK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                                crate::pr_warn!(
-                                    "FUXWATCH-LEAK-FIX tid={} rip={:#x} addr={:#x} W restored, unlogged",
-                                    tid,
-                                    rip,
-                                    fault_addr
-                                );
-                            }
-                            return Some(());
-                        }
-                        drop(g);
-                        return None;
-                    }
-                    let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-                    // SAFETY: current mm's live root; one page, RW.
-                    unsafe {
-                        crate::arch::mm::mm_ops::mprotect_pte_range(
-                            root,
-                            fault_addr & !0xfff,
-                            1,
-                            0x3,
-                        );
-                    }
-                    drop(g);
-                    crate::arch::x86_64::mm::asid::flush_tlb_page(fault_addr);
-                    // hw2: exact/old_word describe the WORD THAT FAULTED (either
-                    // slot) — slot-2 writes used to log with slot 1's exact=false
-                    // and slot 1's old value.
-                    let w1 = crate::sync::futex::fuxwatch_addr();
-                    let w2 = crate::sync::futex::fuxwatch2_addr();
-                    let exact = (w1 != 0 && (fault_addr & !0x3) == (w1 & !0x3))
-                        || (w2 != 0 && (fault_addr & !0x3) == (w2 & !0x3));
-                    let old_word = crate::sync::futex::fuxwatch_read_word_at(root, fault_addr & !0x3);
-                    if !is_user {
-                        // Kernel writer (put_user on the watched page): named
-                        // via a budgeted line, retried with W present.
-                        static KFW_N: core::sync::atomic::AtomicUsize =
-                            core::sync::atomic::AtomicUsize::new(0);
-                        // HOTPATH-PRINT: budget-gated (40/boot) — see LEAK-FIX
-                        // above.
-                        if KFW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                            crate::pr_warn!(
-                                "FUXWATCH-KWRITE tid={} rip={:#x} addr={:#x} exact={} old={:#x}",
-                                tid,
-                                rip,
-                                fault_addr,
-                                exact,
-                                old_word
-                            );
-                        }
-                    } else if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word, fault_addr) {
-                        // Step the writer: TF traps right after the store;
-                        // RF masks fault-class re-entry for this insn.
-                        regs.rflags |= (1 << 8) | (1 << 16);
-                    }
-                    Some(())
-                });
-                if handled.is_some() {
-                    return; // retry the instruction
-                }
-            }
-
             let result = do_page_fault(regs, access);
 
             match result {
@@ -13829,8 +13613,6 @@ pub mod x86_64 {
                         // (softbus/accountmgr/foundation/distributeddata/mmi).
                         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
                     } else {
-                        #[cfg(feature = "x86_64")]
-                        crate::debug::scribble::crash_report(b"#PF-segv", regs);
                         // The riscv64 mm layer returns KernelPanic for kernel
                         // faults; until the x86 twin grows that, do NOT silently
                         // iretq back into the faulting rip (infinite fault loop).
@@ -13877,8 +13659,6 @@ pub mod x86_64 {
                         // — see the SEGV_MAPERR arm above for the full rationale.
                         crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
                     } else {
-                        #[cfg(feature = "x86_64")]
-                        crate::debug::scribble::crash_report(b"#PF-perm", regs);
                         // Oops path (Tranche 5): report + policy, like the
                         // Segfault arm above.
                         crate::debug::oops::oops(
@@ -13922,8 +13702,6 @@ pub mod x86_64 {
                             crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                         }
                     } else {
-                        #[cfg(feature = "x86_64")]
-                        crate::debug::scribble::crash_report(b"#PF-bus", regs);
                         // Oops path (Tranche 5): report + policy, like the
                         // Segfault arm above.
                         crate::debug::oops::oops(
@@ -14027,10 +13805,6 @@ pub mod x86_64 {
                             unsafe { core::arch::asm!("hlt") };
                         }
                     }
-                    // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
-                    // tables live from the debugger).
-                    #[cfg(feature = "x86_64")]
-                    crate::debug::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
                     // Raw serial print (printk may be wedged on a lock this CPU
                     // holds), then halt — the twin's R9 discipline.
                     // uart_putc_raw writes the serial port directly (no locks).
@@ -15142,37 +14916,6 @@ pub mod x86_64 {
             const TF: u64 = 1 << 8;
             const RF: u64 = 1 << 16;
             if regs.user_mode() {
-                // sc57: fuxwatch single-step retirement — the store completed;
-                // re-protect the watched page (W off again for the next write)
-                // and continue silently.
-                // huks-wedge lane (hw2): re-protect the page the STEP recorded
-                // (the store's own page), and only while the watch still owns it
-                // — after a slot move the retired page must stay writable.
-                let tid = crate::sched::get_current_pid() as u32;
-                if let Some(page) = crate::sync::futex::fuxwatch_take_step(tid) {
-                    regs.rflags &= !(TF | RF);
-                    if crate::sync::futex::fuxwatch_page_watched(page) {
-                        if let Some(tk) = crate::sched::current() {
-                            // SAFETY: current task accessor.
-                            if let Some(aspace) = unsafe { (*tk).address_space() } {
-                                let root = aspace.root_ppn();
-                                let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-                                // SAFETY: current mm's live root; one page, R.
-                                unsafe {
-                                    crate::arch::mm::mm_ops::mprotect_pte_range(
-                                        root,
-                                        page,
-                                        1,
-                                        0x1,
-                                    );
-                                }
-                                drop(g);
-                                crate::arch::x86_64::mm::asid::flush_tlb_page(page);
-                            }
-                        }
-                    }
-                    return;
-                }
                 // Stop stepping before delivering anything, or iretq/sysret
                 // would re-trap on the first handler/user instruction.
                 regs.rflags &= !TF;
@@ -15342,8 +15085,6 @@ pub mod x86_64 {
                 // A kernel-mode #UD is always a kernel bug; skipping it would
                 // corrupt execution. The Oops path prints the report and
                 // applies the policy (Tranche 5, the riscv64 twin's).
-                #[cfg(feature = "x86_64")]
-                crate::debug::scribble::crash_report(b"#UD", regs);
                 crate::debug::oops::oops(
                     crate::debug::oops::Kind::IllegalInstruction,
                     &|w: &mut crate::debug::backtrace::ConsoleWriter| {
@@ -15625,14 +15366,6 @@ pub mod x86_64 {
                     utime_ripsample_report();
                 }
             }
-
-            // 1.5 Scribble hunter (rux:scribble (retired dfx=scribble)): GS-pairing tripwire + verify
-            // quiescent tasks' tracked scheduling fields against their shadows +
-            // scheduler-consistency scan (double-run seed detection).
-            // Throttled inside; no-op unless the runtime switch is on.
-            crate::debug::scribble::verify_gs();
-            crate::debug::scribble::verify();
-            crate::debug::scribble::verify_consistency();
 
             // 2. Scheduler tick
             crate::sched::scheduler_tick();
@@ -16060,15 +15793,12 @@ pub mod x86_64 {
             // userspace, so the task's preempt_count must be exactly 0 (no
             // in-flight IRQ, every syscall-path guard dropped). A nonzero count
             // here is a leaked PREEMPT_OFFSET caught at the earliest possible
-            // moment; the probe's per-task acquire-site shadow names the guard
-            // construction that never balanced. Disabled-path cost: one relaxed
-            // load. (Coroutine note: after an in-handler schedule() this tail
+            // moment. (Coroutine note: after an in-handler schedule() this tail
             // runs in the incoming task's own frozen frame with its own regs, so
             // the check validates whichever task actually returns to user.)
             if frame.user_mode() {
                 // Return-to-user quiescent state (rcu.rs; see the riscv64 twin).
                 crate::sync::rcu::rcu_note_context_switch();
-                crate::debug::leakorigin::check_user_return();
             }
         } }
 
@@ -16150,7 +15880,6 @@ pub mod x86_64 {
                 scribble_put_hex(t);
             }
             scribble_put_str(b"\n");
-            crate::debug::scribble::ring_dump();
         } }
 
         // INV-ARCH-TRAP-53 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16192,15 +15921,6 @@ pub mod x86_64 {
         #[no_mangle]
         pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> !  { unsafe { // blanket: the former unsafe-fn contract, now explicit
 
-            // Forensics: full scribble crash capture (raw console; gated on
-            // rux:scribble (retired dfx=scribble) inside crash_report itself).
-            if !regs.is_null() {
-                // SAFETY: diagnostic reads of the frame trap_exit just validated
-                // (and rejected); the memory is the current task's stack.
-                unsafe {
-                    crate::debug::scribble::crash_report(b"BAD-FRAME", &*regs);
-                }
-            }
             // Route the owner out like any fatal-user-fault: SIGSEGV, default
             // disposition kills. do_exit never returns.
             // huks-wedge lane (hw5): GROUP death — Linux's fixup_bad_iret
@@ -17808,7 +17528,7 @@ pub mod x86_64 {
                                     let cow_res = unsafe {
                                         handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                                     };
-                                    crate::debug::schb::note_cow(cow_j0);
+                                    crate::debug::syscost::note_cow(cow_j0);
                                     match cow_res {
                                         crate::arch::mm::CowFaultResult::Resolved
                                         | crate::arch::mm::CowFaultResult::Retry => {
@@ -18051,21 +17771,6 @@ pub mod x86_64 {
                         regs.rip,
                         crate::sched::get_current_pid()
                     );
-                    // rux:wildwatch (retired dfx=wildwatch) (wildwrite-hunt): a write fault inside a guarded
-                    // region IS the wild writer caught in the act — banner it so the
-                    // serial line is unmissable, then let the normal printer below
-                    // carry rip + the rbp walk into the KERNPANIC dump.
-                    #[cfg(feature = "x86_64")]
-                    if (access_type & FaultFlags::WRITE) != 0
-                        && crate::debug::wildwatch::is_armed(fault_addr.bits() as usize)
-                    {
-                        println!(
-                            "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
-                            fault_addr.bits(),
-                            regs.rip,
-                            crate::sched::get_current_pid()
-                        );
-                    }
                     // OH bring-up forensics: walk the frame-pointer chain so the
                     // faulting CALLER is visible (write_volatile-style leaf frames
                     // otherwise hide the driver that computed the bad address).
@@ -18116,7 +17821,7 @@ pub mod x86_64 {
                         let cow_j0 = crate::drivers::timer::get_jiffies();
                         let cow_res =
                             unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
-                        crate::debug::schb::note_cow(cow_j0);
+                        crate::debug::syscost::note_cow(cow_j0);
                         match cow_res {
                             crate::arch::mm::CowFaultResult::Resolved => {
                                 MmFaultResult::Handled
@@ -24027,11 +23732,7 @@ pub mod aarch64 {
             // Restore previous PtRegs pointer (nested-trap case, riscv64 twin).
             CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
 
-            // Leak-origin tripwire (riscv64 twin): a user-return frame must
-            // carry preempt_count == 0.
-            if regs_ref.user_mode() {
-                crate::debug::leakorigin::check_user_return();
-            }
+
         } }
 
         // INV-ARCH-TRAP-9 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe

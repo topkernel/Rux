@@ -22,7 +22,7 @@ pub fn get_core_id() -> u64 {
 /// Read ANOTHER hart's tp task pointer. riscv64 keeps tp in a register
 /// only, so cross-hart reads use the scheduler's per-CPU current mirror
 /// (cpu_state(c).current — written at pick under the GRQ; mirrors tp at
-/// every completed switch). Diagnostic-only (leakorigin v3).
+/// every completed switch). Diagnostic-only.
 #[inline]
 pub fn get_thread_id_of(cpu: usize) -> u64 {
     if cpu < crate::config::MAX_CPUS {

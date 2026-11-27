@@ -57,7 +57,7 @@ static SELFTEST_DONE: AtomicBool = AtomicBool::new(false);
 /// on; throttling is internal).
 pub fn tick(current: u64) {
     if !SELFTEST_DONE.swap(true, Ordering::Relaxed) {
-        // One-shot detector selftest (wildwatch-selftest precedent):
+        // One-shot detector selftest:
         // inject a single bad free_bits bit under the heap lock, expect
         // the audit to flag it, restore, expect clean. All before any
         // real scan — the boot either proves its tripwire or says so.

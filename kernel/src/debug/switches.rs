@@ -12,42 +12,24 @@
 //! Switch catalog (see the RETIRED TOKENS note below for the ones
 //! that already moved to the unified trace framework):
 //!
-//! RETIRED TOKENS (dfx-migrate rounds 4/4b/5, 2026-11): the hunt
-//! families and debug aids that lived here — rounds 4/4b:
-//! `schedtrace`, `fuxstuck`, `txnhunt`, `mmforensics`, `sysring`,
-//! `ohhunt`, `sigtrace`, `futextrace`, `epolltrace`, `taskdump`,
-//! `periodic`, `watchdog`, `memwatch`; round 5: `schb`, `parkdump`,
-//! `sleepsnap`, `ksprobe`, `wwcensus`, `bindertrace`,
-//! `syscalltrace`, `inputtrace`, `exthunt`, `sfddbg`, `dbtrace`,
-//! `datatap`, `ams46`, `vmap`, `poolcensus`, `slowtask`, `execcost`,
-//! `tfdcensus`, `scmtap`, `sysforensic`, `filerd`, `lostpark`,
-//! `allocwatch`, `r83scan`, `leakhunt`, `acqdiv`, `metawatch`,
-//! `scribble`, `monowatch`, `epollscan`, `treehunt`, `tcptrace`,
-//! `strace1`, `ripsample`, `socksnap`, `writetrace`, `ledger`,
-//! `pid1spin`, `steptrace` — moved into the unified trace framework
-//! (`kernel/src/trace/`): each family's gate is now a `rux:` trace
-//! event, its serial prints are echo consumers of that event's
-//! enable. Old `dfx=` tokens for migrated families are GONE (user
-//! directive 2026-11-17: no compatibility aliases — use trace_event=).
-//! (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) name instruments
-//! whose probe bodies no longer exist — see `dead_dfx_tokens`.
+//! RETIRED TOKENS (dfx-migrate rounds 4/4b/5, 2026-11, plus the
+//! 2026-11-28 delete sweep): the hunt families and debug aids that
+//! lived here moved into the unified trace framework
+//! (`kernel/src/trace/`) — each family's gate became a `rux:` trace
+//! event and its serial prints echo consumers of that enable. Old
+//! `dfx=` tokens for migrated families are GONE (user directive
+//! 2026-11-17: no compatibility aliases — use trace_event=). The
+//! round-6 delete sweep (docs/development/debug-alignment.md S2)
+//! then removed the instrument BODIES whose hunts had closed; their
+//! event declarations remain in trace/ (armed default false, no
+//! emitters) and their token names live only in git history. Four
+//! dead tokens (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) named
+//! instruments whose probe bodies no longer exist.
 //!
-//! What survives here is deliberate, not leftover:
-//!
-//! - BEHAVIOR INJECTION (`claiminject`, `oncpuinject`): these CHANGE
-//!   kernel scheduling/rejection behavior to reproduce wedge shapes —
-//!   they are fault injectors, not observability, and have no
-//!   tracepoint form.
-//! - GDB-PARK ACTIONS (`scribblepark`, `scribblepid1`,
-//!   `scribblesweep`): they PARK a CPU at a chosen moment so an
-//!   external gdb session can arm watchpoints — an action taken on
-//!   the machine, not an observation of it. They arm the `rux:scribble`
-//!   detection engine as a side effect.
-//! - ACTIVE DETECTOR (`wildwatch`): its detection mechanism IS state
-//!   mutation — arming write-protects kernel page-table regions and
-//!   sets CR0.WP. The #PF hit dump rides the existing kernel fault
-//!   printer; arming must stay a boot-time switch.
-//!
+//! What survives here is deliberate, not leftover — BEHAVIOR INJECTION
+//! only (`claiminject`, `oncpuinject`): these CHANGE kernel
+//! scheduling/rejection behavior to reproduce wedge shapes — they are
+//! fault injectors, not observability, and have no tracepoint form.
 //! Per the observability policy the table must not grow — new
 //! observability goes through tracepoints.
 
@@ -72,10 +54,6 @@ macro_rules! dfx_switch_table {
         $m! {
             ClaimInject => "claiminject",
             OncpuInject => "oncpuinject",
-            ScribblePark => "scribblepark",
-            ScribblePid1 => "scribblepid1",
-            ScribbleSweep => "scribblesweep",
-            WildWatch => "wildwatch",
         }
     };
 }
@@ -106,39 +84,9 @@ pub enum DfxSwitch {
     /// unless explicitly requested; never enable in production or LTP
     /// runs. PERMANENT SWITCH (dfx-migrate round 5): fault injector.
     OncpuInject,
-    /// Also park (scribble_park breakpoint) on the first confirmed hit
-    /// so a gdb session can arm QEMU watchpoints on the victim address.
-    /// PERMANENT SWITCH (dfx-migrate round 5): parking a CPU for an
-    /// external debugger is an action, not observation. Arming it also
-    /// arms the `rux:scribble` detection engine.
-    ScribblePark,
-    /// Park when pid 1 registers — the init task's Task struct and
-    /// kernel stack live at boot-fixed addresses for the whole run, so
-    /// a gdb session can arm persistent watchpoints on them.
-    /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
-    /// `rux:scribble` as a side effect.
-    ScribblePid1,
-    /// Park when the 64th task registers (early in the fork/exec storm)
-    /// so gdb can arm quiet-region watchpoints across the live set.
-    /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
-    /// `rux:scribble` as a side effect.
-    ScribbleSweep,
-    /// Wild-write attribution tripwire (wildwrite-hunt line): the hpet
-    /// quiet-statics guard cluster (plus its canary page) goes READ-ONLY
-    /// in the kernel page tables after init, in every alias (kernel-half
-    /// link VAs, linear map, low identity). The b77/wt1 wild-write
-    /// engine's smash then page-faults AT THE WRITER — the existing
-    /// kernel-#PF printer hands over rip + rbp walk + KERNPANIC dump.
-    /// The canary page is also checksum-verified from the timer cadence
-    /// (DMA-class writers bypass PTEs). One arming print per boot; zero
-    /// traffic until a hit. See debug/wildwatch.rs. PERMANENT SWITCH
-    /// (dfx-migrate round 5): the detection mechanism itself mutates
-    /// kernel state (PTE write-bits + CR0.WP), so arming cannot be a
-    /// runtime-safe trace-event enable.
-    WildWatch,
 }
 
-const SWITCH_COUNT: usize = 6;
+const SWITCH_COUNT: usize = 2;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -176,15 +124,11 @@ impl DfxSwitch {
             // 4 dead tokens thpark/syncguard/syncwatch/pctlmon whose
             // probe bodies no longer exist) left the table, so the six
             // permanent switches (injection + gdb-park + the PTE-mutating
-            // wildwatch) compact to 0..5 in table order. Cmdline lookup
+            // detector) compacted to 0..1 in table order. Cmdline lookup
             // is by name, so the shift is invisible to users; indices
             // only key the SWITCHES array.
             DfxSwitch::ClaimInject => 0,
             DfxSwitch::OncpuInject => 1,
-            DfxSwitch::ScribblePark => 2,
-            DfxSwitch::ScribblePid1 => 3,
-            DfxSwitch::ScribbleSweep => 4,
-            DfxSwitch::WildWatch => 5,
         }
     }
 
@@ -198,22 +142,6 @@ impl DfxSwitch {
 /// Whether a runtime switch is enabled.
 pub fn enabled(switch: DfxSwitch) -> bool {
     SWITCHES[switch.index()].load(Ordering::Relaxed)
-}
-
-/// OH hunt-print master gate (110th): the always-on hunt probes that
-/// rode every perf boot — mtprobe / bindwalk / bindrec / sbxbind /
-/// devopen-probe / mntslow / appclone / the drm ioctl census — printed
-/// ~1.7k lines per boot at LOGLEVEL=4, and every line costs TWICE (the
-/// busy-poll UART emit charged to the printing task, plus hilogd's
-/// /dev/kmsg drain). They had only the `sprobe=0` silencer before, so
-/// the default was ON. This gate flips the default: armed ONLY when
-/// the unified-framework event `rux:ohhunt` is armed (`trace_event=`,
-/// `set_event`, or the retired `rux:ohhunt (token dfx=ohhunt)` boot token — see
-/// or the legacy `sprobe=1` opt-in. Hunt
-/// rigs that still want the prints add one of those tokens.
-pub fn oh_hunt_prints_on() -> bool {
-    crate::trace::EVENT_OHHUNT.armed()
-        || crate::cmdline::get_param("sprobe").map(|v| v == "1").unwrap_or(false)
 }
 
 /// The retired dfx= tokens — the dfx-migrate migration ledger.
@@ -250,37 +178,6 @@ pub fn oh_hunt_prints_on() -> bool {
 /// files under /sys/kernel/debug/dfx/).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
-    // The gdb-park switches park the machine for an external debugger
-    // (an ACTION — why they stayed out of the trace framework) but
-    // they also need the scribble detection engine live, so arming
-    // them arms `rux:scribble` too.
-    #[cfg(feature = "x86_64")]
-    {
-        if let DfxSwitch::ScribblePark = switch {
-            super::scribble::PARK.store(on, Ordering::Relaxed);
-            if on {
-                crate::trace::EVENT_SCRIBBLE
-                    .enabled
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-        if let DfxSwitch::ScribblePid1 = switch {
-            super::scribble::PARK_PID1.store(on, Ordering::Relaxed);
-            if on {
-                crate::trace::EVENT_SCRIBBLE
-                    .enabled
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-        if let DfxSwitch::ScribbleSweep = switch {
-            super::scribble::PARK_SWEEP.store(on, Ordering::Relaxed);
-            if on {
-                crate::trace::EVENT_SCRIBBLE
-                    .enabled
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-    }
     #[cfg(not(feature = "x86_64"))]
     {
         let _ = (switch, on);
@@ -290,10 +187,6 @@ pub fn set(switch: DfxSwitch, on: bool) {
 /// Parse `dfx=` from the kernel command line. Unknown names are ignored
 /// with a warning rather than failing the boot.
 pub fn init_from_cmdline() {
-    // sc57: the fuxwatch write-watchpoint target is its own boot param
-    // (fuxwatch=0xADDR[,DELAYSEC]) — parsed here so it is live from the
-    // first censusd round.
-    crate::sync::futex::fuxwatch_parse();
     let raw = match crate::cmdline::get_param("dfx") {
         Some(v) => v,
         None => return,

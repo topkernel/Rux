@@ -1638,6 +1638,51 @@ fn rip_sample(rip: u64) {
     }
 }
 
+// ===== Memory-domain pace counters (alloc/reclaim guarded domain) =====
+//
+// Leg-15 counters relocated from the deleted sc-series heartbeat
+// module: the perf-gate row "reclaim slowpath on standard boots:
+// drct=0 class" is evaluated from the RECLM line in dump(). All call
+// sites are fault/alloc hot paths: ONE relaxed fetch_add per event
+// (after the armed check), no locks held, no I/O.
+
+static PACE_COW: AtomicU64 = AtomicU64::new(0);
+static PACE_COW_J: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT_J: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT_MAXJ: AtomicU64 = AtomicU64::new(0);
+static PACE_SLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Record one COW fault resolution attempt. `j0` is the jiffies value
+/// captured at handle_cow_fault entry. No-op unless syscost is armed.
+pub fn note_cow(j0: u64) {
+    if !on() {
+        return;
+    }
+    PACE_COW.fetch_add(1, Ordering::Relaxed);
+    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    PACE_COW_J.fetch_add(d, Ordering::Relaxed);
+}
+
+/// Record one direct-reclaim round (try_to_free_pages), same shape.
+pub fn note_drct(j0: u64) {
+    if !on() {
+        return;
+    }
+    PACE_DRCT.fetch_add(1, Ordering::Relaxed);
+    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    PACE_DRCT_J.fetch_add(d, Ordering::Relaxed);
+    PACE_DRCT_MAXJ.fetch_max(d, Ordering::Relaxed);
+}
+
+/// Record one page-alloc slowpath entry (zone fastpath failed).
+pub fn note_slow() {
+    if !on() {
+        return;
+    }
+    PACE_SLOW.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Periodic dump from the timer softirq. Cheap when off.
 pub fn tick(now_jiffies: u64) {
     if !on() {
@@ -1658,12 +1703,32 @@ pub fn dump() {
     const US: u64 = 10;
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
 
+    // Memory-domain pace counters (alloc/reclaim guarded domain). These
+    // came from the deleted sc-series heartbeat module (leg-15): the
+    // merge-gate row "reclaim slowpath on standard boots: drct=0 class"
+    // reads this line on every syscost boot. Cumulative counters; on a
+    // standard boot cow tracks COW-fault resolutions while drct/slow
+    // must stay in the zero class (reclaim slowpath emergence).
+    {
+        let zfree = crate::mm::pglist::first_online_node()
+            .map(|n| n.free_pages() as u64)
+            .unwrap_or(0);
+        crate::pr_warn!(
+            "SYSCOST t={}s RECLM cow={} cowJ={} drct={} drctJ={} drctMaxJ={} slow={} zfree={}",
+            secs,
+            PACE_COW.load(Ordering::Relaxed),
+            PACE_COW_J.load(Ordering::Relaxed),
+            PACE_DRCT.load(Ordering::Relaxed),
+            PACE_DRCT_J.load(Ordering::Relaxed),
+            PACE_DRCT_MAXJ.load(Ordering::Relaxed),
+            PACE_SLOW.load(Ordering::Relaxed),
+            zfree
+        );
+    }
+
     // 39th: AF_UNIX hot-path phase anatomy rides the same dump cadence
     // (no-op unless the unixrd=1 cmdline param is armed).
     crate::debug::unixrd::dump();
-    // hilog-flood lane: OH log-fabric per-caller census (no-op unless
-    // the hilogcensus=1 cmdline param is armed).
-    crate::debug::hilogcensus::dump();
     // rt-r4: per-caller binder WORLD section maxima (all WORLD sections
     // share one REST_SITES row — this splits the 6-8 ms class by caller).
     {

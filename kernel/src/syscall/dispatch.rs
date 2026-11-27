@@ -928,56 +928,6 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     };
 
-    // EFAULTTRAC (sleep-EFAULT hunt): python's time.sleep surfaces EFAULT
-    // from some syscall, but not from any of the instrumented sleep paths.
-    // Name every syscall that returns exactly -EFAULT so the culprit is
-    // identifiable from the console. Rate-limited.
-    //
-    // RETIRED (probe-retire): the trace was unconditional (37 lines per
-    // ub2404 boot). It now lives behind the existing OH hunt-print
-    // master gate (rux:ohhunt (retired dfx=ohhunt)); the switch is checked only on the
-    // EFAULT return path, so the hot path is untouched.
-    if result == -(errno::EFAULT as i64)
-        && crate::debug::switches::oh_hunt_prints_on()
-    {
-        static EFT_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if EFT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-            crate::pr_info!(
-                "EFAULTTRAC: pid={} nr={} a0={:#x} a1={:#x}",
-                crate::process::current_pid(), syscall_no, args[0], args[1]
-            );
-        }
-    }
-
-    // ub2404 bring-up: budgeted ENOSYS tracer -- every syscall that
-    // answers ENOSYS gets one line (pid, generic nr, first two args).
-    // journald's "Failed to map main seqnum file: Function not
-    // implemented" needs exactly this attribution; the generic nr maps
-    // through syscall/x86_compat.rs comments.
-    // ub2404-gaps blind-spot fix: numbers that hit the unknown-syscall
-    // arm are EXCLUDED (they carry their own per-nr budgeted
-    // attribution above) — keyctl's 57 joins/boot used to eat this
-    // whole budget before the implemented-but-ENOSYS families printed.
-    //
-    // RETIRED (probe-retire): unconditional (budget 200 lines/boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
-    if result == -(38i64)
-        && !unknown_nr
-        && crate::debug::switches::oh_hunt_prints_on()
-    {
-        static ENOSYS_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if ENOSYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-            crate::pr_info!(
-                "ENOSYS-TRACE: pid={} nr={} a0={:#x} a1={:#x}",
-                crate::process::current_pid(),
-                syscall_no,
-                args[0],
-                args[1]
-            );
-        }
-    }
 
     // STRACE1 (loader hunts, rux:strace1 (retired dfx=strace1)): one line per file/memory
     // syscall of PID 1, with the pathname decoded for path-taking calls.

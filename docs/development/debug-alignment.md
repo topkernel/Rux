@@ -250,6 +250,43 @@ Judged individually; call-site counts are greps of the 830da5bed tree
 (`crate::dfx::<mod>::` outside the module's own file). "Replacement" is the
 Linux-shaped surface that carries the need after deletion.
 
+### 2.0 Deletion status (executed 2026-11-28, branch dbg-delete)
+
+All twelve S2.1 modules and the S2.2 print families below are DELETED
+(commits on branch `dbg-delete`, base 4efd954b3):
+
+| Module / family | Status |
+|---|---|
+| dfx/scribble.rs | DELETED @ 434244c7a |
+| dfx/wildwatch.rs | DELETED @ 07e32cbd0 |
+| dfx/slowtask.rs | DELETED @ 217284fe2 |
+| dfx/leakorigin.rs | DELETED @ 1a9a08d51 |
+| dfx/r83hunt.rs | DELETED @ b82eeed6c |
+| dfx/treehunt.rs | DELETED @ 9d7757322 |
+| dfx/schb.rs | DELETED @ 87c268ff7 (drct= pace counters reshaped onto syscost — merge-gate memory row keeps its instrument) |
+| dfx/scmtap.rs | DELETED @ 4923d9151 |
+| dfx/spinwatch.rs | DELETED @ 9914af33b |
+| dfx/hilogcensus.rs | DELETED @ b19519ed4 |
+| dfx/pathstash.rs | DELETED @ 6b19289bd |
+| dfx/reaper.rs | DELETED @ 7b004db26 |
+| rt2xdbg prints | DELETED @ be5221250 |
+| cycdbg prints | DELETED @ 717fd4ce1 |
+| fuxwatch/rwfrzwatch engines | DELETED @ d80e3d899 (fuxstuck census family kept) |
+| OH-hunt prints + sprobe master gate | DELETED @ 5d50dd39f |
+| binderprobe print family | DELETED @ bc2240d86 (census stamps kept) |
+| evdev IN-EV/IN-OPEN/echo prints | DELETED @ 37e4ed796 (input:* tracepoints are the surface) |
+| kpreempt | KEPT (conflict vs protection rules: it is the R1 RT kernel-preemption hook — preempt_schedule_irq-shaped behavior named in perf-gate A/B rows — not a print family; the doc row described a pre-verdict-cache shape) |
+| grqwedge cmdline twin | ALREADY CONSOLIDATED (the whole rig is behind the compile-time dfx-grq-wedge feature; nothing left to delete) |
+| faaround / mpkprobe / mpkguard / negmemo / cov_dump | UNTOUCHED (behavior toggles / compile-time-gated; flagged to their owning lanes per the rows) |
+| scribblepin / censusat= | died with scribble / schb |
+| dfx= switch table | shrunk to the two kept fault injectors (claiminject, oncpuinject); dfx= parsing stays for them |
+
+Kept exception-class instruments are untouched: syscost, fsw, filerd,
+taskdump, cctx, forkprof, mmprof, allocwatch, memwatch, ledger,
+mmforensics, driftwatch, metawatch, lostpark, unixrd, wakewatch,
+sched_ev, oops, pstore, ksyms, backtrace, bug, taint, hung_task,
+softlockup, monowatch, and trace/ entirely.
+
 ### 2.1 Whole-module deletions (kernel/src/dfx/)
 
 | Module | L / sites | Original purpose (hunt/campaign) | Deletion risk | Replacement | Verdict |

@@ -552,94 +552,6 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         }
     }
 
-    // OH bring-up: dump late-boot services' stderr text (capped). The
-    // musl loader's "Error loading shared library X" / "Error relocating"
-    // diagnostics go to fd 2, which init redirects away from the UART
-    // console — without this the exact loader failure (and exit 127) is
-    // invisible on serial. Gate pid >= 300 (hdf_devmgr ~320, devhosts
-    // ~404+, render_service ~443, bootanimation later); init/ueventd
-    // stderr before that is kmsg-visible anyway.
-    //
-    // RETIRED (probe-retire): the relay echoed 198 stderr lines of OTHER
-    // guests' services on an ordinary ub2404 boot — Linux never copies
-    // userspace stderr onto the kernel console. It now lives behind the
-    // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)); the write path
-    // itself is untouched.
-    if fd == 2 && crate::debug::switches::oh_hunt_prints_on() {
-        const STDERR_DUMP_N: usize = 200;
-        static STDERR_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        let pid = crate::process::current_pid();
-        // Dedupe: a fixed ring of recent (pid, first-8-bytes) keys — the
-        // hilog-adapter and selinux-restorecon loops reprint the same
-        // line forever and would eat the whole budget on the first
-        // service (observed: ueventd's restorecon spam took 34 slots,
-        // the HiLogAdapter retry loop 130+).
-        static DEDUPE: [(core::sync::atomic::AtomicU32, [core::sync::atomic::AtomicU32; 2]);
-            32] =
-            [const {
-                (
-                    core::sync::atomic::AtomicU32::new(0),
-                    [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)],
-                )
-            }; 32];
-        // Only late pids consume the budget (an unconditional fetch_add
-        // would let the early-boot stderr storm eat it first).
-        let n = if pid >= 300 {
-            STDERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-        } else {
-            STDERR_N.load(core::sync::atomic::Ordering::Relaxed)
-        };
-        if n < STDERR_DUMP_N && pid >= 300 {
-            let len = core::cmp::min(count, 160);
-            let mut kb = [0u8; 160];
-            // buf/count validated by access_ok above; the copy target is
-            // exactly the len-sized head of the local 160-byte buffer.
-            let uncopied = crate::arch::uaccess_safe::copy_in(&mut kb[..len], buf);
-            if uncopied == 0 {
-                let text = kb[..len]
-                    .iter()
-                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
-                    .collect::<alloc::vec::Vec<u8>>();
-                // Dedupe key: pid + first 8 bytes of the text.
-                let key1 = pid;
-                let key2 = u32::from_le_bytes([
-                    kb[0], kb[1], kb[2], kb[3],
-                ]);
-                let key3 = u32::from_le_bytes([
-                    kb[4], kb[5], kb[6.min(len)], kb[7.min(len)],
-                ]);
-                let mut dup = false;
-                for slot in DEDUPE.iter() {
-                    if slot.0.load(core::sync::atomic::Ordering::Relaxed) == key1
-                        && slot.1[0].load(core::sync::atomic::Ordering::Relaxed) == key2
-                        && slot.1[1].load(core::sync::atomic::Ordering::Relaxed) == key3
-                    {
-                        dup = true;
-                        break;
-                    }
-                }
-                if !dup {
-                    let di = n % DEDUPE.len();
-                    DEDUPE[di].0.store(key1, core::sync::atomic::Ordering::Relaxed);
-                    DEDUPE[di].1[0].store(key2, core::sync::atomic::Ordering::Relaxed);
-                    DEDUPE[di].1[1].store(key3, core::sync::atomic::Ordering::Relaxed);
-                    crate::pr_info!(
-                        "stderr[{}] pid {}: {}",
-                        n,
-                        pid,
-                        core::str::from_utf8(&text).unwrap_or("<non-utf8>")
-                    );
-                } else {
-                    // Refund the budget slot: dup lines don't consume it.
-                    STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-                }
-            } else {
-                // Copy failed: refund the slot too.
-                STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
 
     // fdget fast path (the read twin): unshared fdtable borrows the
     // File with no irq/rcu bracket and no refcount RMW; shared tables
@@ -733,20 +645,6 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     }
 
     // Regular file or redirected output
-    // rux:txnhunt (retired dfx=txnhunt) (leg-29A): name the file when this write
-    // later draws a TXN-HANG (sc303's storage family parked
-    // in a write(9) loop; entry frame shows only the raw
-    // fd). Stash BEFORE the pipe fast path so a hang in a
-    // pipe/socket writev labels the pipe, not the previous
-    // regular-file write's path. Lazy form (leg 44): the
-    // old `&file.path()` built the String on EVERY write(2)
-    // even with the switch off — File::path() walks the
-    // dentry and formats, a per-call probe cost on the
-    // write hot path.
-    crate::debug::pathstash::stash_file_lazy(
-        crate::debug::pathstash::OP_WRITE,
-        || file.path(),
-    );
     // Pipe fast path: transfer directly user↔ring (see the
     // matching branch in sys_read). ops was loaded once above for
     // the UART check — the is_X_file() helpers re-read the cell.
@@ -1127,11 +1025,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // perf-ipc: hand the gathered buffer to the unix engine OWNED
             // (write_slice would re-copy it into the segment).
             let ur_t_send = crate::debug::unixrd::now();
-            // hilogcensus (cmdline hilogcensus=1): parse/claim before the
-            // owned send consumes the buffer, record the outcome after.
-            crate::debug::hilogcensus::unix_send_pre(&gathered);
             let sent = crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
-            crate::debug::hilogcensus::unix_send_post(sent as isize);
             crate::debug::unixrd::add(&crate::debug::unixrd::WV_SEND_NS, ur_t_send);
             if sent < 0 {
                 if sent == -11 {

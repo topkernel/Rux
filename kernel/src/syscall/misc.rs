@@ -2211,54 +2211,6 @@ fn epoll_chain_depth(
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
-    // uevent hunt (serial-getty chain): every epoll registration of a
-    // KOBJECT_UEVENT netlink socket — did udevd arm the socket-activation
-    // monitor fd at all, and as which fd number? Budgeted.
-    //
-    // RETIRED (probe-retire): unconditional (3 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) like the
-    // rest of the uevent-hunt family.
-    if crate::debug::switches::oh_hunt_prints_on() {
-        static UEC_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-            if let Some(ft) = crate::sched::get_current_fdtable() {
-                if let Some(f) = ft.get_file(args[2] as usize) {
-                    if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
-                        if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
-                            // events mask (ADD/MOD only — DEL passes none)
-                            let mut evs = 0u32;
-                            if (args[1] as i32) == 1 || (args[1] as i32) == 3 {
-                                let p = args[3] as *const u8;
-                                if !p.is_null()
-                                    && crate::arch::uaccess::access_ok(p as usize, 12)
-                                {
-                                    let mut b = [0u8; 12];
-                                    if crate::arch::uaccess_safe::copy_in(&mut b, p as usize)
-                                        == 0
-                                    {
-                                        evs = u32::from_le_bytes(
-                                            b[0..4].try_into().unwrap(),
-                                        );
-                                    }
-                                }
-                            }
-                            crate::pr_info!(
-                                "UEEPCTL[{}] pid={} op={} fd={} sock={:#x} qlen={} events={:#x}",
-                                UEC_N.load(core::sync::atomic::Ordering::Relaxed),
-                                crate::process::current_pid(),
-                                args[1] as i32,
-                                args[2] as i32,
-                                alloc::sync::Arc::as_ptr(&nl) as usize,
-                                nl.recv_queue_len(),
-                                evs
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
     // 120th input hunt: evdev-backed fds entering/leaving an epoll — the
     // datum that says whether the input framework's reader is armed.
     {
@@ -3255,99 +3207,6 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     ret
 }
 
-/// spinwatch: dump this epoll's interest set with each fd's CURRENT
-/// poll verdict — the stuck-ready fd inside a spinner's wait set shows
-/// itself. Rate-limited by debug::spinwatch::record() (armed by the
-/// unified-framework event rux:spinwatch; the per-fd rows record into
-/// rux:spinwatch_fd when that event is armed too). The old
-/// `spinwatch=1` cmdline token survives as a boot alias for both.
-fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
-    use alloc::format;
-    let pid = crate::process::current_pid();
-    let (comm, comm16) = match crate::sched::current() {
-        // Read-only comm access on the current task (t is a reference).
-        Some(t) => {
-            let c = t.comm();
-            let end = c.iter().position(|&b| b == 0).unwrap_or(16);
-            (
-                alloc::string::String::from_utf8_lossy(&c[..end]).into_owned(),
-                *c,
-            )
-        }
-        None => return,
-    };
-    let fdtable = match crate::sched::get_current_fdtable() {
-        Some(f) => f,
-        None => return,
-    };
-    crate::pr_warn!(
-        "SPINWATCH pid={} {} epfd={} interest set (fd, want, now-ready, ops):",
-        pid,
-        comm,
-        epfd
-    );
-    // obs-hygiene migration: the report marker rides the unified
-    // framework (rux:spinwatch — the event IS the arm switch, so a
-    // report by construction means it is on; n is the window count
-    // captured by record() right before it returned true).
-    crate::trace::trace_spinwatch(
-        pid as i32,
-        &comm16,
-        epfd,
-        crate::debug::spinwatch::last_report_n(),
-    );
-    let mut entries = epoll.entries.lock();
-    let head = entries.init_once();
-    // Read-only walk of nodes linked under this lock (same shape as the
-    // wait path's P3 wiring walk) — INV-SYSC-1.
-    let mut cur = edges::list_first(head);
-    let mut shown = 0;
-    while cur != head {
-        let entry: &EpollEntry = edges::list_entry(cur);
-        cur = edges::list_next(cur);
-        let Some(f) = fdtable.get_file(entry.fd as usize) else {
-            continue;
-        };
-        let want = entry.events;
-        // Current readiness verdict (POLLIN|POLLOUT capability probe —
-        // the same dispatch the scan uses; at once-per-5s per task the
-        // cost is fine).
-        let mask = {
-            use epoll_events::{EPOLLIN, EPOLLOUT};
-            use poll_events::{POLLIN, POLLOUT};
-            let mut m = 0u16;
-            if want & EPOLLIN != 0 {
-                m |= POLLIN;
-            }
-            if want & EPOLLOUT != 0 {
-                m |= POLLOUT;
-            }
-            if m == 0 {
-                m = POLLIN | POLLOUT;
-            }
-            f.poll_dispatch(m)
-        };
-        let ops = f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0);
-        crate::pr_warn!(
-            "SPINWATCH   fd={} want={:#06x} ready={:#06x} ops={:#x}",
-            entry.fd,
-            want,
-            mask,
-            ops
-        );
-        // obs-hygiene migration: one rux:spinwatch_fd record per fd row
-        // (armed() check inside — rows vanish, not cost, when only
-        // rux:spinwatch is armed).
-        crate::trace::trace_spinwatch_fd(epfd, entry.fd, want, mask as u32, ops as u64);
-        shown += 1;
-        if shown >= 64 {
-            crate::pr_warn!("SPINWATCH   (interest set truncated at 64)");
-            break;
-        }
-    }
-    drop(entries);
-}
-
 fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
     use epoll_events::*;
     use poll_events::*;
@@ -3806,11 +3665,6 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 }
             }
             let count = ready_events.len().min(maxevents as usize);
-            // spinwatch: a fast EVENT-carrying return round (a permanently
-            // ready fd spins the waiter just as hard as a broken timeout).
-            if crate::debug::spinwatch::record() {
-                spinwatch_dump_interest(epoll, epfd);
-            }
             // events_ptr validated with access_ok; copy_out is the
             // exception-table copy path (SUM=0 safe). A fault (e.g. a
             // read-only page) must fail with EFAULT, not silently succeed
@@ -3836,9 +3690,6 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
                 .unwrap_or(true);
             if expired {
-                if crate::debug::spinwatch::record() {
-                    spinwatch_dump_interest(epoll, epfd);
-                }
                 return 0;
             }
         }

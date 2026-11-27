@@ -187,76 +187,23 @@ pub fn preemptible() -> bool {
 // ============================================================================
 
 /// Add value to current task's preempt_count
-///
-/// #[track_caller] + the leakorigin hook (rux:leakhunt (retired dfx=leakhunt)): when val is
-/// PREEMPT_OFFSET, record the acquire site in the per-task shadow (last
-/// acquire wins). The disabled-path cost is one register compare plus
-/// one relaxed load. At a leak, the shadow names the most recent guard
-/// acquire — outer leaks (settled count 1) name the outer site, inner
-/// leaks (an inner scope abandoned between its acquire and drop) name
-/// the inner site; `cnt_after` in the report separates the two.
 #[inline]
 #[track_caller]
 pub fn preempt_count_add(val: i32) {
     if let Some(task) = crate::sched::current() {
-        if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET || val == SOFTIRQ_OFFSET)
-            && crate::trace::EVENT_LEAKHUNT.armed()
-        {
-            let c0 = task.preempt_count();
-            if val == PREEMPT_OFFSET {
-                crate::debug::leakorigin::note_acquire(
-                    task,
-                    core::panic::Location::caller(),
-                    c0.wrapping_add(1),
-                );
-            } else if val == HARDIRQ_OFFSET {
-                // s14 hardirq shadow: with irq_enter #[track_caller],
-                // Location::caller() names the trap dispatch site.
-                crate::debug::leakorigin::note_hardirq_acquire(
-                    task,
-                    core::panic::Location::caller(),
-                    c0.wrapping_add(HARDIRQ_OFFSET),
-                );
-            } else {
-                // phantom-bits softirq shadow: names the +0x100 booker
-                // (__do_softirq bracket or SeqLock::write).
-                crate::debug::leakorigin::note_softirq_acquire(
-                    task,
-                    core::panic::Location::caller(),
-                    c0.wrapping_add(SOFTIRQ_OFFSET),
-                );
-            }
-        }
         task.add_preempt_count(val);
     }
 }
 
-/// Add with an explicit captured acquire-site location — used by
-/// #[track_caller] inline lock helpers (Spinlock::lock and friends) so
-/// the leakorigin shadow records the LOCK CALLER's file:line, not the
-/// helper's own line (preempt-hunt: the omis=1 phantom faces all
-/// recorded as spinlock.rs:292 / rwlock.rs:450, which name the helper
-/// for every caller and so could not distinguish producers).
+/// Add with an explicit captured acquire-site location — the parameter
+/// is kept for the lock helpers' signatures (the acquire-site shadow it
+/// fed was deleted with its module; the location is unused).
 #[inline]
 pub fn preempt_count_add_at(
     val: i32,
-    loc: &'static core::panic::Location<'static>,
+    _loc: &'static core::panic::Location<'static>,
 ) {
     if let Some(task) = crate::sched::current() {
-        if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
-            && crate::trace::EVENT_LEAKHUNT.armed()
-        {
-            let c0 = task.preempt_count();
-            if val == PREEMPT_OFFSET {
-                crate::debug::leakorigin::note_acquire(task, loc, c0.wrapping_add(1));
-            } else {
-                crate::debug::leakorigin::note_hardirq_acquire(
-                    task,
-                    loc,
-                    c0.wrapping_add(HARDIRQ_OFFSET),
-                );
-            }
-        }
         task.add_preempt_count(val);
     }
 }
@@ -321,11 +268,6 @@ pub fn preempt_count_reset() {
 /// Called at the beginning of hardware interrupt handling.
 /// IRQ entry path.
 ///
-/// #[track_caller] (s14): under rux:leakhunt (retired dfx=leakhunt) the leakorigin hardirq
-/// shadow records `Location::caller()` — without this attribute every
-/// acquire would name this line; with it, the trap dispatch site
-/// (timer/soft/ext bracket) is recorded.
-///
 /// 119th (epoll-pwait conviction): the bracket's release must act on
 /// the task that TOOK it. The +HARDIRQ_OFFSET base is charged to the
 /// interrupted task, but the bracket can span a context switch (the
@@ -352,26 +294,6 @@ pub fn irq_enter() {
         }
     }
     preempt_count_add(HARDIRQ_OFFSET);
-    // s14 IRQ-PAIR booking check (rux:leakhunt (retired dfx=leakhunt)): remember which task
-    // THIS cpu's bracket booked +HARDIRQ_OFFSET on; irq_exit verifies
-    // the paired sub lands on the same task. RISC-V S-mode hardirqs
-    // cannot nest on one cpu (SIE cleared for the handler), so the
-    // token is strictly outermost per bracket — no nesting bookkeeping.
-    // Bookings resolve through sched::current() == the tp register, so
-    // a split means tp changed between enter and exit: a switch ran
-    // inside the hardirq bracket (the only shape that can strand a
-    // 0x10000 bit on the enter task).
-    if crate::trace::EVENT_LEAKHUNT.armed() {
-        if let Some(task) = crate::sched::current() {
-            let cpu = crate::arch::cpu_id() as usize;
-            if cpu < crate::config::MAX_CPUS {
-                IRQ_PAIR_TASK[cpu].store(
-                    task as *mut _ as usize,
-                    core::sync::atomic::Ordering::Release,
-                );
-            }
-        }
-    }
     crate::debug::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
 }
 
@@ -410,13 +332,6 @@ pub fn hardirq_depth_live(cpu: usize) -> bool {
         && IRQ_BOOK_DEPTH_CNT[cpu].load(core::sync::atomic::Ordering::Acquire) != 0
 }
 
-/// Per-CPU token of the task the in-flight outermost hardirq bracket
-/// booked +HARDIRQ_OFFSET on (s14 IRQ-PAIR probe; see irq_enter).
-static IRQ_PAIR_TASK: [core::sync::atomic::AtomicUsize;
-    crate::config::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicUsize::new(0) };
-        crate::config::MAX_CPUS];
-
 /// Softirq starvation bound for the irq_exit deferral gate (phantom-bits):
 /// 20 ms of the timer timebase. See irq_exit.
 const SOFTIRQ_STARVE_TICKS: u64 =
@@ -428,23 +343,6 @@ const SOFTIRQ_STARVE_TICKS: u64 =
 /// IRQ exit path with softirq invocation.
 #[inline]
 pub fn irq_exit() {
-    // s14 IRQ-PAIR check BEFORE the sub: fire while both counts are
-    // still observable. Direct console, budgeted (60 lines/boot): a
-    // split is the stranded-0x10000 producer, not weather.
-    if crate::trace::EVENT_LEAKHUNT.armed() {
-        let cpu = crate::arch::cpu_id() as usize;
-        if cpu < crate::config::MAX_CPUS {
-            let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
-            if booked != 0 {
-                if let Some(cur) = crate::sched::current() {
-                    let cur_ptr = cur as *mut crate::process::task::Task as usize;
-                    if cur_ptr != booked {
-                        irq_pair_report(cpu, booked, cur_ptr);
-                    }
-                }
-            }
-        }
-    }
     // 119th (epoll-pwait conviction): release the base on the task that
     // BOOKED it. The bracket can span a context switch (the tick
     // handler switches inside it), so the release used to land on
@@ -653,202 +551,3 @@ pub fn irqentry_nmi_exit() {
     nmi_exit();
 }
 
-/// Tick-side orphan scan (phantom-bits, 2026-11-01): the interrupted
-/// task's preempt_count at tick ENTRY (TICK_ENTRY_PC — before this
-/// tick's own booking) names bits it carried INTO the tick. Two of
-/// those are always orphans — bookings whose release never executed:
-///   * the SOFTIRQ bit (0x100) while no softirq window is open on this
-///     CPU (a live __do_softirq bracket keeps in_progress set; a
-///     SeqLock::write section is irq-off, untickable) — the monopolist
-///     face of the lb60 dump;
-///   * ANY hardirq bit (the tick's own 0x10000 is not in the entry
-///     snapshot) — the stranded-0x10000 face.
-/// Prints (cpu, pid, pctick was -> pc now, sched-slot divergence) and
-/// asks the leakorigin shadow for the booking site (ssite/hsite: the
-/// producer's file:line). Per-CPU 50-jiffy spacing; the first firing
-/// after boot IS the producer's capture.
-///
-/// The one unsafe read (the sched slot's task pid) follows the
-/// irq_pair_report promotion discipline: a diagnostic scalar read of a
-/// pointer this CPU published moments before.
-#[allow(unsafe_code)]
-pub fn tick_orphan_scan(cpu_id: usize) {
-    if !crate::trace::EVENT_LEAKHUNT.armed() {
-        return;
-    }
-    if cpu_id >= crate::config::MAX_CPUS {
-        return;
-    }
-    let entry = TICK_ENTRY_PC[cpu_id].load(core::sync::atomic::Ordering::Relaxed) as i32;
-    let soft_orphan = (entry & SOFTIRQ_MASK) != 0
-        && !crate::interrupt::softirq::in_progress_cpu(cpu_id);
-    let hard_orphan = (entry & HARDIRQ_MASK) != 0;
-    if !soft_orphan && !hard_orphan {
-        return;
-    }
-    let Some(task) = crate::sched::current() else {
-        return;
-    };
-    static LAST: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
-        [const { core::sync::atomic::AtomicU64::new(0) };
-            crate::config::MAX_CPUS];
-    let now = crate::drivers::timer::get_jiffies();
-    let last = LAST[cpu_id].load(core::sync::atomic::Ordering::Acquire);
-    if now.wrapping_sub(last) < 50 {
-        return;
-    }
-    if LAST[cpu_id]
-        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    use crate::console::putchar_no_lock as putchar;
-    fn ph(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..8).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
-    fn pd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 12];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
-    let pc_now = task.preempt_count();
-    let pid = task.pid();
-    let slot_task = crate::sched::sched::cpu_state(cpu_id).current as usize;
-    let slot_pid = if slot_task >= 0x8000_0000_0000_0000 {
-        // Diagnostic scalar read of the sched slot's task (the forensics
-        // stale-handle edge — it was this CPU's published pick).
-        crate::debug::forensics_edges::t_pid(slot_task as *const crate::process::Task)
-    } else {
-        0
-    };
-    for &c in b"\nBIT-ORPHAN cpu=" {
-        putchar(c);
-    }
-    pd(cpu_id as u64);
-    for &c in b" pid=" {
-        putchar(c);
-    }
-    pd(pid as u64);
-    for &c in b" pctick=0x" {
-        putchar(c);
-    }
-    ph(entry as u32 as u64);
-    for &c in b" pcnow=0x" {
-        putchar(c);
-    }
-    ph(pc_now as u32 as u64);
-    if soft_orphan {
-        for &c in b" soft=1" {
-            putchar(c);
-        }
-    }
-    if hard_orphan {
-        for &c in b" hard=1" {
-            putchar(c);
-        }
-    }
-    if slot_task != task as *mut _ as usize {
-        for &c in b" slotdiv=1 slotpid=" {
-            putchar(c);
-        }
-        pd(slot_pid as u64);
-    }
-    putchar(b'\n');
-    if soft_orphan {
-        crate::debug::leakorigin::report_softirq_origin(
-            b"BIT-ORPHAN-SOFTIRQ",
-            task,
-        );
-    }
-    if hard_orphan {
-        crate::debug::leakorigin::report_hardirq_origin(
-            b"BIT-ORPHAN-HARDIRQ",
-            task,
-        );
-    }
-}
-
-/// s14 IRQ-PAIR split report: the outermost hardirq bracket booked
-/// +HARDIRQ_OFFSET on `enter` but irq_exit's -HARDIRQ_OFFSET resolves to
-/// `exit` — the tp register changed inside the bracket (a switch ran
-/// there). This is the booking-time producer of the stranded-0x10000
-/// face, measured where it happens (no trap-boundary sampling hole).
-/// Direct console; budget 60 per boot.
-///
-/// The one unsafe_code promotion in this module: both task pointers were
-/// current on this CPU moments before (pinned by execution), the fields
-/// read are plain integers, and the diagnostic runs with IRQs off —
-/// there is no safe expression for "read through this raw task pointer"
-/// without inventing a reference the type system cannot justify.
-#[allow(unsafe_code)]
-fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
-    use crate::console::putchar_no_lock as putchar;
-    static BUDGET: core::sync::atomic::AtomicU32 =
-        core::sync::atomic::AtomicU32::new(60);
-    let b = BUDGET.load(core::sync::atomic::Ordering::Acquire);
-    if b == 0 {
-        return;
-    }
-    BUDGET
-        .compare_exchange(b, b - 1, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
-        .ok();
-    fn phex(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..16).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
-    // SAFETY: diagnostic scalar reads of stable Task fields; both tasks
-    // were current on this cpu moments ago (pinned by execution).
-    let pid_e = crate::debug::forensics_edges::t_pid(enter as *const _);
-    let pid_x = crate::debug::forensics_edges::t_pid(exit as *const _);
-    let pc_e = crate::debug::forensics_edges::t_preempt_count(enter as *const _);
-    let pc_x = crate::debug::forensics_edges::t_preempt_count(exit as *const _);
-    for &c in b"\nIRQ-PAIR-SPLIT cpu=" {
-        putchar(c);
-    }
-    phex(cpu as u64);
-    for &c in b" enter_pid=" {
-        putchar(c);
-    }
-    phex(pid_e as u64);
-    for &c in b" pc=" {
-        putchar(c);
-    }
-    phex(pc_e as u32 as u64);
-    for &c in b" exit_pid=" {
-        putchar(c);
-    }
-    phex(pid_x as u64);
-    for &c in b" pc=" {
-        putchar(c);
-    }
-    phex(pc_x as u32 as u64);
-    for &c in b" enter_tp=" {
-        putchar(c);
-    }
-    phex(enter as u64);
-    for &c in b" exit_tp=" {
-        putchar(c);
-    }
-    phex(exit as u64);
-    putchar(b'\n');
-}

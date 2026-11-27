@@ -70,18 +70,10 @@ pub mod ledger;
 /// Zero-put / free-refusal attribution counters (freelist-drift family):
 /// which release site orphaned the census's refcount-0 pages.
 pub mod driftwatch;
-#[cfg(feature = "x86_64")]
-pub mod scribble;
-/// R83 (R74 producer hunt): live task-header audit + victim dumps.
-pub mod r83hunt;
 /// CLOCK_MONOTONIC jump tripwire (rux:monowatch (retired dfx=monowatch)): samples the shared
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.
 pub mod monowatch;
-/// Wild-write attribution tripwire (rux:wildwatch (retired dfx=wildwatch), x86_64): RO-guards
-/// the hpet quiet-statics cluster in every page-table alias; see
-/// debug/wildwatch.rs (wildwrite-hunt line).
-pub mod wildwatch;
 /// Buddy-meta shadow scan (rux:metawatch (retired dfx=metawatch)): periodic lock-confirmed
 /// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
 /// debug/metawatch.rs (wildwrite-hunt line).
@@ -100,9 +92,6 @@ pub mod pstore;
 /// The non-fatal Oops path: Linux-shaped report, pstore dmesg capture,
 /// task-death policy (Tranche 5); see debug/oops.rs.
 pub mod oops;
-/// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
-/// hunt, cmdline `rux:schb (retired dfx=schb)`); see debug/schb.rs.
-pub mod schb;
 /// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
 /// see debug/fsw.rs.
 pub mod fsw;
@@ -111,41 +100,6 @@ pub mod fsw;
 /// branches — names where the hilogd storm's 28-58 us per-op wall goes;
 /// see debug/unixrd.rs.
 pub mod unixrd;
-/// OH log-fabric per-caller census (hilog-flood lane, cmdline
-/// `hilogcensus=1`): counts unix DGRAM writev sends (the libhilog record
-/// path) per sender pid with a tag histogram, and /dev/kmsg writes per
-/// caller; dumped on the syscost cadence; see debug/hilogcensus.rs.
-pub mod hilogcensus;
-/// Rapid zero-event epoll-return census (hilog-flood lane, cmdline
-/// `spinwatch=1`): counts a task's zero-event epoll_wait returns and
-/// dumps the interest set with live poll verdicts when a spinner is
-/// caught; see debug/spinwatch.rs.
-pub mod spinwatch;
-/// Leak-origin probe (cmdline `rux:leakhunt (retired dfx=leakhunt)`): records the call site of
-/// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
-/// moment a task returns to userspace (or is seen parked) with a nonzero
-/// preempt_count — names the producer of the leaked-count wake-strand
-/// family; see debug/leakorigin.rs.
-pub mod leakorigin;
-/// Last-open path stash for TXN-HANG (rux:txnhunt (retired dfx=txnhunt)): sys_openat stashes
-/// the resolved path at entry so the 1 Hz audit can name the file a
-/// hung server thread is stuck opening (leg-28 item 2: storage_daemon
-/// D-state open family); see debug/pathstash.rs.
-pub mod pathstash;
-/// Process-tree invariant validator (rux:treehunt (retired dfx=treehunt), leg-29A): catches a
-/// live task whose parent pointer names released memory — the E8-REPAR
-/// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
-/// plus stale thread-group parent snapshots; see debug/treehunt.rs.
-pub mod treehunt;
-/// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
-/// same syscall entry for >= 8 s get a line with args and the parked
-/// kernel-stack chain — attributes the leaf of nested-call cascades
-/// (fs stalls behind binder reader exhaustion). See debug/slowtask.rs.
-pub mod slowtask;
-/// SCM_RIGHTS relay tap (rux:scmtap (retired dfx=scmtap), gdm session-fifo hunt): one line
-/// per unix-fd hop/drop plus the fifo last-writer-close line; see
-/// debug/scmtap.rs.
-pub mod scmtap;
 /// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
 /// debug/forkprof.rs.
@@ -162,11 +116,6 @@ pub mod lostpark;
 /// lane): NS-sum brackets for the __schedule, context_switch, wake and
 /// semop/pipe/unix bodies, dumped at shutdown; see debug/cctx.rs.
 pub mod cctx;
-/// Reaper forensics (rux:schedtrace (retired dfx=schedtrace), reaper-waitid lane): SPAWN/ZEXIT/
-/// REAP4/REAP4N/REAPW/ZLINGER — who reaps the OH launcher/systemui
-/// app-cycle children, and whether they linger un-reaped; see
-/// debug/reaper.rs.
-pub mod reaper;
 
 /// Initialize the DFX subsystem.
 ///
@@ -179,9 +128,6 @@ pub fn init() {
     mmprof::ensure_dump_thread();
     // oops=panic seeds panic_on_oops (the sysctl can flip it later).
     oops::init_from_cmdline();
-    // Wild-write tripwire arms between the timekeeper's init and
-    // start_secondaries (no TLB shootdown needed; see wildwatch.rs).
-    wildwatch::arm();
     softlockup::init();
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.

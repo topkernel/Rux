@@ -1309,16 +1309,6 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
     SAREG_SAMGR_PID_PUB.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// 105th: second-level gate for the legacy binder PRINT probes
-/// (SAREG/SACSA/SLRD/SLTX/btx/payload-head). Their ~7k lines/boot of
-/// emit-lock traffic inflate the very latencies they measure — the QPICK
-/// census measured a ~3 ms sender-build window with them armed.
-/// rux:bindertrace (retired dfx=bindertrace) now arms ONLY the passive census (BRTT/QPICK stamps);
-/// the print family additionally needs cmdline `binderprobe=1`
-/// (forkprof/syscost-style cmdline key, NOT a new dfx switch).
-fn binder_probe_on() -> bool {
-    crate::cmdline::get_param("binderprobe").as_deref() == Some("1")
-}
 
 // ============================================================================
 // 105th RTT census (rux:bindertrace (retired dfx=bindertrace)) — the SA-chain round-trip split.
@@ -3147,9 +3137,6 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
     }
-    // rux:schb (retired dfx=schb): record the new proc for the heartbeat's SC-PROC drain
-    // (no-op unless the switch is armed; never any I/O on this path).
-    crate::debug::schb::note_proc_open(pid);
     // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
     // once per binder-using process start — on OH boots that is nearly
     // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
@@ -6285,60 +6272,6 @@ pub fn txn_hang_audit() {
                 crate::drivers::virtio::vw_snap_direct();
             }
         }
-        // Leg-28 item 2 + leg-29A: name the FILE when the hung server
-        // thread is stuck in a file syscall family — the pathstash
-        // entry was written by this tid's own entry path (open family:
-        // sys_openat; regular-file writes: sys_write; fsync family:
-        // sys_fsync — sc310's hiview handler sat in fdatasync 43 min
-        // with only the raw fd visible).
-        // Family must MATCH the stash op: a writev to a pipe/socket
-        // never re-stashes (pipe fast path), so the slot would still
-        // hold an older open's path — printing it against a writev
-        // entry frame mislabels the file (seen on sc314A wave-1).
-        #[cfg(feature = "x86_64")]
-        let fam = if matches!(sys, 2 | 257 | 437) {
-            Some(crate::debug::pathstash::OP_OPEN)
-        } else if matches!(sys, 1 | 20) {
-            Some(crate::debug::pathstash::OP_WRITE)
-        } else if matches!(sys, 74 | 75) {
-            Some(crate::debug::pathstash::OP_SYNC)
-        } else if matches!(sys, 77 | 76) {
-            // x86_64 ABI: 77 ftruncate, 76 truncate (leg-36B).
-            Some(crate::debug::pathstash::OP_TRUNC)
-        } else {
-            None
-        };
-        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
-        let fam = if matches!(sys, 56 | 24) {
-            Some(crate::debug::pathstash::OP_OPEN)
-        } else if matches!(sys, 64 | 66) {
-            Some(crate::debug::pathstash::OP_WRITE)
-        } else if matches!(sys, 82 | 83) {
-            Some(crate::debug::pathstash::OP_SYNC)
-        } else if matches!(sys, 46 | 45) {
-            // asm-generic: 46 ftruncate, 45 truncate (leg-36B).
-            Some(crate::debug::pathstash::OP_TRUNC)
-        } else {
-            None
-        };
-        if let Some(want) = fam {
-            if let Some((op, p)) = crate::debug::pathstash::lookup_file(h.stid) {
-                if op == want {
-                    let opn = match op {
-                        crate::debug::pathstash::OP_OPEN => "open",
-                        crate::debug::pathstash::OP_WRITE => "write",
-                        crate::debug::pathstash::OP_SYNC => "sync",
-                        crate::debug::pathstash::OP_TRUNC => "truncate",
-                        _ => "?",
-                    };
-                    let _ = writeln!(
-                        w,
-                        "TXN-HANG txn{} file-op={} path='{}'",
-                        h.id, opn, p
-                    );
-                }
-            }
-        }
         // Leg-29A stuck-site probe: kernel-text words off the hung
         // thread's kernel stack, so the serial log names WHERE in the
         // kernel the handler is parked (sc310's RUNNING 43-min
@@ -6872,19 +6805,9 @@ pub fn bwr_park_audit() {
         };
         let age = stack_age(s);
         let stack_nonempty = !s.stack.is_empty();
-        // 62nd: the fuxwatch owner-of-record row — force-printed regardless
-        // of the filters below. The M2 freeze's last acquirer (latched in
-        // fuxwatch_log_write on every 0->1 write) parks in a shape the
-        // census previously skipped (own-stack BLOCK_THREAD node, no chain
-        // hit): tid344's park was invisible for 20 boots while it WAS in
-        // the snapshot set the whole time.
-        let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID
-            .load(core::sync::atomic::Ordering::Relaxed);
-        let is_owner = owner_tid != 0 && s.tid == owner_tid;
         let suspicious = (stack_nonempty && age >= 100)
             || h2_write_only
-            || (in_bwr_ioctl && s.todo_len > 0)
-            || is_owner;
+            || (in_bwr_ioctl && s.todo_len > 0);
         // Bucket first, decide printing after.
         if stack_nonempty && age >= 100 {
             stack_holders += 1;
@@ -6892,7 +6815,7 @@ pub fn bwr_park_audit() {
                 futex_parked_stack += 1;
             }
         }
-        if !stack_nonempty && !in_bwr_ioctl && !is_owner {
+        if !stack_nonempty && !in_bwr_ioctl {
             if sys == SYS_FUTEX {
                 futex_waiters += 1;
             } else {
@@ -6908,7 +6831,7 @@ pub fn bwr_park_audit() {
         // print budget — on a wedged boot the pandemic's peripheral
         // parks crowd out exactly the rows the chain walk needs.
         let samgr_row = s.pid == crate::ipc::binder::binder_sareg_samgr_pid();
-        if printed >= 24 && !samgr_row && !is_owner {
+        if printed >= 24 && !samgr_row {
             continue;
         }
         printed += 1;
@@ -7064,9 +6987,8 @@ pub fn bwr_park_audit() {
                 core::sync::atomic::AtomicU32::new(0);
             // 78th: dedicated samgr budget — first-come ordering let
             // non-samgr hung-txn rows eat all 3 scans before the walk
-            // reached the samgr load-waiters, so the chain-driven
-            // FUXWATCH2 arm and the live-word publish never fired. samgr
-            // rows count against MS_S only.
+            // reached the samgr load-waiters. samgr rows count against
+            // MS_S only.
             static MS_S: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             static MS_BURST: core::sync::atomic::AtomicU32 =
@@ -7093,39 +7015,13 @@ pub fn bwr_park_audit() {
             } else {
                 MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
             };
-            if (eligible && budget_ok || is_owner)
+            if eligible && budget_ok
                 && park == "FUTEX"
                 && !task_raw.is_null()
                 && crate::trace::EVENT_FUXSTUCK.armed()
             {
                 match crate::sync::futex::ffrt_mutex_scan(task_raw) {
                     Some(t) => {
-                        // 77th: auto-arm fuxwatch slot 2 on the live
-                        // contended mutex word (chain-detected; shifts
-                        // per boot). Only when the slot is free and a
-                        // samgr-thread scan found it.
-                        let w2 = crate::sync::futex::FRMTX_LIVE_WORD
-                            .load(core::sync::atomic::Ordering::Relaxed);
-                        if w2 != 0
-                            && s.pid as u32
-                                == crate::ipc::binder::binder_sareg_samgr_pid()
-                        {
-                            if crate::sync::futex::FUXWATCH2_ADDR
-                                .compare_exchange(
-                                    0,
-                                    w2,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                )
-                                .is_ok()
-                            {
-                                crate::pr_debug!(
-                                    "FUXWATCH2-CHAIN word={:#x} (live contended FFRT mutex)",
-                                    w2
-                                );
-                                crate::debug::taskdump::ensure_defer_thread();
-                            }
-                        }
                         alloc::format!(" mscan[{}]", t)
                     }
                     None => alloc::string::String::new(),
@@ -7133,87 +7029,6 @@ pub fn bwr_park_audit() {
             } else {
                 alloc::string::String::new()
             }
-        };
-        // 62nd: the owner row's dedicated payload — the deep frame chain
-        // (rbp chain + spill window, offline-symbolized), the wake
-        // history of its park word, the live park state (age + woken +
-        // other waiters), and the PARK WORD'S OWN SHAPE (if the word is
-        // an l word of a mutex the ±64MB heap map never swept — the
-        // worker-pool-region classes — arm fuxwatch2 on it and dump its
-        // object window). Deep + shape once per boot; wakes + park
-        // state every burst.
-        let owner_txt = if is_owner {
-            static OWNER_DEEP_DONE: core::sync::atomic::AtomicBool =
-                core::sync::atomic::AtomicBool::new(false);
-            // oh67: the one-shot deep dump spent itself on the first
-            // (benign, early) owner row in every boot — re-arm while the
-            // latched holder has been holding >30 s, budget 3 stuck-dumps.
-            static OWNER_DEEP_STUCK: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            let owner_age_j = now.wrapping_sub(
-                crate::sync::futex::FUXWATCH_OWNER_J
-                    .load(core::sync::atomic::Ordering::Relaxed),
-            );
-            let stuck_dump = owner_age_j > 300
-                && OWNER_DEEP_STUCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3;
-            let wakes = crate::sync::futex::fuxw_word_wake_summary(a0 as u64, now);
-            let (page, pwoken, pothers) =
-                crate::sync::futex::fuxw_owner_park_state(s.tid, a0 as u64, now);
-            let mut deep = alloc::string::String::new();
-            if OWNER_DEEP_DONE
-                .compare_exchange(
-                    false,
-                    true,
-                    core::sync::atomic::Ordering::Relaxed,
-                    core::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
-                || stuck_dump
-            {
-                use core::fmt::Write as _;
-                let body = match crate::sync::futex::deep_ufw(task_raw) {
-                    Some(t) => t,
-                    None => alloc::string::String::from("none"),
-                };
-                let _ = write!(deep, " FUX-OWNER-DEEP[{}]", body);
-                // The park word's own object shape: an l word here names
-                // M3 (the inner mutex the ±64MB arena scan missed).
-                match crate::sync::futex::fuxw_word_shape(task_raw, a0 as u64) {
-                    Some(sh) => {
-                        let _ = write!(deep, " FUX-OWNER-SHAPE[{}]", sh);
-                        // Arm slot 2 on the shape-detected l word (the
-                        // address of the l word = a0-0x8 for the
-                        // mutexPrivate/musl-mutex layout).
-                        let wl = (a0 as u64).wrapping_sub(0x8);
-                        crate::sync::futex::FUXWATCH2_ADDR.compare_exchange(
-                            0,
-                            wl,
-                            core::sync::atomic::Ordering::Relaxed,
-                            core::sync::atomic::Ordering::Relaxed,
-                        );
-                        let _ = write!(deep, " M3-ARM l={:#x}", wl);
-                    }
-                    None => {
-                        let _ = write!(deep, " FUX-OWNER-SHAPE[cv-word]");
-                    }
-                }
-            }
-            alloc::format!(
-                " OWNER-LATCH(owner_tid={} latch_age={}ms) park[age={}ms woken={} others={}] wakes[{}]{}",
-                owner_tid,
-                now.wrapping_sub(
-                    crate::sync::futex::FUXWATCH_OWNER_J
-                        .load(core::sync::atomic::Ordering::Relaxed)
-                )
-                .saturating_mul(10),
-                page,
-                pwoken,
-                pothers,
-                wakes,
-                deep
-            )
-        } else {
-            alloc::string::String::new()
         };
         // 81st (ohw126 frontier): the sync-holder futex park verdict.
         // A thread parked in FUTEX while STILL holding a sync txn (the
@@ -7345,7 +7160,7 @@ pub fn bwr_park_audit() {
         }
         let _ = writeln!(
             w,
-            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}{}",
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}",
             s.pid,
             s.tid,
             comm_of(task_raw),
@@ -7366,7 +7181,6 @@ pub fn bwr_park_audit() {
             stx,
             chain_txt,
             mscan_txt,
-            owner_txt,
             parkv_txt
         );
     }
@@ -8013,95 +7827,6 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
         t.tid, total, woken, state, verdict
     );
     s
-}
-
-/// rux:schb (retired dfx=schb) heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
-/// cheap per-beat binder summary — live proc count, threads parked in
-/// the blocking binder read, and waiters older than 15s (the rekick
-/// threshold; a healthy boot parks readers for 1-3s at most). Read-only
-/// under WORLD; no formatting, no I/O — all output happens in schbd.
-pub fn schb_beat() -> (usize, usize, usize) {
-    let now = crate::drivers::timer::get_jiffies();
-    let hz = crate::config::KERNEL_HZ as u64;
-    let mut procs = 0usize;
-    let mut waiters = 0usize;
-    let mut waiters15 = 0usize;
-    let w = world_lock();
-    // SAFETY: read-only traversal under WORLD (pm() casts only reach
-    // each live proc's thread list).
-    {
-        if let Some(world) = w.as_ref() {
-            for p in &world.procs {
-                procs += 1;
-                let proc = pm(world, p);
-                for t in &proc.im(world).threads {
-                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
-                    if since == 0 {
-                        continue;
-                    }
-                    waiters += 1;
-                    if hz != 0 && now.saturating_sub(since) >= 15 * hz {
-                        waiters15 += 1;
-                    }
-                }
-            }
-        }
-    }
-    (procs, waiters, waiters15)
-}
-
-/// rux:schb (retired dfx=schb) wedge census: EVERY read-wait binder thread regardless of
-/// age. stall_report only prints waiters older than STALL_SECS (120s);
-/// the census fires at pid-plateau+60s where the wedge's waiters are
-/// younger. Formats under WORLD (no I/O); the caller emits the lines via
-/// ConsoleWriter after the guard drops (the sc89 stall_report
-/// discipline). No stall_reported latching, no rekick side effects.
-pub fn schb_waiter_census(out: &mut alloc::string::String) {
-    use core::fmt::Write as _;
-    let now = crate::drivers::timer::get_jiffies();
-    let hz = crate::config::KERNEL_HZ as u64;
-    if hz == 0 {
-        return;
-    }
-    let w = world_lock();
-    {
-        if let Some(world) = w.as_ref() {
-            for p in &world.procs {
-                let proc = pm(world, p);
-                for t in &proc.im(world).threads {
-                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
-                    if since == 0 {
-                        continue;
-                    }
-                    let age = now.saturating_sub(since) / hz;
-                    let th = t.st(world);
-                    let depth = th.txn_stack.len();
-                    // Same discrimination as stall_report's stall lines:
-                    // SERVER-OWING (parked in read owing a reply — the
-                    // death-loop terminal shape) vs CLIENT-WAIT (waiting
-                    // for its own reply).
-                    let (shape, owed) = match th.txn_stack.last() {
-                        Some(txn) if txn.to_tid(world) == Some(t.tid) => {
-                            ("SERVER-OWING", txn.to_proc.pid)
-                        }
-                        Some(txn) => ("CLIENT-WAIT", txn.to_proc.pid),
-                        None => ("NO-TXN", 0),
-                    };
-                    let _ = writeln!(
-                        out,
-                        "SC-WEDGE-BW pid={} tid={} age={}s depth={} shape={} owed_pid={} kicks={}",
-                        proc.pid,
-                        t.tid,
-                        age,
-                        depth,
-                        shape,
-                        owed,
-                        t.rekick_count.load(core::sync::atomic::Ordering::Relaxed)
-                    );
-                }
-            }
-        }
-    }
 }
 
 pub fn stall_report() {
@@ -9469,40 +9194,6 @@ fn binder_thread_write(
                                 if val == 32 { " POISON(ERR_DEAD_OBJECT)" } else { "" }
                             );
                         }
-                    }
-                }
-                // rux:bindertrace (retired dfx=bindertrace): payload head for small parcels — the
-                // interface token ("ohos.system...." / hdf names) is ASCII
-                // at the head and names the target interface; replies carry
-                // the result int. Read BEFORE the world lock (uaccess).
-                if crate::trace::EVENT_BINDERTRACE.armed() && binder_probe_on()
-                    && tr.data_size > 0
-                    && tr.data_size <= 160
-                {
-                    // Full parcel for small transactions: the
-                    // FLAT_BINDER_OBJECT past the interface token is the
-                    // prime suspect in the AddSystemAbility(5100)
-                    // ERR_TRANSACTION_FAILED loop (driver must translate
-                    // BINDER_TYPE_BINDER -> HANDLE for the target).
-                    let n = tr.data_size as usize;
-                    let mut pb = [0u8; 160];
-                    if crate::arch::uaccess_safe::copy_in(&mut pb[..n], tr.data_buffer as usize)
-                        == 0
-                    {
-                        const HEX: &[u8; 16] = b"0123456789abcdef";
-                        let mut hx = alloc::string::String::with_capacity(n * 2);
-                        for &by in pb[..n].iter() {
-                            hx.push(HEX[(by >> 4) as usize] as char);
-                            hx.push(HEX[(by & 0xf) as usize] as char);
-                        }
-                        crate::pr_debug!(
-                            "btxp: pid {} {} code {} ds {} p {}",
-                            proc.pid,
-                            if reply { "R" } else { "T" },
-                            tr.code,
-                            tr.data_size,
-                            hx
-                        );
                     }
                 }
                 let mut err_cmd: u32 = 0;
@@ -10887,28 +10578,6 @@ fn binder_transaction(
             txn_id = world.next_id;
             world.next_id += 1;
 
-            // rux:bindertrace (retired dfx=bindertrace): one line per resolved transaction — the
-            // HDF devmgr↔devhost handshake debugging needed the actual
-            // conversation (who calls whom, which codes, oneway or not),
-            // not just the failures. 105th: print family behind
-            // binderprobe=1 (see binder_probe_on).
-            if crate::trace::EVENT_BINDERTRACE.armed()
-                && binder_probe_on()
-            {
-                crate::pr_debug!(
-                    "btx: #{} pid {}{} -> pid {} h{} code {} {} ds {} os {}",
-                    txn_id,
-                    proc.pid,
-                    if reply { " R" } else { "" },
-                    target_proc.as_ref().map(|p| p.pid).unwrap_or(0),
-                    tr.target_handle,
-                    tr.code,
-                    if oneway { "oneway" } else { "twoway" },
-                    data_size,
-                    offsets_size
-                );
-            }
-
             let is_async = !reply && oneway;
             let _ = is_async;
 
@@ -11408,256 +11077,6 @@ fn binder_transaction(
         tr.flags,
     );
 
-    // sc155/156 (Session R): SA-table mutation tracer. Session Q closed
-    // the park cause to "SA 501 (AppMgrService) never lands in samgr's
-    // table" but could not see WHO fails to register it: APPTXN covers
-    // only the app family, and samgr's own insert/not-found hilog lines
-    // (I0/D0) are dropped by hilogd flow control long before the
-    // console. This hook is binder-level and sender-agnostic: requests
-    // carrying a samgr table-mutation code (3 ADD, 4 REMOVE, 10
-    // ADD_ONDEMAND, 21 UNLOAD) whose parcel carries the samgr interface
-    // token (decodes "oh..." UTF-16 — HDI interfaces use "OH"/"HDI"
-    // prefixes, which burned the sc155 budget via powermgr/netmanager
-    // noise) print with the first 64 parcel bytes (offline decode:
-    // 8-byte OH parcel header, then string16 [u32 len][u16 chars], then
-    // u32 saId). Replies from the latched samgr pid print the reply's
-    // first u32 (the int32 result). Comparing the send count/content
-    // with the reference Linux run's 102 "insert SA" lines decides
-    // "registrar never sent" vs "samgr rejected/lost" for SA 501.
-    // OH boot lane 2026-11-12 (103rd): the whole SAREG probe is
-    // dfx-gated (bindertrace). It printed ~5.8k lines / 0.8 MB per
-    // pristine OH boot through acquire_emit_lock — a top-5 kernel
-    // site in the SA-window hiperf record — while the hunt it served
-    // (SA 501 registration) is closed. Hunts needing SAREG/SLRD
-    // pairing arm rux:bindertrace (retired dfx=bindertrace) binderprobe=1 (105th: the print
-    // family left plain bindertrace to the passive census).
-    if crate::trace::EVENT_BINDERTRACE.armed()
-        && binder_probe_on()
-    {
-        const SAMGR_ADD: u32 = 3;
-        const SAMGR_REMOVE: u32 = 4;
-        const SAMGR_ADD_ONDEMAND: u32 = 10;
-        const SAMGR_UNLOAD: u32 = 21;
-        // sc209 (leg 14): also trace LOAD (code 7). sc208's 15 s
-        // SLOW-TXN storm was 22/24 foundation->samgr code-7 loads with
-        // exec exactly 15000/30000/89390 ms — samgr's
-        // StartDynamicSystemProcess waiting out the param client's 15 s
-        // set-ack timeout for the "installs" on-demand process (SA 511)
-        // that init never spawns. The parcel head (header + token + said)
-        // names the target of every load offline.
-        const SAMGR_LOAD: u32 = 7;
-        // 60th (coordinator ask): trace SUBSCRIBE (code 6) — the
-        // AddSystemAbilityListener subscriptions (SA 180/3101/5003 from
-        // accountmgr et al) were INVISIBLE to SAREG before: the
-        // subscription stream (sent? delivered? which samgr thread?)
-        // is the launcher-gate evidence.
-        const SAMGR_SUBSCRIBE: u32 = 6;
-        // The samgr interface token starts UTF-16 "oh" at parcel offset
-        // 12 (after the 8-byte OH parcel header + u32 string length).
-        static SAREG_SAMGR_PID: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        static SAREG_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        let mut is_samgr_req = false;
-        if !reply
-            && matches!(
-                tr.code,
-                SAMGR_ADD
-                    | SAMGR_REMOVE
-                    | SAMGR_ADD_ONDEMAND
-                    | SAMGR_UNLOAD
-                    | SAMGR_LOAD
-                    | SAMGR_SUBSCRIBE
-            )
-        {
-            let mut hdr = [0u8; 16];
-            let ok = tr.data_buffer != 0
-                && crate::arch::uaccess_safe::copy_in(&mut hdr, tr.data_buffer as usize) == 0;
-            // "oh" in UTF-16LE at offsets 12..16 (cheap prefilter; HDI
-            // interfaces use "OH"/"HDI" prefixes).
-            if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
-                // 78th: exact-token verify before calling this a samgr
-                // request. The "oh" prefilter alone also matches every
-                // OTHER lowercase-ohos.* interface descriptor — on ohw113
-                // a wifi request flipped SAREG_SAMGR_PID to
-                // wifi_manager_se (877), and the drifted latch silently
-                // disarmed every samgr-keyed instrument downstream
-                // (OH67_M2/OH68 holder decode, the FUXWATCH2-CHAIN arm,
-                // mscan eligibility). The samgr proxy descriptor is the
-                // 22-char UTF-16 string "ohos.samgr.accessToken" at
-                // parcel offset 12 with u32 length 0x16 at offset 8 —
-                // match it fully.
-                let mut tok = [0u8; 56];
-                let tok_ok = tr.data_buffer != 0
-                    && crate::arch::uaccess_safe::copy_in(&mut tok, tr.data_buffer as usize) == 0;
-                let is_samgr_proxy_req = tok_ok
-                    && tok[8] == 22
-                    && tok[9] == 0
-                    && tok[10] == 0
-                    && tok[11] == 0
-                    && &tok[12..56]
-                        == &[
-                            0x6f, 0x00, 0x68, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x2e, 0x00, 0x73,
-                            0x00, 0x61, 0x00, 0x6d, 0x00, 0x67, 0x00, 0x72, 0x00, 0x2e, 0x00,
-                            0x61, 0x00, 0x63, 0x00, 0x63, 0x00, 0x65, 0x00, 0x73, 0x00, 0x73,
-                            0x00, 0x54, 0x00, 0x6f, 0x00, 0x6b, 0x00, 0x65, 0x00, 0x6e, 0x00,
-                        ];
-                if is_samgr_proxy_req {
-                    is_samgr_req = true;
-                    SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
-                    // leg-25 mirror for the SLRD read-side gate (see
-                    // binder_sareg_samgr_pid): samgr's leader comm matches
-                    // no app prefix, so the tracer keys on the pid.
-                    SAREG_SAMGR_PID_PUB.store(
-                        target.pid as u32,
-                        core::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-            }
-        }
-        let reply_to_mutation = reply
-            && in_reply_to
-                .as_ref()
-                .map(|t| {
-                    matches!(
-                        t.code,
-                        SAMGR_ADD
-                            | SAMGR_REMOVE
-                            | SAMGR_ADD_ONDEMAND
-                            | SAMGR_UNLOAD
-                            | SAMGR_LOAD
-                            | SAMGR_SUBSCRIBE
-                    )
-                })
-                .unwrap_or(false)
-            && proc.pid as u32
-                == SAREG_SAMGR_PID.load(core::sync::atomic::Ordering::Relaxed);
-        // 73rd launcher lane: samgr CheckSystemAbility (code 2) — the
-        // per-SA liveness lookups that gate BMS's provisioning (the
-        // SendToStorageQuota path bails when CheckSystemAbility(storage)
-        // returns null; abref1 shows an 84-row SetBundleQuota sweep we
-        // produce ZERO of). Own budget so the volume of routine lookups
-        // cannot eat the SAREG register/subscribe budget above.
-        if !reply && tr.code == 2 && !is_samgr_req {
-            let mut hdr = [0u8; 16];
-            let ok = tr.data_buffer != 0
-                && crate::arch::uaccess_safe::copy_in(&mut hdr, tr.data_buffer as usize) == 0;
-            if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
-                static CSA_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                // 77th: 300 -> 3000 (ohw107 hit the cap by 30 s; the
-                // pre-load CheckSystemAbility lines that name the wedged
-                // loads' targets went dark).
-                if CSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3000 {
-                    // SA id: first int32 past the interface token's
-                    // length word (parcel: header 8 + strlen 4 + token
-                    // bytes...). Decode conservatively: the first
-                    // int32-aligned field after the token; print the
-                    // raw first 24 bytes so the offline decode can
-                    // extract the said for any shape.
-                    let mut pb = [0u8; 24];
-                    let pb_ok = tr.data_buffer != 0
-                        && crate::arch::uaccess_safe::copy_in(&mut pb, tr.data_buffer as usize)
-                            == 0;
-                    const HEXC: &[u8; 16] = b"0123456789abcdef";
-                    let mut hex = alloc::string::String::with_capacity(pb.len() * 2);
-                    if pb_ok {
-                        for &b in pb.iter() {
-                            hex.push(HEXC[(b >> 4) as usize] as char);
-                            hex.push(HEXC[(b & 0xf) as usize] as char);
-                        }
-                    }
-                    crate::pr_debug!(
-                "SACSA txn{} from pid={} comm-check={} -> samgr pid={} dlen={} parcel={}",
-                        txn.id,
-                        proc.pid,
-                        crate::sched::current()
-                            .map(|t| t.comm())
-                            .map(|c| {
-                                alloc::string::String::from(
-                                    core::str::from_utf8(&c[..])
-                                        .unwrap_or("")
-                                        .trim_end_matches('\0'),
-                                )
-                            })
-                            .unwrap_or_default(),
-                        target.pid,
-                        data_size,
-                        hex
-                    );
-                }
-            }
-        }
-        if is_samgr_req || reply_to_mutation {
-            // 77th: 600 -> 4000 (ohw107 starved the SAREG budget silent
-            // before 65 s — exactly the window where the wedged
-            // LoadSystemAbility sends landed).
-            if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
-                // leg-25: the enqueued txn's id, so the send line pairs
-                // 1:1 with the SLRD read line (offline delivery audit).
-                let t_id = txn.id;
-                let comm = crate::sched::current()
-                    .map(|t| t.comm())
-                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
-                    .unwrap_or("")
-                    .trim_end_matches('\0');
-                // sc209: 64 -> 96 bytes so LOAD parcels' SA id survives
-                // past the (longer) samgr interface token.
-                // 24th session print diet: parcel hex only for the first
-                // 40 prints (the token/SI shape is established by then);
-                // later lines keep the 1:1 txn-id pairing for the SLRD
-                // delivery audit without the 192-char dump. Hex built in
-                // one pass (the old per-byte format! collect spent 96
-                // heap Strings per line, 57k allocations across a boot).
-                // 77th: 40 -> 800, and code-7 LOAD sends ALWAYS get the
-                // hex dump — the said (u32 at parcel offset 60, past the
-                // 8-byte header + u32 toklen + 44-byte
-                // "ohos.samgr.accessToken" token + 4 pad) names which SA
-                // each load targets; ohw107's two wedged loads
-                // (txn13020 158 s, txn13847 92 s) were budget-dark.
-                static SAREG_HEX_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                let want_hex = SAREG_HEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800
-                    || (!reply && tr.code == 7 /* SamgrInterfaceCode::LOAD_SYSTEM_ABILITY */);
-                let hex: alloc::string::String = if want_hex {
-                    let mut pb = [0u8; 96];
-                    let pb_ok = tr.data_buffer != 0
-                        && crate::arch::uaccess_safe::copy_in(&mut pb, tr.data_buffer as usize)
-                            == 0;
-                    if pb_ok {
-                        const HEXC: &[u8; 16] = b"0123456789abcdef";
-                        let mut s = alloc::string::String::with_capacity(pb.len() * 2);
-                        for &b in pb.iter() {
-                            s.push(HEXC[(b >> 4) as usize] as char);
-                            s.push(HEXC[(b & 0xf) as usize] as char);
-                        }
-                        s
-                    } else {
-                        alloc::string::String::from("unmapped")
-                    }
-                } else {
-                    alloc::string::String::from("-")
-                };
-                crate::pr_debug!(
-                "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
-                    if reply { "reply" } else { "send " },
-                    t_id,
-                    if reply {
-                        in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
-                    } else {
-                        tr.code
-                    },
-                    proc.pid,
-                    crate::process::current_pid(),
-                    comm,
-                    target.pid,
-                    data_size,
-                    hex
-                );
-            }
-        }
-    }
-
     // lb-lane hunt (launcher bring-up): samgr -> client CALLBACK
     // deliveries. accountmgr (SA 200) creates user 100 — the gate the
     // launcher spawn waits on — only from OnAddSystemAbility callbacks,
@@ -11956,39 +11375,6 @@ fn binder_transaction(
             .map(|n| n.reg_tgid)
             .filter(|&g| g != 0 && g != target.pid)
             .unwrap_or(0);
-        // OH boot lane 2026-11-12 (103rd): dfx-gated (bindertrace) with
-        // the SAREG/SLRD family — the app-txn trace printed ~1.2k lines
-        // per pristine boot through the console emit lock. 105th: print
-        // family behind binderprobe=1.
-        if crate::trace::EVENT_BINDERTRACE.armed()
-            && binder_probe_on()
-            && (sender_is_app || target_child != 0)
-            && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
-        {
-            let mut pb = [0u8; 32];
-            let hex: alloc::string::String = if tr.data_buffer != 0
-                && crate::arch::uaccess_safe::copy_in(
-                    &mut pb,
-                    tr.data_buffer as usize,
-                ) == 0
-            {
-                pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
-            } else {
-                alloc::string::String::from("-")
-            };
-            crate::pr_debug!(
-                "SLTX {} tgid={} pid={} -> pid={} child={} code={:#x} oneway={} dlen={} parcel={}",
-                if sender_is_app { "out" } else { "in " },
-                sender_tgid,
-                proc.pid,
-                target.pid,
-                target_child,
-                tr.code,
-                oneway,
-                data_size,
-                hex
-            );
-        }
     }
 
     // sc184 (session R, the screen gate): composer-path tracer. The render
@@ -13861,48 +13247,6 @@ fn binder_thread_read(
                                             .unwrap_or("")
                                             .trim_end_matches('\0');
                                         let samgr_pid = binder_sareg_samgr_pid();
-                                        // OH boot lane 2026-11-12 (103rd):
-                                        // dfx-gated (bindertrace) with the
-                                        // SAREG send side — see the sc155
-                                        // block gate above. 105th: print
-                                        // family behind binderprobe=1.
-                                        if crate::trace::EVENT_BINDERTRACE.armed()
-                                            && binder_probe_on()
-                                            && (lname.starts_with("m.ohos.")
-                                                || lname.starts_with("os.")
-                                                || lname.starts_with("com.")
-                                                || (samgr_pid != 0 && tg == samgr_pid))
-                                        {
-                                            static SLRD_N: core::sync::atomic::AtomicUsize =
-                                                core::sync::atomic::AtomicUsize::new(0);
-                                            // 24th session: 1500 -> 300 (1291
-                                            // lines in lb349; print-volume
-                                            // diet for the wedge window — the
-                                            // send-side SAREG id pairing
-                                            // still audits early boot, where
-                                            // the interesting deliveries are).
-                                            // 77th: 300 -> 4000 (ohw107 hit
-                                            // the 300 cap by 30 s; the wedge
-                                            // window's samgr read-side went
-                                            // dark before the hung loads).
-                                            if SLRD_N
-                                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                                < 4000
-                                            {
-                                                let name = core::str::from_utf8({ (*cur).comm() })
-                                                    .unwrap_or("")
-                                                    .trim_end_matches('\0');
-                                                crate::pr_debug!(
-                "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
-                                                    tg,
-                                                    thread.tid,
-                                                    name,
-                                                    t.id,
-                                                    t.code,
-                                                    t.target_node.is_none()
-                                                );
-                                            }
-                                        }
                                     }
                                 }
                             }

@@ -566,14 +566,6 @@ pub fn timer_softirq_handler(_nr: usize) {
             // rate-capped inside) — the Gate-1 delivery adjudication
             // backdrop for the accountmgr->AMS StartUser oneway.
             crate::ipc::binder::ams46_audit();
-            // leg-29A: process-tree invariant validator (rux:treehunt (retired dfx=treehunt),
-            // self-gated + rate-capped inside) — E8-REPAR unlinked-
-            // snapshot root-cause hunt.
-            crate::debug::treehunt::tick();
-            // leg-33B: slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), self-gated +
-            // rate-capped inside) — leaf attribution for nested-call
-            // cascades (fs/futex stalls behind reader exhaustion).
-            crate::debug::slowtask::tick();
             // 17th successor: futex-stuck census (rux:fuxstuck (retired dfx=fuxstuck), self-gated
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.
@@ -940,7 +932,7 @@ pub fn timer_softirq_handler(_nr: usize) {
 /// reference's hrtimer_interrupt shape. Called at the TOP of the timer
 /// IRQ (before the tick body) whenever a high-resolution deadline is
 /// due: the precise-sleep wake then happens before the per-tick
-/// accounting/scheduler_tick/scribble/softlockup body instead of after
+/// accounting/scheduler_tick/softlockup body instead of after
 /// it — measured 30-70 us of body between the LAPIC fire and the wake
 /// on the debug kernel (run/RT-2X.md). Delivery context is the same
 /// no-sleep contract as the softirq sweep (R12-3: tokens delivered
@@ -1147,30 +1139,12 @@ fn softirq_diagnostics(current: u64) {
         crate::debug::monowatch::tick(current);
     }
 
-    // rux:wildwatch (retired dfx=wildwatch): canary re-verify on a 1 s cadence (DMA-class
-    // writers bypass PTEs; the RO trap cannot see them).
-    if crate::debug::switches::enabled(crate::debug::switches::DfxSwitch::WildWatch)
-        && current.saturating_sub(LAST_WILDWATCH_VERIFY.load(Ordering::Relaxed)) >= 100
-    {
-        LAST_WILDWATCH_VERIFY.store(current, Ordering::Relaxed);
-        crate::debug::wildwatch::verify();
-    }
 
     // rux:metawatch (retired dfx=metawatch): buddy-meta shadow audit on a 10 s cadence (the
     // buddy face of the wild writer — see debug/metawatch.rs). Throttle
     // is internal to the module.
     if crate::trace::EVENT_METAWATCH.armed() {
         crate::debug::metawatch::tick(current);
-    }
-
-    // rux:schedtrace (retired dfx=schedtrace) reaper forensics (125th waitid leg): 1 Hz zombie-
-    // linger scan — names un-reaped children and what the non-reaping
-    // parent is blocked on instead (debug/reaper.rs).
-    if crate::trace::EVENT_SCHEDTRACE.armed()
-        && current.saturating_sub(LAST_REAPER_SCAN.load(Ordering::Relaxed)) >= 100
-    {
-        LAST_REAPER_SCAN.store(current, Ordering::Relaxed);
-        crate::debug::reaper::zombie_scan(current);
     }
 
     // rux:ledger (retired dfx=ledger): run a pending on-demand accounting census latched by the
@@ -1192,102 +1166,6 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
         // bounded by one tick (10 ms at HZ=100); anything past 20 ms
         // under load is part of the outlier family.
         let late_ticks = token.late_ticks;
-        // timer-gap lane (cyclictest tail attribution, cmdline cycdbg=1):
-        // ns-precision FIRE lateness for one-shot hres wakes — a new
-        // boot max over 100 us prints the interrupted context (the
-        // firing cpu's current task + preempt count), decomposing the
-        // cyclictest Max tail into "fire late" vs "picked late" (the
-        // wake→pick side prints from wakewatch, same gate). Budget
-        // 8/boot; IRQ-context direct console (putc_brief).
-        if late_ticks > 0
-            && matches!(action, Action::Wake { .. })
-            && crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
-        {
-            const TNS_PER_TICK: u64 = 1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64;
-            let late_us = late_ticks * TNS_PER_TICK / 1000;
-            let token_deadline = token.deadline;
-            static FL_MAX: AtomicU64 = AtomicU64::new(0);
-            static FL_N: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            let mut cur = FL_MAX.load(Ordering::Relaxed);
-            while late_us > cur {
-                match FL_MAX.compare_exchange_weak(cur, late_us, Ordering::Relaxed, Ordering::Relaxed) {
-                    Ok(_) => {
-                        if late_us > 100
-                            && FL_N.fetch_add(1, Ordering::Relaxed) < 12
-                        {
-                            use crate::debug::taskdump::putc_brief as putchar;
-                            fn ph(mut v: u64) {
-                                for _ in 0..16 {
-                                    let b = (v >> 60) as u8;
-                                    putchar(if b < 10 { b'0' + b } else { b'a' + b - 10 });
-                                    v <<= 4;
-                                }
-                            }
-                            let (cpid, cpol, cpc) =
-                                crate::sched::current()
-                                    .map(|t| (t.pid() as u64, t.policy() as u64, t.preempt_count() as u64))
-                                    .unwrap_or((u64::MAX, 9, 0));
-                            for &b in b"\nCYC-FIRE-LATE us=" { putchar(b); }
-                            ph(late_us);
-                            // rt-r4 discriminator: this CPU's LAST LAPIC
-                            // arm deadline minus the wheel deadline —
-                            // armdl≈0 says the one-shot was armed AT the
-                            // deadline and KVM delivered it late (host
-                            // term); armdl≈late_us says it was armed AT
-                            // the late instant (kernel coarse-arm term).
-                            #[cfg(feature = "x86_64")]
-                            let arm_dl = crate::drivers::intc::apic::last_arm_deadline(
-                                crate::arch::cpu_id() as usize,
-                            );
-                            #[cfg(not(feature = "x86_64"))]
-                            let arm_dl: u64 = 0;
-                            for &b in b" armdl=" { putchar(b); }
-                            if arm_dl >= token_deadline {
-                                ph((arm_dl - token_deadline) * TNS_PER_TICK / 1000);
-                            } else {
-                                // armed EARLIER than the deadline (a prior
-                                // event's arm): print the wrapped distance
-                                // as a negative marker (huge hex).
-                                ph(u64::MAX);
-                            }
-                            // rt-r4 rate-bias discriminator: the HPET is
-                            // the truth source the TSC track was calibrated
-                            // against. hlate≈0 with us>0 says the fire was
-                            // PUNCTUAL in true time and the TSC-track
-                            // mapping runs fast (track bias); hlate≈us says
-                            // true lateness (LAPIC arm conversion or
-                            // delivery). One MMIO read, tail-print path
-                            // only (budget 12/boot).
-                            #[cfg(feature = "x86_64")]
-                            {
-                                let hlate = if crate::drivers::timer::hpet::ready() {
-                                    crate::drivers::timer::hpet::read_time_nominal()
-                                        .saturating_sub(token_deadline)
-                                        .saturating_mul(TNS_PER_TICK)
-                                        / 1000
-                                } else {
-                                    u64::MAX
-                                };
-                                for &b in b" hlate=" { putchar(b); }
-                                ph(hlate);
-                            }
-                            for &b in b" pid=" { putchar(b); }
-                            ph(match action { Action::Wake { pid } => pid as u64, _ => 0 });
-                            for &b in b" int_ctx_pid=0x" { putchar(b); }
-                            ph(cpid);
-                            for &b in b" pol=" { putchar(b); }
-                            ph(cpol);
-                            for &b in b" pc=" { putchar(b); }
-                            ph(cpc);
-                            putchar(b'\n');
-                        }
-                        break;
-                    }
-                    Err(actual) => cur = actual,
-                }
-            }
-        }
         if late_ticks > 0 {
             WW_FIRE_N.fetch_add(1, Ordering::Relaxed);
             // rt-r4: sum + us-max for the AVG side (see WW_FIRE_SUM_TICKS).
@@ -1447,10 +1325,7 @@ static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 static LAST_PHANTOM_RELINK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Jiffies of the last reaper zombie-linger scan (rux:schedtrace (retired dfx=schedtrace)).
-static LAST_REAPER_SCAN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Jiffies of the last wildwatch canary verify (rux:wildwatch (retired dfx=wildwatch)).
-static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ==================== Wakewatch forensics (vsync-starvation hunt) ====
 //

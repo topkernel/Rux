@@ -1415,10 +1415,9 @@ pub fn do_exit(exit_code: i32) -> ! {
     //                              "clean exit that skipped the unlock"
     //                              face, incl. post-SEGV handler unwind
     //                              (see the segv_age field).
-    // Fires for: the fuxwatch acquire-latched owner, threads of the
-    // park-latched tgid, threads of a tgid with a standing frozen word,
-    // and any thread with a delivered-SIGSEGV history. FuxStuck-gated,
-    // 96/boot.
+    // Fires for: threads of the park-latched tgid, threads of a tgid
+    // with a standing frozen word, and any thread with a delivered-
+    // SIGSEGV history. FuxStuck-gated, 96/boot.
     {
         use core::sync::atomic::Ordering::Relaxed as Relaxed2;
         static HWEXIT_N: core::sync::atomic::AtomicUsize =
@@ -1426,7 +1425,6 @@ pub fn do_exit(exit_code: i32) -> ! {
         if crate::trace::EVENT_FUXSTUCK.armed()
             && HWEXIT_N.fetch_add(1, Relaxed2) < 96
         {
-            let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID.load(Relaxed2);
             let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
             let my_tgid = cur.tgid() as u32;
             let is_leader = dying_pid == my_tgid;
@@ -1443,8 +1441,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             // lock-free (see binder::txn_owing_of).
             let (owing_n, owing_txn, owing_stid) =
                 crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
-            let hit = (owner_tid != 0 && dying_pid == owner_tid)
-                || (park_tgid != 0 && my_tgid == park_tgid)
+            let hit = (park_tgid != 0 && my_tgid == park_tgid)
                 || (!is_leader && frozen)
                 || segv.is_some()
                 || owing_n > 0;
@@ -1485,7 +1482,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     (0, 0)
                 };
                 crate::pr_warn!(
-                    "HW-EXIT-OF-HOLDER tid={} comm='{}' tgid={} code={:#x} cause={} sig={} sender={} sicode={:#x} leader={} grpexit={} lastsys={} pend={:#x} segv_age_j={} segv_cr2lo={:#x} ownerlatch={} parklatch={} owing_n={} owing_txn={} owing_stid={}",
+                    "HW-EXIT-OF-HOLDER tid={} comm='{}' tgid={} code={:#x} cause={} sig={} sender={} sicode={:#x} leader={} grpexit={} lastsys={} pend={:#x} segv_age_j={} segv_cr2lo={:#x} parklatch={} owing_n={} owing_txn={} owing_stid={}",
                     dying_pid,
                     comm,
                     my_tgid,
@@ -1500,7 +1497,6 @@ pub fn do_exit(exit_code: i32) -> ! {
                     pending,
                     segv.map(|s| s.0).unwrap_or(0),
                     segv.map(|s| s.1).unwrap_or(0),
-                    owner_tid,
                     park_tgid,
                     owing_n,
                     owing_txn,
@@ -2491,22 +2487,6 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::sched::defer_exit_notify(notify_parent, current_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);
-        // 125th waitid leg: reaper forensics — record + print every
-        // leader ZOMBIE (exit time, decoded status, parent, SPAWN age,
-        // last-syscall latch) so the REAP4/REAPW arms can time the reap
-        // and ZLINGER can catch the never-reaped case. rux:schedtrace (retired dfx=schedtrace)-
-        // gated (debug/reaper.rs). Non-leaders never reach ZOMBIE (the
-        // deferred-release tail above), so this fires per process.
-        if crate::debug::reaper::on() {
-            crate::debug::reaper::on_zombie(
-                current_pid,
-                exit_code,
-                notify_parent,
-                cur.comm(),
-                cur.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed),
-                cur.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed),
-            );
-        }
         if fp {
             crate::debug::forkprof::add(crate::debug::forkprof::P_EX_NOTIFY, fp_t_notify);
             crate::debug::forkprof::add(crate::debug::forkprof::P_EX_TOTAL, fp_t0);
@@ -2637,9 +2617,8 @@ fn reparent_children_to_init(dying: &Task) {
             // moved here that its already-run reparent would never move
             // again. The freed-then-reaped dest left every moved child
             // (and its thread-group members) naming freed memory — the
-            // TREE-PARENT-DEAD draws of rux:treehunt (retired dfx=treehunt) +
-            // test/subreap_churn.c, and the ancestor sc304's subreaper
-            // walk faulted into.
+            // TREE-PARENT-DEAD draws of test/subreap_churn.c, and the
+            // ancestor sc304's subreaper walk faulted into.
             let m_ref = crate::process::edges::borrow_task(member);
             let st = m_ref.state();
             let member_exiting = m_ref.ti_flags()

@@ -218,37 +218,6 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             }
         }
     }
-    // timer-gap lane (cyclictest tail attribution, cmdline cycdbg=1):
-    // the PICK-side half of the Max decomposition — a wake→pick delta
-    // over 100 us prints (budget 8/boot, direct console — GRQ held
-    // here). With CYC-FIRE-LATE (timer.rs), a cyclictest Max sample
-    // resolves to fire-late vs picked-late vs neither (arm/user side).
-    if delta * 1_000_000 > 100 * TIMER_CLOCK_FREQ_HZ
-        && crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
-    {
-        static CYCP: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        if CYCP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-            use crate::debug::taskdump::putc_brief as putchar;
-            fn ph(mut v: u64) {
-                for _ in 0..16 {
-                    let b = (v >> 60) as u8;
-                    putchar(if b < 10 { b'0' + b } else { b'a' + b - 10 });
-                    v <<= 4;
-                }
-            }
-            let us = delta * 1_000_000 / TIMER_CLOCK_FREQ_HZ;
-            // SAFETY: read-only pid of the picked task (GRQ held pins it).
-            let pid = crate::process::edges::borrow_task(task).pid() as u64;
-            for &b in b"\nCYC-PICK-LATE us=" { putchar(b); }
-            ph(us);
-            for &b in b" pid=0x" { putchar(b); }
-            ph(pid);
-            for &b in b" cpu=" { putchar(b); }
-            ph(cpu as u64);
-            putchar(b'\n');
-        }
-    }
     // s16 (WW5): sub-gate census before the print gate swallows the
     // distribution below 1000 ms.
     let ms = ticks_to_ms(delta);
@@ -281,9 +250,8 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     }
     // sc108: probe prints burn the PICKED task's CPU (UART TX is a busy
     // THRE poll at 115200 — ~87us/byte charged as stime to whoever was
-    // picked). The launcher child's whole 3s appspawn watchdog budget
-    // went to Session-L/M diagnostics printing in its context. Gate the
-    // prints behind `sprobe`; the strand counters above keep running.
+    // picked). The strand counters above keep running; the prints fire
+    // only on census-armed boots (probe_prints_on below).
     if print_budget_ok() && probe_prints_on() {
         // SAFETY: diagnostic reads of stable Task fields; the task is
         // being picked (GRQ held pins it).
@@ -506,12 +474,12 @@ fn print_budget_ok() -> bool {
         .is_ok()
 }
 
-/// sc108 gate for wake-probe console output (see check_picked): pass
-/// `sprobe=0` on the kernel cmdline to silence — each printed line
-/// costs the picked task ~87us/byte of busy UART poll. Default: on
-/// (concurrent hunts still rely on the prints).
+/// sc108 gate for wake-probe console output (see check_picked). The
+/// old cmdline silencer was deleted with the OH hunt-print family;
+/// these prints now fire only on census-armed boots (the reshape lane
+/// converts them to ring records).
 fn probe_prints_on() -> bool {
-    crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
+    true
 }
 
 fn ww_msg(msg: &[u8]) {

@@ -1266,92 +1266,6 @@ fn syslog_clear() {
     rb.read_seq = 0;
 }
 
-/// Newest `n` records, oldest-first, syslog-style one line each.
-///
-/// rux:schb wedge census (tracepoint; retired cmdline token was rux:schb (retired dfx=schb)) (sc-series quiet-quiet hunt): quietcon diverts
-/// the userspace /dev/console stream into this ring, so the tail around
-/// a soft-wedge is the userspace last-known-good boundary. Records are
-/// COPIED out under the ring lock (bounded hold) and formatted after it
-/// drops — formatting ~hundreds of records under irqsave would block
-/// every other CPU's printk for the duration.
-pub fn ring_tail(n: usize) -> alloc::string::String {
-    struct TailRec {
-        level: u8,
-        timestamp: u64,
-        pid: u32,
-        cpu_id: u16,
-        text: [u8; RECORD_TEXT_SIZE],
-        text_len: u16,
-    }
-    let mut out = alloc::string::String::new();
-    let mut recs: alloc::vec::Vec<TailRec> = alloc::vec::Vec::new();
-    {
-        let rb = RING_BUFFER.lock_irqsave();
-        let next_seq_probe = RING_NEXT_SEQ.load(Ordering::Relaxed);
-    if next_seq_probe == 0 {
-            return out;
-        }
-        let ring_next = RING_NEXT_SEQ.load(Ordering::Relaxed);
-        let oldest_kept = ring_next.saturating_sub(RING_BUFFER_CAPACITY as u64);
-        let start = ring_next.saturating_sub(n as u64).max(oldest_kept);
-        let mut seq = start;
-        while seq < ring_next {
-            let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-            let record = ring_rec(idx as u64);
-            if record.pub_seq.load(Ordering::Acquire) == seq + 1 && record.text_len != 0 {
-                let mut text = [0u8; RECORD_TEXT_SIZE];
-                text[..record.text_len as usize]
-                    .copy_from_slice(&record.text[..rec_text_len(record)]);
-                recs.push(TailRec {
-                    level: record.level,
-                    timestamp: record.timestamp,
-                    pid: record.pid,
-                    cpu_id: record.cpu_id,
-                    text,
-                    text_len: record.text_len,
-                });
-            }
-            seq += 1;
-        }
-    }
-    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
-    for r in &recs {
-        let hlen = format_syslog_header(
-            &mut header_buf,
-            r.level,
-            r.timestamp,
-            r.pid,
-            r.cpu_id,
-        );
-        // Header bytes are ASCII we just formatted — checked decode with
-        // a lossy fallback costs one branch on the rare tail render.
-        out.push_str(core::str::from_utf8(&header_buf[..hlen]).unwrap_or(""));
-        // Lossy-UTF8 substitute that stays in core: kernel and console
-        // records are overwhelmingly valid UTF-8; anything else prints
-        // with invalid bytes masked rather than dropped.
-        let raw = &r.text[..r.text_len as usize];
-        match core::str::from_utf8(raw) {
-            Ok(s) => out.push_str(s),
-            Err(_) => {
-                for &b in raw {
-                    out.push(if b.is_ascii_graphic() || b == b' ' {
-                        b as char
-                    } else {
-                        '.'
-                    });
-                }
-            }
-        }
-        if out.as_bytes().last() != Some(&b'\n') {
-            out.push('\n');
-        }
-    }
-    out
-}
-
-/// The newest printk records that fit in `dst`, oldest-first,
-/// syslog-formatted — the console tail of the pstore panic record.
-///
 /// Two properties `ring_tail` does not have, both for the panic context
 /// the pstore capture runs in:
 ///
@@ -1752,8 +1666,6 @@ fn kmsg_console_allows_echo() -> bool {
 /// `off` (ring only). The RING always records every line in all three
 /// modes, so hilog consumers lose nothing.
 fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
-    // hilogcensus (cmdline hilogcensus=1): per-caller /dev/kmsg volume.
-    crate::debug::hilogcensus::kmsg_write(buf);
     let text = core::str::from_utf8(buf).unwrap_or("<binary>");
     let (level, text) = match text.as_bytes() {
         [b'<', d, b'>', rest @ ..] if (b'0'..=b'7').contains(d) => {

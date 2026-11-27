@@ -404,101 +404,6 @@ fn rt_throttled(cpu: usize) -> bool {
     cpu < MAX_CPUS && RT_THROTTLED[cpu].load(core::sync::atomic::Ordering::Acquire)
 }
 
-/// timer-gap lane: periodic pinned-RT wedge-state dump (rt2xdbg=1,
-/// cpu-0's tick only, every 32 jiffies): the slot, idle bit,
-/// need_resched, the global/class counters, the RT bitmap words, and the
-/// per-prio linked pids with their ownership bits — decides between
-/// "linked but never walked", "unlinked while runnable", and
-/// "counter desync" in one read.
-fn rt_wedge_dump_tick(cpu: usize) {
-    if cpu != 0 || crate::cmdline::get_param("rt2xdbg").as_deref() != Some("1") {
-        return;
-    }
-    use crate::debug::taskdump::putc_brief as putchar;
-    fn ph(mut v: u64) {
-        for _ in 0..16 {
-            let n = (v >> 60) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-            v <<= 4;
-        }
-    }
-    static LASTJ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let now = crate::drivers::timer::get_jiffies();
-    let last = LASTJ.load(core::sync::atomic::Ordering::Acquire);
-    if now.wrapping_sub(last) < 32
-        && LASTJ
-            .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
-            .is_err()
-    {
-        return;
-    }
-    // SAFETY: read-only diagnostics under the GRQ lock; all task
-    // pointers come from the RT lists (linked tasks cannot be freed).
-    {
-        let g = grq().lock_irqsave();
-        let slot = cpu_state(0).current;
-        let slot_pid = if slot.is_null() {
-                u32::MAX
-            } else {
-                crate::sched::edges::task_shared(slot).pid()
-            };
-        let idle_bit = (grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire) & 1) != 0;
-        let nr = g.nr_running.load(core::sync::atomic::Ordering::Acquire);
-        let rt_nr = g.rt_rq.nr_running();
-        let w0 = g.rt_rq.bitmap_word(0);
-        let w1 = g.rt_rq.bitmap_word(1);
-        for &b in b"WEDGE jif=" { putchar(b); }
-        ph(now);
-        for &b in b" slot_pid=" { putchar(b); }
-        ph(slot_pid as u64);
-        for &b in b" idlebit=" { putchar(b); }
-        ph(idle_bit as u64);
-        for &b in b" nrsched=" { putchar(b); }
-        ph(need_resched() as u64);
-        for &b in b" nr=" { putchar(b); }
-        ph(nr as u64);
-        for &b in b" rt_nr=" { putchar(b); }
-        ph(rt_nr as u64);
-        for &b in b" bm0=" { putchar(b); }
-        ph(w0);
-        for &b in b" bm1=" { putchar(b); }
-        ph(w1);
-        putchar(b'\n');
-        // Walk every set prio's list (max 6 tasks printed).
-        let mut printed = 0;
-        for word_idx in 0..2usize {
-            let word = if word_idx == 0 { w0 } else { w1 };
-            let mut remaining = word;
-            while remaining != 0 && printed < 6 {
-                let bit = remaining.trailing_zeros() as usize;
-                remaining &= remaining - 1;
-                let prio = 99 - (word_idx * 64 + bit);
-                g.rt_rq.walk_prio(prio as usize, &mut |t: *mut Task| {
-                    if printed >= 6 || t.is_null() {
-                        return;
-                    }
-                    printed += 1;
-                    for &b in b"  RTQ pid=0x" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).pid() as u64);
-                    for &b in b" p=" { putchar(b); }
-                    ph(prio as u64);
-                    for &b in b" mask=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).cpus_allowed() as u64);
-                    for &b in b" st=0x" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).state().bits() as u64);
-                    for &b in b" oncpu=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).on_cpu() as u64);
-                    for &b in b" claim=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed) as u64);
-                    for &b in b" pk=" { putchar(b); }
-                    ph(crate::sched::edges::task_shared(t).pick_state() as u64);
-                    putchar(b'\n');
-                });
-            }
-        }
-    }
-}
-
 /// Per-tick RT bandwidth accounting. Called from scheduler_tick with the
 /// ticking CPU's current task (no locks — plain atomics).
 fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
@@ -517,15 +422,6 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
         RT_PERIOD_START[cpu].store(now, core::sync::atomic::Ordering::Release);
         RT_TIME_USED[cpu].store(0, core::sync::atomic::Ordering::Release);
         if RT_THROTTLED[cpu].swap(false, core::sync::atomic::Ordering::AcqRel) {
-            // timer-gap lane: throttle LIFT (rt2xdbg=1, cpu-0, 32 lines)
-            if cpu == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static TLN: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if TLN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    for &b in b"RT-THROTTLE-LIFT cpu=0\n" { putchar(b); }
-                }
-            }
             set_need_resched();
         }
         return;
@@ -539,15 +435,6 @@ fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
             if used >= RT_RUNTIME_JIFFIES
                 && !RT_THROTTLED[cpu].swap(true, core::sync::atomic::Ordering::AcqRel)
             {
-                // timer-gap lane: throttle SET (rt2xdbg=1, cpu-0, 32 lines)
-                if cpu == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                    static TSN: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    if TSN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                        use crate::debug::taskdump::putc_brief as putchar;
-                        for &b in b"RT-THROTTLE-SET cpu=0\n" { putchar(b); }
-                    }
-                }
                 set_need_resched();
             }
         }
@@ -2280,45 +2167,6 @@ pub fn resched_cpu(cpu: usize) {
                     crate::arch::ipi::send_reschedule_ipi(cpu);
                 }
             }
-            // RT-2X item-7 hunt: name every poke decision for the wedge
-            // boot (cmdline rt2xdbg=1; cpu-0-targeted only, 200-line
-            // budget — self-pokes flood the log): target, sender,
-            // polling flag, and the target's current task (pid/policy).
-            if cpu == 0
-                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-            {
-                static RSP: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if RSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    let cur = cpu_state(cpu).current;
-                    let (cpid, cpolicy) = if cur.is_null() {
-                        (0xDEADu64, 9u64)
-                    } else {
-                        (crate::sched::edges::task_shared(cur).pid() as u64,
-                         crate::sched::edges::task_shared(cur).policy() as u64)
-                    };
-                    let poll = POLLING_IDLE[cpu].load(core::sync::atomic::Ordering::Acquire);
-                    for &b in b"RESCHED-CPU tgt=" { putchar(b); }
-                    ph(cpu as u64);
-                    for &b in b" from=" { putchar(b); }
-                    ph(this_cpu as u64);
-                    for &b in b" cur=0x" { putchar(b); }
-                    ph(cpid);
-                    for &b in b" pol=" { putchar(b); }
-                    ph(cpolicy);
-                    for &b in b" polling=" { putchar(b); }
-                    ph(poll as u64);
-                    putchar(b'\n');
-                }
-            }
         }
     }
     crate::debug::cctx::add(&crate::debug::cctx::IPI_NS, cc_t);
@@ -3278,58 +3126,6 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 );
             }
         }
-        // Scribble hunter (rux:scribble (retired dfx=scribble)): stop tracking before the page
-        // is dropped/deallocated (it may be recycled immediately).
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::unregister(task_ptr);
-        // Scribble hunter: freed-while-linked UAF check — a Task page
-        // returned to the heap while still linked in its class tree
-        // gets recycled as BTreeMap nodes / new Tasks, and subsequent
-        // tree ops write node pointers into the recycled page (the
-        // Task-pointer-fragment scribble family). Loud if it happens.
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed() {
-            if let Some(grq_guard) = try_grq_lock() {
-                use core::sync::atomic::Ordering as O;
-                let policy = crate::sched::edges::task_shared(task_ptr).policy();
-                let linked = match policy {
-                    SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task_ptr),
-                    SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task_ptr),
-                    _ => grq_guard.cfs_rq.is_linked(task_ptr),
-                };
-                let flagged = crate::sched::edges::task_shared(task_ptr).pid() == TASK_POISON;
-                if linked || flagged {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
-                    for &b in MSG {
-                        putchar(b);
-                    }
-                    let mut v = task_ptr as usize;
-                    for _ in 0..16 {
-                        let n = (v >> 60) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    const M2: &[u8] = b" linked=0x";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    putchar(b'0' + linked as u8);
-                    const M3: &[u8] = b" poison=0x";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    let p = crate::sched::edges::task_shared(task_ptr).pid() as usize;
-                    for sh in (0..8u32).rev() {
-                        let n = ((p >> (sh * 4)) & 0xF) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    }
-                    putchar(b'\n');
-                }
-                drop(grq_guard);
-                let _ = O::Relaxed;
-            }
-        }
         // Heap-v3 leak fix: run the Task field destructors BEFORE returning
         // the page. The Task owns heap memory in plain (non-Arc) fields —
         // exe_path: Box<[u8]> (re-set on every execve by set_exe_path),
@@ -3990,21 +3786,6 @@ fn __schedule() {
     // poisoned -> next __schedule runs on the poison) must be healed here,
     // before any dereference: fall back to the hardware truth (tp, the
     // arch per-CPU current_task) and resync the slot.
-    #[cfg(feature = "x86_64")]
-    if crate::trace::EVENT_SCRIBBLE.armed()
-        && !crate::debug::scribble::task_plausible(prev)
-    {
-        let tp0: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
-        crate::debug::scribble::bad_switch_arg(0, prev as u64, tp0 as u64);
-        if crate::debug::scribble::task_plausible(tp0) {
-            this_cpu_mut().current = tp0;
-            prev = tp0;
-        } else {
-            // No sane task identity left on this CPU — freeze for gdb
-            // instead of switching through garbage.
-            crate::debug::scribble::scribble_switch_park(prev as u64, 0);
-        }
-    }
 
     // R55 (multi-mode form-B): the slot-resolved prev must be the task the
     // hardware is actually executing (tp). A mismatch means ti_cpu was
@@ -4018,12 +3799,6 @@ fn __schedule() {
     // shape that produced every phantom capture).
     let tp: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
     if !tp.is_null() && tp != prev {
-        // Scribble hunter tripwire: name the divergence the moment the
-        // scheduler sees it (slot task vs the task the hardware runs).
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed() {
-            crate::debug::scribble::slot_divergence(cpu_id, tp, prev);
-        }
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
         let home = {
             let mut found = usize::MAX;
@@ -4171,9 +3946,6 @@ fn __schedule() {
                 // stack address).
                 r56_print_pid(b"", (tpr.ti_kernel_sp() >> 32) as u32, b":");
                 r56_print_pid(b"", (tpr.ti_kernel_sp() & 0xFFFF_FFFF) as u32, b"\n");
-                // R83: byte-level header dump of the victim — the scribble
-                // shape (extent + alignment) names the writer's store.
-                crate::debug::r83hunt::dump_victim(b"R74", tp);
                 // R85: book the physical truth — unconditional within this
                 // block (tp != prev by the enclosing guard, tp is running,
                 // canonical, and not exiting). The slot's task may be
@@ -4279,10 +4051,6 @@ fn __schedule() {
                 // direct-console, GRQ NOT held here — printk would also
                 // work, keep it raw for the IRQ-off window).
                 if voluntary_sleep && holdout != 0 {
-                    crate::debug::leakorigin::report_outermost(
-                        b"PARK-REFUSED-ORIGIN",
-                        prev,
-                    );
                 }
                 crate::arch::cpu::restore_irq(flags);
                 prev_t.set_state(TaskState::new(TaskState::RUNNING));
@@ -4339,32 +4107,6 @@ fn __schedule() {
     if prev_pid == 0 {
         let nr = GlobalRunQueue::grq_nr_running();
         if nr == 0 {
-            // RT-2X item-7 hunt: the pinned-RT wedge shape — cpu0 idle
-            // forever with runnable RT tasks — convicts this branch when
-            // the counter desyncs from actual class linkage. Tripwire
-            // (cmdline rt2xdbg=1, 32-line budget): names the gap live.
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                let grq = grq();
-                let rt_nr = grq.rt_rq.nr_running() as u64;
-                let rr_nr = grq.rt_rq.rr_nr_running.load(core::sync::atomic::Ordering::Relaxed) as u64;
-                let cfs_linked = {
-                    // count() requires the lock; approximate via the
-                    // timeline's own atomic size if exposed — otherwise
-                    // report -1 (the RT rows alone decide the wedge).
-                    u64::MAX
-                };
-                if rt_nr != 0 || rr_nr != 0 {
-                    // Rule 1 (grq-lock-1st): event ring, not the
-                    // console (pid = cpu, a packs rt|rr counts, b = the
-                    // CFS linked bitmap witness).
-                    crate::sched::sched_ev::sched_ev(
-                        crate::sched::sched_ev::EV_NR_RUNNING_DESYNC,
-                        crate::arch::cpu_id() as u32,
-                        ((rt_nr as u64) << 32) | rr_nr as u64,
-                        cfs_linked,
-                    );
-                }
-            }
             return;
         }
     }
@@ -4633,17 +4375,6 @@ fn __schedule() {
         // enqueue_task's check_rt_preempt).
         let prev_mask = prev_t.cpus_allowed();
         if prev_mask & (1u32 << cpu_id) == 0 {
-            // Rule 1 (grq-lock-1st): the opt-in rt2xdbg census — event
-            // ring, not the console (a = the affinity mask driving the
-            // migration dispatch).
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                crate::sched::sched_ev::sched_ev(
-                    crate::sched::sched_ev::EV_RQD_MIGRATE,
-                    prev_pid,
-                    prev_mask as u64,
-                    0,
-                );
-            }
             match crate::sched::claim_idle_cpu_for(prev_mask) {
                 Some(idle_cpu) => resched_cpu(idle_cpu),
                 None => match prev_t.policy() {
@@ -5103,31 +4834,11 @@ fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *
     //    Skipped while the RT bandwidth is throttled ON THIS CPU (the
     //    70th's per-cpu rt_rq parity; a throttled cpu falls through to
     //    CFS while other cpus may still pick RT).
-    // timer-gap lane: the pinned-RT wedge's prime silent skip — a cpu
-    // whose RT class stays throttled picks idle forever while linked RT
-    // tasks wait. Name the skip live (rt2xdbg=1, cpu-0-targeted, 32-line
-    // budget): the accounting triple (used/period_start/now jiffies)
-    // decides between "throttle never lifts" and "lifts but re-arms".
     // grq-hold-slim Cut 2: the class bit gates the whole arm (mask
     // load above); rt_throttled is now evaluated ONCE per RT-nonempty
     // pick instead of twice.
     if class_mask & CLASS_RT_BIT != 0 {
         let rt_is_throttled = rt_throttled(cpu_id);
-        if rt_is_throttled {
-        // Rule 1 (grq-lock-1st): the opt-in rt2xdbg census — event
-        // ring, not the console (a packs used|period_start, b packs
-        // now|rt_nr).
-        if cpu_id == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-            crate::sched::sched_ev::sched_ev(
-                crate::sched::sched_ev::EV_RT_THROTTLED,
-                cpu_id as u32,
-                (RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed) << 32)
-                    | RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
-                (crate::drivers::timer::get_jiffies() << 32)
-                    | grq.rt_rq.nr_running() as u64,
-            );
-        }
-    }
         if !rt_is_throttled {
         // timer-gap lane (self-migration handoff retry): the walk names
         // an affinity-allowed task it refused only because its owner is
@@ -5147,21 +4858,6 @@ fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *
         if skip_owner < MAX_CPUS
             && SWITCHING_OUT[skip_owner].load(core::sync::atomic::Ordering::Acquire) != 0
         {
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static SOR: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if SOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    for &b in b"SOR-REARM-RISK-RETRY owner=" { putchar(b); }
-                    let mut v = skip_owner as u64;
-                    for _ in 0..4 {
-                        let n = (v >> 28) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    putchar(b'\n');
-                }
-            }
             set_need_resched();
         }
         if let Some(task) = rt_picked {
@@ -5427,27 +5123,6 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
         // lock here, so the ownership picture is stable. A task that is
         // STILL another CPU's published current (sched slot) or still
         // carries another CPU's running_on_cpu claim is being resumed
-        // while it executes — the pick only got here because the on_cpu
-        // byte read false, i.e. the ownership word {ti_on_cpu, claim} was
-        // reset outside the publish protocol (x86-scribble3: the word
-        // held a kernel-static pointer; a single 8-byte store yields
-        // {false, -1}). Name the seed the moment the scheduler first
-        // sees it, with the pre-mark state.
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed() {
-            let me = crate::arch::cpu_id() as usize;
-            let mut owner_slot: i32 = -1;
-            for c in 0..crate::config::MAX_CPUS {
-                if c != me && cpu_state(c).current == task {
-                    owner_slot = c as i32;
-                    break;
-                }
-            }
-            let claim = task.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
-            if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
-                crate::debug::scribble::double_seed(task_ptr, me as u64, owner_slot, claim);
-            }
-        }
         // R74 (riscv64 double-run seed tripwire, always on): same check as
         // the x86 scribble hunter's double_seed, SBI-direct and
         // unconditional — the r74g capture ended with TWO harts both
@@ -5482,14 +5157,6 @@ fn mark_picked_on_cpu(task: &mut Task, is_repick: bool) {
                 r56_print_pid(b"", tp_is_task as u32, b"\n");
             }
         }
-        // Scribble hunter: record the pick (rux:scribble (retired dfx=scribble)).
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::ring_log(
-            crate::arch::cpu_id() as usize,
-            1,
-            task_ptr as u64,
-            0,
-        );
         // R56-heal: publish the FULL ownership qword {on_cpu = true,
         // claim = this cpu} — not just the on_cpu byte — plus the pick
         // state. A fresh pick publishes PICKED: the switch-in must affirm
@@ -5802,14 +5469,6 @@ fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool {
     // wake — the idle fast path in __schedule then never triggered again.
     let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            // Scribble hunter: record the class insert (rux:scribble (retired dfx=scribble)).
-            #[cfg(feature = "x86_64")]
-            crate::debug::scribble::ring_log(
-                crate::arch::cpu_id() as usize,
-                3,
-                task_ptr as u64,
-                1,
-            );
             grq.rt_rq.enqueue(task_ptr, false)
         }
         SchedPolicy::Deadline => {
@@ -5858,14 +5517,6 @@ fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: &mut Task) -> bool {
             grq.dl_rq.enqueue(task_ptr)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
-            // Scribble hunter: record the class insert (rux:scribble (retired dfx=scribble)).
-            #[cfg(feature = "x86_64")]
-            crate::debug::scribble::ring_log(
-                crate::arch::cpu_id() as usize,
-                3,
-                task_ptr as u64,
-                0,
-            );
             grq.cfs_rq.enqueue(task_ptr)
         }
         SchedPolicy::Idle => {
@@ -7037,28 +6688,6 @@ pub fn wake_up_enqueue_opt(
                     // name". One remote bt per boot, gated to SMP2+ boots
                     // (the reporter would deadlock self-IPI'ing its own
                     // cpu on a UP box).
-                    #[cfg(feature = "x86_64")]
-                    {
-                        static W3BT: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        let me = crate::arch::cpu_id() as usize;
-                        // timer-gap: bt the naming cpu AND the sibling
-                        //(SMP2 diagnostic — the g2 wedge needs both sides;
-                        //rt2xdbg=1-gated: it fires remote IPIs).
-                        if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                            for tgt in [w3_fz_naming, w3_fz_naming ^ 1] {
-                                if tgt != me
-                                    && tgt < crate::config::MAX_CPUS
-                                    && W3BT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2
-                                {
-                                    let _ = crate::arch::ipi::remote_backtrace(
-                                        tgt,
-                                        "w3-frozen-exec",
-                                    );
-                                }
-                            }
-                        }
-                    }
                 }
                 return false;
             }
@@ -7360,16 +6989,6 @@ pub fn wake_up_enqueue_opt(
                         }
                         ph(pc as u32 as u64);
                         putchar(b'\n');
-                        // preempt-hunt (2026-11-01): name the acquire
-                        // site whose 1->0 release never ran — the
-                        // outermost-acquire tap. This is the producer's
-                        // home site, printed at the moment the phantom
-                        // count is adjudicated (still the direct-console
-                        // discipline: GRQ held).
-                        crate::debug::leakorigin::report_outermost(
-                            b"WAKE-HEAL-ORIGIN",
-                            task,
-                        );
                         // wake-fastrepro (leak hunt): the ORIGIN tap is
                         // collision-churned on OH boots (2048 slots vs
                         // thousands of tasks — both control boots printed
@@ -7429,13 +7048,10 @@ pub fn wake_up_enqueue_opt(
                     // ate the heal — without this the zero-fire state is
                     // indistinguishable between "never reached" and
                     // "predicate always skips" (the lb17 capture: 21
-                    // PARKED-LEAK, 0 WAKE-HEAL). 110th: rides rux:schb (retired dfx=schb) —
-                    // ~56 direct-console lines rode the pre-launcher
-                    // window of every perf boot.
+                    // PARKED-LEAK, 0 WAKE-HEAL).
                     static WHS_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if WHS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60
-                        && crate::trace::EVENT_SCHB.armed()
                     {
                         use crate::debug::taskdump::putc_brief as putchar;
                         fn pdec(mut v: u64) {
@@ -7485,12 +7101,6 @@ pub fn wake_up_enqueue_opt(
                         // family. Report the outermost acquire site here
                         // too (rux:leakhunt (retired dfx=leakhunt)-gated, own 200-line budget,
                         // still direct-console: GRQ held).
-                        if curr_on {
-                            crate::debug::leakorigin::report_outermost(
-                                b"WAKE-SKIP-ORIGIN",
-                                task,
-                            );
-                        }
                         // Lost-park census tail (rux:lostpark (retired dfx=lostpark)): when the
                         // refusal is curr_on, name the lying slot's CPU +
                         // writer tag and the victim's full ownership word —
@@ -8416,29 +8026,6 @@ fn rt_try_poke_cpu(task: &Task, task_prio: u32, cpu: usize) -> bool {
             & (1u32 << cpu)
             != 0;
         if !running.is_null() && !idle_bit_set {
-            // RT-2X item-7 hunt print kept (rt2xdbg=1,
-            // 200-line budget): the poke decision, live.
-            if task_prio > 85 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static CSP: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if CSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    for &b in b"CRP-POKE-IDLE-SLOT cpu=" { putchar(b); }
-                    ph(cpu as u64);
-                    for &b in b" wakee=0x" { putchar(b); }
-                    ph(task.pid() as u64);
-                    for &b in b" prio=" { putchar(b); }
-                    ph(task_prio as u64);
-                    putchar(b'\n');
-                }
-            }
             resched_cpu(cpu);
             return true;
         }
@@ -8767,10 +8354,6 @@ pub fn scheduler_tick() {
     crate::debug::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
-    // phantom-bits orphan scan: bits the interrupted task carried INTO
-    // the tick whose release never executed (softirq bit outside any
-    // open window / stranded hardirq bit). rux:leakhunt (retired dfx=leakhunt)-gated inside.
-    crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
     // Allocator class-lock holder watch (rux:allocwatch (retired dfx=allocwatch)): scan ALL mm
     // stamp slots CROSS-CPU and name any holder frozen >1 s mid-section.
@@ -9111,10 +8694,6 @@ pub fn scheduler_tick() {
                                     .load(core::sync::atomic::Ordering::Relaxed)
                                     as u64);
                                 putchar(b'\n');
-                                // rux:leakhunt (retired dfx=leakhunt): the acquire site of the
-                                // leaked count (last PREEMPT_OFFSET
-                                // acquire on the incumbent).
-                                crate::debug::leakorigin::report_incumbent_site(cur);
                             }
                         }
                         // PREEMPT-HEAL (round 3c, bound 10 s -> 2 s by
@@ -9422,28 +9001,6 @@ pub fn scheduler_tick() {
                             ph(crate::interrupt::preempt::TICK_ENTRY_CS[cpu_id]
                                 .load(core::sync::atomic::Ordering::Relaxed));
                             putchar(b'\n');
-                            // preempt-hunt (2026-11-01): the
-                            // outermost-acquire record is guaranteed
-                            // intact here — the incumbent's base never
-                            // returned to 0 since the phantom formed
-                            // (inner pairs are 1->2->1 and do not clear
-                            // it), so this names the acquire whose 1->0
-                            // release is missing / late.
-                            crate::debug::leakorigin::report_outermost(
-                                b"PREEMPT-HEAL-ORIGIN",
-                                cur,
-                            );
-                            // phantom-bits: when the healed count carried
-                            // the SOFTIRQ bit, name its +0x100 booker
-                            // (the monopolist face — the release never
-                            // executed anywhere: no sub=0x100 underflow
-                            // exists to point at it instead).
-                            if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
-                                crate::debug::leakorigin::report_softirq_origin(
-                                    b"PREEMPT-HEAL-SOFTIRQ",
-                                    cur,
-                                );
-                            }
                         }
                         // phantom-bits round 2 — the pure-field faces the
                         // base leg can never reach: base == 0 with a
@@ -9507,18 +9064,6 @@ pub fn scheduler_tick() {
                             }
                             putchar(if h_stale { b'H' } else { b'S' });
                             putchar(b'\n');
-                            if s_stale {
-                                crate::debug::leakorigin::report_softirq_origin(
-                                    b"PREEMPT-HEAL-SOFTIRQ",
-                                    cur,
-                                );
-                            }
-                            if h_stale {
-                                crate::debug::leakorigin::report_hardirq_origin(
-                                    b"PREEMPT-HEAL-HARDIRQ",
-                                    cur,
-                                );
-                            }
                         }
                     }
                 }
@@ -9901,9 +9446,6 @@ pub fn scheduler_tick() {
                     }
                     ph(*tp_named as u64);
                     putchar(b'\n');
-                    // rux:leakhunt (retired dfx=leakhunt): name the acquire site of the leaked
-                    // count (last PREEMPT_OFFSET acquire on this task).
-                    crate::debug::leakorigin::report_parked_site(*task);
                 }
             }
             // Lazily reclaim slots whose tasks missed 2+ walks.
@@ -9961,14 +9503,6 @@ pub fn scheduler_tick() {
             }
         }
     }
-
-    // R84 (R74 producer-#2 hunt): the R83 idle-loop audit never ran
-    // under the dbus storm (all harts busy) — validate headers from the
-    // tick itself: current task every tick, full pid-hash walk every 4
-    // jiffies, heap fingerprint scan every 64 jiffies (all CAS-gated
-    // inside; try-locked walks so IRQ context is safe).
-    #[cfg(feature = "riscv64")]
-    crate::debug::r83hunt::sched_tick_audit();
 
     // Poll UART for pending data — MUST be before current check.
     if crate::console::uart_has_data() {
@@ -10236,9 +9770,6 @@ pub fn scheduler_tick() {
     // ticking cpu charges ITS OWN rt_rq budget.
     rt_bandwidth_tick(crate::arch::cpu_id() as u64 as usize, current);
 
-    // timer-gap lane: pinned-RT wedge-state dump (rt2xdbg=1-gated).
-    rt_wedge_dump_tick(crate::arch::cpu_id() as u64 as usize);
-
     // cgroup v2 cpu controller (U1b): charge this tick into the current
     // task's cgroup chain, roll quota periods over / unthrottle, and
     // force a resched when the chain is (or was) throttled so the CPU
@@ -10452,37 +9983,8 @@ fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // R65 hunt (garbage-next guard): __switch_to saves callee registers
     // through `prev` and resumes through `next` (thread.sp/ret_addr are
-    // read from it), so a non-Task pointer here IS the self-propagating
-    // cross-stack engine (x86-scribble3 ring capture: PUB events whose
-    // prev/next are kernel-stack addresses, 0x18 apart). Refuse the
-    // garbage resume — switch to this CPU's idle task instead — and
-    // report; the pick-side seed tripwire names the producer.
-    #[cfg(feature = "x86_64")]
-    let next: &mut Task = {
-        let np = next as *mut Task;
-        if crate::trace::EVENT_SCRIBBLE.armed()
-            && !crate::debug::scribble::task_plausible(np)
-        {
-            crate::debug::scribble::bad_switch_arg(1, np as u64, prev as *mut Task as u64);
-            let idle = cpu_state(cpu_id).idle;
-            if !idle.is_null() {
-                // Keep the ownership slots consistent with what actually
-                // resumes (__schedule already published the garbage next
-                // into the sched slot before calling us).
-                this_cpu_mut().current = idle;
-                // r11: supersede the garbage pick's generation (probe
-                // path; the slot tag stays as the probe left it).
-                pick_gen_supersede(cpu_id, idle);
-                crate::sched::edges::task_mut(idle)
-            } else {
-                // No idle pointer (early boot): freeze for gdb.
-                crate::debug::scribble::scribble_switch_park(np as u64, 1);
-                crate::sched::edges::task_mut(np)
-            }
-        } else {
-            next
-        }
-    };
+    // read from it).
+    let next: &mut Task = next;
 
     next.set_ti_cpu(cpu_id as i32);
 
@@ -10592,7 +10094,7 @@ where
 /// Non-blocking variant of [`for_each_task`] for NON-PREEMPTIBLE contexts
 /// (the timer-softirq heartbeat slot and any IRQ-side diagnostic).
 ///
-/// lb325 wedge forensics (18th successor): both `debug::slowtask::audit` and
+/// lb325 wedge forensics (18th successor): both (the retired slow-entry audit and
 /// `futex_stuck_census` phase B walk tasks from the 1 Hz heartbeat, which
 /// runs with IF=0. A task-context pid-hash writer (insert/remove/for_each
 /// callback) that a timer interrupt suspends mid-critical-section holds its
@@ -10603,7 +10105,7 @@ where
 /// forever). Evidence: both vCPUs at the identical RIP inside
 /// `AtomicBool::compare_exchange` with RDI = pid_hash BUCKET_LOCK+22,
 /// RFL IF=0 on both, BUCKET_LOCK[22] the only held byte in the array, and
-/// the active frames `slowtask::audit → for_each_task →
+/// the active frames `audit → for_each_task →
 /// pid_hash_for_each_task → lock_bucket` / `futex_stuck_census →
 /// for_each_task → …`.
 ///
@@ -12400,8 +11902,6 @@ pub fn cpu_idle_loop() -> ! {
         }
         ph(floor.wrapping_sub(sp));
         putchar(b'\n');
-        #[cfg(feature = "x86_64")]
-        crate::debug::scribble::ring_dump();
     }
 
     loop {
@@ -12444,10 +11944,6 @@ pub fn cpu_idle_loop() -> ! {
         #[cfg(feature = "riscv64")]
         {
             harvest_orphan_tasks(cpu_id);
-            // R83 (R74 producer hunt): header audit on the same cadence —
-            // names the scribbled task within ~4 jiffies of the write,
-            // instead of at its next (fatal) schedule.
-            crate::debug::r83hunt::audit_tick();
         }
 
         // Ensure IRQs are enabled before each schedule() call.

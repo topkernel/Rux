@@ -149,7 +149,7 @@ impl<T: Copy> SeqLock<T> {
     /// body added PREEMPT_OFFSET here while the guard's Drop subtracts
     /// SOFTIRQ_OFFSET — a successful try_write left preempt_count at
     /// 1 − 256 = −255 (underflow: the task looked in_interrupt() forever
-    /// after; the leakorigin user-return tripwire would have flagged it).
+    /// after; the user-return tripwire would have flagged it).
     /// No in-tree caller existed yet, so the bug was latent.
     #[inline]
     pub fn try_write(&self) -> Option<SeqLockWriteGuard<'_, T>> {

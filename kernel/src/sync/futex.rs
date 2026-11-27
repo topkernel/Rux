@@ -192,69 +192,6 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
     if !crate::trace::EVENT_FUXSTUCK.armed() {
         return;
     }
-    // 80th (ohw126 AMS park): immediate per-word wake verdict line. The
-    // sc58 ring only covers ~6 s of wake traffic; on ohw126 the tid-852
-    // park's birth window (77-138 s) was overwritten long before the
-    // census dumped it, so the lost-wake-vs-never-sent verdict was
-    // unanswerable from the ring. When a fuxwatch slot is armed, every
-    // WAKE-class op whose uaddr EQUALS the watched word prints at once:
-    //   - wake ret>=1 while the parked waiter stays parked = kernel
-    //     wake drop;
-    //   - word write (FUXWATCH write log) with NO matching wake line =
-    //     userspace never signaled;
-    //   - neither = the producer never ran (graph stall, oh68 decode).
-    // The watched word is quiet by construction (it is a stall word), so
-    // the line volume is small; bounded anyway (the word may be a hot
-    // lock before the wedge window).
-    {
-        let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-        let w2 = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-        // 81st: the latched sync-holder park word matches too (the word
-        // shifts per boot and even mid-park; the census latch tracks it,
-        // so the immediate verdict follows the live word). Same-VA
-        // foreign objects: the park word is a stack/heap VA mapped in
-        // many processes — only the park tgid's ops are the verdict.
-        let wp = FUXPARK_WORD.load(core::sync::atomic::Ordering::Relaxed);
-        let wp_tgid = FUXPARK_TGID.load(core::sync::atomic::Ordering::Relaxed);
-        let w1_tgid = FUXWATCH1_TGID.load(core::sync::atomic::Ordering::Relaxed);
-        let cur0 = crate::sched::current();
-        let cur0_tgid = match cur0 {
-            Some(t) => crate::sched::edges::task_shared(t).tgid() as u32,
-            None => 0,
-        };
-        let m1 = uaddr == w1 && (w1_tgid == 0 || cur0_tgid == w1_tgid);
-        let m2 = uaddr == w2;
-        let mp = uaddr == wp && (wp_tgid == 0 || cur0_tgid == wp_tgid);
-        if (m1 || m2 || mp) && uaddr != 0 {
-            static FWW_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if FWW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
-                let cur = crate::sched::current();
-                let (tid2, tgid2, comm) = match cur {
-                    Some(t) => {
-                        (
-                            t.pid(),
-                            t.tgid() as u32,
-                            core::str::from_utf8(t.comm().as_slice()).unwrap_or(""),
-                        )
-                    },
-                    None => (0, 0, ""),
-                };
-                let comm = comm.trim_end_matches('\0');
-                // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
-                crate::pr_warn!(
-                    "FUXWATCH-WAKE j={} tid={} tgid={} comm='{}' op={} uaddr={:#x} ret={}",
-                    crate::drivers::timer::get_jiffies(),
-                    tid2,
-                    tgid2,
-                    comm,
-                    cmd,
-                    uaddr,
-                    ret
-                );
-            }
-        }
-    }
     let (tid, tgid) = match crate::sched::current() {
         Some(t) => { (t.pid(), t.tgid() as u32) },
         None => (0, 0),
@@ -311,9 +248,6 @@ static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 // sc186: 64 lines died on arena churn before the wedge window; 192 keeps
 // the same worst-case UART bound as one parkdump stack dump.
-// glib-mutex: rwfrzbudget=N raises the cap (the garepro repro drives
-// thousands of ops/min through the watched word; the default cap goes
-// dark long before a freeze could form). Default unchanged.
 static RWFRZ_WATCH_BUDGET: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(192);
 
@@ -972,53 +906,6 @@ pub fn ffrt_chain_walk(
                 }
                 if is_lock {
                     // sc57b: auto-arm a watch on the DETECTED lock's `l`
-                    // word (hop-0x8: the mutexPrivate state) once per
-                    // boot — ONLY for the registered samgr pid's walks:
-                    // ohc71 armed a random hot mutex from a foreign
-                    // process's ring and trapped the boot into a
-                    // fault+step crawl. 60th: prefer SLOT 1 (the manual
-                    // fuxwatch= param is absent on these boots and the
-                    // same-VA word across processes is a different
-                    // object every boot); fall back to slot 2. The old
-                    // census auto-arm (first stuck OS_FFRT park word =
-                    // a musl cv waiter node on the waiter's own stack)
-                    // cannot identify the owner and was stealing the
-                    // slot before this walk could arm the lock word —
-                    // it no longer fires.
-                    let samgr_pid =
-                        crate::ipc::binder::binder_sareg_samgr_pid();
-                    if samgr_pid != 0 && tk.tgid() as u32 == samgr_pid {
-                        let wl = nxt.wrapping_sub(0x8);
-                        let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-                        if (w1 & !0x3) != (wl & !0x3) {
-                            if FUXWATCH_ADDR
-                                .compare_exchange(
-                                    0,
-                                    wl,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                )
-                                .is_err()
-                            {
-                                FUXWATCH2_ADDR
-                                    .compare_exchange(
-                                        0,
-                                        wl,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                    )
-                                    .ok();
-                            }
-                            // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                            crate::pr_warn!(
-                                "FUXWATCH-LOCKHEAD l={:#x} head={:#x} tid={} pid={}",
-                                wl,
-                                nxt,
-                                tk.pid(),
-                                samgr_pid
-                            );
-                        }
-                    }
                     return Some((out, Some(nxt)));
                 }
                 cur = nxt;
@@ -1054,7 +941,7 @@ pub fn ffrt_chain_walk(
 /// frozen mm; dfx-gated by the caller. Returns None when nothing in
 /// the window shape-tests (plain cond/mutex parks).
 /// 77th: the most recent CONTENDED (l==2) mutexPrivate lock word seen
-/// by any ffrt_mutex_scan — the TXN-HANG print site auto-arms fuxwatch
+/// by any ffrt_mutex_scan
 /// slot 2 on it (the samgr load-wedge's live word, which shifts per
 /// boot: 0x7ff0004b5ec8 on ohw108-110 vs 0x7ff000499a48 on ohw112).
 pub static FRMTX_LIVE_WORD: core::sync::atomic::AtomicU64 =
@@ -1159,10 +1046,8 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
             nhit += 1;
             let l = rd(b + 0x8).unwrap_or(0) & 0xffff_ffff;
             // 77th: publish the first CONTENDED (l==2) mutex's lock word
-            // for the TXN-HANG auto-arm (FUXWATCH2) — the wedge's live
-            // word shifts per boot (0x7ff0004b5ec8 on ohw108-110 vs
-            // 0x7ff000499a48 on ohw112), so a fixed cmdline address
-            // misses; the chain scan sees the real word every burst.
+            // — the wedge's live word shifts per boot, so the chain scan
+            // re-publishes the real word every burst.
             if l == 2 {
                 FRMTX_LIVE_WORD.store(b + 0x8, core::sync::atomic::Ordering::Relaxed);
             }
@@ -1193,68 +1078,8 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
     Some(out)
 }
 
-// sc57 (57th): kernel-side write watchpoint (the coordinator's TCG
-// hardware-watchpoint rig, in-kernel and KVM-fast). fuxwatch=0xADDR
-// names a userspace word whose address is deterministic per image
-// (the ffrt mutexPrivate `l` word of the wedge's contested lock has
-// been 0x7ff0004862b8+8 in every boot); the censusd kthread clears
-// the PTE W bit on every mm that maps it; the write-fault path logs
-// the write (tid, rip), restores W, single-steps the writer via TF
-// (the #DB hook re-clears W), so EVERY write to the word is logged
-// with zero gap. The last write before the freeze names the owner
-// that never unlocked. All zero-cost without the boot param.
-pub static FUXWATCH_ADDR: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-// sc57b: second watch slot — the chain walk auto-arms it on the first
-// NEW shape-detected lock head that differs from FUXWATCH_ADDR's lock
-// (the wedge's nested "B" mutex: the FFRT queue-internal lock).
-pub static FUXWATCH2_ADDR: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-static FUXWATCH2_HITS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-static FUXWATCH_DELAY_S: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-// step-marker SET: two CPUs can fault+step concurrently; a single
-// marker would lose one thread's #DB → SIGTRAP → thread killed.
-static FUXWATCH_STEP_TIDS: [core::sync::atomic::AtomicU32; 4] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; 4];
-// huks-wedge lane (hw2): the stepped PAGE per marker. The #DB hook used
-// to re-protect slot 1's CURRENT page whatever page was stepped — after
-// a slot move that W-cleared the WRONG page (an armed-but-idle one) and
-// left the stepped page writable. The pair (tid, page) makes the
-// retirement land on the page the store actually executed on.
-static FUXWATCH_STEP_PAGES: [core::sync::atomic::AtomicU64; 4] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
-static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 128] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
-const FUXWATCH_BUDGET: usize = 4096;
-use core::sync::atomic::Ordering as Relaxed2;
-// 81st: when slot 1 was armed by the sync-holder park latch, its word is
-// a SINGLE process's object (foundation's main-stack condvar on ohw128:
-// 0x7fffffffc304) — but the VA is mapped in EVERY process (main-stack
-// page). Arming the page in all 67 mms both floods the exact-word log
-// with foreign same-VA writes and (ohw128) overflowed the 16-slot mm
-// done-set: mms armed-but-unrecorded took the un-watched fault path on
-// their own stack writes -> Permission denied -> SIGSEGV storm ->
-// sysrq-c cascade at 97 s. With this set, slot 1's page arms ONLY in
-// the latched tgid's mms; foreign same-VA words never fault at all.
-pub static FUXWATCH1_TGID: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-// huks-wedge lane (hw1): slot 2 gets its own tgid restriction. The
-// 81st restricted only slot 1 (FUXWATCH1_TGID) but arm_round applied
-// that restriction to the WHOLE round — with slot 1 tgid-latched, the
-// round never visited any other tgid's mms, so a slot-2 word armed by
-// the latch (huks on hw1w1) could never actually arm. Slot 2 is now
-// tgid-restricted the same way and arm_round visits a task when EITHER
-// slot's tgid matches.
-pub static FUXWATCH2_TGID: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-
 // 81st (ohw126 frontier): the sync-holder futex park latch. The 80th's
-// immediate per-word wake verdict (fuxw_push) only fires when a fuxwatch
-// slot holds the word, but the tid-852 class park word SHIFTS per boot
+// verdict needs the live word, but the tid-852 class park word SHIFTS per boot
 // (and even mid-park: ohw126 0x7ff082348a84 -> ...fb4 within one page)
 // so no fixed cmdline arm can target it. The TXN-HANG-BWR census is the
 // first kernel component that SEES the word (a thread parked in FUTEX
@@ -1273,24 +1098,10 @@ pub static FUXPARK_TGID: core::sync::atomic::AtomicU32 =
 pub static FUXPARK_J: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
-/// Census-side latch+arm for a sync-holder futex park word (see the
+/// Census-side latch for a sync-holder futex park word (see the
 /// FUXPARK statics). Called every audit burst; stores unconditionally so
-/// a mid-park word SHIFT is tracked (the immediate wake verdict follows
-/// the live word). Watch arming: slot 1 when free; a DIFFERENT page than
-/// slot 1 takes slot 2 (the PTE watch is per page — a same-page shift is
-/// already covered by slot 1's page plus the FW-PG page-mate log).
-/// rux:fuxstuck (retired dfx=fuxstuck)-gated by the caller.
-///
-/// huks-wedge lane (hw1): STICKY watch slots. The 81st re-targeted slot
-/// 1 on every latch, so with several stalled tgids the write watch kept
-/// re-arming the winner of the moment (hw1w1: huks 0x..64224 -> huks
-/// 0x..19224 -> foundation 0x..4e24 within 70 ms; huks's word lost its
-/// slot before any write could be logged). The verdict fields
-/// (FUXPARK_WORD/TID/TGID) still follow the newest row exactly as the
-/// 81st had them; only the SLOTS are now assigned to the first two
-/// DISTINCT stalled tgids and re-targeted only on a same-tgid page move
-/// (with the done-set re-opened so the moved page actually arms — the
-/// old code never reset it on the slot-1 move path).
+/// a mid-park word SHIFT is tracked (the verdict fields follow the
+/// newest row). rux:fuxstuck-gated by the caller.
 pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
     use core::sync::atomic::Ordering::Relaxed;
     if word == 0 || word < 0x1000 {
@@ -1302,517 +1113,6 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
     if prev == 0 {
         FUXPARK_J.store(crate::drivers::timer::get_jiffies() as u32, Relaxed);
     }
-    // ---- watch-slot assignment (sticky, per tgid) ----
-    let arm_print = |slot: u8, w: u64| {
-        let mut cw = crate::debug::backtrace::ConsoleWriter::new();
-        use core::fmt::Write as _;
-        let _ = writeln!(
-            cw,
-            "FUXPARK-ARM s{} word={:#x} tid={} tgid={} (sync-holder park{})",
-            slot,
-            w,
-            tid,
-            tgid,
-            if slot == 1 { "" } else { ", sticky" }
-        );
-        crate::debug::taskdump::ensure_defer_thread();
-    };
-    let reopen_done_set = || {
-        for d in FUXWATCH_MM_DONE.iter() {
-            d.store(0, Relaxed);
-        }
-    };
-    let s1 = FUXWATCH_ADDR.load(Relaxed);
-    let s1_t = FUXWATCH1_TGID.load(Relaxed);
-    if s1 == 0 {
-        if FUXWATCH_ADDR
-            .compare_exchange(0, word, Relaxed, Relaxed)
-            .is_ok()
-        {
-            FUXWATCH1_TGID.store(tgid, Relaxed);
-            // ConsoleWriter, not pr_warn — the censusd audit context
-            // drops printk (ohw128-134: this print never appeared
-            // while the arm provably happened).
-            arm_print(1, word);
-        }
-        return;
-    }
-    if s1_t == tgid {
-        // Same-tgid word (mid-park shift or a sibling word): follow only
-        // a PAGE move (a same-page shift is already covered by the RO
-        // page plus the FW-PG page-mate log).
-        if (s1 & !0xfff) != (word & !0xfff) {
-            // huks-wedge lane (hw2): retire the page being abandoned
-            // BEFORE reopening the done-set (the done-set entries are
-            // the armed-root ledger retire walks). hw4w1 flipped slot 1
-            // across four same-tgid words every 5 s census round; each
-            // flip left the old page W-cleared and the next legitimate
-            // store to it faulted SEGV_ACCERR (hw4 t=116.349, foundation
-            // tid 1470's musl release store on slot 2's abandoned page).
-            fuxwatch_retire_page(s1);
-            FUXWATCH_ADDR.store(word, Relaxed);
-            reopen_done_set();
-            arm_print(1, word);
-        }
-        return;
-    }
-    // Foreign tgid relative to slot 1: slot 2 is dedicated to the SECOND
-    // distinct stalled tgid and stays sticky afterwards.
-    let s2 = FUXWATCH2_ADDR.load(Relaxed);
-    let s2_t = FUXWATCH2_TGID.load(Relaxed);
-    if s2 == 0 {
-        if FUXWATCH2_ADDR
-            .compare_exchange(0, word, Relaxed, Relaxed)
-            .is_ok()
-        {
-            FUXWATCH2_TGID.store(tgid, Relaxed);
-            // neverword lane (nw1 conviction): the FIRST slot-2 latch
-            // reopened the done-set with slot 1's page still W-cleared
-            // in every mm the arm round had covered — those mms left
-            // the ledger with present-RO PTEs, and the fault hook
-            // (mm_armed now false) fell them to do_page_fault ->
-            // SEGV_ACCERR. nw1 t=6.56-6.71: slot1 armed samgr
-            // (0x3fbf13e6a8), the hilogd decode latched slot 2 on the
-            // SAME word ~55 ms later, samgr tid 361's musl arena CAS
-            // faulted on the abandoned page, the group died, init
-            // rebooted (panic) at 10.1 s. Retire slot 1's page (walks
-            // the ledger — MUST precede the reopen) so every armed mm
-            // gets W back before the ledger is cleared.
-            fuxwatch_retire_page(s1);
-            reopen_done_set();
-            arm_print(2, word);
-        }
-    } else if s2_t == tgid && (s2 & !0xfff) != (word & !0xfff) {
-        fuxwatch_retire_page(s2);
-        FUXWATCH2_ADDR.store(word, Relaxed);
-        reopen_done_set();
-        arm_print(2, word);
-    }
-}
-
-/// huks-wedge lane (hw2): retire a watched page — restore the W bit in
-/// every mm the arm round had cleared it in (the done-set). MUST run
-/// before the done-set is reopened (its entries are the ledger of armed
-/// roots). Without this, a slot re-target abandons the old page with W
-/// still cleared; `fuxwatch_page_matches` then answers false for it and
-/// the next legitimate userspace store falls through to do_page_fault →
-/// present-RO PTE → SEGV_ACCERR. hw1w1 t=68.057: distributeddata tid
-/// 1068's musl mutex RELEASE store (rip 0x3fbf11bd83) took exactly that
-/// fault 0.35 s after slot 1 moved off the word's page at t=67.704 —
-/// the mutex froze at 0x80000010 for the rest of the boot and the whole
-/// daemon wedged. Only PTEs that are present, user and W-CLEAR are
-/// touched, so genuine userspace read-only pages are never made
-/// writable: a PROT_READ mapping in an armed root keeps its bits.
-#[cfg(feature = "x86_64")]
-pub fn fuxwatch_retire_page(page: u64) {
-    if page == 0 {
-        return;
-    }
-    let va = page & !0xfff;
-    let mut touched = 0usize;
-    let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-    for d in FUXWATCH_MM_DONE.iter() {
-        let root = d.load(core::sync::atomic::Ordering::Relaxed);
-        if root == 0 {
-            continue;
-        }
-        // SAFETY: read-only diagnostic walk of an armed root.
-        match crate::sync::edges::pt_walk(root, va) {
-            // Present + user + W-clear = a page WE armed (the arm round
-            // wrote 0x1); restore RW.
-            Some((_, bits)) if bits & 0x1 != 0 && bits & 0x4 != 0 && bits & 0x2 == 0 => {
-                // SAFETY: same live root the arm round modified; one
-                // page, RW.
-                crate::arch::mm::mm_ops::mprotect_pte_range(root, va, 1, 0x3);
-                touched += 1;
-            }
-            _ => {}
-        }
-    }
-    drop(g);
-    if touched > 0 {
-        crate::arch::x86_64::mm::asid::flush_tlb_all();
-        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-        crate::pr_warn!("FUXWATCH-RETIRE page={:#x} restored W in {} mms", va, touched);
-    }
-}
-
-/// Non-x86 stub: the W-bit watch is x86_64-only (see fuxwatch_arm_round).
-#[cfg(not(feature = "x86_64"))]
-pub fn fuxwatch_retire_page(_page: u64) {}
-
-/// huks-wedge lane (hw2): full watch shutdown (budget trip). Retire
-/// BOTH slot pages and clear the slot addresses so the fault hook,
-/// the #DB hook and the arm rounds all stop matching. After this the
-/// instrument is inert and every page it ever touched is writable.
-pub fn fuxwatch_retire_all() {
-    let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    let b = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    fuxwatch_retire_page(a);
-    fuxwatch_retire_page(b);
-    FUXWATCH_ADDR.store(0, core::sync::atomic::Ordering::Relaxed);
-    FUXWATCH2_ADDR.store(0, core::sync::atomic::Ordering::Relaxed);
-    for d in FUXWATCH_MM_DONE.iter() {
-        d.store(0, core::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// 62nd (ohw13 post-decode): owner-of-record latch for the watched
-/// lock's l word. Every successful 0->1 acquire write overwrites the
-/// latch; after a freeze no further 0->1 writes happen (only old=2
-/// pile-ins), so the latch ends up naming the tid whose acquire was
-/// the freeze's last one — the holder that never unlocked. The
-/// TXN-HANG-BWR audit reads this and force-prints that thread's row
-/// (FUX-OWNER) with a deep frame walk, regardless of the census
-/// filters that previously hid it (tid344-class rows had no stacked
-/// decode and no chain hit).
-pub static FUXWATCH_OWNER_TID: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-/// Jiffies of the latched acquire (the latch age, for the row).
-pub static FUXWATCH_OWNER_J: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-
-/// Parse fuxwatch=0xADDR[,DELAYSEC] (and sc58: fuxwatch2=0xADDR) once at
-/// boot (called from the dfx init path). Empty/absent leaves the watch
-/// off. fuxwatch2 pre-arms the second slot (the census/chain-walk
-/// auto-arm only fills it when free).
-pub fn fuxwatch_parse() {
-    // rwlock-livelock: rwfrzwatch=0xADDR pre-arms the RWFRZ-WATCH futex
-    // op tracer at boot (the census latches only minutes after a freeze
-    // forms — the holder's final unlock lands before that and was
-    // invisible). For a deterministic image (the ub2404 spawn-queue
-    // mutex address is stable across boots) this records the word's
-    // COMPLETE WAIT/WAKE lifecycle from t=0.
-    if let Some(v) = crate::cmdline::get_param("rwfrzwatch") {
-        if let Some(a) = v.trim_start_matches("0x").split(',').next() {
-            if let Ok(addr) = u64::from_str_radix(a, 16) {
-                if addr > 0x1000 {
-                    RWFRZ_WATCH[0].store(addr as usize, core::sync::atomic::Ordering::Relaxed);
-                    // HOTPATH-PRINT: switch/cmdline-gated (off by default).
-                    crate::pr_warn!("rwfrzwatch armed {:#x}", addr);
-                }
-            }
-        }
-    }
-    if let Some(v) = crate::cmdline::get_param("rwfrzbudget") {
-        if let Ok(b) = v.parse::<usize>() {
-            if b > 0 && b <= 200000 {
-                RWFRZ_WATCH_BUDGET.store(b, core::sync::atomic::Ordering::Relaxed);
-                // HOTPATH-PRINT: switch/cmdline-gated (off by default).
-                crate::pr_warn!("rwfrzbudget {}", b);
-            }
-        }
-    }
-    let Some(v) = crate::cmdline::get_param("fuxwatch") else {
-        // fuxwatch2 is independent of slot 1
-        fuxwatch2_parse();
-        return;
-    };
-    let mut it = v.split(',');
-    let addr = it.next().and_then(|s| {
-        let t = s.trim_start_matches("0x");
-        u64::from_str_radix(t, 16).ok()
-    });
-    let delay = it.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    if let Some(a) = addr {
-        if a > 0x1000 {
-            FUXWATCH_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
-            FUXWATCH_DELAY_S.store(delay, core::sync::atomic::Ordering::Relaxed);
-            // HOTPATH-PRINT: switch/cmdline-gated (off by default).
-            crate::pr_warn!("fuxwatch armed target={:#x} delay={}s", a, delay);
-            // sc58: the arm rounds run in the censusd kthread, which was
-            // only spawned lazily on the first DEFERRED print — ohc73/74
-            // never queued one before the wedge window, so the watch
-            // words never armed (0 FW lines with FUXWATCH2-AUTO armed).
-            // Spawn censusd now (parse runs in early-boot task context).
-            crate::debug::taskdump::ensure_defer_thread();
-        }
-    }
-    fuxwatch2_parse();
-}
-
-fn fuxwatch2_parse() {
-    let Some(v) = crate::cmdline::get_param("fuxwatch2") else {
-        return;
-    };
-    let addr = v.split(',').next().and_then(|s| {
-        let t = s.trim_start_matches("0x");
-        u64::from_str_radix(t, 16).ok()
-    });
-    if let Some(a) = addr {
-        if a > 0x1000 {
-            FUXWATCH2_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
-            // HOTPATH-PRINT: switch/cmdline-gated (off by default).
-            crate::pr_warn!("fuxwatch2 armed target={:#x}", a);
-            // sc58: censusd must exist for the arm rounds (see slot 1).
-            crate::debug::taskdump::ensure_defer_thread();
-        }
-    }
-}
-
-/// Arm round (censusd kthread context): clear W on the watched word's
-/// page in every mm that maps it. Re-run cheaply; each mm armed once
-/// (the fault/#DB dance keeps W cleared afterwards).
-#[cfg(feature = "x86_64")]
-pub fn fuxwatch_arm_round() {
-    use core::sync::atomic::Ordering::Relaxed;
-    let addr = FUXWATCH_ADDR.load(Relaxed);
-    let addr2 = FUXWATCH2_ADDR.load(Relaxed);
-    if (addr == 0 || FUXWATCH_HITS.load(Relaxed) >= FUXWATCH_BUDGET)
-        && (addr2 == 0 || FUXWATCH2_HITS.load(Relaxed) >= FUXWATCH_BUDGET)
-    {
-        return;
-    }
-    if addr != 0
-        && crate::drivers::timer::get_jiffies() < FUXWATCH_DELAY_S.load(Relaxed) * 100
-    {
-        return;
-    }
-    crate::sched::for_each_task_try(|task| {
-        // SAFETY: diagnostic read under the for_each_task contract.
-        let tk = crate::sched::edges::task_shared(task);
-        // 81st: a park-latched slot-1 word is watched in its OWN tgid
-        // only (see FUXWATCH1_TGID) — the same VA in every other mm is
-        // a different object. hw1 (huks-wedge): the restriction is now
-        // PER SLOT — slot 2 carries its own tgid (FUXWATCH2_TGID) and
-        // the round visits a task when EITHER slot's tgid matches; the
-        // 81st applied slot 1's restriction to the whole round, so a
-        // slot-2 word latched by the census could never arm.
-        let park_tgid1 = FUXWATCH1_TGID.load(Relaxed);
-        let park_tgid2 = FUXWATCH2_TGID.load(Relaxed);
-        let this_tgid = tk.tgid() as u32;
-        let ok1 = park_tgid1 == 0 || this_tgid == park_tgid1;
-        let ok2 = park_tgid2 == 0 || this_tgid == park_tgid2;
-        if !ok1 && !ok2 {
-            return;
-        }
-        let Some(aspace) = tk.address_space() else {
-            return;
-        };
-        let root = aspace.root_ppn();
-        if root == 0 {
-            return;
-        }
-        if FUXWATCH_MM_DONE
-            .iter()
-            .any(|d| d.load(Relaxed) == root)
-        {
-            return;
-        }
-        // page present and writable? (arm both watch words; a page
-        // already armed via done-set is skipped whole)
-        // SAFETY: read-only walk of the task's page tables.
-        let mut to_arm: [u64; 2] = [0; 2];
-        let mut narm = 0usize;
-        for (si, wa) in [&addr, &addr2].iter().enumerate() {
-            let wa: u64 = **wa;
-            if wa == 0 || to_arm.contains(&wa) {
-                continue;
-            }
-            if si == 0 && !ok1 {
-                continue;
-            }
-            if si == 1 && !ok2 {
-                continue;
-            }
-            let ok = crate::sync::edges::pt_walk(root, wa)
-            .map(|(_, bits)| bits & 0x2 != 0)
-            .unwrap_or(false);
-            if ok {
-                to_arm[narm] = wa;
-                narm += 1;
-            }
-        }
-        if narm == 0 {
-            return;
-        }
-        // 81st (ohw128 SEGV storm): claim a done-slot BEFORE the
-        // mprotect — an armed-but-unrecorded mm (done-set overflow: 82
-        // mms armed into 16 slots) takes the UN-watched fault path on
-        // its own writes -> present-RO PTE -> Permission denied ->
-        // SIGSEGV. No free slot: skip the mm whole (never half-arm).
-        let mut slot_free = false;
-        for d in FUXWATCH_MM_DONE.iter() {
-            if d.load(Relaxed) == 0 {
-                slot_free = true;
-                break;
-            }
-        }
-        if !slot_free {
-            return;
-        }
-        let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-        // SAFETY: root is a live user page-table root; R-only heap
-        // data pages.
-        for &wa in to_arm.iter().take(narm) {
-            crate::arch::mm::mm_ops::mprotect_pte_range(root,
-                    wa & !0xfff,
-                    1,
-                    0x1);
-        }
-        drop(g);
-        crate::arch::x86_64::mm::asid::flush_tlb_all();
-        for d in FUXWATCH_MM_DONE.iter() {
-            if d
-                .compare_exchange(0, root, Relaxed, Relaxed)
-                .is_ok()
-            {
-                break;
-            }
-        }
-        // HOTPATH-PRINT: one line per armed mm (dfx-gated by the param).
-        crate::pr_warn!(
-            "FUXWATCH-ARM tgid={} root={:#x} page={:#x}",
-            tk.tgid(),
-            root,
-            addr & !0xfff
-        );
-    });
-}
-
-#[cfg(not(feature = "x86_64"))]
-pub fn fuxwatch_arm_round() {}
-
-/// Fault-path predicates/helpers (called from the x86_64 fault hook).
-#[inline]
-pub fn fuxwatch_page_matches(fault_addr: u64) -> bool {
-    let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    let b = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    (a != 0 && (fault_addr & !0xfff) == (a & !0xfff))
-        || (b != 0 && (fault_addr & !0xfff) == (b & !0xfff))
-}
-
-/// True only for mms WE armed (the done-set) — a fork-COW write fault
-/// on the same VA in an un-armed mm must take the normal COW path,
-/// never be granted W by the watchpoint.
-#[inline]
-pub fn fuxwatch_mm_armed(root_ppn: u64) -> bool {
-    root_ppn != 0
-        && FUXWATCH_MM_DONE
-            .iter()
-            .any(|d| d.load(core::sync::atomic::Ordering::Relaxed) == root_ppn)
-}
-
-#[inline]
-pub fn fuxwatch_over_budget() -> bool {
-    FUXWATCH_HITS.load(core::sync::atomic::Ordering::Relaxed) >= FUXWATCH_BUDGET
-}
-
-/// Log the write and arm the single-step marker; false = step must not
-/// be armed (budget). `exact` — the faulting address is the watched
-/// WORD itself (cr2 gives byte precision): only those log; same-page
-/// neighbours of other heap objects step silently (they must not reach
-/// do_page_fault, which would install W and kill the watch).
-pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_addr: u64) -> bool {
-    let w2 = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    let claim = |tid: u32| {
-        for (i, s) in FUXWATCH_STEP_TIDS.iter().enumerate() {
-            if s.load(core::sync::atomic::Ordering::Relaxed) == tid {
-                // already stepping: refresh the page so a same-tid
-                // second fault (signal-handler interleave) retires the
-                // page its store will land on
-                FUXWATCH_STEP_PAGES[i].store(fault_addr & !0xfff, core::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-        }
-        for (i, s) in FUXWATCH_STEP_TIDS.iter().enumerate() {
-            if s
-                .compare_exchange(0, tid, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
-                .is_ok()
-            {
-                FUXWATCH_STEP_PAGES[i].store(fault_addr & !0xfff, core::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-        }
-    };
-    if !exact {
-        claim(tid);
-        return true;
-    }
-    let which2 = w2 != 0 && (fault_addr & !0x3) == (w2 & !0x3);
-    let n = FUXWATCH_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if which2 {
-        // sc58: slot 2 keeps its own budget accounting (arm_round tests
-        // both counters; a shared counter let slot-2 writes retire BOTH
-        // slots early).
-        FUXWATCH2_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    }
-    if n >= FUXWATCH_BUDGET {
-        // huks-wedge lane (hw2): the budget used to only stop logging —
-        // the arm rounds stopped too, but the page stayed W-cleared, so
-        // the NEXT write fell through the (now-skipped) fault hook to
-        // do_page_fault → SEGV_ACCERR. Retire the whole watch once: both
-        // pages restored, slots cleared — the instrument goes inert
-        // instead of arming a trap nobody handles.
-        static RETIRED: core::sync::atomic::AtomicBool =
-            core::sync::atomic::AtomicBool::new(false);
-        if !RETIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
-            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
-            crate::pr_warn!("FUXWATCH budget reached — retiring watch");
-            fuxwatch_retire_all();
-        }
-        return false;
-    }
-    // 70th: page-mate writes (the mutex cluster shares the watched page —
-    // slot1 armed on the first devmgr waiter word, whose page also carries
-    // the DevSvcManager mutex in every observed boot) get their own log
-    // arm: the stale-EBUSY founder's acquire (0 -> 0x10, uncontended, no
-    // syscall) is otherwise invisible. Budgeted separately.
-    let page1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed) & !0xFFF;
-    if !which2 && page1 != 0 && (fault_addr & !0xFFF) == page1 && fault_addr & !0x3 != FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed) & !0x3 {
-        static PG_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        let p = PG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if p < 900 {
-            // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
-            crate::pr_warn!(
-                "FW-PG #{} tid={} addr={:#x} rip={:#x} old={:#x}",
-                p,
-                tid,
-                fault_addr,
-                rip,
-                old_word
-            );
-        }
-    }
-    // HOTPATH-PRINT: compact per-write line; the wedge window carries
-    // at most a few hundred. (w2 marker identifies second-watch words
-    // when both pages share rips.) 78th: tgid too — every FFRT process
-    // allocates a mutexPrivate at the SAME heap VA, so a slot-2 watch
-    // traces N processes' objects at once and tid alone cannot
-    // attribute a write (ohw115: param_watcher's counter and samgr's
-    // mutex shared 0x7ff000499a50).
-    let wtgid = crate::sched::current()
-        .map(|t| crate::sched::edges::task_shared(t).tgid() as u32)
-        .unwrap_or(0);
-    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-    crate::pr_warn!("FW tid={} tgid={} rip={:#x} old={} n={} addr={:#x}{}", tid, wtgid, rip, old_word, n, fault_addr, if which2 { " w2" } else { "" });
-    // 62nd: latch the owner-of-record on every successful 0->1
-    // acquire-class write (the fast-path CAS or the xchg that wins
-    // from UNLOCK). old_word==0 with the word transitioning to a
-    // locked value = an acquire. After a freeze only old=2 pile-ins
-    // remain, so the latch holds the freeze acquirer.
-    // 78th: the slot-2 latch is samgr-tgid-gated — the chain armed the
-    // slot on SAMGR's mutex word, but the watch itself covers every mm
-    // mapping that VA, and foreign acquires (ohw115: param_watcher's
-    // old=0 counter write) corrupted the latch and the OH68 owner
-    // decode with it.
-    if old_word == 0 && (!which2 || {
-        let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
-        samgr == 0 || wtgid == samgr
-    }) {
-        FUXWATCH_OWNER_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
-        FUXWATCH_OWNER_J
-            .store(crate::drivers::timer::get_jiffies() as u32, core::sync::atomic::Ordering::Relaxed);
-        // oh68: latch the writer's ctx->task at the acquire instant (the
-        // only moment a coroutine holder is provably executing); exact =
-        // this IS the watched lock word's acquire, not a page-mate write.
-        if exact {
-            oh68_latch_owner_task(tid);
-        }
-    }
-    claim(tid);
-    true
 }
 
 /// 62nd: one-line wake history for a park word (the FUX-OWNER row's
@@ -2045,85 +1345,6 @@ pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String
     Some(out)
 }
 
-/// Read the watched word's CURRENT value through the walker (fault
-/// context: the word still holds its pre-write value).
-pub fn fuxwatch_read_word(root_ppn: u64) -> u32 {
-    let addr = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    if addr == 0 {
-        return 0xffff_ffff;
-    }
-    // SAFETY: read-only walk of the current mm.
-    match crate::sync::edges::pt_walk(root_ppn, addr) {
-        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
-            let kv = crate::arch::mm::memory_layout::phys_to_virt(
-                crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
-            );
-            // SAFETY: linear-mapped RAM word.
-            crate::sync::edges::read_volatile_u32(kv.as_usize())
-        }
-        _ => 0xffff_ffff,
-    }
-}
-
-/// #DB hook: Some(page) when this trap is our single step (marker
-/// consumed) — the page the stepped store executed on. huks-wedge lane
-/// (hw2): the retirement must land on THAT page; re-protecting whichever
-/// page slot 1 currently points at (the old behavior) W-clears the wrong
-/// page after a slot move and leaves the stepped one writable.
-#[inline]
-pub fn fuxwatch_take_step(tid: u32) -> Option<u64> {
-    for (i, s) in FUXWATCH_STEP_TIDS.iter().enumerate() {
-        if s
-            .compare_exchange(tid, 0, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
-            .is_ok()
-        {
-            let p = FUXWATCH_STEP_PAGES[i].swap(0, core::sync::atomic::Ordering::Relaxed);
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// huks-wedge lane (hw2): is this page still watched (either slot)? The
-/// #DB retirement only re-protects pages the watch still owns; a page
-/// retired by a slot move must stay writable.
-#[inline]
-pub fn fuxwatch_page_watched(page: u64) -> bool {
-    if page == 0 {
-        return false;
-    }
-    let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    let b = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    (a != 0 && (a & !0xfff) == page) || (b != 0 && (b & !0xfff) == page)
-}
-
-/// huks-wedge lane (hw2): read the u32 at `addr` (cr2 precision) through
-/// the given root — the fault hook's `old_word` must describe the WORD
-/// THAT FAULTED, not slot 1's word (slot-2 writes logged with slot 1's
-/// old value before).
-pub fn fuxwatch_read_word_at(root_ppn: u64, addr: u64) -> u32 {
-    // SAFETY: read-only walk of the current mm.
-    match crate::sync::edges::pt_walk(root_ppn, addr) {
-        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
-            let kv = crate::arch::mm::memory_layout::phys_to_virt(
-                crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
-            );
-            // SAFETY: linear-mapped RAM word.
-            crate::sync::edges::read_volatile_u32(kv.as_usize())
-        }
-        _ => 0xffff_ffff,
-    }
-}
-
-#[inline]
-pub fn fuxwatch_addr() -> u64 {
-    FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed)
-}
-
-#[inline]
-pub fn fuxwatch2_addr() -> u64 {
-    FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed)
-}
 
 /// sc57 (57th): one-shot region scan — a SUSPENDED FFRT coroutine's
 /// stack lives in an 8MB stack-pool region (same class as the worker
@@ -2704,7 +1925,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
 //   ctx->task STAYS set while a thread-mode task parks inside Execute()
 //   (ThreadWait under wn.cv); a COROUTINE task's ctx->task is cleared the
 //   moment it yields (ExecuteTask epilogue), so the holder coroutine is
-//   captured at the acquire WRITE itself (fuxwatch_log_write old==0 path)
+//   captured at the acquire WRITE itself
 //   — the only instant the writer provably executes the holder.
 //
 //   CoTask (432B): TaskBase{type@24 gid@32 status@48 createTime@96
@@ -2727,7 +1948,7 @@ static OH68_KEY: core::sync::atomic::AtomicU32 =
 pub static OH68_OWNER_CTX: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 /// ctx->task at the acquire write (the holder coroutine/thread task).
-pub static FUXWATCH_OWNER_TASK: core::sync::atomic::AtomicU64 =
+pub static OH68_OWNER_TASK: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 static OH68_ROOT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
@@ -2801,38 +2022,6 @@ fn oh68_ctx_of(_root: u64, _fs: u64, _tid: u32) -> u64 {
 /// Called from the FW write path on an exact acquire-class write
 /// (old==0): the faulting thread is executing the lock acquirer at this
 /// instant. Reads its TLS chain and latches ctx->task (the holder) plus
-/// the ExecuteCtx (for the audit-side ThreadWait park-word check
-/// ctx+224). Bounded: cached key = 3 reads, cold = up to 64.
-pub fn oh68_latch_owner_task(tid: u32) {
-    use core::sync::atomic::Ordering::Relaxed;
-    let _ = tid;
-    if cfg!(not(target_arch = "x86_64")) {
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        let Some(tsk) = crate::sched::current() else {
-            return;
-        };
-        // SAFETY: current-task accessor in the FW fault path (the same
-        // use the trap path itself makes right above this latch's
-        // caller).
-        let tk = crate::sched::edges::task_shared(tsk);
-        let Some(aspace) = tk.address_space() else {
-            return;
-        };
-        let root = aspace.root_ppn();
-        let fs = oh68_fs_base(tk);
-        let ctx = oh68_ctx_of(root, fs, tid);
-        if ctx == 0 {
-            return;
-        }
-        OH68_OWNER_CTX.store(ctx, Relaxed);
-        if let Some(t) = rd_word(root, ctx + 16) {
-            FUXWATCH_OWNER_TASK.store(t, Relaxed);
-        }
-    }
-}
 
 /// oh68: audit-time decode. Walks EVERY samgr thread's TLS chain (worker
 /// sweep — a thread-mode holder keeps ctx->task set while parked inside
@@ -3138,7 +2327,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     };
 
     // The latched acquire-time holder (coroutine case) — deep walk.
-    let otask = FUXWATCH_OWNER_TASK.load(Relaxed);
+    let otask = OH68_OWNER_TASK.load(Relaxed);
     let octx = OH68_OWNER_CTX.load(Relaxed);
     let parkw = if octx != 0 { octx + 224 } else { 0 };
     let _ = write!(out, " owner[task={:#x} ctx={:#x} parkw={:#x}]", otask, octx, parkw);
@@ -3234,8 +2423,8 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     // the critical section) is invisible to everything above: it is
     // not in the mutex waiter ring (holders are not waiters), its
     // worker's ctx->task was cleared at the yield (the worker sweep
-    // only sees thread-mode or queued tasks), and the fuxwatch owner
-    // latch needs the watch armed BEFORE the acquire — the chain arms
+    // only sees thread-mode or queued tasks), and an acquire-time owner
+    // latch needs the write observed BEFORE the acquire — the chain arms
     // at the first stuck print, which is AFTER the founder acquired
     // (ohw115: holder acquired pre-81.5 s, watch armed 84 s). A CoTask
     // whose saved coroutine RIP sits inside libffrt's CoWait internals
@@ -3266,7 +2455,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             // waiters); fall back to the old fixed window.
             let mut anchor = OH68_SWEEP_TASK.load(Relaxed);
             if anchor == 0 {
-                anchor = FUXWATCH_OWNER_TASK.load(Relaxed);
+                anchor = OH68_OWNER_TASK.load(Relaxed);
             }
             if anchor == 0 {
                 // The parked word itself lives in the wedged process's
@@ -4644,7 +3833,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
 ///     (scheduling/priority territory).
 /// Locking: phase A walks the bucket chains under the bucket + nested slot
 /// locks (waiter_of discipline) copying POD only; phase B reads task state
-/// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
+/// under for_each_task (pid-hash per-bucket lock) — the
 /// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
 /// Zero cost when rux:fuxstuck (retired dfx=fuxstuck) is off (one switch load).
 pub fn futex_stuck_census() {
@@ -6044,7 +5233,7 @@ pub fn futex_stuck_census() {
     //       around the OLDEST stuck parks' births (park_j-2s .. +5s) —
     //       closes the FXRS arming gap (FXRS starts watching a word only
     //       3+ s after it parked; the lost wake happens at birth);
-    //   (c) auto-arm fuxwatch slot 2 on the first stuck FFRT-worker park
+    //   (c) name the first stuck FFRT-worker park
     //       word in the registered samgr pid — that word IS the FFRT
     //       queue-internal mutex's musl lock word (fval=0x80000010 =
     //       held|waiters): its write trace decides "unlock happens but
@@ -6054,37 +5243,13 @@ pub fn futex_stuck_census() {
     //       the waiter's OWN stack — its write trace cannot identify
     //       the mutex owner, and arming it stole the slot (and the
     //      censusd arm rounds) from the chain-walk's LOCK-HEAD arm
-    //      (fuxwatch-LOCKHEAD), which is the owner-naming instrument.
+    //      LOCK-HEAD walk, which is the owner-naming instrument.
     {
         use core::fmt::Write as _;
         // (a) pool stats — O(1) counter (see FUX_POOL_USED).
         let pool_used = FUX_POOL_USED.load(Relaxed);
         let last_full = FUX_POOL_FULL_J.load(Relaxed);
-        // (c) DISABLED (60th): see the comment above — the stack-word
-        // auto-arm lost the slot race against the chain-walk's
-        // LOCK-HEAD arm; kept as a const-gated block for reference.
-        const CENSUS_STACK_WORD_ARM: bool = false;
         let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
-        if CENSUS_STACK_WORD_ARM && samgr_pid != 0 && FUXWATCH2_ADDR.load(Relaxed) == 0 {
-            for g in groups.iter() {
-                if g.tgid == samgr_pid && g.rep_comm[..7] == *b"OS_FFRT" {
-                    let w2 = g.uaddr as u64;
-                    if FUXWATCH2_ADDR
-                        .compare_exchange(0, w2, Relaxed, Relaxed)
-                        .is_ok()
-                    {
-                        // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                        crate::pr_warn!(
-                            "FUXWATCH2-AUTO word={:#x} tid={} park={}s",
-                            w2,
-                            g.rep_tid,
-                            g.max_age
-                        );
-                    }
-                    break;
-                }
-            }
-        }
         // (b cont.) pick the dump targets first (top-3 by max_age plus
         // any samgr FFRT group), then snapshot ONLY matching entries —
         // the ring is 64k entries; copying it whole every 5 s would be
@@ -6739,72 +5904,9 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         // and goes back to sleep — the later `woken = true` is a plain
         // store that schedules no one, and with no second FUTEX_WAKE the
         // waiter sleeps forever despite having been woken once.
-    // timer-gap lane: every WAKE's walk outcome (rt2xdbg=1, 128 lines) —
-    // uaddr, requested nr, matched/consumed ret, and the bucket chain
-    // length at walk time. The pi_min wedge: did the gow WAKE even SEE
-    // the parked waiters?
-    if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-        static FWW: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        if FWW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 128 {
-            use crate::debug::taskdump::putc_brief as putchar;
-            fn ph(mut v: u64) {
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-            }
-            let mut chain = 0u64;
-            let mut idx = head.head;
-            while let Some(i) = idx {
-                chain += 1;
-                if chain > 64 {
-                    break;
-                }
-                let s = WAITER_POOL[i].lock_irqsave();
-                idx = s.as_ref().map(|w| w.next).flatten();
-            }
-            for &b in b"FWW uaddr=0x" { putchar(b); }
-            ph(uaddr as u64);
-            for &b in b" nr=" { putchar(b); }
-            ph(nr_wake as u64);
-            for &b in b" ret=" { putchar(b); }
-            ph(ret as u64);
-            for &b in b" chain=" { putchar(b); }
-            ph(chain);
-            putchar(b'\n');
-        }
-    }
-
         let woken_n = wake_list.len();
-    // oh67: for the watched lock words, name WHO the wake consumed —
-    // a wake returning ret=1 that consumes a task which never proceeds
-    // names a stolen/stale waiter (the frozen-mutex wedge shape).
-    let oh67_watch = {
-        let a = FUXWATCH_ADDR.load(Relaxed2::Relaxed);
-        let b2 = FUXWATCH2_ADDR.load(Relaxed2::Relaxed);
-        uaddr as u64 == a || uaddr as u64 == b2
-    };
     for task in wake_list {
         if !task.is_null() {
-            if oh67_watch {
-                static WOKE_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if WOKE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    // SAFETY: the task is linked in this bucket under our
-                    // lock; cannot be freed while we hold it.
-                    let tk = crate::sched::edges::task_shared(task);
-                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
-                    crate::pr_warn!(
-                        "FUXW-WOKE uaddr={:#x} woken tid={} tgid={} state={:#x}",
-                        uaddr,
-                        tk.pid(),
-                        tk.tgid(),
-                        tk.state().bits()
-                    );
-                }
-            }
             // R12-2 wake-under-bucket, now compile-checked: the proof
             // minted by the bucket guard is what the nested GRQ acquire
             // requires (INV-LOCK-5 forward; D-11).
@@ -7065,28 +6167,6 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // so a plain store suffices.
         crate::sched::edges::task_shared(current).futex_wait_enqueued.store(true, core::sync::atomic::Ordering::Release);
 
-        // oh67: name WHO parks on the watched lock words (the frozen-mutex
-        // wedge: a waiter parked on M2.l that tid343-class unlocks keep
-        // consuming without the web progressing).
-        {
-            let a = FUXWATCH_ADDR.load(Relaxed2::Relaxed);
-            let b2 = FUXWATCH2_ADDR.load(Relaxed2::Relaxed);
-            if uaddr as u64 == a || uaddr as u64 == b2 {
-                static PARK_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if PARK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    // HOTPATH-PRINT: budget-gated hunt diagnostic (first-N counter above).
-                    crate::pr_warn!(
-                        "FUXW-PARK uaddr={:#x} tid={} tgid={} val={:#x}",
-                        uaddr,
-                        current.pid(),
-                        current.tgid(),
-                        val
-                    );
-                }
-            }
-        }
-
         // C8 wake-ordering invariant (sleeper side): in order — (1) our
         // waiter entry (task pointer, the flag the waker polls) is linked
         // into the bucket chain, (2) the task state is stored as
@@ -7113,32 +6193,6 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             // INV-SCE-2: current is the parking task itself; the bucket
             // lock holds the chain stable (see the comment above).
             let current_t = crate::sched::edges::task_shared(current);
-            // timer-gap lane: the park edge for cpu0-pinned FIFO tasks
-            // (rt2xdbg=1, 64 lines) — the pi_min wedge question is
-            // whether the waiter ever parks on the word the waker walks.
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                && current_t.cpus_allowed() == 1
-            {
-                static FWT: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if FWT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
-                    use crate::debug::taskdump::putc_brief as putchar;
-                    fn ph(mut v: u64) {
-                        for _ in 0..16 {
-                            let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                            v <<= 4;
-                        }
-                    }
-                    for &b in b"FWT-PARK pid=0x" { putchar(b); }
-                    ph(current_t.pid() as u64);
-                    for &b in b" uaddr=0x" { putchar(b); }
-                    ph(uaddr as u64);
-                    for &b in b" val=0x" { putchar(b); }
-                    ph(uval as u64);
-                    putchar(b'\n');
-                }
-            }
             current_t.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         }
 
@@ -8343,60 +7397,6 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     }
                 }
             }
-            // 70th (ohw84 decode): the frozen devmgr words carry states no
-            // clean musl path produces (a stale EBUSY fast-path marker with
-            // every task of the tgid parked as a waiter, and a no-owner
-            // 0x80000000 word), and uncontended lock/unlock never syscalls,
-            // so the writers are invisible to WAIT/WAKE tracing alone. At
-            // the FIRST waiter-bit WAIT from devmgr, arm the sc57 write
-            // watchpoint on that word's PAGE (the mutex cluster — the
-            // stub/svc/holder locks — shares one page in every observed
-            // boot) and on the second distinct word; fuxwatch then logs
-            // every write (tid, rip, old->new) from that moment on.
-            if is_rw_wait {
-                let s1 = FUXWATCH_ADDR.load(Relaxed);
-                if s1 == 0 {
-                    FUXWATCH_ADDR.store(uaddr as u64, Relaxed);
-                    crate::debug::taskdump::ensure_defer_thread();
-                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                    crate::pr_warn!("FXDV-ARM slot1={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
-                } else if (s1 as usize) != uaddr && FUXWATCH2_ADDR.load(Relaxed) == 0 {
-                    FUXWATCH2_ADDR.store(uaddr as u64, Relaxed);
-                    crate::debug::taskdump::ensure_defer_thread();
-                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                    crate::pr_warn!("FXDV-ARM slot2={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
-                }
-                // 70th (ohw86): birth-curve sampler — on every traced devmgr
-                // futex, sample slot1's word AND its +0x94 neighbor (the
-                // mutex cluster: sem at mutex-0x94 in every observed boot;
-                // ohw86 proved the frozen mutex took its last write BEFORE
-                // any wait armed the page watch) and print each CHANGE.
-                // The final 0->0x10 transition's timestamp brackets the
-                // founder to the second, before any watch can arm.
-                if let Some(t) = crate::sched::current() {
-                    let base = FUXWATCH_ADDR.load(Relaxed) as usize;
-                    if base != 0 {
-                        static LAST1: [core::sync::atomic::AtomicU32; 2] =
-                            [const { core::sync::atomic::AtomicU32::new(u32::MAX) }; 2];
-                        for (k, wa) in [base, base.wrapping_add(0x94)].iter().enumerate() {
-                            if let Some(w) = crate::sync::edges::read_u32_via_task(t, *wa) {
-                                let prev = LAST1[k].load(Relaxed);
-                                if w != prev {
-                                    LAST1[k].store(w, Relaxed);
-                                    // HOTPATH-PRINT: hunt-era diagnostic on a rare adjudication path (wedge/freeze class).
-                                    crate::pr_warn!(
-                                        "FXDV-CURVE word{:+#x} {:#x} -> {:#x} jif={} tid={}",
-                                        if k == 0 { 0 } else { 0x94 },
-                                        prev,
-                                        w,
-                                        crate::drivers::timer::get_jiffies(),
-                                        crate::sched::edges::task_shared(t).pid()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
                 // FXDV-WORD: the word's live value at every traced wait —
                 // the formation curve (0x10 -> 0x80000010 -> stuck) with
                 // the waiter's own expected val beside it decides
@@ -8421,7 +7421,6 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         }
                     }
                 }
-            }
             let interesting = is_rw_wait
                 || (matches!(cmd, FUTEX_WAKE) && addr_idx != usize::MAX && val != 0);
             if interesting {
@@ -10988,7 +9987,7 @@ pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
             }
         });
         let _ = writeln!(w, "CTD-THREADS n={}", nthreads);
-        let otask = FUXWATCH_OWNER_TASK.load(Relaxed);
+        let otask = OH68_OWNER_TASK.load(Relaxed);
         if otask > 0x1000 && (otask >> 47) == 0 {
             // the acquire-time latch (process-blind — validate it belongs
             // to THIS tgid by page-table reachability before anchoring)
@@ -11771,8 +10770,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // settled phase. The entire body (adoption included — adopting a
     // word also fills a RWFRZ_WATCH slot, arming the per-op tracer)
     // now sits behind the existing futex-hunt switch (rux:futextrace (retired dfx=futextrace)).
-    // The only functional action inside is watch-slot bookkeeping; the
-    // explicit rwfrzwatch= cmdline pre-arm above stays available.
+    // The only functional action inside is watch-slot bookkeeping.
     if !crate::trace::EVENT_FUTEX_MISS.armed() {
         return;
     }

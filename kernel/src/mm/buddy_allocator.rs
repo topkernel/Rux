@@ -612,23 +612,10 @@ impl BuddyAllocator {
                 // (task_page_mark from alloc_task_slot — before R69 the
                 // probe read a table nobody wrote and never fired), so the
                 // event is also recorded with a caller backtrace for the
-                // deferred audit printer in rux:scribble (retired dfx=scribble) mode.
+                // deferred audit printer in hunt mode (module deleted).
                 if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
                     && crate::sched::sched::task_page_is_owned(addr as *const u8)
                 {
-                    // R69: also record the event with a caller backtrace
-                    // for the deferred audit printer (rux:scribble (retired dfx=scribble),
-                    // x86_64 — the dfx scribble module is x86-only).
-                    #[cfg(feature = "x86_64")]
-                    if crate::trace::EVENT_SCRIBBLE.armed() {
-                        let frames = crate::debug::scribble::audit_frames();
-                        crate::debug::scribble::audit_record(
-                            crate::debug::scribble::AUDIT_KIND_HANDOFF,
-                            addr as u64,
-                            order as u32,
-                            &frames,
-                        );
-                    }
                     crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R18-1 double-handoff
                 }
                 return addr as *mut u8;
@@ -662,18 +649,6 @@ impl BuddyAllocator {
             if self.page_is_free(page_idx) || meta.order != order as u8 {
                 // R43: taint-only (SBI ecall under the heap lock was an
                 // A-form wedge ingredient — see the R18-1 note above).
-                // R69: also record the event with a caller backtrace for
-                // the deferred audit printer (rux:scribble (retired dfx=scribble), x86_64).
-                #[cfg(feature = "x86_64")]
-                if crate::trace::EVENT_SCRIBBLE.armed() {
-                    let frames = crate::debug::scribble::audit_frames();
-                    crate::debug::scribble::audit_record(
-                        crate::debug::scribble::AUDIT_KIND_DOUBLE_FREE,
-                        addr as u64,
-                        order as u32,
-                        &frames,
-                    );
-                }
                 crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
                 // R17-A3: kind follows the bitmap (the authoritative free
                 // state), not the leader-only `free` byte.
@@ -1036,32 +1011,6 @@ impl BuddyAllocator {
         }
 
         let order = self.size_to_order(size.max(align));
-
-        // R69 free-side probe (x86_64): a free targeting a page that
-        // still carries a live Task (ownership bitmap; alloc/
-        // free_task_slot maintain it) is the double-handoff engine's
-        // fuel — the page would return to the free lists while its Task
-        // still runs, and the next two allocations share it. Refuse
-        // under rux:scribble (retired dfx=scribble) (the bitmap is exact since R69; the old
-        // R17-B refusal was withdrawn because the pre-Batch-8 bitmap
-        // aliased) and record with a caller backtrace either way.
-        // IN_TASK_FREE marks the legitimate release path.
-        #[cfg(feature = "x86_64")]
-        if crate::trace::EVENT_SCRIBBLE.armed()
-            && !crate::sched::sched::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
-            && crate::sched::sched::task_page_is_owned(ptr)
-        {
-            let frames = crate::debug::scribble::audit_frames();
-            crate::debug::scribble::audit_record(
-                crate::debug::scribble::AUDIT_KIND_FREE_LIVE,
-                ptr_addr as u64,
-                order as u32,
-                &frames,
-            );
-            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
-            refused_free_note(FR_TASK_LIVE, ptr_addr, order, 0, 0);
-            return;
-        }
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {

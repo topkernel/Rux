@@ -228,7 +228,7 @@ impl<T> RwSpinlock<T> {
 
     /// Preempt disable + read lock.
     /// Guard drop: read unlock + preempt enable.
-    /// track_caller: leakorigin's outermost-acquire shadow records the
+    /// track_caller: (historical) the acquire-site shadow recorded the
     /// LOCK CALLER's site (preempt-hunt), not this helper's line.
     ///
     /// Reference discipline (sync-realign, 2026-11): a spin-family lock
@@ -525,7 +525,7 @@ fn preempt_disable() {
 
 /// As `preempt_disable`, booking the caller-of-the-lock's location (the
 /// #[track_caller] lock helpers forward their own caller down so the
-/// leakorigin shadow names the real acquire site; preempt-hunt).
+/// acquire-site shadow named the real acquire site; preempt-hunt).
 #[inline]
 fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
     crate::interrupt::preempt::preempt_count_add_at(

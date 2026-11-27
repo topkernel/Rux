@@ -910,7 +910,7 @@ impl<T> Spinlock<T> {
 
     /// Preempt disable + lock.
     /// Guard drop: unlock + preempt enable.
-    /// track_caller: leakorigin's outermost-acquire shadow records the
+    /// track_caller: (historical) the acquire-site shadow recorded the
     /// LOCK CALLER's site (preempt-hunt), not this helper's line.
     ///
     /// Reference discipline (sync-realign, 2026-11): a spinlock NEVER
@@ -1194,7 +1194,7 @@ fn preempt_disable() {
 
 /// As `preempt_disable`, booking the CALLER-of-the-lock's location (the
 /// #[track_caller] lock helpers forward their own caller down so the
-/// leakorigin shadow names the real acquire site).
+/// acquire-site shadow named the real acquire site).
 #[inline]
 fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
     crate::interrupt::preempt::preempt_count_add_at(

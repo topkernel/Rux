@@ -364,72 +364,6 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         MMAP_RING[idx].off.store(args[5], Relaxed);
         MMAP_RING[idx].ret.store(ret as u64, Relaxed);
     }
-    // sc139/140 (Session Q): name the SOURCE of the parked children's
-    // library mappings AT MMAP TIME. The park frames ([27]/[35] in the
-    // exec VMA 0x7ff082359000, filesz=0x49500) live in a dlopen'd lib
-    // whose fd is already CLOSED at park-dump time, so APPMAP printed
-    // '?'. Print fd + path + filesz for EVERY file-backed mmap of the
-    // appspawn family — the offline map (ret -> lib -> fileoff) then
-    // symbolizes the park chain. 110th: rides the ohhunt gate — the
-    // comm scan + fdtable path lookup + print ran on EVERY appspawn-
-    // family mmap (~456 lines in the pre-launcher window alone, each
-    // costing UART emit + hilogd drain).
-    if ret > 0 && crate::debug::switches::oh_hunt_prints_on() {
-        let comm = crate::sched::current()
-            .map(|t| t.comm())
-            .map(|c| core::str::from_utf8(c).unwrap_or(""))
-            .unwrap_or("")
-            .trim_end_matches('\0');
-        let family = comm == "appspawn"
-            || comm == "hdf_devmgr"
-            || comm == "accountmgr"
-            || comm.contains("launcher")
-            || comm.contains("settingsdata")
-            || comm.contains("systemui")
-            || comm.contains("dataability");
-        let in_arena = (ret as usize) >= 0x7ff000000000 && (ret as usize) < 0x7ff100000000;
-        if family {
-            let fd = args[4] as i32;
-            if fd >= 0 && args[3] & 0x20 == 0 && args[2] & 0x4 != 0 /* file-backed EXEC segment */ {
-                static NF: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                    let path = crate::sched::current()
-                        .and_then(|t| t.try_fdtable().and_then(|fdt| fdt.get_file(fd as usize)))
-                        .map(|f| f.path())
-                        .unwrap_or_else(|| alloc::string::String::from("?"));
-                    crate::pr_debug!(
-                "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} {}",
-                        comm,
-                        ret,
-                        args[1],
-                        args[2],
-                        args[3],
-                        fd,
-                        args[5],
-                        path
-                    );
-                }
-            } else if in_arena {
-                // keep the arena-base print for the 0x7ff000... cluster
-                // (param areas + fixed-address anon pages)
-                static NA: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if NA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                    crate::pr_debug!(
-                "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} -",
-                        comm,
-                        ret,
-                        args[1],
-                        args[2],
-                        args[3],
-                        fd,
-                        args[5]
-                    );
-                }
-            }
-        }
-    }
     ret
 }
 
@@ -488,31 +422,6 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // looked up a page-cache entry at a non-page-aligned offset.
     if offset % crate::mm::page::PAGE_SIZE as u64 != 0 {
         return mmap_error::EINVAL;
-    }
-    // bring-up trace: every MAP_SHARED file mapping with the raw args —
-    // the DRM/dumb-buffer mapping failures need the kernel-side view of
-    // what userspace actually passed. 110th: rides the ohhunt gate
-    // (~31 lines per perf boot).
-    if fd >= 0
-        && map_flags & map::MAP_ANONYMOUS == 0
-        && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED
-        && crate::debug::switches::oh_hunt_prints_on()
-    {
-        static SHARED_FILE_MMAPS: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        let n = SHARED_FILE_MMAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 32 {
-            // HOTPATH-PRINT: shared-file mmap tap; oh_hunt_prints_on gate + SHARED_FILE_MMAPS<32 budget
-            crate::pr_warn!(
-                "mmap[{}] pid {} len={:#x} flags={:#x} fd={} off={:#x}",
-                n,
-                crate::process::current_pid(),
-                length,
-                map_flags,
-                fd,
-                offset
-            );
-        }
     }
     // MAP_SHARED /dev/zero mapping: the ORIGINAL open file description is
     // captured here (the fd is masked out of the generic attach below) and

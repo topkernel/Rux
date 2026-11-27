@@ -194,7 +194,6 @@ stub_\vec:
     movq %rax, PT_RSP(%rbp)
     movq PT_SS+0x28(%rbp), %rax
     movq %rax, PT_SS(%rbp)
-    incl scribble_badiret_fixups(%rip)
 9:  /* GS-base authenticity check (SCRIBBLE2): the magic's HIGH dword is
      * a fixed pattern present only inside a real PerCpu slot.  A wrong
      * base (user GS 0 — the residue the repair above plus NMI-style
@@ -206,7 +205,6 @@ stub_\vec:
     cmpl $PC_MAGIC_PATTERN, %esi
     je 7f
     swapgs
-    incl scribble_gs_fixups(%rip)
 7:  movl %gs:PC_CPU_NUMBER, %esi /* arg1: cpu id                      */
     movq $\vec, %rdx             /* arg2: vector                      */
     movq %rbp, %rdi              /* arg0: regs                        */
@@ -308,13 +306,11 @@ stub_spurious:
     movq %rax, PT_RSP(%rbp)
     movq PT_SS+0x28(%rbp), %rax
     movq %rax, PT_SS(%rbp)
-    incl scribble_badiret_fixups(%rip)
 9:  movl %gs:PC_MAGIC_HI, %esi
     /* GS-base authenticity check (see TRAP_STUB) */
     cmpl $PC_MAGIC_PATTERN, %esi
     je 7f
     swapgs
-    incl scribble_gs_fixups(%rip)
 7:  movl %gs:PC_CPU_NUMBER, %esi
     movq %rbp, %rdi
     movq $255, %rdx
@@ -391,7 +387,6 @@ syscall_entry:
     cmpl $PC_MAGIC_PATTERN, %gs:PC_MAGIC_HI
     je 1f
     swapgs
-    incl scribble_gs_fixups(%rip)
 1:  movq %rsp, %gs:PC_SYSCALL_SCRATCH  /* stash user rsp                */
     movq %gs:PC_TSS_RSP0, %rsp         /* kernel stack top (this CPU)  */
     pushq $__USER_DS                   /* 0xa0 ss                       */

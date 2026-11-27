@@ -7,8 +7,7 @@
 //!
 //! OWNERSHIP (the coordinator's framework-consolidation doctrine): every
 //! raw stale-handle read the dfx hunt family performs routes through
-//! THIS file. The modules that hunt (leakorigin, scribble, r83hunt,
-//! treehunt, wildwatch, memwatch's fp-chain, the preempt/softirq
+//! THIS file. The modules that hunt (memwatch's fp-chain, the preempt/softirq
 //! bracket diagnostics) stay in their own files; their raw pointer
 //! discipline lives here, named and audited once.
 //!
@@ -125,8 +124,8 @@ pub(crate) fn location_ref<T>(site: *const T) -> &'static T {
 // forensics_edges.rs per the edges->unsafe.rs naming decision) is now
 // the dfx subsystem's ONE audited unsafe file. The arms below absorbed
 // the last inline unsafe of the hunt/diagnostic modules (backtrace,
-// memwatch, scribble, wildwatch, r83hunt, leakorigin, taskdump, pstore,
-// treehunt, pathstash, ledger, mmforensics, oops, hung_task, slowtask,
+// memwatch, taskdump, pstore,
+// ledger, mmforensics, oops, hung_task,
 // mod) — all sixteen now zero-unsafe with file-level forbid. Existing
 // INV-FOR-1..3 contracts are unchanged; the arms reuse those families
 // or extend them with new numbers.
@@ -201,20 +200,6 @@ pub(crate) fn t_ti_cpu(task: *const Task) -> i32 {
     unsafe { (*task).ti_cpu() }
 }
 
-/// Racy volatile read of a sched slot's published current pointer
-/// (INV-FOR-1 racy-diagnostic arm: the slot is written by its owning
-/// CPU under the GRQ; this read is moment-stale by design — the same
-/// discipline as r83hunt's header reads). Returns the raw pointer VALUE
-/// (0 when the slot is empty), never a reference.
-pub(crate) fn sched_slot_current_volatile(cpu: usize) -> usize {
-    // SAFETY: INV-FOR-1 — single volatile read of the published slot;
-    /// the value is only compared or printed, never dereferenced here.
-    unsafe {
-        core::ptr::read_volatile(
-            &crate::sched::sched::cpu_state(cpu).current as *const *mut Task,
-        ) as usize
-    }
-}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-2 arms: the raw word/slice access family (volatile reads and
@@ -521,25 +506,10 @@ pub(crate) fn gs_cpu_dword_read() -> u32 {
     id
 }
 
-/// The GS-pairing triple for the scribble tripwire: (gs:[0] cpu id,
-/// IA32_KERNEL_GS_BASE, IA32_GS_BASE) (INV-FOR-4 gs-data arm; the MSR
-/// reads are data-safe primitives).
-#[cfg(feature = "x86_64")]
-pub(crate) fn gs_pairing_read() -> (u32, u64, u64) {
-    let id = gs_cpu_dword_read();
-    // SAFETY: INV-FOR-4 — MSR data reads.
-    unsafe {
-        (
-            id,
-            crate::arch::x86_64::cpu::rdmsr(0xC000_0101),
-            crate::arch::x86_64::cpu::rdmsr(0xC000_0102),
-        )
-    }
-}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-5: the deliberate-fault family (the provoke-oops and
-// wildwatch-selftest tripwires — the fault is the DESIGN).
+// deliberate-fault tripwires — the fault is the DESIGN).
 // ---------------------------------------------------------------------------
 
 /// Deliberate NULL-adjacent page read at 0x10 (INV-FOR-5: the oops
@@ -588,23 +558,6 @@ pub(crate) fn console_put_raw(b: u8) {
     /// caller runs in the locked-down diagnostic context.
     unsafe { crate::console::putchar_no_lock(b) }
 }
-
-/// The scribble report buffer, mutably (INV-FOR-6 report arm: writes
-/// are bounded by the len check at the single putc call site; the
-/// Sync commitment below covers the gdb-read-after-death sharing).
-#[cfg(feature = "x86_64")]
-pub(crate) fn scribble_report_buf_mut() -> &'static mut [u8; 4096] {
-    // SAFETY: INV-FOR-6 — bounded diagnostic writes to the fixed
-    /// static buffer; readers are post-mortem (gdb) or under the
-    /// REPORT_LOCK.
-    unsafe { &mut *crate::debug::scribble::REPORT_BUF.0.get() }
-}
-
-// SAFETY: ReportBuf is written only under the REPORT_LOCK claim (one
-// reporter at a time) with a bounds-checked index, and read post-mortem
-// by gdb or after the lock releases; the content is diagnostic bytes.
-#[cfg(feature = "x86_64")]
-unsafe impl Sync for crate::debug::scribble::ReportBuf {}
 
 // ---------------------------------------------------------------------------
 // INV-FOR-7: the memwatch frame-walk family (the walk_fp_chain bodies —
@@ -757,178 +710,7 @@ pub(crate) fn kroot_pollution_scan() -> (u64, u64, u64, u64, u64) {
 }
 
 // ---------------------------------------------------------------------------
-// INV-FOR-8: the wildwatch guard-page family (x86_64): the kernel-half
-// page-table walk and the CR0.WP arm.
-// ---------------------------------------------------------------------------
-
-/// The boot-constant VMA-LMA offset (INV-FOR-8: read-only access of the
-/// value written once during mmu init, before any wildwatch code runs).
-#[cfg(feature = "x86_64")]
-pub(crate) fn va_kernel_pa_offset_raw() -> u64 {
-    // SAFETY: INV-FOR-8 — boot-constant static read.
-    unsafe { crate::arch::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset as u64 }
-}
-
-/// The arch page-table-frame translation helper (INV-FOR-8: same
-/// contract as the arch helper — phys names a mapped page-table frame).
-#[cfg(feature = "x86_64")]
-pub(crate) fn get_page_table_virt_raw(
-    phys: u64,
-) -> *mut crate::arch::mm::pagetable::PageTable {
-    // SAFETY: INV-FOR-8 — the arch helper's own contract.
-    unsafe { crate::arch::mm::mmu_init::get_page_table_virt(phys) }
-}
-
-/// Clear RW on the 4KiB page covering `va`, splitting a 2MiB leaf if
-/// needed. Returns true when the leaf reads back read-only (INV-FOR-8:
-/// the caller runs pre-SMP from debug::init on the BSP; the linking store
-/// is one aligned 8-byte store, so the old and new translations are
-/// both consistent for concurrent readers).
-#[cfg(feature = "x86_64")]
-pub(crate) fn protect_page_raw(va: usize) -> bool {
-    use crate::arch::mm::pagetable::{PageTable, PageTableEntry};
-
-    let root = super::wildwatch::table_virt(crate::arch::mm::mmu_init::root_static_phys());
-    let pml4i = (va >> 39) & 0x1ff;
-    let pdpti = (va >> 30) & 0x1ff;
-    let pdi = (va >> 21) & 0x1ff;
-    let pti = (va >> 12) & 0x1ff;
-
-    // SAFETY: INV-FOR-8 — read-only walk of the shared kernel root plus
-    // the single aligned linking store, pre-SMP on the BSP per the
-    // caller contract.
-    unsafe {
-        // Full 4-level walk. (An earlier draft read PML4[i] and used its
-        // PDPT page directly as the PD — one level short; every guard
-        // read as zeros. The gdb cross-check below is what caught it.)
-        let pml4e = (*root).get(pml4i);
-        if !pml4e.is_table() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pml4[{:}]={:#x} not a table link",
-                va,
-                pml4i,
-                pml4e.bits()
-            );
-            return false;
-        }
-        let pdpt: &mut PageTable = &mut *super::wildwatch::table_virt(pml4e.phys_addr());
-        let pd_e = pdpt.get(pdpti);
-        if !pd_e.is_valid() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pdpt[{:}]={:#x} invalid",
-                va,
-                pdpti,
-                pd_e.bits()
-            );
-            return false;
-        }
-        if pd_e.is_leaf() {
-            // 1GiB leaf — split not implemented (no guard region lands
-            // under one today); fail loudly rather than silently skip.
-            crate::pr_err!(
-                "wildwatch: va={:#x} pdpt[{:}] is a 1GiB leaf (split unsupported)",
-                va,
-                pdpti
-            );
-            return false;
-        }
-        let pd: &mut PageTable = &mut *super::wildwatch::table_virt(pd_e.phys_addr());
-        let pmd = pd.get(pdi);
-        if !pmd.is_valid() {
-            crate::pr_err!(
-                "wildwatch: va={:#x} pml4i={} pdpti={} pdi={} pti={} pd[{:+}]={:#x} pd[{}]={:#x} pd[{}]={:#x} pd[{}]={:#x} (cr3={:#x})",
-                va,
-                pml4i,
-                pdpti,
-                pdi,
-                pti,
-                pdi as isize - 1,
-                pd.get(pdi.wrapping_sub(1)).bits(),
-                pdi,
-                pmd.bits(),
-                pdi + 1,
-                pd.get(pdi + 1).bits(),
-                pdi + 2,
-                pd.get(pdi + 2).bits(),
-                crate::arch::cpu::read_cr3()
-            );
-            return false;
-        }
-
-        if pmd.is_table() {
-            // Already 4KiB entries: flip this one's RW off.
-            let pt: &mut PageTable = &mut *super::wildwatch::table_virt(pmd.phys_addr());
-            let mut e = pt.get(pti);
-            if !e.is_valid() {
-                crate::pr_err!(
-                    "wildwatch: va={:#x} cr3={:#x} pml4[{}]={:#x} pdpt[{}]={:#x} pd[{}]={:#x} pt[{}]={:#x} invalid",
-                    va,
-                    crate::arch::cpu::read_cr3(),
-                    pml4i,
-                    pml4e.bits(),
-                    pdpti,
-                    pd_e.bits(),
-                    pdi,
-                    pmd.bits(),
-                    pti,
-                    e.bits()
-                );
-                return false;
-            }
-            e = PageTableEntry::from_bits(e.bits() & !PageTableEntry::RW);
-            pt.set(pti, e);
-            crate::arch::cpu::invlpg(va as u64);
-            return !pt.get(pti).is_writable();
-        }
-
-        // 2MiB leaf: split into a fresh 4KiB table replicating the leaf,
-        // with the target page's RW cleared.
-        let phys2m = pmd.phys_addr();
-        // Keep the flag bits that apply per-page; PS (7) and GLOBAL (8)
-        // are dropped for children of a split.
-        let mut flags = pmd.bits() & 0xFFF & !PageTableEntry::PS & !PageTableEntry::GLOBAL;
-        // A supervisor leaf never carries US; keep whatever it carried.
-        flags |= PageTableEntry::P;
-        let Some(newpt_phys) = crate::arch::mm::mmu_init::alloc_page_table() else {
-            return false;
-        };
-        let newpt: &mut PageTable =
-            &mut *super::wildwatch::table_virt(newpt_phys);
-        for i in 0..512u64 {
-            let mut bits = (phys2m + i * 4096) | flags;
-            if i as usize == pti {
-                bits &= !PageTableEntry::RW;
-            }
-            newpt.set(i as usize, PageTableEntry::from_bits(bits));
-        }
-        // One aligned 8-byte linking store replaces the huge leaf.
-        pd.set(
-            pdi,
-            PageTableEntry::from_bits(newpt_phys | PageTableEntry::P | PageTableEntry::RW),
-        );
-        crate::arch::cpu::invlpg(va as u64);
-        let pt: &mut PageTable = &mut *super::wildwatch::table_virt(pd.get(pdi).phys_addr());
-        !pt.get(pti).is_writable()
-    }
-}
-
-/// Set CR0.WP on the CURRENT cpu (INV-FOR-8: one CR0 read-modify-write;
-/// WP is a boot-time-static bit; with WP clear ring-0 stores ignore
-/// page RW bits — the guard pages would be writable).
-#[cfg(feature = "x86_64")]
-pub(crate) fn cr0_set_write_protect() {
-    // SAFETY: INV-FOR-8 — single CR0 RMW.
-    unsafe {
-        let cr0 = crate::arch::cpu::read_cr0();
-        crate::arch::cpu::write_cr0(cr0 | 0x1_0000);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// INV-FOR-9: the page-descriptor diagnostic read family (ledger +
-// mmforensics: read-only descriptor access inside the mapped vmemmap
-// span; the flags atomics are the same ones every other reader uses
-// lock-free).
+// INV-FOR-9: the page-descriptor diagnostic family.
 // ---------------------------------------------------------------------------
 
 /// One snapshot of a page descriptor's diagnostic fields (INV-FOR-9):
@@ -1091,31 +873,7 @@ pub(crate) fn pstore_capture_write(
 }
 
 // ---------------------------------------------------------------------------
-// INV-FOR-12: the cmdline-blob scan (r83hunt's foreign-word probe: the
-// blob is [ptr, ptr+len) for the whole boot; read-only scan).
-// ---------------------------------------------------------------------------
-
-/// Does the boot cmdline blob contain the 8-byte LE pattern `v`?
-/// (INV-FOR-12: unaligned search — the observed words are unaligned
-/// slices; the blob pointer/length are the boot-time constants.)
-pub(crate) fn cmdline_contains_qword(v: u64) -> bool {
-    let ptr = crate::cmdline::CMDLINE_PTR.load(core::sync::atomic::Ordering::Acquire) as usize;
-    let len = crate::cmdline::CMDLINE_LEN.load(core::sync::atomic::Ordering::Acquire);
-    if ptr == 0 || len < 8 {
-        return false;
-    }
-    let needle = v.to_le_bytes();
-    // SAFETY: INV-FOR-12 — blob is [ptr, ptr+len) for the whole boot;
-    // read-only scan.
-    unsafe {
-        let blob = core::slice::from_raw_parts(ptr as *const u8, len);
-        blob.windows(8).any(|w| w == needle)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// INV-FOR-1/2 extension arms (second wave: scribble/wildwatch/pathstash/
-// r83hunt specifics).
+// INV-FOR-1/2 extension arms.
 // ---------------------------------------------------------------------------
 
 /// Stale task hung_task_since read (INV-FOR-1: the header canary word —
@@ -1133,24 +891,6 @@ pub(crate) fn t_running_on_cpu(task: *const Task) -> i32 {
     unsafe { (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed) }
 }
 
-/// The pathstash slot for `tid`, mutably (INV-FOR-1 stash arm: this
-/// task is the only writer for its tid slot; publication ordered via
-/// tid/len stores).
-pub(crate) fn pathstash_slot_mut(tid: u32) -> &'static mut super::pathstash::Slot {
-    // SAFETY: INV-FOR-1 — single-writer-per-slot diagnostic stash.
-    unsafe {
-        &mut (*core::ptr::addr_of_mut!(super::pathstash::SLOTS))
-            [(tid as usize) % super::pathstash::N]
-    }
-}
-
-/// The pathstash slot at index `i` (i < N by the caller's modulo),
-/// shared (INV-FOR-1 stash read arm: bytes utf8-checked by the caller).
-pub(crate) fn pathstash_slot_ref(i: usize) -> &'static super::pathstash::Slot {
-    // SAFETY: INV-FOR-1 — diagnostic read of the static slot table.
-    unsafe { &(*core::ptr::addr_of!(super::pathstash::SLOTS))[i] }
-}
-
 /// The kernel text range from the linker symbols (INV-FOR-2 image-bound
 /// arm: machine-lifetime linker symbols; addresses only, never
 /// dereferenced).
@@ -1163,40 +903,3 @@ pub(crate) fn kernel_text_range_raw() -> (u64, u64) {
     unsafe { (&_stext as *const u8 as u64, &_etext as *const u8 as u64) }
 }
 
-/// Resolve the physical address a kernel-half VA maps to (leaf walk,
-/// x86_64; INV-FOR-8 arm: read-only walk of the shared kernel root via
-/// table_virt's translation).
-#[cfg(feature = "x86_64")]
-pub(crate) fn resolve_phys_raw(va: usize) -> Option<u64> {
-    // SAFETY: INV-FOR-8 — read-only walk of the shared kernel root.
-    unsafe {
-        let root = super::wildwatch::table_virt(crate::arch::mm::mmu_init::root_static_phys());
-        let pml4i = (va >> 39) & 0x1ff;
-        let pdpti = (va >> 30) & 0x1ff;
-        let pdi = (va >> 21) & 0x1ff;
-        let pti = (va >> 12) & 0x1ff;
-        let pml4e = (*root).get(pml4i);
-        if !pml4e.is_table() {
-            return None;
-        }
-        let pdpt = &mut *super::wildwatch::table_virt(pml4e.phys_addr());
-        let pd_e = pdpt.get(pdpti);
-        if !pd_e.is_table() {
-            return None;
-        }
-        let pd = &mut *super::wildwatch::table_virt(pd_e.phys_addr());
-        let pmd = pd.get(pdi);
-        if !pmd.is_valid() {
-            return None;
-        }
-        if pmd.is_leaf() {
-            return Some(pmd.phys_addr() | ((va as u64) & 0x1F_FFFF));
-        }
-        let pt = &mut *super::wildwatch::table_virt(pmd.phys_addr());
-        let pte = pt.get(pti);
-        if !pte.is_valid() {
-            return None;
-        }
-        Some(pte.phys_addr() | ((va as u64) & 0xFFF))
-    }
-}
