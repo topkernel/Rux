@@ -5,8 +5,13 @@
 //! RISC-V SBI (Supervisor Binary Interface) call wrapper
 //!
 //! Uses sbi-rt crate's SBI 0.2 extension
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the
+//! supervisor-mode ecall edge lives in the root audited file
+//! `crate::boot_edges` (INV-SBI-ECALL-1); this file holds only the
+//! safe constant/wrapper surface.
 
-use core::arch::asm;
+#![forbid(unsafe_code)]
 
 /// SBI 0.2 TIMER extension's set_timer (recommended)
 pub use sbi_rt::set_timer;
@@ -59,28 +64,23 @@ pub const SBI_ERR_INVALID_ADDRESS: i64 = -5;
 /// * `true` when the request was accepted (the system is going down —
 ///   this call does not return on a compliant SBI implementation)
 pub fn sbi_system_reset(reset_type: usize, reason: usize) -> bool {
-    unsafe {
-        let mut error: u64 = reset_type as u64;
-        let mut value: u64 = reason as u64;
+    // INV-SBI-ECALL-1: the SRST ecall (EID 0x53525354, FID 0) — the raw
+    // edge lives in the root audited file.
+    let (error, _) = crate::boot_edges::sbi_ecall(
+        SBI_EXT_SRST as u64,
+        SBI_SRST_FUNCTION_RESET as u64,
+        reset_type as u64,
+        reason as u64,
+    );
 
-        asm!(
-            "ecall",
-            in("a7") SBI_EXT_SRST as u64,
-            in("a6") SBI_SRST_FUNCTION_RESET as u64,
-            inout("a0") error,
-            inout("a1") value,
-            options(nomem)
+    if error as i64 != SBI_SUCCESS {
+        crate::println!(
+            "sbi: system reset failed, error={} (SRST not supported?)",
+            error as i64
         );
-
-        if error as i64 != SBI_SUCCESS {
-            crate::println!(
-                "sbi: system reset failed, error={} (SRST not supported?)",
-                error as i64
-            );
-            false
-        } else {
-            true
-        }
+        false
+    } else {
+        true
     }
 }
 
@@ -95,40 +95,31 @@ pub fn sbi_system_reset(reset_type: usize, reason: usize) -> bool {
 /// # Implementation
 /// Uses SBI IPI Extension (EID #0x735049)
 pub fn send_ipi(hart_id: usize) -> bool {
-    unsafe {
-        let sbi_ext_id: u64 = SBI_EXT_IPI as u64;
-        let sbi_func_id: u64 = SBI_EXT_IPI_SEND_IPI as u64;
-        let hart_mask: u64 = 1u64 << hart_id;
+    // INV-SBI-ECALL-1: the IPI ecall (EID 0x735049, FID 0) with the
+    // single-hart mask in a0 — the raw edge lives in the root audited
+    // file.
+    let sbi_ext_id: u64 = SBI_EXT_IPI as u64;
+    let sbi_func_id: u64 = SBI_EXT_IPI_SEND_IPI as u64;
+    let hart_mask: u64 = 1u64 << hart_id;
 
-        let mut error: u64 = hart_mask;
-        let mut value: u64 = 0u64;
+    let (error, _) = crate::boot_edges::sbi_ecall(sbi_ext_id, sbi_func_id, hart_mask, 0u64);
 
-        asm!(
-            "ecall",
-            in("a7") sbi_ext_id,
-            in("a6") sbi_func_id,
-            inout("a0") error,
-            inout("a1") value,
-            options(nomem)
+    // SBI spec: error = 0 means success
+    if error as i64 != SBI_SUCCESS {
+        // SBI call failed
+        crate::println!("sbi: send_ipi to hart {} failed, error={} ({})",
+            hart_id,
+            error as i64,
+            match error as i64 {
+                SBI_ERR_NOT_SUPPORTED => "NOT_SUPPORTED",
+                SBI_ERR_INVALID_PARAM => "INVALID_PARAM",
+                SBI_ERR_DENIED => "DENIED",
+                SBI_ERR_INVALID_ADDRESS => "INVALID_ADDRESS",
+                _ => "UNKNOWN"
+            }
         );
-
-        // SBI spec: error = 0 means success
-        if error as i64 != SBI_SUCCESS {
-            // SBI call failed
-            crate::println!("sbi: send_ipi to hart {} failed, error={} ({})",
-                hart_id,
-                error as i64,
-                match error as i64 {
-                    SBI_ERR_NOT_SUPPORTED => "NOT_SUPPORTED",
-                    SBI_ERR_INVALID_PARAM => "INVALID_PARAM",
-                    SBI_ERR_DENIED => "DENIED",
-                    SBI_ERR_INVALID_ADDRESS => "INVALID_ADDRESS",
-                    _ => "UNKNOWN"
-                }
-            );
-            false
-        } else {
-            true
-        }
+        false
+    } else {
+        true
     }
 }

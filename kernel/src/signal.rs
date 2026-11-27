@@ -10,6 +10,17 @@
 //! - `struct sigpending`: Pending signal queue
 //! - `struct sigaction`: Signal handling action
 //! - Signal sending (kill) and processing (do_signal)
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the
+//! UAPI handler type, the queue's Send/Sync declaration, the trap-frame
+//! edge, the POD frame template, the file-dentry slot read and the
+//! trap.S entry symbol live in the root audited file
+//! `crate::boot_edges` (INV-SIG-* families). The remaining blocks'
+//! callees (TaskBorrow::from_raw, ptrace::ptrace_stop,
+//! Task::address_space_arc) are safe framework fns — their former
+//! unsafe wrappers were dropped, not moved.
+
+#![forbid(unsafe_code)]
 
 use crate::safety::bytes as cbytes;
 use crate::sync::rwlock::RwSpinlock;
@@ -149,7 +160,11 @@ pub enum SigActionKind {
 }
 
 /// Signal handler function type
-pub type SigHandler = unsafe extern "C" fn(i32);
+///
+/// The `unsafe extern "C" fn` type definition lives in the root audited
+/// file (crate::boot_edges, INV-SIG-HANDLER-1); the re-export keeps the
+/// historical `crate::signal::SigHandler` path.
+pub use crate::boot_edges::SigHandler;
 
 /// sigaction structure
 ///
@@ -247,8 +262,8 @@ pub struct SigQueue {
     inner: crate::sync::spinlock::Spinlock<alloc::collections::VecDeque<SigInfo>>,
 }
 
-unsafe impl Send for SigQueue {}
-unsafe impl Sync for SigQueue {}
+// Send/Sync are declared in the root audited file (crate::boot_edges,
+// INV-SIG-QUEUE-1 — all access serialized by the inner Spinlock).
 
 impl SigQueue {
     pub const fn new() -> Self {
@@ -1340,10 +1355,11 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         Some(c) => c,
         None => return false,
     };
-    // SAFETY (the one frame edge): regs comes from the arch trap handler
-    // and is the running task's live frame for the whole of do_signal;
-    // every later use is a plain struct access through this reference.
-    let regs: &mut crate::arch::pt_regs::PtRegs = unsafe { &mut *regs };
+    // INV-SIG-REGS-1 (the one frame edge): regs comes from the arch trap
+    // handler and is the running task's live frame for the whole of
+    // do_signal; every later use is a plain struct access through this
+    // reference. The raw edge lives in the root audited file.
+    let regs: &mut crate::arch::pt_regs::PtRegs = crate::boot_edges::live_pt_regs(regs);
 
     // The body is a LOOP, not a single pass: a signal whose disposition
     // parks the task (group stop, ptrace signal-delivery-stop) resumes
@@ -1463,9 +1479,9 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
             let info = current.pending.peek_info(sig)
                 .unwrap_or_else(|| SigInfo::new(sig, si_code::SI_KERNEL, current.pid(), 0));
             current.pending.remove(sig);
-            // SAFETY (one cross-module edge): current is the running task; ptrace_stop
-            // stays an unsafe fn of the ptrace lane until that lane converts it.
-            unsafe { crate::process::ptrace::ptrace_stop(current, sig, info) };
+            // ptrace_stop is a safe framework fn now (the ptrace lane
+            // converted it): current is the running task.
+            crate::process::ptrace::ptrace_stop(current, sig, info);
             // ptrace_stop parked the task; on resume re-select — the
             // tracer may have re-injected a signal or sent SIGKILL.
             delivered = true;
@@ -1629,9 +1645,10 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
 fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
     const ERESTARTSYS: i64 = -512;
     const ERESTARTNOHAND: i64 = -514;
-    // SAFETY: the trap path's live frame for the current task, same
-    // contract do_signal's frame edge documents.
-    let regs: &mut crate::arch::pt_regs::PtRegs = unsafe { &mut *regs };
+    // INV-SIG-REGS-1: the trap path's live frame for the current task,
+    // same contract do_signal's frame edge documents. The raw edge
+    // lives in the root audited file.
+    let regs: &mut crate::arch::pt_regs::PtRegs = crate::boot_edges::live_pt_regs(regs);
 
     #[cfg(feature = "riscv64")]
     {
@@ -2217,9 +2234,9 @@ fn restore_sigcontext_aarch64(
     // handler that edited the ucontext — swapcontext, siglongjmp
     // trampolines — must have its edits win). Fall back to the kernel
     // backup only when the user copy is unreadable.
-    // SAFETY: SignalFrame is a POD byte-image (ints + byte arrays only);
-    // all-zero bytes are a valid instance.
-    let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
+    // INV-SIG-FRAME-POD-1: SignalFrame is a POD byte-image; the zeroed
+    // template edge lives in the root audited file.
+    let mut user_frame: SignalFrame = crate::boot_edges::zeroed_signal_frame();
     let copied = crate::arch::uaccess_safe::copy_in(
         cbytes::bytes_of_mut(&mut user_frame),
         frame_addr as usize,
@@ -2328,9 +2345,9 @@ fn restore_sigcontext_riscv64(
     // the stack, and those edits must win (review M-04 — the kernel
     // backup copy used to be authoritative). Fall back to the kernel
     // backup only when the user copy is unreadable.
-    // SAFETY: SignalFrame is a POD byte-image (ints + byte arrays only);
-    // all-zero bytes are a valid instance.
-    let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
+    // INV-SIG-FRAME-POD-1: SignalFrame is a POD byte-image; the zeroed
+    // template edge lives in the root audited file.
+    let mut user_frame: SignalFrame = crate::boot_edges::zeroed_signal_frame();
     let copied = crate::arch::uaccess_safe::copy_in(
         cbytes::bytes_of_mut(&mut user_frame),
         frame_addr as usize,
@@ -2686,9 +2703,9 @@ fn restore_sigcontext_x86_64(
 
     // The user copy wins over the kernel backup (handler/swapcontext
     // edits must be honored — M-04).
-    // SAFETY: SignalFrame is a POD byte-image (ints + byte arrays only);
-    // all-zero bytes are a valid instance.
-    let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
+    // INV-SIG-FRAME-POD-1: SignalFrame is a POD byte-image; the zeroed
+    // template edge lives in the root audited file.
+    let mut user_frame: SignalFrame = crate::boot_edges::zeroed_signal_frame();
     let copied = crate::arch::uaccess_safe::copy_in(
         cbytes::bytes_of_mut(&mut user_frame),
         frame_addr as usize,
@@ -2793,11 +2810,13 @@ fn handle_default_signal(sig: i32) {
                         // without a SIGCHLD handler rely on the
                         // waitqueue wake).
                         if let Some(parent_ptr) = current.parent_ptr() {
-                            // SAFETY (one adopt edge): tree handle under the
+                            // Contract (adopt edge): tree handle under the
                             // caller's syscall context — TaskBorrow's
-                            // short-read contract.
+                            // short-read contract (from_raw is a safe
+                            // framework fn; the borrow discipline is the
+                            // type's documented INV-PROC-BORROW-1).
                             let parent =
-                                match unsafe { crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) } {
+                                match crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) {
                                     Some(p) => p,
                                     None => return,
                                 };
@@ -2810,10 +2829,9 @@ fn handle_default_signal(sig: i32) {
                             info._rest[..4]
                                 .copy_from_slice(&(Signal::SIGCONT as i32).to_le_bytes());
                             let _ = crate::signal::send_signal_with_info(parent.pid(), info);
-                            // SAFETY (one exit-path edge): the parent
-                            // handle is TaskBorrow-adopted above; exit.rs's
-                            // wake helper stays unsafe until its lane
-                            // converts it.
+                            // Contract (exit-path edge): the parent
+                            // handle is TaskBorrow-adopted above;
+                            // wake_group_chldexit is a safe framework fn.
                             crate::process::exit::wake_group_chldexit(&*parent);
                             crate::signal::signal_wake_up(parent.as_ptr());
                         }
@@ -2838,10 +2856,12 @@ fn handle_default_signal(sig: i32) {
                     // (reference do_notify_parent_cldstop) for SA_SIGINFO
                     // parents that decode it.
                     if let Some(parent_ptr) = current.parent_ptr() {
-                        // SAFETY (one adopt edge): tree handle under the
-                        // caller's syscall context — TaskBorrow's contract.
+                        // Contract (adopt edge): tree handle under the
+                        // caller's syscall context — TaskBorrow's contract
+                        // (from_raw is a safe framework fn; the borrow
+                        // discipline is the type's INV-PROC-BORROW-1).
                         let parent =
-                            match unsafe { crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) } {
+                            match crate::process::task_ref::TaskBorrow::from_raw(parent_ptr as *mut crate::process::task::Task) {
                                 Some(p) => p,
                                 None => return,
                             };
@@ -2853,7 +2873,7 @@ fn handle_default_signal(sig: i32) {
                         );
                         info._rest[..4].copy_from_slice(&sig.to_le_bytes());
                         let _ = crate::signal::send_signal_with_info(parent.pid(), info);
-                        // SAFETY (one exit-path edge): as above.
+                        // Contract (exit-path edge): as above — safe fn.
                         crate::process::exit::wake_group_chldexit(&*parent);
                         crate::signal::signal_wake_up(parent.as_ptr());
                     }
@@ -2987,7 +3007,8 @@ fn abort_reason_dump(leader_tid: u32) {
         rsp
     );
 
-    let Some(aspace) = (unsafe { task.address_space_arc() }) else {
+    // address_space_arc is a safe framework fn (refcounted clone).
+    let Some(aspace) = (task.address_space_arc()) else {
         crate::pr_warn!("ABORT-DUMP: no address space");
         return;
     };
@@ -3019,8 +3040,10 @@ fn abort_reason_dump(leader_tid: u32) {
             let (s, e, _off) = ranges[i];
             if addr >= s && addr < e {
                 let name = aspace.get_vma_file(s as usize).and_then(|file| {
-                    // SAFETY: read-only dentry access on the pinned file.
-                    let dentry = unsafe { &*file.dentry.get() };
+                    // INV-SIG-FILEDENTRY-1: read-only dentry slot access
+                    // on the pinned file — the raw edge lives in the
+                    // root audited file.
+                    let dentry = crate::boot_edges::file_dentry_slot(&file);
                     dentry.as_ref().map(|d| d.name.lock().clone())
                 });
                 return match name {
@@ -3758,7 +3781,7 @@ pub fn park_stopped_task(task: *mut crate::process::task::Task) {
     // executes it, across every schedule() in the loop below — the
     // running-task contract extended to the park window because the
     // parker IS the owner.
-    let t = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+    let t = match crate::process::task_ref::TaskBorrow::from_raw(task) {
         Some(t) => t,
         None => return,
     };
@@ -3798,7 +3821,10 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 ///
 /// * `regs` - PtRegs pointer, passed from trap.S
 ///
-#[no_mangle]
+/// The `#[no_mangle]` export shim lives in the root audited file
+/// (crate::boot_edges, INV-SIG-ENTRY-1) — this file is
+/// #![forbid(unsafe_code)] and cannot carry the attribute; the symbol
+/// name (what trap.S calls) is unchanged.
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     // forkprof trace: the trap-exit signal gate (every user return).
     if crate::dfx::forkprof::trace_on() {
@@ -3960,7 +3986,7 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
     // current task, a pid-hash pin, or a tree-lock-protected parent) —
     // the same short-read contract TaskBorrow documents; the wake below
     // does not yield, so the borrow lives to its end.
-    let t = match unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+    let t = match crate::process::task_ref::TaskBorrow::from_raw(task) {
         Some(t) => t,
         None => return false,
     };

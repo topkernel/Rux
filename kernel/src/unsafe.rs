@@ -5,10 +5,11 @@
 //! The ROOT single files' one audited unsafe collection (mainline
 //! minimal-first architecture, 2026-11-27). The crate-root single
 //! files — lib.rs, init.rs, cmdline.rs, console.rs, cov.rs, initrd.rs,
-//! list.rs, main.rs, errno.rs — belong to no subsystem directory, so
-//! their unsafe families collect here under this one audited file (the
-//! gate whitelists exactly one `unsafe.rs` per directory plus this
-//! root file). The file began as boot_edges.rs (the boot-provenance
+//! list.rs, main.rs, errno.rs, and (final round) printk.rs, sbi.rs,
+//! signal.rs — belong to no subsystem directory, so their unsafe
+//! families collect here under this one audited file (the gate
+//! whitelists exactly one `unsafe.rs` per directory plus this root
+//! file). The file began as boot_edges.rs (the boot-provenance
 //! framework edges, industrial-reduction lane L2) and was git-mv'd to
 //! the per-directory `unsafe.rs` naming; the module keeps its
 //! historical `boot_edges` identifier so every call site stays stable.
@@ -552,4 +553,182 @@ impl crate::list::ListHead {
         self.next = self as *mut _;
         self.prev = self as *mut _;
     }
+}
+
+// ===========================================================================
+// PRINTK (moved from printk.rs by the root-file unsafe collection,
+// 2026-11-27: the lock-free ring slot edges and the global logger
+// install). printk.rs keeps the ring struct, the slot protocol prose
+// and every caller; only the raw accesses move cross here.
+// ===========================================================================
+
+/// The lock-free printk ring's raw slot-read edge.
+///
+/// INV-PRINTK-RING-1: `RING_RECORDS` is a fixed-size static array of
+/// ring slots; `idx` arrives bounds-reduced (seq % RING_BUFFER_CAPACITY)
+/// from the caller, so the subscript cannot go out of range. The
+/// aliasing discipline is the documented slot protocol: a reader may
+/// only trust the record's fields between an Acquire load of `pub_seq`
+/// that matched its expected sequence and the reads it performs after
+/// that load — the standard lock-free ring shape (the one documented
+/// tear window is a writer stalling a full ring inside one preemption
+/// window; readers clamp `text_len`, so a tear garbles, never faults).
+#[inline]
+pub(crate) fn ring_slot_get(ring: &crate::printk::RecordsArray, idx: usize) -> &'static crate::printk::LogRecord {
+    // SAFETY: INV-PRINTK-RING-1 — in-bounds slot under the slot protocol.
+    unsafe { &(*ring.0.get())[idx] }
+}
+
+/// The lock-free printk ring's raw slot-write edge (writer side).
+///
+/// INV-PRINTK-RING-1 (writer arm): the writer owns the slot between the
+/// invalidation store and the publication store of its reserved
+/// sequence — distinct sequences map to distinct slots, so at most one
+/// writer fills a slot at a time (modulo the documented stall window).
+#[inline]
+pub(crate) fn ring_slot_get_mut(ring: &crate::printk::RecordsArray, idx: usize) -> &'static mut crate::printk::LogRecord {
+    // SAFETY: INV-PRINTK-RING-1 (writer arm) — owned slot between
+    // invalidate and publish.
+    unsafe { &mut (*ring.0.get())[idx] }
+}
+
+/// `Sync` for the ring's `UnsafeCell` holder.
+///
+/// INV-PRINTK-RING-1 (Sync arm): sound because every access to the
+/// cells goes through [`ring_slot_get`] / [`ring_slot_get_mut`], whose
+/// slot protocol is the only authorized access shape.
+unsafe impl Sync for crate::printk::RecordsArray {}
+
+/// Install the global `log` facade logger (printk's init_logger).
+///
+/// INV-PRINTK-LOGGER-1: `log::set_logger` may succeed exactly once (the
+/// facade enforces it internally); the only caller is
+/// `printk::init_logger`, run once during early boot before any task
+/// exists, so there is no second install to race.
+pub fn set_global_logger(logger: &'static dyn log::Log) {
+    // SAFETY: INV-PRINTK-LOGGER-1 — single early-boot install.
+    unsafe {
+        log::set_logger(logger).ok();
+    }
+}
+
+// ===========================================================================
+// SBI (moved from sbi.rs by the root-file unsafe collection, 2026-11-27:
+// the two supervisor-mode ecalls — SRST system reset and IPI send —
+// share one ecall edge).
+// ===========================================================================
+
+/// One SBI 0.2 ecall: returns (error, value) in the a0/a1 convention.
+///
+/// INV-SBI-ECALL-1: a supervisor-mode `ecall` into the machine-mode SBI
+/// runtime, arguments per the SBI calling convention (a7 = extension
+/// id, a6 = function id, a0/a1 arguments in and error/value out). The
+/// call is synchronous — control returns to the instruction after the
+/// ecall on the same hart — and `nomem` is sound because the SBI
+/// contract passes everything in registers. Reachable at any point the
+/// kernel runs (the SBI firmware is the platform, always present).
+#[cfg(feature = "riscv64")]
+pub fn sbi_ecall(eid: u64, fid: u64, a0: u64, a1: u64) -> (u64, u64) {
+    let mut error: u64 = a0;
+    let mut value: u64 = a1;
+    // SAFETY: INV-SBI-ECALL-1 — register-only ecall into the SBI runtime.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") eid,
+            in("a6") fid,
+            inout("a0") error,
+            inout("a1") value,
+            options(nomem)
+        );
+    }
+    (error, value)
+}
+
+// ===========================================================================
+// SIGNAL (moved from signal.rs by the root-file unsafe collection,
+// 2026-11-27: the UAPI handler type, the queue's Send/Sync declaration,
+// the trap-frame edge, the POD frame template, the file-dentry slot
+// read, and the trap.S entry symbol). The 15 sites fell into these
+// five families plus six blocks whose callees were already safe fns
+// (TaskBorrow::from_raw, ptrace::ptrace_stop, Task::address_space_arc)
+// — those wrappers were simply dropped, not moved.
+// ===========================================================================
+
+/// Signal handler function type (the rt_sigaction sa_handler UAPI).
+///
+/// INV-SIG-HANDLER-1: the `unsafe` lives in the TYPE — calling through
+/// it invokes user code, which only the signal-return trampoline does
+/// (it erets to user mode; the kernel never calls a handler
+/// directly). Kernel-side, a SigHandler is inert bits: constructed
+/// from the user's sigaction words, copied to the user frame, never
+/// dereferenced by kernel code.
+pub type SigHandler = unsafe extern "C" fn(i32);
+
+/// `Send`/`Sync` for the per-task signal queue.
+///
+/// INV-SIG-QUEUE-1: SigQueue wraps `Spinlock<VecDeque<SigInfo>>`; every
+/// access is serialized by the spinlock, so sharing `&SigQueue` across
+/// cores (Sync) and moving ownership across CPUs (Send — queues live
+/// in tasks, tasks migrate) are sound.
+unsafe impl Send for crate::signal::SigQueue {}
+unsafe impl Sync for crate::signal::SigQueue {}
+
+/// Convert the trap path's raw frame pointer into the delivery
+/// reference (the one frame edge of do_signal and of the syscall
+/// restart fixup).
+///
+/// INV-SIG-REGS-1: `regs` comes from the arch trap entry and is the
+/// running task's live frame for the whole of the delivery call —
+/// non-null by trap-path construction, owned by the CPU executing the
+/// conversion, never accessed concurrently. Only do_signal /
+/// restart_syscall_no_handler (the trap-exit path) call this.
+pub fn live_pt_regs(regs: *mut crate::arch::pt_regs::PtRegs) -> &'static mut crate::arch::pt_regs::PtRegs {
+    // SAFETY: INV-SIG-REGS-1 — the trap path's live, exclusive frame.
+    unsafe { &mut *regs }
+}
+
+/// A zeroed SignalFrame template (the restore-path input buffer).
+///
+/// INV-SIG-FRAME-POD-1: SignalFrame is a repr(C) byte-image (ints,
+/// byte arrays and POD SigInfo words only) — all-zero bytes are a valid
+/// instance, so `zeroed` cannot produce an invalid value. The template
+/// is immediately overwritten: copy_in from user memory (the handler's
+/// edits win — M-04) or the kernel backup replaces it wholesale.
+pub fn zeroed_signal_frame() -> crate::signal::SignalFrame {
+    // SAFETY: INV-SIG-FRAME-POD-1 — POD byte-image, all-zero valid.
+    unsafe { core::mem::zeroed() }
+}
+
+/// Read the File dentry slot (the diagnostic name-resolution edge).
+///
+/// INV-SIG-FILEDENTRY-1: the File's dentry slot is `UnsafeCell` because
+/// it is installed post-construction (`set_dentry`) during open; after
+/// installation it is never cleared nor re-pointed, so a reader sees
+/// either None or a stable Arc. The caller reads it under the vma_read
+/// lock of the abort-dump walker (a short read, no yield, the File is
+/// kept alive by the vma's own Arc for the read's duration).
+pub fn file_dentry_slot(file: &crate::fs::file::File) -> &'static Option<alloc::sync::Arc<crate::fs::dentry::Dentry>> {
+    // SAFETY: INV-SIG-FILEDENTRY-1 — stable-after-install slot, short
+    // read under the vma_read lock.
+    unsafe { &*file.dentry.get() }
+}
+
+// ---------------------------------------------------------------------------
+// Assembly-crossing entry symbol (moved from signal.rs by the root-file
+// unsafe collection, 2026-11-27 — same rule as sched/unsafe.rs: a symbol
+// exported to assembly IS a raw edge, and #![forbid(unsafe_code)] cannot
+// coexist with #[no_mangle] in a file, so the export shim lives here and
+// the body stays in signal.rs under the same Rust path).
+// ---------------------------------------------------------------------------
+
+/// Trap-exit signal delivery entry (trap.S calls this by symbol on
+/// every return to user space).
+///
+/// INV-SIG-ENTRY-1: the shim only forwards the trap path's frame
+/// pointer to [`crate::signal::check_and_deliver_signals`], which owns
+/// the null check and the INV-SIG-REGS-1 frame edge.
+#[no_mangle]
+pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
+    crate::signal::check_and_deliver_signals(regs)
 }

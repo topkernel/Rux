@@ -7,6 +7,13 @@
 //! Provides leveled kernel logging (pr_emerg through pr_debug),
 //! a ring buffer for storing all messages, and a syslog(2) syscall
 //! for userspace `dmesg` to read/manage kernel logs.
+//!
+//! Zero-unsafe (mainline minimal-first collection, 2026-11-27): the
+//! ring's raw slot edges, the Sync declaration of its UnsafeCell
+//! holder and the global-logger install live in the root audited
+//! file `crate::boot_edges` (INV-PRINTK-RING-1 / INV-PRINTK-LOGGER-1).
+
+#![forbid(unsafe_code)]
 
 use core::cell::UnsafeCell;
 use core::fmt;
@@ -51,7 +58,7 @@ const RING_BUFFER_CAPACITY: usize = crate::config::PRINTK_RING_BUFFER_SIZE / REC
 
 /// A single log record in the ring buffer.
 #[repr(C)]
-struct LogRecord {
+pub(crate) struct LogRecord {
     /// Log level (0-7).
     level: u8,
     /// CPU ID that generated this message.
@@ -107,8 +114,10 @@ impl LogRecord {
 /// interleaves with it: the tear window is documented, bounded by
 /// `RING_BUFFER_CAPACITY` prints inside ONE preemption window, and
 /// memory-safe by construction (every reader clamps `text_len`).
-struct RecordsArray(UnsafeCell<[LogRecord; RING_BUFFER_CAPACITY]>);
-unsafe impl Sync for RecordsArray {}
+pub(crate) struct RecordsArray(pub(crate) UnsafeCell<[LogRecord; RING_BUFFER_CAPACITY]>);
+// Sync is declared in the root audited file (crate::boot_edges,
+// INV-PRINTK-RING-1 Sync arm — every access goes through the audited
+// slot edges).
 
 static RING_RECORDS: RecordsArray = RecordsArray(UnsafeCell::new([const {
     LogRecord::empty()
@@ -124,10 +133,9 @@ static RING_RECORDS: RecordsArray = RecordsArray(UnsafeCell::new([const {
 #[inline]
 fn ring_rec(seq: u64) -> &'static LogRecord {
     let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-    // SAFETY: RING_RECORDS is a fixed static array; idx is bounds-checked
-    // by the modulo. The aliasing discipline is the slot protocol above
-    // (this is the standard lock-free ring access shape).
-    unsafe { &(*RING_RECORDS.0.get())[idx] }
+    // INV-PRINTK-RING-1: bounds-reduced idx, slot-protocol discipline —
+    // the raw edge lives in the root audited file.
+    crate::boot_edges::ring_slot_get(&RING_RECORDS, idx)
 }
 
 /// Writable slot view for the lock-free writer (Rule 2). Same slot
@@ -137,9 +145,10 @@ fn ring_rec(seq: u64) -> &'static LogRecord {
 #[inline]
 fn ring_rec_mut(seq: u64) -> &'static mut LogRecord {
     let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-    // SAFETY: see `ring_rec` — the writer's slot-protocol ownership makes
-    // this the standard lock-free ring write access.
-    unsafe { &mut (*RING_RECORDS.0.get())[idx] }
+    // INV-PRINTK-RING-1 (writer arm): the writer owns this slot between
+    // the invalidate and publish stores — the raw edge lives in the root
+    // audited file.
+    crate::boot_edges::ring_slot_get_mut(&RING_RECORDS, idx)
 }
 
 /// Clamped text length for a record: never trust the raw u16 (a torn
@@ -2130,10 +2139,9 @@ impl Log for PrintkLogger {
 /// Must be called once during early boot.
 pub fn init_logger() {
     static LOGGER: PrintkLogger = PrintkLogger;
-    // SAFETY: called once during early boot; LOGGER is a static with 'static lifetime.
-    unsafe {
-        log::set_logger(&LOGGER).ok();
-    }
+    // INV-PRINTK-LOGGER-1: single early-boot install — the raw edge
+    // lives in the root audited file.
+    crate::boot_edges::set_global_logger(&LOGGER);
     log::set_max_level(LevelFilter::Trace);
 }
 
