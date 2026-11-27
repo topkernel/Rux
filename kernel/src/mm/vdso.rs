@@ -4,15 +4,14 @@
 //!
 //! vDSO (virtual dynamic shared object) — P2.
 //!
-//! FRAMEKERNEL CLASSIFICATION (unsafe-slim L7, 2026-11-21): this file is
-//! mm's SECOND edge file (with mm/edges.rs — the doctrine's ≤2 per
-//! subsystem), NOT a service file to de-sign. It is one self-contained
-//! timekeeping primitive — the data-page seqlock, the volatile word
-//! pairs, and the rdtsc/rdcycle counter asm — whose unsafe is the
-//! audited core itself (the LTP clock_gettime04 protocol: base_tsc/
-//! base_mono_ns must pair under the seq word or the vDSO clock runs
-//! ahead of the syscall clock). Relocating these blocks into edges.rs
-//! would move the same audited bytes without shrinking anything.
+//! FRAMEKERNEL CLASSIFICATION (unsafe-slim L7, 2026-11-21), SUPERSEDED
+//! by the mainline one-audited-file consolidation (2026-11-27): this
+//! file WAS mm's second edge file; its raw page-word accesses (the
+//! seqlock word, the volatile field pairs, the lfence;rdtsc asm) now
+//! live in the subsystem's ONE audited unsafe file (`crate::mm::edges`,
+//! INV-MM-VDSO family) and this file is zero-unsafe safe code over
+//! those edges. The protocol docs and the invariants below are
+//! unchanged.
 //!
 //! INV-MM-VDSO (the invariants this primitive owns):
 //! - The data page (`VDSO_DATA_PAGE`) is written ONLY by the timer-tick
@@ -70,6 +69,8 @@
 // static mapping whose seqlock/fields are accessed at page-constant
 // offsets (the seq/data readers' contract); the tick/wr rows hold the
 // seqlock write discipline.)
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Fixed user mapping address (INTERP_BASE - 4 MiB, clear of the dynamic
@@ -92,22 +93,34 @@ struct VdsoDataPage([u8; 4096]);
 
 static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);
 
-/// The seqlock word IS data-page offset 0 (odd = write in progress).
-///
-/// It must be accessed THROUGH the page pointer, never through a
-/// separate static: the user-side vDSO code reads page[0] and retries
-/// while it is odd or changed across the read. The original separate
-/// VDSO_SEQ static never aliased the page, so page[0] stayed 0 forever,
-/// no reader ever retried, and a reader descheduled between its
-/// base_tsc and base_mono_ns loads paired a stale tsc with a fresh mono
-/// — a vDSO clock AHEAD of the syscall clock by the whole preemption
-/// gap (LTP clock_gettime04: "Time travelled backwards (-454618735 ns)"
-/// on every clock, only on loads noisy enough to deschedule the reader
-/// for hundreds of ms).
-// SAFETY: only written from the timer-tick refresh paths below.
-unsafe fn vdso_seq() -> &'static AtomicU32 {
-    unsafe { &*(VDSO_DATA_PAGE.0.as_ptr() as *const AtomicU32) }
+/// Raw address of the fixed data-page static. Safe: taking an address
+/// is not a deref — every deref of these pages lives in the subsystem's
+/// audited unsafe file (`crate::mm::edges`, the INV-MM-VDSO family).
+#[inline]
+pub(crate) fn data_page_addr() -> *mut u8 {
+    core::ptr::addr_of_mut!(VDSO_DATA_PAGE).cast::<u8>()
 }
+
+/// Raw address of the fixed code-page static (see [`data_page_addr`]).
+#[inline]
+pub(crate) fn code_page_addr() -> *mut u8 {
+    core::ptr::addr_of_mut!(VDSO_CODE_PAGE).cast::<u8>()
+}
+
+// The seqlock word IS data-page offset 0 (odd = write in progress).
+//
+// It must be accessed THROUGH the page pointer, never through a
+// separate static: the user-side vDSO code reads page[0] and retries
+// while it is odd or changed across the read. The original separate
+// VDSO_SEQ static never aliased the page, so page[0] stayed 0 forever,
+// no reader ever retried, and a reader descheduled between its
+// base_tsc and base_mono_ns loads paired a stale tsc with a fresh mono
+// — a vDSO clock AHEAD of the syscall clock by the whole preemption
+// gap (LTP clock_gettime04: "Time travelled backwards (-454618735 ns)"
+// on every clock, only on loads noisy enough to deschedule the reader
+// for hundreds of ms). Kernel-side readers take the audited edge
+// `crate::mm::edges::vdso_seq_ref` (INV-MM-VDSO-1); the page is only
+// written from the timer-tick refresh paths below under the seqlock.
 
 /// Refresh the data page snapshot (timer tick / clock-set paths).
 ///
@@ -119,18 +132,14 @@ pub fn vdso_data_tick() {
     // 10 MHz source: 100 ns per cycle, exact.
     let mono_ns = cycles.saturating_mul(100);
     let epoch_ns = crate::timer::wall_epoch_offset_ns();
-    // SAFETY: the page is only written here under the seqlock; user
-    // readers validate via the seq word before trusting the fields.
-    unsafe {
-        let seq = vdso_seq();
-        seq.fetch_or(1, Ordering::Release);
-        let base = VDSO_DATA_PAGE.0.as_mut_ptr();
-        core::ptr::write_volatile(base.add(8) as *mut u64, cycles);
-        core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
-        core::ptr::write_volatile(base.add(24) as *mut u64, epoch_ns);
-        // tz fields (32/36) stay zero.
-        seq.fetch_add(1, Ordering::Release);
-    }
+    // The three field writes are the audited edge's INV-MM-VDSO-3
+    // write arm; the seqlock section brackets them and user readers
+    // validate via the seq word before trusting the fields.
+    let seq = crate::mm::edges::vdso_seq_ref();
+    seq.fetch_or(1, Ordering::Release);
+    crate::mm::edges::vdso_rv_tick_publish(cycles, mono_ns, epoch_ns);
+    // tz fields (32/36) stay zero.
+    seq.fetch_add(1, Ordering::Release);
 }
 
 /// x86_64 unified-track timekeeping (vDSO re-arm, 2026-11-15).
@@ -193,8 +202,6 @@ pub fn vdso_data_tick() {
 pub mod x86_track {
     use core::sync::atomic::Ordering;
 
-    use super::vdso_seq;
-
     // ---- lane instrumentation (vdso-clock): fallback/skip counters ----
     pub static TRACK_READ_NONE: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
@@ -222,43 +229,24 @@ pub mod x86_track {
     // ------------------------------------------------------------------
 
     #[inline]
-    pub(super) unsafe fn rd(off: usize) -> u64 {
-        unsafe {
-            core::ptr::read_volatile(
-                super::VDSO_DATA_PAGE.0.as_ptr().add(off) as *const u64,
-            )
-        }
+    pub(super) fn rd(off: usize) -> u64 {
+        // Audited edge INV-MM-VDSO-2 (volatile in-page load).
+        crate::mm::edges::vdso_field_read64(off)
     }
     #[inline]
-    pub(super) unsafe fn wr(off: usize, v: u64) {
-        unsafe {
-            core::ptr::write_volatile(
-                super::VDSO_DATA_PAGE.0.as_mut_ptr().add(off) as *mut u64,
-                v,
-            )
-        }
+    pub(super) fn wr(off: usize, v: u64) {
+        // Audited edge INV-MM-VDSO-2 write arm (volatile in-page store).
+        crate::mm::edges::vdso_field_write64(off, v)
     }
 
     /// lfence;rdtsc — the ORDERED counter read. A bare rdtsc can be
     /// hoisted across the field loads by the CPU; the seq protocol
     /// requires the TSC stamp to sit inside the seq1..seq2 window (the
-    /// emitted vDSO code uses the identical pair).
+    /// emitted vDSO code uses the identical pair). The asm itself is
+    /// the audited edge `crate::mm::edges::lfence_rdtsc`.
     #[inline]
     pub fn read_tsc_ordered() -> u64 {
-        let lo: u32;
-        let hi: u32;
-        // SAFETY: pure counter read; lfence orders it against the
-        // surrounding seq-word loads.
-        unsafe {
-            core::arch::asm!(
-                "lfence",
-                "rdtsc",
-                out("eax") lo,
-                out("edx") hi,
-                options(nomem, nostack)
-            );
-        }
-        (lo as u64) | ((hi as u64) << 32)
+        crate::mm::edges::lfence_rdtsc()
     }
 
     /// (delta_tsc * mult) >> 32 — full-precision nominal mapping,
@@ -285,20 +273,18 @@ pub mod x86_track {
     /// Take the page for writing. Returns false when another writer
     /// holds it (seq odd) — the caller skips this round.
     #[inline]
-    pub(super) unsafe fn seq_try_begin() -> bool {
-        unsafe {
-            let seq = vdso_seq();
-            let cur = seq.load(Ordering::Relaxed);
-            if cur & 1 != 0 {
-                return false;
-            }
-            seq.compare_exchange(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
+    pub(super) fn seq_try_begin() -> bool {
+        let seq = crate::mm::edges::vdso_seq_ref();
+        let cur = seq.load(Ordering::Relaxed);
+        if cur & 1 != 0 {
+            return false;
         }
+        seq.compare_exchange(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
     #[inline]
-    pub(super) unsafe fn seq_end() {
-        unsafe { vdso_seq().fetch_add(1, Ordering::Release); }
+    pub(super) fn seq_end() {
+        crate::mm::edges::vdso_seq_ref().fetch_add(1, Ordering::Release);
     }
 
     /// Publish the initial anchor (promote_tsc_timekeeper; boot-time
@@ -306,20 +292,18 @@ pub mod x86_track {
     /// `base_mono_nom` must make the track continuous with the previous
     /// clock (the caller computes the continuity value).
     pub fn publish_tsc_anchor(mult: u64, cycle_last: u64, base_mono_nom: u64) {
-        unsafe {
-            if !seq_try_begin() {
-                // Cannot happen today (promote runs pre-SMP with IRQs
-                // off); if it ever races, the next tick refresh
-                // publishes — mult stays 0 and userspace falls back to
-                // the syscall until then.
-                return;
-            }
-            wr(40, mult);
-            wr(8, cycle_last);
-            wr(16, base_mono_nom);
-            wr(48, 1); // res_ns
-            seq_end();
+        if !seq_try_begin() {
+            // Cannot happen today (promote runs pre-SMP with IRQs
+            // off); if it ever races, the next tick refresh
+            // publishes — mult stays 0 and userspace falls back to
+            // the syscall until then.
+            return;
         }
+        wr(40, mult);
+        wr(8, cycle_last);
+        wr(16, base_mono_nom);
+        wr(48, 1); // res_ns
+        seq_end();
     }
 
     /// Forward-only base step (1 Hz HPET resync). Returns false when
@@ -328,15 +312,13 @@ pub mod x86_track {
         if step_nominal == 0 {
             return true;
         }
-        unsafe {
-            if !seq_try_begin() {
-                return false;
-            }
-            let base = rd(16);
-            wr(16, base.wrapping_add(step_nominal));
-            seq_end();
-            true
+        if !seq_try_begin() {
+            return false;
         }
+        let base = rd(16);
+        wr(16, base.wrapping_add(step_nominal));
+        seq_end();
+        true
     }
 
     /// The >25 s rebase pull-back (vCPU TSC-offset smash class). This
@@ -345,15 +327,13 @@ pub mod x86_track {
     /// through the pull (the vDSO track steps back — a broken-by-
     /// definition state, documented, better than a 25 s-off clock).
     pub fn tsc_anchor_step_back(lead_nominal: u64) -> bool {
-        unsafe {
-            if !seq_try_begin() {
-                return false;
-            }
-            let base = rd(16);
-            wr(16, base.wrapping_sub(lead_nominal));
-            seq_end();
-            true
+        if !seq_try_begin() {
+            return false;
         }
+        let base = rd(16);
+        wr(16, base.wrapping_sub(lead_nominal));
+        seq_end();
+        true
     }
 
     // ------------------------------------------------------------------
@@ -363,28 +343,26 @@ pub mod x86_track {
     /// Seq-validated anchor triple (no TSC read). None when not
     /// promoted (mult == 0) or the writer wedged odd.
     pub fn tsc_anchor_peek() -> Option<(u64, u64, u64)> {
-        unsafe {
-            for _ in 0..128 {
-                let s1 = vdso_seq().load(Ordering::Acquire);
-                if s1 & 1 != 0 {
-                    continue;
-                }
-                let cl = rd(8);
-                let base = rd(16);
-                let mult = rd(40);
-                let s2 = vdso_seq().load(Ordering::Acquire);
-                if s1 != s2 {
-                    continue;
-                }
-                if mult == 0 {
-                    bump(&PEEK_NONE, "peek-none-mult0");
-                    return None; // not promoted
-                }
-                return Some((cl, base, mult));
+        for _ in 0..128 {
+            let s1 = crate::mm::edges::vdso_seq_ref().load(Ordering::Acquire);
+            if s1 & 1 != 0 {
+                continue;
             }
-            bump(&PEEK_NONE, "peek-none-retry");
-            None
+            let cl = rd(8);
+            let base = rd(16);
+            let mult = rd(40);
+            let s2 = crate::mm::edges::vdso_seq_ref().load(Ordering::Acquire);
+            if s1 != s2 {
+                continue;
+            }
+            if mult == 0 {
+                bump(&PEEK_NONE, "peek-none-mult0");
+                return None; // not promoted
+            }
+            return Some((cl, base, mult));
         }
+        bump(&PEEK_NONE, "peek-none-retry");
+        None
     }
 
     /// The unified-track clock read (kernel side of the vDSO contract):
@@ -404,37 +382,35 @@ pub mod x86_track {
     /// retry, then report unreadable (the caller's ratchet freeze is
     /// the safe degradation; the resync/rebase paths repair the anchor).
     pub fn tsc_track_now_nominal() -> Option<u64> {
-        unsafe {
-            for _ in 0..128 {
-                let s1 = vdso_seq().load(Ordering::Acquire);
-                if s1 & 1 != 0 {
-                    continue;
-                }
-                let cl = rd(8);
-                let base = rd(16);
-                let mult = rd(40);
-                if mult == 0 {
-                    return None; // not promoted
-                }
-                // The TSC stamp sits INSIDE the window: a refresh that
-                // lands between the field loads and this read bumps the
-                // seq word and the whole read retries — cycle_last can
-                // never be ahead of the stamped TSC (no wrapped delta).
-                let raw = read_tsc_ordered();
-                let s2 = vdso_seq().load(Ordering::Acquire);
-                if s1 != s2 {
-                    continue;
-                }
-                if raw < cl {
-                    // Wrapped-delta refusal (see the doc above).
-                    continue;
-                }
-                let delta = raw - cl;
-                return Some(base.wrapping_add(tsc_delta_nominal(delta, mult)));
+        for _ in 0..128 {
+            let s1 = crate::mm::edges::vdso_seq_ref().load(Ordering::Acquire);
+            if s1 & 1 != 0 {
+                continue;
             }
-            bump(&TRACK_READ_NONE, "track-none");
-            None
+            let cl = rd(8);
+            let base = rd(16);
+            let mult = rd(40);
+            if mult == 0 {
+                return None; // not promoted
+            }
+            // The TSC stamp sits INSIDE the window: a refresh that
+            // lands between the field loads and this read bumps the
+            // seq word and the whole read retries — cycle_last can
+            // never be ahead of the stamped TSC (no wrapped delta).
+            let raw = read_tsc_ordered();
+            let s2 = crate::mm::edges::vdso_seq_ref().load(Ordering::Acquire);
+            if s1 != s2 {
+                continue;
+            }
+            if raw < cl {
+                // Wrapped-delta refusal (see the doc above).
+                continue;
+            }
+            let delta = raw - cl;
+            return Some(base.wrapping_add(tsc_delta_nominal(delta, mult)));
         }
+        bump(&TRACK_READ_NONE, "track-none");
+        None
     }
 }
 
@@ -446,47 +422,45 @@ pub mod x86_track {
 /// serves every read).
 #[cfg(feature = "x86_64")]
 pub fn vdso_data_tick() {
-    unsafe {
-        if x86_track::tsc_anchor_peek().is_none() {
-            x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-peek");
-            return; // TSC timekeeper not promoted — keep the page as-is
-        }
-        if !x86_track::seq_try_begin() {
-            x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-writer");
-            return; // another CPU is mid-refresh; next tick catches up
-        }
-        let cl = x86_track::rd(8);
-        let base = x86_track::rd(16);
-        let mult = x86_track::rd(40);
-        // Ordered TSC stamp (vdso-clock discipline): the reader side
-        // uses lfence;rdtsc so the stamp sits inside its seq window;
-        // the writer stamps with the SAME ordered read so the anchor it
-        // publishes is coherent with every reader's comparison (a bare
-        // rdtsc can execute speculatively early relative to the field
-        // loads — harmless today because raw >= cl is re-checked, but
-        // the ordered read keeps the writer/reader pair symmetric).
-        let raw = x86_track::read_tsc_ordered();
-        // TSC must never read backward; if it ever does (vCPU TSC
-        // smash), keep the old anchor — the emitted bound check sends
-        // readers to the syscall and the resync report paths fire.
-        if raw >= cl {
-            let d = x86_track::tsc_delta_nominal(raw - cl, mult);
-            x86_track::wr(16, base.wrapping_add(d));
-            x86_track::wr(8, raw);
-        }
-        let epoch_ns = crate::timer::wall_epoch_offset_ns();
-        x86_track::wr(24, epoch_ns);
-        let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
-        if hz >= 1_000_000 {
-            // Interpolation bound: 50 ms of raw TSC. Refreshes happen
-            // every tick (~10 ms); a healthy reader interpolates at most
-            // a few tens of ms past cycle_last. A larger (or wrapped)
-            // delta means the anchor is stale or the TSC jumped — the
-            // emitter then takes the syscall fallback.
-            x86_track::wr(52, hz / 20);
-        }
-        x86_track::seq_end();
+    if x86_track::tsc_anchor_peek().is_none() {
+        x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-peek");
+        return; // TSC timekeeper not promoted — keep the page as-is
     }
+    if !x86_track::seq_try_begin() {
+        x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-writer");
+        return; // another CPU is mid-refresh; next tick catches up
+    }
+    let cl = x86_track::rd(8);
+    let base = x86_track::rd(16);
+    let mult = x86_track::rd(40);
+    // Ordered TSC stamp (vdso-clock discipline): the reader side
+    // uses lfence;rdtsc so the stamp sits inside its seq window;
+    // the writer stamps with the SAME ordered read so the anchor it
+    // publishes is coherent with every reader's comparison (a bare
+    // rdtsc can execute speculatively early relative to the field
+    // loads — harmless today because raw >= cl is re-checked, but
+    // the ordered read keeps the writer/reader pair symmetric).
+    let raw = x86_track::read_tsc_ordered();
+    // TSC must never read backward; if it ever does (vCPU TSC
+    // smash), keep the old anchor — the emitted bound check sends
+    // readers to the syscall and the resync report paths fire.
+    if raw >= cl {
+        let d = x86_track::tsc_delta_nominal(raw - cl, mult);
+        x86_track::wr(16, base.wrapping_add(d));
+        x86_track::wr(8, raw);
+    }
+    let epoch_ns = crate::timer::wall_epoch_offset_ns();
+    x86_track::wr(24, epoch_ns);
+    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+    if hz >= 1_000_000 {
+        // Interpolation bound: 50 ms of raw TSC. Refreshes happen
+        // every tick (~10 ms); a healthy reader interpolates at most
+        // a few tens of ms past cycle_last. A larger (or wrapped)
+        // delta means the anchor is stale or the TSC jumped — the
+        // emitter then takes the syscall fallback.
+        x86_track::wr(52, hz / 20);
+    }
+    x86_track::seq_end();
 }
 
 /// Physical addresses of the two vDSO pages (data, code) for the exec
@@ -1484,12 +1458,11 @@ fn build_code_page() -> [u8; 4096] {
 /// Build the vDSO ELF code page and prime the data page. Called once
 /// during boot (single-threaded) before the first execve.
 pub fn vdso_init() {
-    // SAFETY: boot-time single-threaded init; the code page is only read
-    // afterwards (user mappings are R+X), and the data page writes are
-    // seqlock-guarded.
-    unsafe {
-        VDSO_CODE_PAGE.0 = build_code_page();
-    }
+    // Boot-time single-threaded init: the code-page prime is the
+    // audited edge's INV-MM-VDSO-4 init arm (the page is only read
+    // afterwards — user mappings are R+X), and the data-page writes are
+    // the seqlock-guarded tick publishes below.
+    crate::mm::edges::vdso_code_page_prime(&build_code_page());
     // Prime the snapshot so pre-first-tick readers see sane values.
     vdso_data_tick();
 }

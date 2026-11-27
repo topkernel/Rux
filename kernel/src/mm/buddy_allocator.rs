@@ -40,8 +40,15 @@
 //!   same lock in the alloc path (terminal 15+ min system freeze,
 //!   session-4 record). The bitmap fill is 4096 word ops for the same
 //!   block; the order fill is a call-free byte loop.
+//!
+//! Mainline consolidation (2026-11-27): zero unsafe keywords — the
+//! UnsafeCell block edges, the Send/Sync commitments and the GlobalAlloc
+//! trait seams live in the audited unsafe file (`crate::mm::edges`,
+//! INV-MM-14/15 families); this file holds the logic as safe code.
 
-use core::alloc::{GlobalAlloc, Layout};
+#![forbid(unsafe_code)]
+
+use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
@@ -84,7 +91,7 @@ const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
 const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
 
 /// Words in the per-page free bitmap (INV-HEAP-3).
-const FREE_BITMAP_WORDS: usize = (MAX_PAGES + 63) / 64;
+pub(super) const FREE_BITMAP_WORDS: usize = (MAX_PAGES + 63) / 64;
 
 /// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
@@ -135,12 +142,15 @@ fn refused_free_note(kind: usize, addr: usize, order: usize, meta_order: u8, met
 }
 
 
-/// Block metadata (stored separately, not mixed with user data)
+/// Block metadata (stored separately, not mixed with user data).
+/// `pub(super)`: the audited unsafe file's INV-MM-14 edges hand out
+/// references/snapshots of it to the locked allocator paths.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct BlockMeta {
-    /// Block size order (2^order * PAGE_SIZE)
-    order: u8,
+pub(super) struct BlockMeta {
+    /// Block size order (2^order * PAGE_SIZE); pub(super): written by
+    /// the audited unsafe file's INV-MM-14 fill edge.
+    pub(super) order: u8,
     /// Whether the block is free
     free: u8,
     /// Previous index (index in metadata array, u32::MAX means null)
@@ -160,16 +170,16 @@ impl BlockMeta {
     }
 }
 
-/// Metadata array wrapper (uses UnsafeCell for interior mutability)
-struct MetaArray {
-    data: UnsafeCell<[BlockMeta; MAX_PAGES]>,
+/// Metadata array wrapper (uses UnsafeCell for interior mutability).
+/// `pub(super)`/named-field visibility: the audited unsafe file
+/// (`crate::mm::edges`, INV-MM-14 family) reads the cell for the
+/// Send/Sync commitments and the raw block edges.
+pub(super) struct MetaArray {
+    pub(super) data: UnsafeCell<[BlockMeta; MAX_PAGES]>,
 }
 
-// SAFETY: MetaArray is only accessed through BuddyAllocator, which holds a
-// Spinlock.  All get/get_mut calls happen under that lock, preventing
-// concurrent mutable access to the underlying array.
-unsafe impl Send for MetaArray {}
-unsafe impl Sync for MetaArray {}
+// (MetaArray Send/Sync commitments moved to crate::mm::edges with the
+// INV-MM-14 family — same SAFETY contract.)
 
 impl MetaArray {
     const fn new() -> Self {
@@ -178,18 +188,17 @@ impl MetaArray {
         }
     }
 
-    /// Get metadata reference
+    /// Get metadata reference (idx bounds-checked here; the raw cell
+    /// read is the audited edge's INV-MM-14 arm).
     fn get(&self, idx: usize) -> &BlockMeta {
         assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
-        // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
-        unsafe { &(*self.data.get())[idx] }
+        super::edges::buddy_meta_get(self, idx)
     }
 
     /// Get mutable metadata reference
     fn get_mut(&self, idx: usize) -> &mut BlockMeta {
         assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
-        // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
-        unsafe { &mut (*self.data.get())[idx] }
+        super::edges::buddy_meta_get_mut(self, idx)
     }
 }
 
@@ -216,10 +225,8 @@ pub struct BuddyAllocator {
     lock: Spinlock<()>,
 }
 
-// SAFETY: BuddyAllocator uses internal Spinlock for all mutable operations
-// and atomics for read-only fields, making it safe to share across threads.
-unsafe impl Send for BuddyAllocator {}
-unsafe impl Sync for BuddyAllocator {}
+// (BuddyAllocator Send/Sync commitments moved to crate::mm::edges with
+// the INV-MM-14 family — same SAFETY contract.)
 
 impl BuddyAllocator {
     /// R13-6: current heap virtual range (for allocation-validity checks).
@@ -248,10 +255,9 @@ impl BuddyAllocator {
         if idx >= MAX_PAGES {
             return None;
         }
-        // SAFETY: read-only diagnostic access to the metadata array;
-        // idx is bounds-checked above. Concurrent mutation may tear a
-        // field but cannot make the read unsound (plain integer loads).
-        let m = unsafe { (*self.meta.data.get())[idx] };
+        // INV-MM-14 snapshot arm (audited edge): read-only diagnostic
+        // Copy of the metadata array; idx bounds-checked above.
+        let m = super::edges::buddy_meta_snapshot(&self.meta, idx);
         if m.free != 0 {
             return None; // free block: no containing allocation
         }
@@ -400,19 +406,11 @@ impl BuddyAllocator {
             order,
             MAX_PAGES
         );
-        // SAFETY: indices bounds-checked above; callers hold the allocator
-        // lock (or are the single-threaded init_sized seeder); only the
-        // `order` byte of each BlockMeta is written.
-        unsafe {
-            let base = self.meta.data.get() as *mut BlockMeta;
-            let mut p = base.add(page_idx + 1);
-            let end = base.add(last);
-            let o = order as u8;
-            while p < end {
-                (*p).order = o;
-                p = p.add(1);
-            }
-        }
+        // INV-MM-14 fill arm (audited edge): indices bounds-checked
+        // above; callers hold the allocator lock (or are the
+        // single-threaded init_sized seeder); only the `order` byte of
+        // each BlockMeta is written.
+        super::edges::buddy_meta_fill_orders(&self.meta, page_idx + 1, last, order as u8);
     }
 
     /// Initialize block metadata
@@ -733,8 +731,14 @@ impl BuddyAllocator {
     }
 }
 
-unsafe impl GlobalAlloc for BuddyAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+impl BuddyAllocator {
+    // The GlobalAlloc trait seam for BuddyAllocator lives in the
+    // subsystem's audited unsafe file (crate::mm::edges, INV-MM-15);
+    // these are the safe inherent twins the trait delegates to. The
+    // logic is byte-identical to the former trait bodies.
+
+    /// Safe inherent twin of `GlobalAlloc::alloc` (INV-MM-15).
+    pub fn alloc(&self, layout: Layout) -> *mut u8 {
         // DFX memwatch: own s0, captured unconditionally at the top of the
         // body. s0 is callee-saved so the value stays valid for the whole
         // body even across helper calls; the actual frame walk runs just
@@ -819,9 +823,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             // could clobber the register), f[1..] = the s0 chain above.
             // s0 is callee-saved, so the walk stays valid even here, after
             // alloc_blocks().
-            unsafe {
-                crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
-            }
+            crate::mm::edges::walk_fp_chain(mw_s0, &mut mw_frames);
             crate::dfx::memwatch::note_alloc(
                 ptr,
                 self.heap_start.load(Ordering::Relaxed),
@@ -832,28 +834,29 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         ptr
     }
 
-    // DFX memwatch leak hunt: explicit realloc (instead of the default
-    // trait method) so the frame-pointer chain can be walked past the whole
-    // raw_vec/alloc growth machinery into the allocating kernel code. This
-    // is how the GNOME-oom leak was run to ground (the "129..256-byte
-    // buffer reallocated ~4.6x/s" signature was BTreeMap node growth in
-    // timer add_timer_wakeup). At -O0 the chain is: this method <-
-    // __rust_realloc <- realloc_nonnull <- grow_impl <- Allocator::grow <-
-    // finish_grow <- grow_amortized <- do_reserve <- reserve <-
-    // append_elements <- THE KERNEL CODE, so 12 frames are captured.
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // DFX memwatch leak hunt (see the method-level comment below for the
-        // chain shape). The walk is gated: disabled = zero added work on the
-        // realloc hot path; enabled = 12-frame pointer chase per realloc.
+    /// Safe inherent twin of `GlobalAlloc::realloc` (INV-MM-15). DFX
+    /// memwatch leak hunt: explicit realloc (instead of the default trait
+    /// method) so the frame-pointer chain can be walked past the whole
+    /// raw_vec/alloc growth machinery into the allocating kernel code.
+    /// This is how the GNOME-oom leak was run to ground (the
+    /// "129..256-byte buffer reallocated ~4.6x/s" signature was BTreeMap
+    /// node growth in timer add_timer_wakeup). At -O0 the chain is: this
+    /// method <- __rust_realloc <- realloc_nonnull <- grow_impl <-
+    /// Allocator::grow <- finish_grow <- grow_amortized <- do_reserve <-
+    /// reserve <- append_elements <- THE KERNEL CODE, so 12 frames are
+    /// captured.
+    pub fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // DFX memwatch leak hunt (see the method-level comment above for
+        // the chain shape). The walk is gated: disabled = zero added work
+        // on the realloc hot path; enabled = 12-frame pointer chase per
+        // realloc.
         let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
             [0; crate::dfx::memwatch::SITE_FRAMES];
         if crate::dfx::memwatch::armed() {
             let mut fp: u64 = crate::dfx::backtrace::current_frame_pointer();
             // f[0] = return address out of this method (into __rust_realloc);
             // f[1..] ascend the caller chain through the growth machinery.
-            unsafe {
-                crate::dfx::memwatch::walk_fp_chain(fp, &mut mw_frames);
-            }
+            crate::mm::edges::walk_fp_chain(fp, &mut mw_frames);
             crate::dfx::memwatch::note_realloc(new_size, &mw_frames);
         }
 
@@ -867,12 +870,15 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return core::ptr::null_mut();
         }
         let copy_len = layout.size().min(new_size);
-        core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_len);
+        // INV-MM-14 realloc arm (audited edge): both blocks are live
+        // owned heap memory for copy_len bytes.
+        super::edges::heap_block_copy(ptr, new_ptr, copy_len);
         self.dealloc(ptr, layout);
         new_ptr
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    /// Safe inherent twin of `GlobalAlloc::dealloc` (INV-MM-15).
+    pub fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if self.initialized.load(Ordering::Acquire) == 0 {
             return;
         }
@@ -910,11 +916,10 @@ fn trace_kmalloc_at(s0: u64, ptr: u64, bytes_req: usize, bytes_alloc: usize) {
         return;
     }
     let mut frames = [0u64; 8];
-    // SAFETY: s0 is GlobalAlloc::alloc's own fp (captured at entry,
-    // callee-saved); the walk reads only kernel frames.
-    unsafe {
-        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
-    }
+    // s0 is GlobalAlloc::alloc's own fp (captured at entry,
+    // callee-saved); the walk reads only kernel frames — the audited
+    // edge's INV-MM-2 diag arm.
+    crate::mm::edges::walk_fp_chain(s0, &mut frames);
     crate::trace::trace_kmalloc(
         crate::trace::alloc_call_site(&frames),
         ptr,
@@ -935,11 +940,9 @@ fn trace_kfree_at(ptr: u64) {
     }
     let s0 = crate::dfx::backtrace::current_frame_pointer();
     let mut frames = [0u64; 8];
-    // SAFETY: s0 is current_frame_pointer() read in THIS frame, the
-    // dealloc twin of the alloc capture.
-    unsafe {
-        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
-    }
+    // s0 is current_frame_pointer() read in THIS frame, the dealloc twin
+    // of the alloc capture — the audited edge's INV-MM-2 diag arm.
+    crate::mm::edges::walk_fp_chain(s0, &mut frames);
     crate::trace::trace_kfree(crate::trace::alloc_call_site(&frames), ptr);
 }
 
@@ -1306,16 +1309,17 @@ static META_AUDIT_BUSY: AtomicU64 = AtomicU64::new(0);
 
 /// MetaArray-style interior-mutable scratch (see MetaArray's SAFETY
 /// comments): only touched by `meta_audit_inner`, which every caller
-/// reaches while holding the META_AUDIT_BUSY claim.
-struct AuditScratch {
-    data: UnsafeCell<[u64; FREE_BITMAP_WORDS]>,
+/// reaches while holding the META_AUDIT_BUSY claim. `pub(super)` +
+/// named field: the audited unsafe file's INV-MM-14 audit edge reads
+/// the cell.
+pub(super) struct AuditScratch {
+    pub(super) data: UnsafeCell<[u64; FREE_BITMAP_WORDS]>,
 }
 
-// SAFETY: see `AuditScratch` doc — all access is claim-serialized.
-unsafe impl Send for AuditScratch {}
-unsafe impl Sync for AuditScratch {}
+// (AuditScratch Send/Sync commitments moved to crate::mm::edges with the
+// INV-MM-14 family — same SAFETY contract.)
 
-static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {
+pub(super) static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {
     data: UnsafeCell::new([0; FREE_BITMAP_WORDS]),
 };
 
@@ -1340,9 +1344,10 @@ fn record(
 /// `findings.len()` are stored.
 fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
     let mut total = 0usize;
-    // SAFETY: caller holds the META_AUDIT_BUSY claim (single audit at a
-    // time across CPUs); the borrow lives only inside this function.
-    let scratch = unsafe { &mut (*META_AUDIT_SCRATCH.data.get()) };
+    // INV-MM-14 audit arm (audited edge): the caller holds the
+    // META_AUDIT_BUSY claim (single audit at a time across CPUs); the
+    // borrow lives only inside this function.
+    let scratch = super::edges::buddy_audit_scratch_mut();
     for w in scratch.iter_mut() {
         *w = 0;
     }
@@ -1649,10 +1654,12 @@ pub fn buddy_meta_selftest() -> bool {
 pub struct CombinedAllocator;
 
 /// The real (unintercepted) free path: slab-region or buddy-heap by
-/// pointer range. `CombinedAllocator::dealloc` routes here after the
-/// deferred-free check declines; the deferred-free drainer calls this
-/// directly so re-deferring is impossible.
-pub unsafe fn dealloc_direct(ptr: *mut u8, layout: Layout) {
+/// pointer range. `CombinedAllocator`'s dealloc seam (the trait impl in
+/// crate::mm::edges) routes here after the deferred-free check
+/// declines; the deferred-free drainer calls this directly so
+/// re-deferring is impossible. The in-heap route goes through the
+/// BuddyAllocator's safe inherent dealloc (INV-MM-15).
+pub fn dealloc_direct(ptr: *mut u8, layout: Layout) {
     if ptr.is_null() {
         return;
     }
@@ -1679,51 +1686,56 @@ pub unsafe fn dealloc_direct(ptr: *mut u8, layout: Layout) {
     // Pointers in other regions are ignored
 }
 
-unsafe impl GlobalAlloc for CombinedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
+// The CombinedAllocator GlobalAlloc trait seam lives in the subsystem's
+// audited unsafe file (crate::mm::edges, INV-MM-15); these are the safe
+// free-fn twins the trait delegates to.
 
-        // Opportunistic reclamation of time-deferred frees (see
-        // mm/deferred_free.rs): one relaxed load on the fast path; the
-        // same allocation churn that fills the pool drains it.
-        crate::mm::deferred_free::drain_if_due();
+/// Safe twin of `CombinedAllocator`'s `GlobalAlloc::alloc` (INV-MM-15).
+pub(crate) fn combined_alloc(layout: Layout) -> *mut u8 {
+    let size = layout.size();
 
-        // Small objects (<= 4096 bytes) try Slab allocator. The align <= 8
-        // guard is load-bearing: slab objects are at least 8-aligned (16-byte
-        // header + 8-multiple object sizes) but NOT 16-aligned in general, so
-        // higher alignments must fall through to the buddy, which hands out
-        // naturally aligned power-of-two blocks. Routing an align-16 layout
-        // through the slab would hand back a misaligned pointer.
-        // Without the slab, EVERY small Rust allocation (Box/Arc/String/Vec)
-        // pinned a whole 4KB buddy page — a 30K-object workload exhausted the
-        // 128MB heap (LTP inode02 ALLOCTHROW storm).
-        if size <= 4096 && layout.align() <= 8 && crate::mm::slab::is_slab_initialized() {
-            let ptr = crate::mm::kmalloc(size);
-            if !ptr.is_null() {
-                return ptr;
-            }
-            // Slab allocation failed, fall back to Buddy
+    // Opportunistic reclamation of time-deferred frees (see
+    // mm/deferred_free.rs): one relaxed load on the fast path; the
+    // same allocation churn that fills the pool drains it.
+    crate::mm::deferred_free::drain_if_due();
+
+    // Small objects (<= 4096 bytes) try Slab allocator. The align <= 8
+    // guard is load-bearing: slab objects are at least 8-aligned (16-byte
+    // header + 8-multiple object sizes) but NOT 16-aligned in general, so
+    // higher alignments must fall through to the buddy, which hands out
+    // naturally aligned power-of-two blocks. Routing an align-16 layout
+    // through the slab would hand back a misaligned pointer.
+    // Without the slab, EVERY small Rust allocation (Box/Arc/String/Vec)
+    // pinned a whole 4KB buddy page — a 30K-object workload exhausted the
+    // 128MB heap (LTP inode02 ALLOCTHROW storm).
+    if size <= 4096 && layout.align() <= 8 && crate::mm::slab::is_slab_initialized() {
+        let ptr = crate::mm::kmalloc(size);
+        if !ptr.is_null() {
+            return ptr;
         }
-
-        // Large objects or Slab failure uses Buddy allocator
-        HEAP_ALLOCATOR.alloc(layout)
+        // Slab allocation failed, fall back to Buddy
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ptr.is_null() {
-            return;
-        }
+    // Large objects or Slab failure uses Buddy allocator (the safe
+    // inherent alloc twin — resolution: inherent, not the trait seam).
+    HEAP_ALLOCATOR.alloc(layout)
+}
 
-        // Teardown-race guard (mm/deferred_free.rs): frees of the
-        // registered size class (MmStruct) are held back briefly so
-        // unaccounted &MmStruct borrowers (procfs generators) that were
-        // preempted mid-syscall resume against coherent post-teardown
-        // memory instead of heap-reused garbage (the #GP-in-btree
-        // family).
-        if crate::mm::deferred_free::try_defer(ptr, &layout) {
-            return;
-        }
-
-        dealloc_direct(ptr, layout);
+/// Safe twin of `CombinedAllocator`'s `GlobalAlloc::dealloc` (INV-MM-15).
+pub(crate) fn combined_dealloc(ptr: *mut u8, layout: Layout) {
+    if ptr.is_null() {
+        return;
     }
+
+    // Teardown-race guard (mm/deferred_free.rs): frees of the
+    // registered size class (MmStruct) are held back briefly so
+    // unaccounted &MmStruct borrowers (procfs generators) that were
+    // preempted mid-syscall resume against coherent post-teardown
+    // memory instead of heap-reused garbage (the #GP-in-btree
+    // family).
+    if crate::mm::deferred_free::try_defer(ptr, &layout) {
+        return;
+    }
+
+    dealloc_direct(ptr, layout);
 }

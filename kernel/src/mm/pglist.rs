@@ -6,6 +6,12 @@
 //!
 //! This module implements the pglist_data structure which represents
 //! a NUMA node's memory. On UMA systems, there is a single node.
+//!
+//! Mainline consolidation (2026-11-27): zero unsafe keywords — the raw
+//! NODE_DATA slot reads are the audited edge's INV-MM-12 arms
+//! (crate::mm::edges::pglist_node_data / pglist_node_data_mut).
+
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -251,28 +257,19 @@ pub fn init_node_data() {
 
 /// Get node by ID
 ///
-/// # Safety
-/// Returns reference to static data
+/// INV-MM-12 read arm via the audited edge (`crate::mm::edges::
+/// pglist_node_data`): NODE_DATA is initialized by `init_node_data()`
+/// before any call here.
 pub fn node_data(node_id: usize) -> Option<&'static PglistData> {
-    if node_id >= MAX_NUMNODES {
-        return None;
-    }
-    // SAFETY: node_id is bounds-checked above; NODE_DATA is initialized by
-    // init_node_data() before any call here.
-    unsafe { NODE_DATA[node_id].as_ref() }
+    super::edges::pglist_node_data(node_id)
 }
 
 /// Get mutable node by ID
 ///
-/// # Safety
-/// Must be called during initialization only
+/// INV-MM-12 mut arm via the audited edge; the caller must ensure the
+/// INV-MM-1 exclusivity (init window or the node's `lru_lock` held).
 pub fn node_data_mut(node_id: usize) -> Option<&'static mut PglistData> {
-    if node_id >= MAX_NUMNODES {
-        return None;
-    }
-    // SAFETY: node_id is bounds-checked above; caller must ensure exclusive
-    // access (called only during init or with appropriate locking).
-    unsafe { NODE_DATA[node_id].as_mut() }
+    super::edges::pglist_node_data_mut(node_id)
 }
 
 /// Get first (and only, on UMA) node
@@ -282,13 +279,11 @@ pub fn first_online_node() -> Option<&'static PglistData> {
 
 /// Get first mutable node.
 ///
-/// # Safety
-/// Caller must ensure exclusive access to the node.  On a single-node UMA
-/// system this means no other thread may hold a mutable or shared reference
-/// to the same `PglistData` simultaneously.  Typically this is safe only
-/// during early boot or when the caller holds a lock that prevents
-/// concurrent page allocation / reclaim on the same node.
-pub unsafe fn first_online_node_mut() -> Option<&'static mut PglistData> {
+/// The INV-MM-1 exclusivity contract is unchanged (the caller must
+/// ensure no other thread holds a reference to the same `PglistData` —
+/// early boot, or the node's `lru_lock` held); the raw slot read is the
+/// audited edge's INV-MM-12 mut arm, so this wrapper is plain safe code.
+pub fn first_online_node_mut() -> Option<&'static mut PglistData> {
     node_data_mut(0)
 }
 

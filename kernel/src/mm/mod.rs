@@ -6,6 +6,13 @@
 //! Memory Management Module
 
 pub mod buddy_allocator;
+// The subsystem's ONE audited unsafe file (mainline minimal-first
+// consolidation, 2026-11-27): the former `edges` collection renamed to
+// `unsafe.rs` on disk per the 2026-11-25 edges->unsafe.rs naming
+// decision (git mv keeps history); the #[path] keeps the FILE name the
+// gate requires while the module keeps its historical `edges`
+// identifier, so every crate::mm::edges call site stays stable.
+#[path = "unsafe.rs"]
 pub mod edges;
 pub mod allocator;
 pub mod layout;

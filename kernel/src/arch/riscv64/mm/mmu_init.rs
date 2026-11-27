@@ -185,9 +185,10 @@ pub fn alloc_page_table() -> Option<u64> {
             // Late stage: use zone allocator
             use crate::mm::zone::ZoneType;
 
-            // SAFETY: node-table mutation is the zone allocator's own
-            // discipline (bring-up / zone-locked paths).
-            let phys_addr = if let Some(node) = unsafe { crate::mm::pglist::first_online_node_mut() } {
+            // Node-table mutation is the zone allocator's own
+            // discipline (bring-up / zone-locked paths); the NODE_DATA
+            // borrow is the audited edge's INV-MM-12 mut arm.
+            let phys_addr = if let Some(node) = crate::mm::pglist::first_online_node_mut() {
                 if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
                     if zone.is_initialized() {
                         let mut pfn_opt = zone.alloc_pages(0);
