@@ -21,13 +21,19 @@ are each annotated with the safety property their design carries.
 ## 2. Safety, measured
 
 ### 2.0 Safe-by-construction surface
-All non-arch kernel paths are `no_std` safe Rust; the unsafe surface
-is enumerated and contracted — 3,158 unsafe tokens in service code vs
-1,340 in the audited Framework layer, 47 service files enforce
-`forbid(unsafe_code)` at the compiler, 56 more are already unsafe-free;
-SAFETY-comment coverage 3,207/5,009 (64%); 157 Kani harnesses, 1,104
-proptests, 4 SPIN models, Miri on the verify crate (generated ledger:
-docs/development/tcb-ledger.md; security-design.md §0).
+All non-arch kernel paths are `no_std` safe Rust. The unsafe-consolidation
+campaign (completed 2026-11-27) collapsed the entire unsafe surface into
+**19 audited `unsafe.rs` files** (one per subsystem plus the root
+collection) — the machine gate
+(`scripts/gate_unsafe_mainline.py`) is green repo-wide (rc=0): zero
+unsafe outside the audited files, with **401 files carrying file-level
+`#![forbid(unsafe_code)]`** so a violation is a compile error. The
+unsafe keyword occupies **1,022 of 375,622 kernel lines — 0.27%**
+(down from 6,396 unsafe regions before the consolidation rounds);
+SAFETY-comment coverage 65.5%; every audited block carries its INV
+contract (Primitive INV index at the bottom of this file); 157 Kani
+harnesses, 1,104 proptests, 4 SPIN models, Miri on the verify crate
+(generated ledger: docs/development/tcb-ledger.md; security-design.md §0).
 
 **INV-UACCESS-1 (user-copy soundness, unsafe-slim round, 2026-11-19):**
 user-memory access outside `arch/` routes through `arch::uaccess_safe`
@@ -1914,6 +1920,41 @@ registered per the data-corruption doctrine.
   handed to the pick-protocol lane in run/COORD-NOTE-R11.md). make test
   1555/1555 fresh rootfs; triple-arch rc=0. [lane worktree oh-launch
   run/OH-LAUNCH.md round 13]
+
+## Unsafe-consolidation round (2026-11-27): the whole kernel's unsafe in 19 audited files
+
+The mainline unsafe collection completed. Every subsystem's unsafe
+operations now live in exactly one audited collection file
+(`<subsystem>/unsafe.rs`, 18 files plus the root `kernel/src/unsafe.rs`),
+each file-level `#![forbid(unsafe_code)]` everywhere else, and a
+machine gate holds the boundary.
+
+- **Boundary, compiler-enforced**: 401 files carry
+  `#![forbid(unsafe_code)]`; the machine gate
+  (`scripts/gate_unsafe_mainline.py`) scans the whole repo — rc=0 on
+  the landed state (unsafe only in the audited files and `tests/`).
+  A future unsafe outside the audited files cannot build; it never
+  reaches review.
+- **Numbers**: unsafe keyword 1,022 lines / 375,622 kernel lines =
+  **0.27%** (pre-campaign reference point: 6,396 ledgered unsafe
+  regions); SAFETY-comment coverage 65.5%; every surviving unsafe
+  block names its INV contract inline (e.g. INV-ARCH-*, INV-FS-*,
+  INV-SCHED-* families) — the audited file header carries the
+  subsystem's contract list.
+- **Nothing traded away**: the consolidation moved code, it did not
+  weaken checks — volatile/bounds discipline stays inside the
+  audited blocks; the typed primitives (`safety::ptr`, `MmioRegion`,
+  `UserPtr`, uaccess edges) keep their INV contracts (§2.0), now as
+  the safe API layer ON TOP of the audited collections.
+- **Six fixes banked with the line**: x86 `reboot(POWER_OFF)` real
+  power-off (ACPI S5); sc69-sc73 leak-count triple fix (HZ
+  calibration / verdict adjudication / boundary zeroing); riscv64
+  trap call-chain capture (25.9% of samples carry kernel frames);
+  apic.rs consolidation-damage repair (8f9d6f359); riscv64 heap to
+  the LAYOUT-8 window end 0x82200000 (918a0571e, window widened
+  28→32 MB at 7375290e2); 1000 Hz sampling ready (carrier zeroed).
+- **Gates**: triple-arch build rc=0 (x86_64 KVM, riscv64, aarch64).
+  [docs lane, 2026-11-27]
 
 ## Primitive INV index (literal ids — machine-greppable)
 

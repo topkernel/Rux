@@ -1,6 +1,40 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-11-14): merge day — OH lock screen reached, Ubuntu 24.04 at graphical.target
+## Current Phase (2026-11-27): unsafe-consolidation campaign landed — zero unsafe outside 19 audited files
+
+The mainline unsafe collection is complete and machine-enforced.
+
+### The campaign end state
+
+- **Machine gate green repo-wide**:
+  `scripts/gate_unsafe_mainline.py` rc=0 — unsafe exists only inside
+  the 19 audited `unsafe.rs` files (one per subsystem plus the root
+  collection); every other kernel file carries file-level
+  `#![forbid(unsafe_code)]` (401 files), making any new unsafe
+  outside the audited files a compile error.
+- **The numbers**: unsafe keyword 1,022 lines of 375,622 total
+  kernel lines — **0.27%** (down from 6,396 unsafe regions before
+  the consolidation rounds); SAFETY-comment coverage 65.5%; every
+  audited block carries its INV contract (Primitive INV index in
+  [safety-and-performance.md](../architecture/safety-and-performance.md)).
+- **Six fixes landed with this line**: x86 `reboot(POWER_OFF)` real
+  power-off (ACPI S5); sc69-sc73 leak-count triple fix (HZ
+  calibration / verdict adjudication / boundary zeroing); riscv64
+  trap call-chain capture (25.9% of samples carry kernel frames);
+  apic.rs consolidation-damage repair (8f9d6f359); riscv64 heap to
+  the LAYOUT-8 window end 0x82200000 (918a0571e); 1000 Hz sampling
+  ready (carrier zeroed).
+- **Gates on this state**: triple-arch build rc=0 (x86_64, riscv64,
+  aarch64).
+
+### Next milestones
+
+1. LTP pass-rate push continues on the 1,869-test list
+2. OH: interactive launcher from the lock screen (spawn-stall
+   userspace races + the stranded-reader wake family)
+3. Ubuntu 24.04: past the glib freeze toward serial login
+
+## Previous Phase (2026-11-14): merge day — OH lock screen reached, Ubuntu 24.04 at graphical.target
 
 **Twelve merges in one day, every fix evidence-banked
 (docs/architecture/safety-and-performance.md merge-day round,

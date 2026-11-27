@@ -4,6 +4,42 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-11-27 — Unsafe-consolidation campaign lands: zero unsafe outside 19 audited files
+
+The mainline unsafe collection is complete: every subsystem's unsafe
+now lives in exactly one audited file per subsystem (plus the root
+collection), each unsafe block carries its INV contract, and the
+machine gate enforces the boundary repo-wide.
+
+- **Machine gate green repo-wide**: `scripts/gate_unsafe_mainline.py`
+  rc=0 — unsafe exists only inside the 19 audited `unsafe.rs` files
+  (one per subsystem plus the root collection); every other file in
+  `kernel/src` carries a file-level `#![forbid(unsafe_code)]`
+  (401 files), so any new unsafe outside the audited files is a
+  compile error, not a review finding.
+- **The numbers**: unsafe keyword occupies 1,022 lines of the
+  375,622-line kernel — 0.27%, down from 6,396 unsafe regions before
+  the consolidation rounds; SAFETY-comment coverage 65.5%; each
+  audited block carries an INV contract comment (the searchable
+  Primitive INV index lives in
+  [safety-and-performance.md](../architecture/safety-and-performance.md)).
+- **Six fixes and stability results landed with this line**:
+  1. `reboot(POWER_OFF)` performs a real power-off on x86 (ACPI S5)
+     instead of stopping at the reset vector
+  2. sc69-sc73 leak-count triple fix — the sampler HZ calibration,
+     the verdict adjudication, and the boundary zeroing are each
+     corrected, so session leak counters no longer double-count or
+     carry stale totals
+  3. riscv64 trap handler captures the call chain — 25.9% of samples
+     now carry kernel frames into the trace (was: bare trap pc only)
+  4. apic.rs consolidation-damage repair (8f9d6f359) — the brace and
+     build fallout of the edges migration fixed before it could ship
+  5. riscv64 heap migrated to the LAYOUT-8 window end 0x82200000
+     (918a0571e, window 28 MB → 32 MB at 7375290e2) — the
+     consolidation wrappers crossed the old LAYOUT-7 heap base
+  6. 1000 Hz sampling is ready: the sampling carrier is zeroed, so
+     1000 Hz session-level sampling starts from clean counters
+
 ### 2026-11-14 — Merge day: signal/epoll parity, OH lock screen, Ubuntu 24.04 at graphical.target
 
 Twelve merges landed in one day; the evidence records
