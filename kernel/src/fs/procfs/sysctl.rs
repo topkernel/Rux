@@ -277,24 +277,52 @@ pub fn write_lease_break_time(input: &[u8]) -> i32 {
 // Writers (write side) — return 0 on success, negative errno on failure
 // ============================================================================
 
-/// Parse a decimal integer from a sysctl write payload (trailing '\n'
-/// tolerated; empty is EINVAL).
-fn parse_u64(input: &[u8]) -> Result<u64, i32> {
-    let s: &[u8] = if input.last() == Some(&b'\n') {
-        &input[..input.len() - 1]
-    } else {
-        input
-    };
-    if s.is_empty() || s.len() > 10 {
-        return Err(-(crate::errno::constants::EINVAL as i32));
+/// Sysctl write-parse primitive (reference fs/proc/proc_sysctl.c
+/// proc_get_long family, behavior verified against a reference kernel):
+/// a decimal number, optionally preceded by whitespace, terminated by
+/// whitespace (' ', '\t', '\n') or the end of the buffer. Any other
+/// trailing character is EINVAL ("1x\n"); '\r' is NOT whitespace
+/// ("3\r\n" is EINVAL on the reference too). Returns the value and the
+/// number of bytes consumed INCLUDING the single terminator byte
+/// (write("1") -> 1, write("1 ") -> 2, write("1\n") -> 2). No digits
+/// (garbage or whitespace-only payload) is EINVAL — the procfs write
+/// dispatch intercepts the whitespace-only case before handlers (the
+/// guest shell's `echo N > file` stdio splits value and '\n' into two
+/// write() calls; see procfs_file_write).
+fn parse_u64_at(input: &[u8], start: usize) -> Result<(u64, usize), i32> {
+    let einval = -(crate::errno::constants::EINVAL as i32);
+    let mut i = start;
+    while i < input.len() && matches!(input[i], b' ' | b'\t' | b'\n') {
+        i += 1;
     }
+    let digits = i;
     let mut v: u64 = 0;
-    for &b in s {
-        if !b.is_ascii_digit() {
-            return Err(-(crate::errno::constants::EINVAL as i32));
+    while i < input.len() && input[i].is_ascii_digit() {
+        v = v
+            .checked_mul(10)
+            .and_then(|x| x.checked_add((input[i] - b'0') as u64))
+            .ok_or(einval)?;
+        i += 1;
+    }
+    if i == digits {
+        return Err(einval);
+    }
+    if i < input.len() {
+        if !matches!(input[i], b' ' | b'\t' | b'\n') {
+            return Err(einval);
         }
-        v = v.checked_mul(10).and_then(|x| x.checked_add((b - b'0') as u64))
-            .ok_or(-(crate::errno::constants::EINVAL as i32))?;
+        i += 1; // the terminator is consumed
+    }
+    Ok((v, i))
+}
+
+/// Parse ONE decimal value from a sysctl write payload: the value must
+/// be followed only by whitespace (multi-number payloads belong to
+/// multi-value handlers like printk, which parse with parse_u64_at).
+fn parse_u64(input: &[u8]) -> Result<u64, i32> {
+    let (v, consumed) = parse_u64_at(input, 0)?;
+    if input[consumed..].iter().any(|b| !matches!(b, b' ' | b'\t' | b'\n')) {
+        return Err(-(crate::errno::constants::EINVAL as i32));
     }
     Ok(v)
 }
@@ -426,25 +454,77 @@ pub fn generate_threads_max() -> Vec<u8> {
 /// <default_console_loglevel>`. The first number is live: syslog(2)
 /// actions 6/7/8 store into the same CONSOLE_LOGLEVEL this reads, so LTP
 /// syslog11 can observe level changes through the file.
+/// /proc/sys/kernel/printk — four loglevels as on Linux:
+/// `<console_loglevel> <default_message_loglevel> <minimum_console_loglevel>
+/// <default_console_loglevel>`. All four are live: syslog(2) actions 6/7/8
+/// store into the same CONSOLE_LOGLEVEL the first number reads, so LTP
+/// syslog11 can observe level changes through the file; the other three
+/// round-trip what userland wrote (reference default seeds 4/1/7).
+pub static PRINTK_DEFAULT_MESSAGE_LEVEL: AtomicU32 = AtomicU32::new(4);
+pub static PRINTK_MINIMUM_CONSOLE_LEVEL: AtomicU32 = AtomicU32::new(1);
+pub static PRINTK_DEFAULT_CONSOLE_LEVEL: AtomicU32 = AtomicU32::new(7);
+
 pub fn generate_printk() -> Vec<u8> {
     let cur = crate::printk::get_console_loglevel();
-    alloc::format!("{} 4 1 7\n", cur).into_bytes()
+    alloc::format!(
+        "{} {} {} {}\n",
+        cur,
+        PRINTK_DEFAULT_MESSAGE_LEVEL.load(Ordering::Relaxed),
+        PRINTK_MINIMUM_CONSOLE_LEVEL.load(Ordering::Relaxed),
+        PRINTK_DEFAULT_CONSOLE_LEVEL.load(Ordering::Relaxed),
+    )
+    .into_bytes()
 }
 
-/// Write side: the first integer sets the console loglevel (Linux
-/// printk_sysctl bounds 1..=15; single-number writes are what sysctl(8)
-/// and LTP's save/restore emit).
+/// Write side: 1-4 whitespace-separated integers, like the reference
+/// proc_dointvec on the printk table — `echo 7 >` (shell idiom) and
+/// `sysctl -w kernel.printk="7 4 1 7"` (the canonical four-number form)
+/// both work. The first integer sets the console loglevel; the rest are
+/// stored for readback. The reference accepts any int here (plain
+/// proc_dointvec, no min/max conv); we bound the console level to 0..=255
+/// (u8 storage — recorded divergence) and reject the rest only on parse
+/// failure.
 pub fn write_printk(input: &[u8]) -> i32 {
-    match parse_u64(input) {
-        Ok(v) => {
-            if !(1..=15).contains(&v) {
-                return -(crate::errno::constants::EINVAL as i32);
+    let mut pos = 0;
+    let mut values = [0u64; 4];
+    let mut n = 0usize;
+    while pos < input.len() && n < values.len() {
+        match parse_u64_at(input, pos) {
+            Ok((v, consumed)) => {
+                values[n] = v;
+                n += 1;
+                pos = consumed;
             }
-            crate::printk::set_console_loglevel(v as u8);
-            0
+            Err(e) => return e,
         }
-        Err(e) => e,
     }
+    if n == 0 {
+        // No value at all (whitespace payloads are intercepted by the
+        // dispatch; a bare trailing '\n' after four values is fine).
+        if input[pos..].iter().any(|b| !matches!(b, b' ' | b'\t' | b'\n')) {
+            return -(crate::errno::constants::EINVAL as i32);
+        }
+        return 0;
+    }
+    // Anything left after four values must be whitespace or trailing
+    // garbage is EINVAL ("7 4 1 7x\n" — the reference conv fails too).
+    if input[pos..].iter().any(|b| !matches!(b, b' ' | b'\t' | b'\n')) {
+        return -(crate::errno::constants::EINVAL as i32);
+    }
+    if values[0] > 255 {
+        return -(crate::errno::constants::EINVAL as i32);
+    }
+    crate::printk::set_console_loglevel(values[0] as u8);
+    if n > 1 {
+        PRINTK_DEFAULT_MESSAGE_LEVEL.store(values[1] as u32, Ordering::Relaxed);
+    }
+    if n > 2 {
+        PRINTK_MINIMUM_CONSOLE_LEVEL.store(values[2] as u32, Ordering::Relaxed);
+    }
+    if n > 3 {
+        PRINTK_DEFAULT_CONSOLE_LEVEL.store(values[3] as u32, Ordering::Relaxed);
+    }
+    0
 }
 
 /// /proc/sys/kernel/printk_devkmsg — the console-echo policy for userspace

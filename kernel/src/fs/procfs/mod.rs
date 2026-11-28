@@ -2272,6 +2272,17 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
     match node.sysctl_write {
         Some(write_fn) => {
+            // Whitespace-only payload: the guest shell's `echo N > file`
+            // stdio writes the value and the trailing "\n" as SEPARATE
+            // write() calls, so the second write arrives alone. Same rule
+            // as OomScoreAdj above and sysrq write_trigger: it is this
+            // guest's stdio behavior, not an intent to store a value —
+            // accept it as a no-op. (Drill repro: every `echo N >
+            // /proc/sys/...` returned EINVAL even though the value had
+            // already applied — echo surfaced the failed newline write.)
+            if buf.iter().all(|b| matches!(b, b' ' | b'\t' | b'\n')) {
+                return buf.len() as isize;
+            }
             let ret = write_fn(buf);
             if ret != 0 {
                 ret as isize
