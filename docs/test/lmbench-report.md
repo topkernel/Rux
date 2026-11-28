@@ -1689,3 +1689,57 @@ userspace/lmbench/run-refkvm.sh        # -> run/lmbench-refkvm.txt
 Raw column: `run/lmbench-refkvm.txt`; per-case host load and re-run
 history: `run/refkvm/run-audit.txt` (loadavg-gated, LOAD_MAX=7).
 
+
+## Guest-in-guest scoreboard (2026-11-24, first same-rig reference column for the net + syscall-latency rows)
+
+The fair-rig reference column (run-refkvm.sh shape: distro guest kernel
+7.0.0-38-generic under the same q35/KVM/smp8/cpu-host rig, init_ref
+PID-1 wrapper with loopback bring-up added, /test static binaries off
+the store lmbench image) measured on 2026-11-24. Reference lat_tcp
+needed a loopback IFF_UP in init_ref — without it connect(127.0.0.1)
+fails ENETUNREACH (the distro kernel does not auto-configure lo).
+
+| row | Rux (µs) | reference guest (µs) | verdict |
+|---|---:|---:|---|
+| lat_tcp 127.0.0.1 | 12.59–12.82 | 23.43–23.62 | **Rux 1.86x faster** |
+| lat_udp 127.0.0.1 | ~10.13 | 20.32 | **Rux ~2x faster** |
+| lat_syscall null | 0.0420 | 0.0405 | parity (0.96x) |
+| lat_syscall read | 0.0963–0.0966 | 0.0593 | 1.62x behind |
+| lat_syscall write | 0.0781 | 0.0552 | 1.41x behind |
+| lat_syscall stat | ~0.275 | 0.2132 | 1.29x behind |
+| lat_fs 0k | ~18773/17127 | 380981/378527 | ~20x behind |
+| lat_fs 1k | ~16726/15275 | 292111/361777 | ~18x behind |
+| lat_fs 10k | 1645/1516 | 206837/165036 | ~126x behind |
+
+Headline reversals vs the native-ceiling-era board:
+
+- **The loopback network rows FLIP TO AHEAD** once measured against a
+  guest reference instead of the native ceiling: Rux's single-queue
+  loopback delivery (no cross-cpu softirq wake, no iface lock train)
+  beats the distro kernel's guest TCP/IP stack by 1.86–2x on the same
+  virtual hardware. The 1.64x/1.61x "behind" labels are retired.
+- **null is at parity** (0.0420 vs 0.0405) — the syscall entry floor is
+  within 4% of the guest reference.
+- **read/write/stat remain genuinely behind at 1.29–1.62x**, now
+  measured guest-in-guest. read/write on this rig run on /dev/zero and
+  /dev/null (char devices, 1-byte ops — lat_syscall's own open), so the
+  gap is NOT filesystem: it is fdget → ops classify → small-stage stack
+  buf → copy_out (access_ok + SMAP-bracketed asm + extable) → copy_out
+  wrapper layers. The uaccess chain was re-read end-to-end this round;
+  the candidate reductions are wrapper-layer (double access_ok, safe
+  wrapper layers around the asm primitive), not the asm itself.
+- **lat_fs's 10k row is disproportionately worse (126x vs 18x at 1k)** —
+  the 10KiB-per-file write path carries a per-round cost the 1k round
+  does not; this is a new, narrower lead than the old "19–22x" label.
+
+Also this round: an attempted inline loopback drain in loopback_send
+(deliver before send returns) REGRESSED lat_tcp 12.11 → 12.7–12.8
+(measured A/B, both kernels rebuilt from clean trees) and was reverted:
+inline delivery pulls tcp_rcv's ACK generation into the sender's hot
+path. The deferred NetRx delivery the ledger already had is the better
+shape for the ping-pong workload.
+
+The reference image recipe is in userspace/lmbench/init_ref.c (loopback
+bring-up added this round) + /tmp/lmbench-ref.img (store lmbench image +
+init_ref injection); the runner is the run-refkvm.sh shape with
+budget=180 and the case in lmbench=lat_tcp,127.0.0.1 form.
