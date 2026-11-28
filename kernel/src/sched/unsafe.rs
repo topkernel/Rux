@@ -55,9 +55,9 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; crate::config::MAX
 pub fn idle_task_ptr(cpu: usize) -> *mut Task {
     debug_assert!(cpu < crate::config::MAX_CPUS);
     // SAFETY: INV-SCE-4 — index in range (init writes every slot before
-    // any CPU schedules); addr-of forms no reference to possibly-uninit
-    // memory.
-    unsafe { core::ptr::addr_of_mut!(IDLE_TASK_STORAGES[cpu]).cast::<Task>() }
+    // any CPU schedules); the indexed addr_of_mut! on the static mut is
+    // the unsafe op; the cast adds no access.
+    unsafe { core::ptr::addr_of_mut!(IDLE_TASK_STORAGES[cpu]) }.cast::<Task>()
 }
 
 /// Base address of the whole idle-task storage array (INV-SCE-4):
@@ -65,8 +65,8 @@ pub fn idle_task_ptr(cpu: usize) -> *mut Task {
 /// admits the static Task storages (never their contents).
 #[inline]
 pub fn idle_task_storage_base() -> usize {
-    // SAFETY: INV-SCE-4 — only the static's address is read.
-    unsafe { core::ptr::addr_of!(IDLE_TASK_STORAGES) as usize }
+    // INV-SCE-4 — only the static's address is taken (no access) — safe.
+    core::ptr::addr_of!(IDLE_TASK_STORAGES) as usize
 }
 
 // ---------------------------------------------------------------------------
@@ -198,15 +198,17 @@ pub fn task_poison_pair_volatile(t: *const Task) -> (u32, u32) {
     debug_assert!(!t.is_null());
     // SAFETY: INV-TL-2 diag — the two volatile loads at the fixed
     // offsets; the caller's walk keeps the page mapped.
-    unsafe {
-        let pid = core::ptr::read_volatile(
+    let pid = unsafe {
+        core::ptr::read_volatile(
             (t as *const u8).add(crate::process::task::TASK_PID) as *const u32,
-        );
-        let state = core::ptr::read_volatile(
+        )
+    };
+    let state = unsafe {
+        core::ptr::read_volatile(
             (t as *const u8).add(crate::process::task::TASK_STATE) as *const u32,
-        );
-        (pid, state)
-    }
+        )
+    };
+    (pid, state)
 }
 
 /// Volatile read of a task's pid word (INV-SCE-2 diag twin, the R47
@@ -220,9 +222,7 @@ pub fn task_pid_volatile(t: *const Task) -> u32 {
     // the R47 discipline defines; the caller's walk/pin keeps the
     // page mapped.
     unsafe {
-        core::ptr::read_volatile(
-            (t as *const u8).add(crate::process::task::TASK_PID) as *const u32,
-        )
+        core::ptr::read_volatile((t as *const u8).add(crate::process::task::TASK_PID) as *const u32)
     }
 }
 
@@ -362,7 +362,8 @@ pub fn list_next(node: *mut crate::list::ListHead) -> *mut crate::list::ListHead
 #[inline]
 pub fn task_of_rt_list(pos: *mut crate::list::ListHead) -> *mut Task {
     let offset = core::mem::offset_of!(Task, rt_run_list);
-    // SAFETY: pure pointer arithmetic, no dereference.
+    // SAFETY: pure pointer arithmetic, no dereference (ptr::sub is an
+    // unsafe fn, hence the block).
     unsafe { (pos as *mut u8).sub(offset) as *mut Task }
 }
 
@@ -400,12 +401,12 @@ pub fn rt_list_del(task: *mut Task) {
 pub fn rt_list_linked(task: *mut Task) -> bool {
     debug_assert!(!task.is_null());
     // SAFETY: INV-SCE-7 — only the embedded node's link words are read,
-    // under the caller's GRQ hold.
-    unsafe {
-        let node = core::ptr::addr_of!((*task).rt_run_list);
-        let next = (*task).rt_run_list.next;
-        !next.is_null() && next != node as *mut crate::list::ListHead
-    }
+    // under the caller's GRQ hold (the addr_of! through the raw place
+    // and the link read are the unsafe ops; the null/identity test is
+    // safe).
+    let node = unsafe { core::ptr::addr_of!((*task).rt_run_list) };
+    let next = unsafe { (*task).rt_run_list.next };
+    !next.is_null() && next != node as *mut crate::list::ListHead
 }
 
 // ---------------------------------------------------------------------------
@@ -540,8 +541,9 @@ static mut RB_NIL: RbNode = RbNode::unlinked();
 /// pointer once per op, never as a reference.
 #[inline]
 fn rb_nil() -> *mut RbNode {
-    // SAFETY: address-of on a static mut; the pointer itself is stable.
-    unsafe { core::ptr::addr_of_mut!(RB_NIL) }
+    // INV-SCE-6: address-of on a static mut forms no reference — safe;
+    // the pointer itself is stable.
+    core::ptr::addr_of_mut!(RB_NIL)
 }
 
 /// Container-of helpers between a Task and its embedded timeline node.
@@ -550,7 +552,8 @@ fn rb_nil() -> *mut RbNode {
 pub(crate) fn node_of_task(task: *mut Task) -> *mut RbNode {
     let off = core::mem::offset_of!(Task, sched_entity)
         + core::mem::offset_of!(SchedEntity, run_node);
-    // SAFETY: pure pointer arithmetic, no dereference.
+    // SAFETY: pure pointer arithmetic, no dereference (ptr::add is an
+    // unsafe fn, hence the block).
     unsafe { (task as *mut u8).add(off) as *mut RbNode }
 }
 
@@ -558,7 +561,8 @@ pub(crate) fn node_of_task(task: *mut Task) -> *mut RbNode {
 pub(crate) fn task_of_node(node: *mut RbNode) -> *mut Task {
     let off = core::mem::offset_of!(Task, sched_entity)
         + core::mem::offset_of!(SchedEntity, run_node);
-    // SAFETY: pure pointer arithmetic, no dereference.
+    // SAFETY: pure pointer arithmetic, no dereference (ptr::sub is an
+    // unsafe fn, hence the block).
     unsafe { (node as *mut u8).sub(off) as *mut Task }
 }
 
@@ -567,7 +571,9 @@ pub(crate) fn task_of_node(node: *mut RbNode) -> *mut Task {
 pub(crate) fn node_key(node: *mut RbNode) -> VruntimeKey {
     let off = core::mem::offset_of!(SchedEntity, run_node);
     // SAFETY: caller guarantees node is a linked node of this timeline
-    // (in-range, embedded in a Task whose entity carries a Some key).
+    // (in-range, embedded in a Task whose entity carries a Some key) —
+    // the container_of address arithmetic and the dereference are the
+    // unsafe ops.
     let se = unsafe { (node as *mut u8).sub(off) as *mut SchedEntity };
     match unsafe { (*se).timeline_key() } {
         Some(k) => k,
@@ -747,48 +753,51 @@ impl RbTimeline {
         let nil = self.nil();
         // SAFETY: fixup only touches linked, in-range nodes (guaranteed
         // by the insert descent's per-hop checks: parent chain members
-        // were all on the descent path).
-        unsafe {
-            while (*(*z).parent).red {
-                let p = (*z).parent;
-                let g = (*p).parent;
-                if p == (*g).left {
-                    let u = (*g).right; // uncle
-                    if (*u).red {
+        // were all on the descent path) — each dereference below carries
+        // that contract; the rotate calls and loop control are safe.
+        while unsafe { (*(*z).parent).red } {
+            let p = unsafe { (*z).parent };
+            let g = unsafe { (*p).parent };
+            if p == unsafe { (*g).left } {
+                let u = unsafe { (*g).right }; // uncle
+                if unsafe { (*u).red } {
+                    unsafe {
                         (*p).red = false;
                         (*u).red = false;
                         (*g).red = true;
-                        z = g;
-                    } else {
-                        if z == (*p).right {
-                            z = p;
-                            self.rotate_left(z);
-                        }
-                        (*(*z).parent).red = false;
-                        (*(*(*z).parent).parent).red = true;
-                        self.rotate_right((*(*z).parent).parent);
                     }
+                    z = g;
                 } else {
-                    let u = (*g).left;
-                    if (*u).red {
+                    if z == unsafe { (*p).right } {
+                        z = p;
+                        self.rotate_left(z);
+                    }
+                    unsafe { (*(*z).parent).red = false };
+                    unsafe { (*(*(*z).parent).parent).red = true };
+                    self.rotate_right(unsafe { (*(*z).parent).parent });
+                }
+            } else {
+                let u = unsafe { (*g).left };
+                if unsafe { (*u).red } {
+                    unsafe {
                         (*p).red = false;
                         (*u).red = false;
                         (*g).red = true;
-                        z = g;
-                    } else {
-                        if z == (*p).left {
-                            z = p;
-                            self.rotate_right(z);
-                        }
-                        (*(*z).parent).red = false;
-                        (*(*(*z).parent).parent).red = true;
-                        self.rotate_left((*(*z).parent).parent);
                     }
+                    z = g;
+                } else {
+                    if z == unsafe { (*p).left } {
+                        z = p;
+                        self.rotate_right(z);
+                    }
+                    unsafe { (*(*z).parent).red = false };
+                    unsafe { (*(*(*z).parent).parent).red = true };
+                    self.rotate_left(unsafe { (*(*z).parent).parent });
                 }
             }
-            let _ = nil;
-            (*self.root).red = false;
         }
+        let _ = nil;
+        unsafe { (*self.root).red = false };
     }
 
     /// Unlink `node` (allocation-free). The leftmost cache is advanced to
@@ -799,111 +808,119 @@ impl RbTimeline {
         if !Self::node_ok(node) || !unsafe { (*node).linked } {
             return false;
         }
-        unsafe {
-            let node_was_black = !(*node).red;
-            let left = (*node).left;
-            let right = (*node).right;
-            let parent = (*node).parent;
-            if left != nil && !Self::node_ok(left) {
-                return false;
-            }
-            if right != nil && !Self::node_ok(right) {
-                return false;
-            }
-            if parent != nil && !Self::node_ok(parent) {
-                return false;
-            }
-            if node == self.leftmost {
-                self.leftmost = unsafe { self.next(node) };
-            }
+        // SAFETY: every dereference below works on a neighbor captured
+        // from `node` after the per-neighbor range checks (the poison
+        // discipline); the node_ok tests, tree-root bookkeeping and
+        // erase_fixup calls are safe and stay outside the unsafe ops.
+        let node_was_black = !unsafe { (*node).red };
+        let left = unsafe { (*node).left };
+        let right = unsafe { (*node).right };
+        let parent = unsafe { (*node).parent };
+        if left != nil && !Self::node_ok(left) {
+            return false;
+        }
+        if right != nil && !Self::node_ok(right) {
+            return false;
+        }
+        if parent != nil && !Self::node_ok(parent) {
+            return false;
+        }
+        if node == self.leftmost {
+            self.leftmost = self.next(node);
+        }
 
-            if left == nil {
-                // Case A: no left child — splice node out; the right
-                // child (or NIL) takes its place.
-                let child = right;
-                if child != nil {
-                    (*child).parent = parent;
-                }
-                if parent == nil {
-                    self.root = child;
-                } else if (*parent).left == node {
-                    (*parent).left = child;
-                } else {
-                    (*parent).right = child;
-                }
-                if node_was_black {
-                    self.erase_fixup(child, parent);
-                }
-            } else if right == nil {
-                // Case B: no right child — the left child takes node's
-                // place.
-                (*left).parent = parent;
-                if parent == nil {
-                    self.root = left;
-                } else if (*parent).left == node {
-                    (*parent).left = left;
-                } else {
-                    (*parent).right = left;
-                }
-                if node_was_black {
-                    self.erase_fixup(left, parent);
-                }
+        if left == nil {
+            // Case A: no left child — splice node out; the right
+            // child (or NIL) takes its place.
+            let child = right;
+            if child != nil {
+                unsafe { (*child).parent = parent };
+            }
+            if parent == nil {
+                self.root = child;
+            } else if unsafe { (*parent).left } == node {
+                unsafe { (*parent).left = child };
             } else {
-                // Case C: two children — the in-order successor (min of
-                // the right subtree) is moved into node's structural
-                // position (the reference rb_erase pointer swap; node
-                // identity is the entity, so no key copying).
-                let mut succ = right;
-                let mut succ_parent;
-                if (*succ).left == nil {
+                unsafe { (*parent).right = child };
+            }
+            if node_was_black {
+                self.erase_fixup(child, parent);
+            }
+        } else if right == nil {
+            // Case B: no right child — the left child takes node's
+            // place.
+            unsafe { (*left).parent = parent };
+            if parent == nil {
+                self.root = left;
+            } else if unsafe { (*parent).left } == node {
+                unsafe { (*parent).left = left };
+            } else {
+                unsafe { (*parent).right = left };
+            }
+            if node_was_black {
+                self.erase_fixup(left, parent);
+            }
+        } else {
+            // Case C: two children — the in-order successor (min of
+            // the right subtree) is moved into node's structural
+            // position (the reference rb_erase pointer swap; node
+            // identity is the entity, so no key copying).
+            let mut succ = right;
+            let mut succ_parent;
+            if unsafe { (*succ).left } == nil {
+                succ_parent = succ;
+            } else {
+                loop {
                     succ_parent = succ;
-                } else {
-                    loop {
-                        succ_parent = succ;
-                        succ = (*succ).left;
-                        if !Self::node_ok(succ) {
-                            return false;
-                        }
-                        if (*succ).left == nil {
-                            break;
-                        }
+                    succ = unsafe { (*succ).left };
+                    if !Self::node_ok(succ) {
+                        return false;
                     }
-                    succ_parent = (*succ).parent;
+                    if unsafe { (*succ).left } == nil {
+                        break;
+                    }
                 }
-                let child2 = (*succ).right;
-                if child2 != nil && !Self::node_ok(child2) {
-                    return false;
-                }
-                let succ_was_black = !(*succ).red;
+                succ_parent = unsafe { (*succ).parent };
+            }
+            let child2 = unsafe { (*succ).right };
+            if child2 != nil && !Self::node_ok(child2) {
+                return false;
+            }
+            let succ_was_black = !unsafe { (*succ).red };
 
-                if succ_parent != succ {
-                    // splice succ out of its old spot first
-                    if child2 != nil {
-                        (*child2).parent = succ_parent;
-                    }
-                    (*succ_parent).left = child2;
-                    // reattach node's right subtree under succ
+            if succ_parent != succ {
+                // splice succ out of its old spot first
+                if child2 != nil {
+                    unsafe { (*child2).parent = succ_parent };
+                }
+                unsafe { (*succ_parent).left = child2 };
+                // reattach node's right subtree under succ
+                unsafe {
                     (*succ).right = right;
                     (*right).parent = succ;
                 }
-                // succ takes node's position (parent + left subtree +
-                // node's color).
-                (*succ).parent = parent;
-                if parent == nil {
-                    self.root = succ;
-                } else if (*parent).left == node {
-                    (*parent).left = succ;
-                } else {
-                    (*parent).right = succ;
-                }
+            }
+            // succ takes node's position (parent + left subtree +
+            // node's color).
+            unsafe { (*succ).parent = parent };
+            if parent == nil {
+                self.root = succ;
+            } else if unsafe { (*parent).left } == node {
+                unsafe { (*parent).left = succ };
+            } else {
+                unsafe { (*parent).right = succ };
+            }
+            unsafe {
                 (*succ).left = left;
                 (*left).parent = succ;
                 (*succ).red = (*node).red;
-                if succ_was_black {
-                    self.erase_fixup(child2, succ_parent);
-                }
             }
+            if succ_was_black {
+                self.erase_fixup(child2, succ_parent);
+            }
+        }
 
+        unsafe {
             (*node).parent = nil;
             (*node).left = nil;
             (*node).right = nil;
@@ -931,103 +948,117 @@ impl RbTimeline {
                 nil
             }
         }
-        unsafe {
-            if x != nil && !Self::node_ok(x) {
-                x = nil;
+        // SAFETY: every dereference below is a red-bit read/write or a
+        // parent-link read on a pointer that passed node_ok (or NIL, on
+        // which the code never dereferences); the kid() helper, the
+        // rotations and the loop control are safe and stay outside.
+        if x != nil && !Self::node_ok(x) {
+            x = nil;
+        }
+        while x != self.root && (x == nil || !unsafe { (*x).red }) {
+            if xp == nil || !Self::node_ok(xp) {
+                break;
             }
-            while x != self.root && (x == nil || !(*x).red) {
-                if xp == nil || !Self::node_ok(xp) {
+            let x_is_left = x == kid(xp, true, nil);
+            if x_is_left {
+                let mut w = kid(xp, false, nil);
+                if w == nil {
                     break;
                 }
-                let x_is_left = x == kid(xp, true, nil);
-                if x_is_left {
-                    let mut w = kid(xp, false, nil);
+                if unsafe { (*w).red } {
+                    unsafe {
+                        (*w).red = false;
+                        (*xp).red = true;
+                    }
+                    self.rotate_left(xp);
+                    w = kid(xp, false, nil);
                     if w == nil {
                         break;
                     }
-                    if (*w).red {
-                        (*w).red = false;
-                        (*xp).red = true;
-                        self.rotate_left(xp);
+                }
+                let wl = kid(w, true, nil);
+                let wr = kid(w, false, nil);
+                if (wl == nil || !unsafe { (*wl).red }) && (wr == nil || !unsafe { (*wr).red }) {
+                    unsafe { (*w).red = true };
+                    x = xp;
+                    xp = unsafe { (*x).parent };
+                } else {
+                    if wr == nil || !unsafe { (*wr).red } {
+                        // wl is red here (valid-tree invariant)
+                        unsafe {
+                            (*wl).red = false;
+                            (*w).red = true;
+                        }
+                        self.rotate_right(w);
                         w = kid(xp, false, nil);
                         if w == nil {
                             break;
                         }
                     }
-                    let wl = kid(w, true, nil);
-                    let wr = kid(w, false, nil);
-                    if (wl == nil || !(*wl).red) && (wr == nil || !(*wr).red) {
-                        (*w).red = true;
-                        x = xp;
-                        xp = (*x).parent;
-                    } else {
-                        if wr == nil || !(*wr).red {
-                            // wl is red here (valid-tree invariant)
-                            (*wl).red = false;
-                            (*w).red = true;
-                            self.rotate_right(w);
-                            w = kid(xp, false, nil);
-                            if w == nil {
-                                break;
-                            }
-                        }
+                    unsafe {
                         (*w).red = (*xp).red;
                         (*xp).red = false;
-                        let wr2 = kid(w, false, nil);
-                        if wr2 != nil {
-                            (*wr2).red = false;
-                        }
-                        self.rotate_left(xp);
-                        x = self.root;
                     }
-                } else {
-                    let mut w = kid(xp, true, nil);
+                    let wr2 = kid(w, false, nil);
+                    if wr2 != nil {
+                        unsafe { (*wr2).red = false };
+                    }
+                    self.rotate_left(xp);
+                    x = self.root;
+                }
+            } else {
+                let mut w = kid(xp, true, nil);
+                if w == nil {
+                    break;
+                }
+                if unsafe { (*w).red } {
+                    unsafe {
+                        (*w).red = false;
+                        (*xp).red = true;
+                    }
+                    self.rotate_right(xp);
+                    w = kid(xp, true, nil);
                     if w == nil {
                         break;
                     }
-                    if (*w).red {
-                        (*w).red = false;
-                        (*xp).red = true;
-                        self.rotate_right(xp);
+                }
+                let wl = kid(w, true, nil);
+                let wr = kid(w, false, nil);
+                if (wl == nil || !unsafe { (*wl).red }) && (wr == nil || !unsafe { (*wr).red }) {
+                    unsafe { (*w).red = true };
+                    x = xp;
+                    xp = unsafe { (*x).parent };
+                } else {
+                    if wl == nil || !unsafe { (*wl).red } {
+                        // wr is red here (valid-tree invariant)
+                        unsafe {
+                            (*wr).red = false;
+                            (*w).red = true;
+                        }
+                        self.rotate_left(w);
                         w = kid(xp, true, nil);
                         if w == nil {
                             break;
                         }
                     }
-                    let wl = kid(w, true, nil);
-                    let wr = kid(w, false, nil);
-                    if (wl == nil || !(*wl).red) && (wr == nil || !(*wr).red) {
-                        (*w).red = true;
-                        x = xp;
-                        xp = (*x).parent;
-                    } else {
-                        if wl == nil || !(*wl).red {
-                            // wr is red here (valid-tree invariant)
-                            (*wr).red = false;
-                            (*w).red = true;
-                            self.rotate_left(w);
-                            w = kid(xp, true, nil);
-                            if w == nil {
-                                break;
-                            }
-                        }
+                    unsafe {
                         (*w).red = (*xp).red;
                         (*xp).red = false;
-                        let wl2 = kid(w, true, nil);
-                        if wl2 != nil {
-                            (*wl2).red = false;
-                        }
-                        self.rotate_right(xp);
-                        x = self.root;
                     }
-                }
-                if x != nil && !Self::node_ok(x) {
-                    x = nil;
+                    let wl2 = kid(w, true, nil);
+                    if wl2 != nil {
+                        unsafe { (*wl2).red = false };
+                    }
+                    self.rotate_right(xp);
+                    x = self.root;
                 }
             }
-            if x != nil && Self::node_ok(x) {
-                (*x).red = false;
+            if x != nil && !Self::node_ok(x) {
+                x = nil;
             }
+        }
+        if x != nil && Self::node_ok(x) {
+            unsafe { (*x).red = false };
         }
     }
 }
@@ -1099,8 +1130,8 @@ pub fn secondary_idle_publish(cpu: usize, ptr: usize) {
 /// The table's base address (boot.S linkage reads it by symbol; the
 /// physmap base math must match the linker script).
 pub fn secondary_idle_table_base() -> usize {
-    // SAFETY: address-of only.
-    unsafe { core::ptr::addr_of!(__secondary_idle_tasks) as usize }
+    // INV-SCE-4: address-of only, no access — safe.
+    core::ptr::addr_of!(__secondary_idle_tasks) as usize
 }
 
 /// Read cpu's published idle-task pointer (aarch64 bring-up path).
@@ -1402,32 +1433,36 @@ pub fn drop_task_in_place(task_ptr: *mut Task) {
 /// sequence: it writes through a pointer that is logically dead (the
 /// poison/paint) — by definition outside the language's model.
 pub fn poison_and_dealloc_task(task_ptr: *mut Task) {
-    // SAFETY: INV-TL-2 — every write below goes through a pointer the
-    // type system already considers dead; that is the POINT of the
+    // SAFETY: INV-TL-2 — every unsafe op below goes through a pointer
+    // the type system already considers dead; that is the POINT of the
     // poison discipline (the R47/R12-4 guards read these words to
     // refuse stale wakes). Volatile stores at the compile-time
     // offsets; the paint loop bounds itself to 0x100 bytes; the
-    // dealloc closes the window.
+    // dealloc closes the window. The ring record, the unmark and the
+    // IN_TASK_FREE stores are plain atomic/static access — safe.
+    let slot = task_ptr as *mut u8;
+    let h = crate::sched::sched::FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
+    crate::sched::sched::FREED_TASK_RING[h].store(
+        unsafe { (*task_ptr).pid() },
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    // R47: poison state and pid at their COMPILE-TIME offsets
+    // (task_offsets::TASK_STATE/TASK_PID; currently 0x50/0x54). The
+    // previous hardcoded `slot.add(0x48)` u64 write predated the
+    // journal_handle/ti_on_cpu/task_refcnt insertion before `state`
+    // (the same +8 drift trap.rs R20 fixed for its own walk) and
+    // landed entirely inside ti_a2 — so every poison reader
+    // (Task::wake_up R15-6, enqueue_task_locked R15-6,
+    // ensure_linked_locked R41, trap.rs panic walk) checked fields
+    // that were never poisoned. Freed Task pages were
+    // indistinguishable from live ones, and the stale wakes those
+    // guards exist to drop proceeded to set_state(RUNNING == 0)
+    // into freed-then-reused pages — the positional 4-byte zero at
+    // the state word behind the phantom-RUNNING / recurrence-at-
+    // same-address signature (rounds 39-47 form-B). Two separate
+    // u32 writes (not one u64) so a future field inserted between
+    // state and pid cannot silently miss pid again.
     unsafe {
-        let slot = task_ptr as *mut u8;
-        let h = crate::sched::sched::FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
-        crate::sched::sched::FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
-        // R47: poison state and pid at their COMPILE-TIME offsets
-        // (task_offsets::TASK_STATE/TASK_PID; currently 0x50/0x54). The
-        // previous hardcoded `slot.add(0x48)` u64 write predated the
-        // journal_handle/ti_on_cpu/task_refcnt insertion before `state`
-        // (the same +8 drift trap.rs R20 fixed for its own walk) and
-        // landed entirely inside ti_a2 — so every poison reader
-        // (Task::wake_up R15-6, enqueue_task_locked R15-6,
-        // ensure_linked_locked R41, trap.rs panic walk) checked fields
-        // that were never poisoned. Freed Task pages were
-        // indistinguishable from live ones, and the stale wakes those
-        // guards exist to drop proceeded to set_state(RUNNING == 0)
-        // into freed-then-reused pages — the positional 4-byte zero at
-        // the state word behind the phantom-RUNNING / recurrence-at-
-        // same-address signature (rounds 39-47 form-B). Two separate
-        // u32 writes (not one u64) so a future field inserted between
-        // state and pid cannot silently miss pid again.
         core::ptr::write_volatile(
             slot.add(crate::process::task::TASK_STATE) as *mut u32,
             crate::sched::sched::TASK_POISON,
@@ -1436,12 +1471,12 @@ pub fn poison_and_dealloc_task(task_ptr: *mut Task) {
             slot.add(crate::process::task::TASK_PID) as *mut u32,
             crate::sched::sched::TASK_POISON,
         );
-        // R69: release the ownership bit and tell the heap's free-side
-        // audit that THIS free is the legitimate one (anything else
-        // freeing a live Task page is the double-handoff engine).
-        crate::sched::sched::task_page_unmark(slot);
-        crate::sched::sched::IN_TASK_FREE.store(true, core::sync::atomic::Ordering::Release);
-        alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
-        crate::sched::sched::IN_TASK_FREE.store(false, core::sync::atomic::Ordering::Release);
     }
+    // R69: release the ownership bit and tell the heap's free-side
+    // audit that THIS free is the legitimate one (anything else
+    // freeing a live Task page is the double-handoff engine).
+    crate::sched::sched::task_page_unmark(slot);
+    crate::sched::sched::IN_TASK_FREE.store(true, core::sync::atomic::Ordering::Release);
+    unsafe { alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>()) };
+    crate::sched::sched::IN_TASK_FREE.store(false, core::sync::atomic::Ordering::Release);
 }
