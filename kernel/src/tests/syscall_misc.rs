@@ -460,12 +460,23 @@ fn test_sys_poll() {
     test_assert!(ret == expected, "sys_ppoll null fds returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
-    // Test: ppoll rejects a wrong sigsetsize up front (reference order:
-    // the EINVAL for sigsetsize != sizeof(sigset_t) precedes the EFAULT
-    // for the bad fds pointer).
+    // Test: NULL mask IGNORES sigsetsize entirely (reference shape after
+    // the glibc-poll fix: SYSCALL_DEFINE5(ppoll) validates sigsetsize only
+    // inside `if (sigmask)`; glibc's poll() wrapper calls
+    // ppoll(fds, nfds, ts, NULL, 0) on every GLib main-loop iteration, so
+    // an unconditional check turned every poll(2) into EINVAL). With a
+    // NULL mask and sigsetsize=0 the call proceeds and fails on the bad
+    // fds pointer with EFAULT — NOT EINVAL.
     let ret = sys_ppoll([0, 1, 0, 0, 0, 0]);
+    let expected = -(errno::EFAULT as i64);
+    test_assert!(ret == expected, "sys_ppoll null mask ignores sigsetsize",
+        &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
+
+    // Test: non-NULL mask + wrong sigsetsize still returns EINVAL (the
+    // validation fires before the mask-pointer access_ok check).
+    let ret = sys_ppoll([0, 1, 0, 0x1000, 0, 0]);
     let expected = -(errno::EINVAL as i64);
-    test_assert!(ret == expected, "sys_ppoll wrong sigsetsize returns -EINVAL",
+    test_assert!(ret == expected, "sys_ppoll non-null mask rejects wrong sigsetsize",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 }
 
