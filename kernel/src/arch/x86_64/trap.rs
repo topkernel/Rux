@@ -281,8 +281,23 @@ pub fn init_secondary(cpu: usize) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-65): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn init_syscall() {
-    crate::arch::arch_floor::x86_64::trap::init_syscall()
+pub 
+fn init_syscall() {
+
+
+                  extern "C" {
+                      static syscall_entry: u8;
+                  }
+                  // SAFETY: MSR writes configure the syscall entry; values are the
+                  // constants documented at the top of this file.
+
+                      let efer = rdmsr(MSR_EFER);
+                      wrmsr(MSR_EFER, efer | EFER_SCE | EFER_NXE);
+                      wrmsr(MSR_STAR, MSR_STAR_VALUE);
+                      wrmsr(MSR_LSTAR, &raw const syscall_entry as u64);
+                      wrmsr(MSR_FMASK, MSR_FMASK_VALUE);
+
+
 }
 
 // ============================================================================
@@ -308,22 +323,73 @@ pub const IRQ_CASCADE: u8 = 2;
 // IS the protocol.
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-64): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn init_8259() {
-    crate::arch::arch_floor::x86_64::trap::init_8259()
+pub(crate) 
+        // INV-ARCH-TRAP-64 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
+        // wrapper at the original path — obligations unchanged.
+fn init_8259() {
+
+
+               // SAFETY: port writes program the 8259 during early init with IF off.
+
+                   outb(PIC1_CMD, 0x11); // ICW1: init, edge-triggered, cascade, ICW4
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC2_CMD, 0x11);
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC1_DATA, PIC_IRQ_BASE); // ICW2: master vector base 0x20
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC2_DATA, PIC_IRQ_BASE + 8); // ICW2: slave vector base 0x28
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC1_DATA, 1 << IRQ_CASCADE); // ICW3: slave hangs off IRQ2
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC2_DATA, IRQ_CASCADE); // ICW3: slave identity 2
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC1_DATA, 0x01); // ICW4: 8086 mode
+                   crate::arch::x86_64::cpu::io_wait();
+                   outb(PIC2_DATA, 0x01);
+                   crate::arch::x86_64::cpu::io_wait();
+
+                   // OCW1: mask all lines except the cascade (bit 2 of the master).
+                   outb(PIC1_DATA, 0xFF & !(1 << IRQ_CASCADE));
+                   outb(PIC2_DATA, 0xFF);
+
+
 }
 /// Non-specific EOI — conservative like early Linux: always EOI the
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-63): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn pic_send_eoi(line: u8) {
-    crate::arch::arch_floor::x86_64::trap::pic_send_eoi(line)
+pub(crate) 
+fn pic_send_eoi(line: u8) {
+
+
+                          // SAFETY: EOI writes are idempotent at the chip.
+
+                              if line >= 8 {
+                                  outb(PIC2_CMD, 0x20);
+                              }
+                              outb(PIC1_CMD, 0x20);
+
+
 }
 /// Claim the highest-priority in-service IRQ (PIC analogue of the PLIC
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-62): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn pic_claim() -> Option<u8> {
-    crate::arch::arch_floor::x86_64::trap::pic_claim()
+pub(crate) 
+fn pic_claim() -> Option<u8> {
+
+
+                             // SAFETY: OCW3 ISR-mode selects are read-side only.
+
+                                 outb(PIC1_CMD, 0x0B); // OCW3: read ISR on next read
+                                 outb(PIC2_CMD, 0x0B);
+                                 let isr = ((inb(PIC2_CMD) as u16) << 8) | inb(PIC1_CMD) as u16;
+                                 if isr == 0 {
+                                     return None;
+                                 }
+                                 Some(isr.trailing_zeros() as u8)
+
+
 }
 
 /// Serializes PIC mask-register RMWs. Leaf lock (never held across any
@@ -335,15 +401,43 @@ pub(crate) static PIC_MASK_LOCK: Spinlock<()> = Spinlock::new(());
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-61): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn unmask_irq_line(line: u8) {
-    crate::arch::arch_floor::x86_64::trap::unmask_irq_line(line)
+pub 
+fn unmask_irq_line(line: u8) {
+
+
+                             let _pl = PIC_MASK_LOCK.lock_irqsave();
+                             // SAFETY: RMW of the mask register, serialized by PIC_MASK_LOCK.
+
+                                 if line < 8 {
+                                     let m = inb(PIC1_DATA) & !(1 << line);
+                                     outb(PIC1_DATA, m);
+                                 } else if line < 16 {
+                                     let m = inb(PIC2_DATA) & !(1 << (line - 8));
+                                     outb(PIC2_DATA, m);
+                                 }
+
+
 }
 /// Mask one PIC line (0..15).
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-60): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn mask_irq_line(line: u8) {
-    crate::arch::arch_floor::x86_64::trap::mask_irq_line(line)
+pub 
+fn mask_irq_line(line: u8) {
+
+
+                           let _pl = PIC_MASK_LOCK.lock_irqsave();
+                           // SAFETY: RMW of the mask register, serialized by PIC_MASK_LOCK.
+
+                               if line < 8 {
+                                   let m = inb(PIC1_DATA) | (1 << line);
+                                   outb(PIC1_DATA, m);
+                               } else if line < 16 {
+                                   let m = inb(PIC2_DATA) | (1 << (line - 8));
+                                   outb(PIC2_DATA, m);
+                               }
+
+
 }
 
 // ============================================================================
@@ -1085,15 +1179,82 @@ pub(crate) fn handle_alignment_check(regs: &mut PtRegs) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-48): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_device_not_available() {
-    crate::arch::arch_floor::x86_64::trap::handle_device_not_available()
+pub(crate) 
+fn handle_device_not_available() {
+
+
+                                 if let Some(cur) = crate::sched::current() {
+                                     // SAFETY: cur is the task now running on this CPU; clts claims
+                                     // the live FPU for it, restore_fpu loads its image.
+
+                                         crate::arch::x86_64::cpu::clts();
+                                         (*cur).thread_mut().restore_fpu();
+
+                                     return;
+                                 }
+                                 // No current task (early boot / idle context) took an FP trap:
+                                 // re-enable the FPU defensively instead of looping on #NM.
+                                 // HOTPATH-PRINT: rare self-heal arm — fires only when the #NM
+                                 // handler finds no current task; re-runs fpu_init and returns.
+                                 crate::pr_warn!("trap: #NM with no current task — re-running fpu_init");
+                                 // SAFETY: fpu_init only flips CR0/CR4 feature bits and zeroes the
+                                 // live FPU state; the caller was not using it (#NM proves that).
+                                  crate::arch::x86_64::thread::fpu_init() ;
+
 }
 /// #DB — hardware single-step (TF) or debug-register trap.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-47): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_debug(regs: &mut PtRegs) {
-    crate::arch::arch_floor::x86_64::trap::handle_debug(regs)
+pub(crate) 
+fn handle_debug(regs: &mut PtRegs) {
+
+
+                                   const TF: u64 = 1 << 8;
+                                   const RF: u64 = 1 << 16;
+                                   if regs.user_mode() {
+                                       // Stop stepping before delivering anything, or iretq/sysret
+                                       // would re-trap on the first handler/user instruction.
+                                       regs.rflags &= !TF;
+                                       if let Some(task) = crate::sched::current() {
+                                           if (*task).tracer_pid() != 0 {
+                                               // SAFETY: task is the current task in its trap path.
+
+                                                   crate::process::ptrace::ptrace_stop(
+                                                       task,
+                                                       crate::signal::Signal::SIGTRAP as i32,
+                                                       crate::signal::SigInfo::new(
+                                                           crate::signal::Signal::SIGTRAP as i32,
+                                                           crate::signal::si_code::SI_KERNEL,
+                                                           (*task).pid(),
+                                                           0,
+                                                       ),
+                                                   );
+
+                                               return;
+                                           }
+                                       }
+                                       // Linux do_debug: a user #DB without a tracer is a CATCHABLE
+                                       // SIGTRAP (force_sig_fault semantics). The old unconditional
+                                       // do_exit killed every task that set TF with a handler
+                                       // installed (gdb-less tracers, coverage tools, the tfprobe
+                                       // A/B) — the reference only kills on the default disposition.
+                                       // Handler-first routing like the #UD/#GP arms; a blocked
+                                       // SIGTRAP (trap inside its own handler) is forced to the
+                                       // default action, mirroring the SIGSEGV discipline.
+                                       let pid = crate::process::current_pid();
+                                       let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGTRAP as i32);
+                                       if !sigtrap_has_handler() || sigtrap_blocked_current() {
+                                           crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+                                       } else {
+                                           crate::signal::force_unblock_current(crate::signal::Signal::SIGTRAP as i32);
+                                       }
+                                   } else {
+                                       // Kernel-mode #DB with TF set: clear TF in the saved frame and
+                                       // resume (Linux do_debug discipline for kernel steps).
+                                       regs.rflags &= !TF;
+                                   }
+
 }
 
 /// SIGTRAP (5) disposition check for the #DB path (step tracers and
@@ -1117,8 +1278,73 @@ pub(crate) fn sigtrap_blocked_current() -> bool {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-46): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_breakpoint(regs: &mut PtRegs) {
-    crate::arch::arch_floor::x86_64::trap::handle_breakpoint(regs)
+pub(crate) 
+fn handle_breakpoint(regs: &mut PtRegs) {
+
+
+                                        if regs.user_mode() {
+                                            if let Some(task) = crate::sched::current() {
+                                                let step_addr = (*task).single_step_addr();
+                                                if (*task).single_step_active() && regs.rip == step_addr.wrapping_add(1) {
+                                                    let saved = (*task).single_step_saved_insn();
+                                                    let restored = crate::process::ptrace::write_target_word(task, step_addr, saved);
+                                                    (*task).clear_single_step();
+                                                    if !restored {
+                                                        // Tracee's text is gone racing the step — kill it.
+                                                        crate::process::exit::do_exit(
+                                                            -(crate::signal::Signal::SIGSEGV as i32),
+                                                        );
+                                                    }
+                                                    // Rewind past the int3 so the restored instruction
+                                                    // re-executes (x86 trap already advanced rip).
+                                                    regs.rip = step_addr;
+                                                    if (*task).tracer_pid() != 0 {
+                                                        // SAFETY: task is the current task in its trap path.
+
+                                                            crate::process::ptrace::ptrace_stop(
+                                                                task,
+                                                                crate::signal::Signal::SIGTRAP as i32,
+                                                                crate::signal::SigInfo::new(
+                                                                    crate::signal::Signal::SIGTRAP as i32,
+                                                                    crate::signal::si_code::SI_KERNEL,
+                                                                    (*task).pid(),
+                                                                    0,
+                                                                ),
+                                                            );
+
+                                                    } else {
+                                                        (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
+                                                    }
+                                                    return;
+                                                }
+                                                // A real user int3 under a tracer stops for the tracer
+                                                // (gdb inserts and relies on breakpoints); rip already
+                                                // points after the 1-byte int3, matching Linux do_int3.
+                                                if (*task).tracer_pid() != 0 {
+                                                    // SAFETY: task is the current task in its trap path.
+
+                                                        crate::process::ptrace::ptrace_stop(
+                                                            task,
+                                                            crate::signal::Signal::SIGTRAP as i32,
+                                                            crate::signal::SigInfo::new(
+                                                                crate::signal::Signal::SIGTRAP as i32,
+                                                                crate::signal::si_code::SI_KERNEL,
+                                                                (*task).pid(),
+                                                                0,
+                                                            ),
+                                                        );
+
+                                                    return;
+                                                }
+                                            }
+                                            crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+                                            // Do NOT advance rip — the task is ZOMBIE and will not resume
+                                        } else {
+                                            // Kernel-mode int3 is a kernel bug (kgdb-style breakpoints are
+                                            // not wired up).
+                                            panic!("trap: int3 in kernel mode at rip={:#x}", regs.rip);
+                                        }
+
 }
 
 // ============================================================================

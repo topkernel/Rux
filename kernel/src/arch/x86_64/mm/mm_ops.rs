@@ -1653,8 +1653,58 @@ pub fn alloc_user_phys_page() -> Option<u64> {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MM-OPS-25): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn create_user_address_space() -> Option<u64> {
-    crate::arch::arch_floor::x86_64::mm::mm_ops::create_user_address_space()
+pub 
+fn create_user_address_space() -> Option<u64> {
+
+
+                                              let phys_addr = alloc_pages(GfpFlags::GFP_USER, 0);
+                                              if phys_addr == 0 {
+                                                  return None;
+                                              }
+
+                                              // Validate physical address is within actual physical memory range.
+                                              if crate::mm::layout::is_kernel_layout_initialized() {
+                                                  let layout = crate::mm::layout::kernel_layout();
+                                                  let phys_end = layout.phys_base + layout.phys_size;
+
+                                                  if phys_addr < layout.phys_base || phys_addr >= phys_end {
+                                                      // Invalid physical address - outside memory range
+                                                      return None;
+                                                  }
+                                              }
+
+                                              let root_page = phys_addr as u64;
+
+                                              // Stamp the root into the PT ledger (it comes from alloc_pages, NOT
+                                              // alloc_page_table, so it is otherwise unstamped and its teardown free
+                                              // is refused — one leaked frame per exec'd mm).
+                                              crate::arch::x86_64::mm::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
+
+                                              // K1-BAR: from this point on, new kernel-half PML4 entries installed
+                                              // in the static root (per-BAR ioremap arena) are invisible to mm
+                                              // trees forked earlier — they copied the kernel-half links at their
+                                              // own creation. PCI probe must finish before the first user mm;
+                                              // ioremap_bar_kernel reports a violation loudly.
+                                              crate::arch::x86_64::mm::mmu_init::mark_user_mms_exist();
+
+                                              let root_ppn = root_page / PAGE_SIZE;
+                                              if let Some(root_table) = PtTable::from_phys(root_page) {
+                                                  root_table.zero_entries();
+                                              }
+
+                                              // ALWAYS clone from the static kernel root — root_page_table_ppn()
+                                              // reads CR3, which is a USER root while another task is current.
+                                              let kernel_ppn = get_kernel_page_table_ppn();
+                                              copy_kernel_mappings(root_ppn, kernel_ppn);
+
+                                              // Fixmap lives in the kernel half (PML4[511]) on x86 — already
+                                              // shared by the link copy above; nothing to do (riscv64 needs the
+                                              // explicit copy because its fixmap sits below KERNEL_PGD_START).
+                                              // (No-op on x86; the fixmap lane owns its conversion.)
+                                               crate::arch::x86_64::mm::fixmap::copy_fixmap_to_user(root_ppn) ;
+
+                                              Some(root_ppn)
+
 }
 
 /// Copy kernel mappings into a fresh user PML4.

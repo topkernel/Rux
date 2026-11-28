@@ -10857,25 +10857,6 @@ pub mod x86_64 {
         // INV-ARCH-CONTEXT-21 (collected 2026-11-27 from x86_64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Context switch wrapper (same protocol as the riscv64 twin):
-        ///
-        /// 1. save prev FPU (fxsave into thread)
-        /// 2. switch_mm via CR3 if the address space changed
-        /// 3. save/restore per-task FS base (TLS)
-        /// 4. `__switch_to` (registers, stacks, per-CPU current, TSS.rsp0)
-        /// 5. restore the incoming task's FPU
-        ///
-        /// # Safety
-        /// Must be called with interrupts disabled (caller's responsibility).
-        /// After `__switch_to` all locals are invalid; the incoming task is
-        /// resolved through `sched::current()` (the per-CPU slot).
-        pub  fn context_switch(prev: &mut Task, next: &mut Task)  {
-
-            // Thin contract wrapper (IRQs-off + locals-invalid-after-switch stay
-            // the caller-visible protocol); the body below is safe Rust over the
-            // audited switch edges.
-            context_switch_body(prev, next)
-        }
 
         // INV-ARCH-CONTEXT-22 (collected 2026-11-27 from x86_64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -11287,20 +11268,6 @@ pub mod x86_64 {
         // INV-ARCH-CONTEXT-26 (collected 2026-11-27 from x86_64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Switch the address-space root (interface parity with the riscv64
-        /// twin's switch_mm; called from exec/exit paths outside context_switch).
-        ///
-        /// # Safety
-        /// `next_ppn` must be a live page-table root PPN.  With PCID active
-        /// `asid` tags the CR3 write (NOFLUSH keeps cached translations); asid 0
-        /// for a USER root is the allocator-pressure fallback and must arrive
-        /// here as such — callers pass the mm's resolved PCID (see exec.rs).
-        pub  fn switch_mm(next_ppn: u64, asid: u16)  {
-
-            // SAFETY: caller guarantees a valid PML4 physical address; the
-            // tagging/fallback discipline lives in asid::switch_root.
-             crate::arch::x86_64::mm::asid::switch_root(next_ppn, asid) ;
-        }
 
         // extern declarations duplicated from x86_64/context.rs (the original
         // block stays in place; duplicate extern decls unify)
@@ -11494,67 +11461,10 @@ pub mod x86_64 {
         // INV-ARCH-CPU-37 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// CR4.SMEP (bit 20): Supervisor-Mode Execution Prevention. When set, a
-        /// ring-0 instruction fetch of a U=1 page faults IMMEDIATELY at the
-        /// fetch — the reference kernel arms it whenever CPUID offers it.
-        /// R12 (oh-launch round 12, the rip=0x1 family): without SMEP the kernel
-        /// happily EXECUTES user-mapped (and zero) pages, which is the
-        /// amplifier half of the last scribbler face: a kernel rip that lands
-        /// on a small-int garbage target (a return address or fn pointer
-        /// overwritten with 1/0/3 — PICK_LIVE, a bool, an enum tag) does not
-        /// fault at the fetch if the page happens to be mapped; it executes
-        /// whatever bytes sit there (mostly zeros = `add [rax],al`-class ops)
-        /// and the machine only faults later on a DATA access at a small
-        /// address — the captured shape (rip=0x1 rsp=0x0 badaddr=0x3 and
-        /// badaddr=-0x30, data faults while "executing" at 1). With SMEP on,
-        /// the same jump faults AT THE TARGET: a clean #PF with badaddr=rip
-        /// naming the hijack address, no zero-page execution cascade, no
-        /// follow-on dumper re-entry. The kernel-EXEC-fault routing in
-        /// mm/exception.rs already assumes these semantics ("SMEP blocks U=1
-        /// fetches at CPL0 even when mapped" — kernel EXEC faults route to the
-        /// exception table / KernelPanic instead of demand-filling); arming the
-        /// bit is what makes that comment true.
-        pub fn enable_smep()  {
-
-            // CPUID leaf 7 subleaf 0, EBX bit 7 = SMEP.
-            let (_, ebx, _, _) = cpuid(7, 0);
-            if ebx & (1 << 7) == 0 {
-                crate::println!("arch: SMEP not available");
-                return;
-            }
-            // SAFETY: CR4 update with the SMEP bit only; CPUID gated and
-            // idempotent. Set on the BSP before SMP bring-up so every AP
-            // inherits CR4 via the boot trampoline.
-            
-                let cr4 = read_cr4();
-                write_cr4(cr4 | (1 << 20));
-            
-            crate::println!("arch: CR4.SMEP enabled (kernel EXEC of user pages faults at the fetch)");
-        }
 
         // INV-ARCH-CPU-38 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Arm FSGSBASE for the context-switch path (WRFSBASE/WRGSBASE take
-        /// effect CPU-globally once CR4.FSGSBASE is set; the switch path gates
-        /// on fsgsbase_enabled() so the instruction never executes without it).
-        pub fn enable_fsgsbase()  {
-
-            // CPUID leaf 7 subleaf 0, EBX bit 16 = FSGSBASE.
-            let (_, ebx, _, _) = cpuid(7, 0);
-            if ebx & (1 << 16) == 0 {
-                crate::println!("arch: FSGSBASE not available, switches keep wrmsr FS/GS");
-                return;
-            }
-            // SAFETY: CR4 update with the FSGSBASE bit only; CPUID gated and
-            // idempotent.
-            
-                let cr4 = read_cr4();
-                write_cr4(cr4 | (1 << 16));
-            
-            FSGSBASE_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
-            crate::println!("arch: CR4.FSGSBASE enabled");
-        }
 
         // INV-ARCH-CPU-39 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -11706,39 +11616,10 @@ pub mod x86_64 {
         // INV-ARCH-CPU-48 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
-        ///
-        /// F1b root-cause fix (wildwrite-hunt): without WP, ring-0 stores IGNORE
-        /// page-table RW bits, so every "read-only" supervisor mapping is
-        /// decorative — supervisor uaccess writes pierce COW/share protections
-        /// (read() into a post-fork COW page writes the SHARED page: parent/child
-        /// divergence, cross-mapper bleed, zero kernel-side trace). Linux sets WP
-        /// early in boot for exactly this discipline; we now do the same,
-        /// permanently, on BSP and every AP. Safe here because the kernel image,
-        /// linear map, and device windows are all mapped P|RW — WP only ever
-        /// bites user-side COW/RO pages (the trap path resolves those: see
-        /// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
-        /// kernel statics.
-        pub fn enable_write_protect()  {
-
-            // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
-            
-                let cr0 = read_cr0();
-                write_cr0(cr0 | 0x1_0000);
-            
-        }
 
         // INV-ARCH-CPU-49 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Set CR0.TS (drop the live FPU; next FP instruction traps #NM).
-        /// Memory-safe for any caller: one control-bit set, no mode bits touched.
-        #[inline]
-        pub fn stts()  {
-
-            // SAFETY: single-bit set, mode bits preserved.
-             write_cr0(read_cr0() | CR0_TS) ;
-        }
 
         // INV-ARCH-CPU-50 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -11797,13 +11678,6 @@ pub mod x86_64 {
         // INV-ARCH-CPU-54 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// I/O wait (dummy port write to serialize slow legacy devices)
-        #[inline]
-        pub fn io_wait()  {
-
-            // SAFETY: writing to port 0x80 (POST diagnostic port) is harmless.
-             outb(0x80, 0) ;
-        }
 
         // INV-ARCH-CPU-55 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -12257,63 +12131,6 @@ pub mod x86_64 {
         // INV-ARCH-IPI-24 (collected 2026-11-27 from x86_64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Dispatch a received IPI vector.  Called from interrupt context.
-        /// `regs` is the INTERRUPTED context's frame (trap.S-built PtRegs) —
-        /// used by the REMOTE-BT capture to name what this CPU was executing
-        /// when poked.
-        pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs)  {
-
-            match vector {
-                VECTOR_RESCHEDULE => {
-                    // Only set the flag.  Calling schedule() here (IRQs off)
-                    // could deadlock on the runqueue lock the same way the
-                    // riscv64 twin documents; the trap-exit path reschedules.
-                    crate::sched::set_need_resched();
-                }
-                VECTOR_CALL_FUNCTION => csd_flush_queue(),
-                VECTOR_TLB_FLUSH => {
-                    // Full non-global flush of the CURRENT address space: no
-                    // kernel PTEs carry the GLOBAL bit, so this covers
-                    // everything the local invlpg/flush_tlb covered. With PCID
-                    // active the CR3 reload would only reach the CURRENT PCID's
-                    // entries, so the flush is INVPCID all-contexts (every PCID
-                    // on this CPU) — the shootdown callers invalidate mappings
-                    // that may be cached under any mm's PCID.
-                    if crate::arch::mm::asid::pcid_enabled() {
-                        // SAFETY: type 3 ignores the descriptor content and is
-                        // valid regardless of the current CR3.
-                        
-                            crate::arch::x86_64::cpu::invpcid(
-                                crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL,
-                                0,
-                                0,
-                            )
-                        ;
-                    } else {
-                        // SAFETY: reloading the current CR3 with PCID off.
-                         crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) ;
-                    }
-                    // (fork-frag lane) Flush COMPLETED: publish the epoch advance
-                    // that releases deferred page-table frees waiting on this CPU
-                    // (see TLB_FLUSH_EPOCH above).
-                    let cpu = crate::arch::cpu_id() as usize;
-                    if cpu < MAX_CPUS {
-                        TLB_FLUSH_EPOCH[cpu].fetch_add(1, Ordering::Release);
-                    }
-                }
-                VECTOR_STOP => loop {
-                    crate::arch::cpu::disable_irq();
-                    // HLT parks this CPU forever (panic path); WFI's SAFETY
-                    // contract holds by construction here.
-                    crate::arch::cpu::wfi();
-                },
-                VECTOR_IRQ_WORK => {
-                    snapshot_self();
-                    remote_bt_self(regs);
-                }
-                _ => {}
-            }
-        }
     }
 
     pub mod root {
@@ -12390,26 +12207,6 @@ pub mod x86_64 {
         // INV-ARCH-MPK-3 (collected 2026-11-27 from x86_64/mpk.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Arm the standing guard (mpkguard=1 at boot). Idempotent; false when
-        /// the hardware bit is absent (the guard silently stays off — the
-        /// cmdline asked for protection the machine cannot give, say so).
-        pub fn guard_arm() -> bool  {
-
-            let (_, _, ecx, _) = crate::arch::x86_64::cpu::cpuid(7, 0);
-            if ecx & (1 << 3) == 0 {
-                crate::println!("mpkguard: PKU absent — guard NOT armed");
-                return false;
-            }
-            // SAFETY: CR4.PKE arm (idempotent, CPUID-gated — the probe template).
-            
-                let cr4 = crate::arch::x86_64::cpu::read_cr4();
-                crate::arch::x86_64::cpu::write_cr4(cr4 | (1 << 22));
-            
-            wrpkru(closed_pkru());
-            GUARD.store(true, core::sync::atomic::Ordering::Release);
-            crate::println!("mpkguard: armed (keys 1-15 AD|WD, key0 open)");
-            true
-        }
 
         // INV-ARCH-MPK-4 (collected 2026-11-27 from x86_64/mpk.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -12558,23 +12355,6 @@ pub mod x86_64 {
         // INV-ARCH-MPK-5 (collected 2026-11-27 from x86_64/mpk.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// CR4.PKE (bit 22): arm protection keys. Idempotent.
-        pub(crate) fn enable_pke() -> bool  {
-
-            let (_, _, ecx, _) = crate::arch::x86_64::cpu::cpuid(7, 0);
-            if ecx & (1 << 3) == 0 {
-                // OSPKE not exposed (KVM did not pass it through even though
-                // the host has it): the honest negative's primary datum.
-                return false;
-            }
-            // SAFETY: CR4 update with the PKE bit only, CPUID-gated and
-            // idempotent (the enable_smep template).
-            
-                let cr4 = crate::arch::x86_64::cpu::read_cr4();
-                crate::arch::x86_64::cpu::write_cr4(cr4 | (1 << 22));
-            
-            true
-        }
 
         // INV-ARCH-MPK-6 (collected 2026-11-27 from x86_64/mpk.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -12668,117 +12448,10 @@ pub mod x86_64 {
         // INV-ARCH-PROCESS-5 (collected 2026-11-27 from x86_64/process.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// arch_prctl(code, addr) — TLS base management. glibc/musl startup calls
-        /// ARCH_SET_FS before anything else; without it every TLS access faults
-        /// (the static-toybox SIGSEGV-at-startup shape).
-        ///
-        /// FS is the kernel-managed TLS pointer (thread.fs_base, live MSR, both
-        /// kept in sync — context_switch restores from thread.fs_base). GS is
-        /// stored per-task only: nothing switches the live GS MSR on x86, so
-        /// installing a user GS base there would leak into every other task.
-        pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64  {
-
-            let code = args[0];
-            let addr = args[1];
-
-            let Some(current) = crate::sched::current() else {
-                return -crate::errno::constants::ESRCH as i64;
-            };
-
-            match code {
-                ARCH_SET_FS => {
-                    if addr >= 1 << 47 {
-                        return -crate::errno::constants::EFAULT as i64;
-                    }
-                    // SAFETY: current is the running task; we are the only context
-                    // that may touch our own thread state.
-                    
-                        let thread = (*current).thread_mut();
-                        thread.fs_base = addr;
-                        thread.set_tp(addr);
-                        crate::arch::x86_64::cpu::wrmsr(MSR_FS_BASE, addr);
-                    
-                    0
-                }
-                ARCH_GET_FS => {
-                    // SAFETY: read-only access to the current task's thread state.
-                    let fs =  (*current).thread().fs_base ;
-                    // SAFETY: writes one userspace word at a validated pointer.
-                    let ok = 
-                        crate::arch::uaccess::put_user(addr as *mut u64, fs)
-                    ;
-                    if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
-                }
-                ARCH_SET_GS => {
-                    // SAFETY: see ARCH_SET_FS.
-                    
-                        (*current).thread_mut().gs_base = addr;
-                        // closegap/cache-parity: program the SWAPGS shadow too, so
-                        // the live MSR matches thread.gs_base immediately (the
-                        // context switch no longer re-reads the MSR to refresh the
-                        // cache — a stale shadow here would otherwise be saved
-                        // nowhere and visible to userspace until the next switch).
-                        // The ACTIVE GS base (percpu) is untouched, as before.
-                        crate::arch::x86_64::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
-                    
-                    0
-                }
-                ARCH_GET_GS => {
-                    // SAFETY: read-only access to the current task's thread state.
-                    let gs =  (*current).thread().gs_base ;
-                    // SAFETY: writes one userspace word at a validated pointer.
-                    let ok = 
-                        crate::arch::uaccess::put_user(addr as *mut u64, gs)
-                    ;
-                    if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
-                }
-                _ => -crate::errno::constants::EINVAL as i64,
-            }
-        }
 
         // INV-ARCH-PROCESS-6 (collected 2026-11-27 from x86_64/process.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Reset the FPU and TLS state on exec (the twin's flush_thread):
-        /// zeroed fxsave image marked valid (fresh tasks restore deterministic
-        /// FP state — ARCH-H1 parity) and fs/gs bases cleared.
-        pub fn flush_thread()  {
-
-            if let Some(current) = crate::sched::current() {
-                // Typed handle — we are the only context that can touch our
-                // own thread state here.
-                {
-                    let thread = current.thread_mut();
-                    thread.mark_fpu_clean();
-                    thread.fs_base = 0;
-                    thread.gs_base = 0;
-
-                    // Drop the LIVE FS base too: without this the next
-                    // context-switch-out would resurrect the old image's TLS
-                    // pointer from the MSR (the twin's live-FS=Off discipline,
-                    // x86 form: the exec'ing image has no TLS until
-                    // set_thread_area/arch_prctl installs one).
-                    //
-                    // GS discipline note: the ACTIVE GS base (0xC0000101) is the
-                    // CPU's per-CPU pointer (smp.rs) and must NEVER be cleared
-                    // from task context.  The task's user GS base lives in the
-                    // SWAPGS shadow (0xC0000102) — that is what "no TLS on a
-                    // fresh image" clears here.
-                    // SAFETY: cached-mirror clears (the live per-CPU GS at
-                    // 0xC0000101 is untouched — see the note above).
-                    
-                        crate::arch::x86_64::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
-                        crate::arch::x86_64::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
-                    
-
-                    // LAZY FPU: the live registers still hold the OLD image's
-                    // state. Mark them stale (CR0.TS) so the first FP use of the
-                    // new image traps into the clean restore above.
-                    // SAFETY: single CR0 bit set.
-                    crate::arch::x86_64::cpu::stts();
-                }
-            }
-        }
     }
 
     pub mod smp {
@@ -13015,20 +12688,6 @@ pub mod x86_64 {
         // INV-ARCH-SMP-25 (collected 2026-11-27 from x86_64/smp.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Point this CPU's GS base at its PerCpu slot and zero the user shadow
-        /// (glibc TLS lives on FS; a NULL user GS is the correct state).
-        ///
-        /// Kernel GS = percpu / user GS = 0; entries/exits pair SWAPGS (trap.S).
-        pub fn load_per_cpu_base(cpu: usize)  {
-
-            let base = &PER_CPU[cpu] as *const PerCpu as u64;
-            // SAFETY: WRMSR of the GS base MSRs with a kernel .bss address and
-            // zero; both values are valid in any context that runs kernel code.
-            
-                wrmsr(MSR_GS_BASE, base);
-                wrmsr(MSR_KERNEL_GS_BASE, 0);
-            
-        }
 
         // INV-ARCH-SMP-26 (collected 2026-11-27): global_asm! invocation moved verbatim from x86_64/smp.rs
         core::arch::global_asm!(include_str!("x86_64/smp_trampoline.S"), options(att_syntax));
@@ -14801,161 +14460,14 @@ pub mod x86_64 {
         // INV-ARCH-TRAP-46 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// int3 (#BP) — port of the twin's handle_breakpoint for the int3
-        /// displacement scheme: PTRACE_SINGLESTEP replaces the instruction at
-        /// the target with int3 (1 byte).  int3 is a TRAP, so rip in the frame
-        /// already points one byte PAST the displaced instruction; the restore
-        /// path rewinds rip by 1 so the restored instruction re-executes.
-        pub(crate) fn handle_breakpoint(regs: &mut PtRegs)  {
-
-            if regs.user_mode() {
-                if let Some(task) = crate::sched::current() {
-                    let step_addr = (*task).single_step_addr();
-                    if (*task).single_step_active() && regs.rip == step_addr.wrapping_add(1) {
-                        let saved = (*task).single_step_saved_insn();
-                        let restored = crate::process::ptrace::write_target_word(task, step_addr, saved);
-                        (*task).clear_single_step();
-                        if !restored {
-                            // Tracee's text is gone racing the step — kill it.
-                            crate::process::exit::do_exit(
-                                -(crate::signal::Signal::SIGSEGV as i32),
-                            );
-                        }
-                        // Rewind past the int3 so the restored instruction
-                        // re-executes (x86 trap already advanced rip).
-                        regs.rip = step_addr;
-                        if (*task).tracer_pid() != 0 {
-                            // SAFETY: task is the current task in its trap path.
-                            
-                                crate::process::ptrace::ptrace_stop(
-                                    task,
-                                    crate::signal::Signal::SIGTRAP as i32,
-                                    crate::signal::SigInfo::new(
-                                        crate::signal::Signal::SIGTRAP as i32,
-                                        crate::signal::si_code::SI_KERNEL,
-                                        (*task).pid(),
-                                        0,
-                                    ),
-                                );
-                            
-                        } else {
-                            (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
-                        }
-                        return;
-                    }
-                    // A real user int3 under a tracer stops for the tracer
-                    // (gdb inserts and relies on breakpoints); rip already
-                    // points after the 1-byte int3, matching Linux do_int3.
-                    if (*task).tracer_pid() != 0 {
-                        // SAFETY: task is the current task in its trap path.
-                        
-                            crate::process::ptrace::ptrace_stop(
-                                task,
-                                crate::signal::Signal::SIGTRAP as i32,
-                                crate::signal::SigInfo::new(
-                                    crate::signal::Signal::SIGTRAP as i32,
-                                    crate::signal::si_code::SI_KERNEL,
-                                    (*task).pid(),
-                                    0,
-                                ),
-                            );
-                        
-                        return;
-                    }
-                }
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
-                // Do NOT advance rip — the task is ZOMBIE and will not resume
-            } else {
-                // Kernel-mode int3 is a kernel bug (kgdb-style breakpoints are
-                // not wired up).
-                panic!("trap: int3 in kernel mode at rip={:#x}", regs.rip);
-            }
-        }
 
         // INV-ARCH-TRAP-47 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// #DB — hardware single-step (TF) or debug-register trap.
-        pub(crate) fn handle_debug(regs: &mut PtRegs)  {
-
-            const TF: u64 = 1 << 8;
-            const RF: u64 = 1 << 16;
-            if regs.user_mode() {
-                // Stop stepping before delivering anything, or iretq/sysret
-                // would re-trap on the first handler/user instruction.
-                regs.rflags &= !TF;
-                if let Some(task) = crate::sched::current() {
-                    if (*task).tracer_pid() != 0 {
-                        // SAFETY: task is the current task in its trap path.
-                        
-                            crate::process::ptrace::ptrace_stop(
-                                task,
-                                crate::signal::Signal::SIGTRAP as i32,
-                                crate::signal::SigInfo::new(
-                                    crate::signal::Signal::SIGTRAP as i32,
-                                    crate::signal::si_code::SI_KERNEL,
-                                    (*task).pid(),
-                                    0,
-                                ),
-                            );
-                        
-                        return;
-                    }
-                }
-                // Linux do_debug: a user #DB without a tracer is a CATCHABLE
-                // SIGTRAP (force_sig_fault semantics). The old unconditional
-                // do_exit killed every task that set TF with a handler
-                // installed (gdb-less tracers, coverage tools, the tfprobe
-                // A/B) — the reference only kills on the default disposition.
-                // Handler-first routing like the #UD/#GP arms; a blocked
-                // SIGTRAP (trap inside its own handler) is forced to the
-                // default action, mirroring the SIGSEGV discipline.
-                let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGTRAP as i32);
-                if !sigtrap_has_handler() || sigtrap_blocked_current() {
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
-                } else {
-                    crate::signal::force_unblock_current(crate::signal::Signal::SIGTRAP as i32);
-                }
-            } else {
-                // Kernel-mode #DB with TF set: clear TF in the saved frame and
-                // resume (Linux do_debug discipline for kernel steps).
-                regs.rflags &= !TF;
-            }
-        }
 
         // INV-ARCH-TRAP-48 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// #NM — FPU unavailable: the LAZY-FPU restore point.
-        ///
-        /// context_switch sets CR0.TS on every switch-in and skips the incoming
-        /// task's xrstor; the task's first FP instruction lands here (the kernel
-        /// binary has no compiler-emitted FP instructions — the only xmm sites
-        /// are restore_fpu's own asm — so a user instruction is the only way to
-        /// observe TS). Clear TS and run the ordinary restore: the saved image
-        /// when the task ever used FP, the deterministic ABI-initial state
-        /// otherwise (fork/exec mark fpu images clean/valid).
-        pub(crate) fn handle_device_not_available()  {
-
-            if let Some(cur) = crate::sched::current() {
-                // SAFETY: cur is the task now running on this CPU; clts claims
-                // the live FPU for it, restore_fpu loads its image.
-                
-                    crate::arch::x86_64::cpu::clts();
-                    (*cur).thread_mut().restore_fpu();
-                
-                return;
-            }
-            // No current task (early boot / idle context) took an FP trap:
-            // re-enable the FPU defensively instead of looping on #NM.
-            // HOTPATH-PRINT: rare self-heal arm — fires only when the #NM
-            // handler finds no current task; re-runs fpu_init and returns.
-            crate::pr_warn!("trap: #NM with no current task — re-running fpu_init");
-            // SAFETY: fpu_init only flips CR0/CR4 feature bits and zeroes the
-            // live FPU state; the caller was not using it (#NM proves that).
-             crate::arch::x86_64::thread::fpu_init() ;
-        }
 
         // INV-ARCH-TRAP-49 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -16046,131 +15558,23 @@ pub mod x86_64 {
         // INV-ARCH-TRAP-60 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Mask one PIC line (0..15).
-        pub fn mask_irq_line(line: u8)  {
-
-            let _pl = PIC_MASK_LOCK.lock_irqsave();
-            // SAFETY: RMW of the mask register, serialized by PIC_MASK_LOCK.
-            
-                if line < 8 {
-                    let m = inb(PIC1_DATA) | (1 << line);
-                    outb(PIC1_DATA, m);
-                } else if line < 16 {
-                    let m = inb(PIC2_DATA) | (1 << (line - 8));
-                    outb(PIC2_DATA, m);
-                }
-            
-        }
 
         // INV-ARCH-TRAP-61 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Unmask one PIC line (0..15).
-        pub fn unmask_irq_line(line: u8)  {
-
-            let _pl = PIC_MASK_LOCK.lock_irqsave();
-            // SAFETY: RMW of the mask register, serialized by PIC_MASK_LOCK.
-            
-                if line < 8 {
-                    let m = inb(PIC1_DATA) & !(1 << line);
-                    outb(PIC1_DATA, m);
-                } else if line < 16 {
-                    let m = inb(PIC2_DATA) & !(1 << (line - 8));
-                    outb(PIC2_DATA, m);
-                }
-            
-        }
 
         // INV-ARCH-TRAP-62 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Claim the highest-priority in-service IRQ (PIC analogue of the PLIC
-        /// claim read): switch both chips to ISR-read mode and pick the lowest
-        /// set line (8259 priority order).  None means spurious.
-        pub(crate) fn pic_claim() -> Option<u8>  {
-
-            // SAFETY: OCW3 ISR-mode selects are read-side only.
-            
-                outb(PIC1_CMD, 0x0B); // OCW3: read ISR on next read
-                outb(PIC2_CMD, 0x0B);
-                let isr = ((inb(PIC2_CMD) as u16) << 8) | inb(PIC1_CMD) as u16;
-                if isr == 0 {
-                    return None;
-                }
-                Some(isr.trailing_zeros() as u8)
-            
-        }
 
         // INV-ARCH-TRAP-63 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Non-specific EOI — conservative like early Linux: always EOI the
-        /// master, and the slave too when the line is on it.
-        pub(crate) fn pic_send_eoi(line: u8)  {
 
-            // SAFETY: EOI writes are idempotent at the chip.
-            
-                if line >= 8 {
-                    outb(PIC2_CMD, 0x20);
-                }
-                outb(PIC1_CMD, 0x20);
-            
-        }
-
-        // INV-ARCH-TRAP-64 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
-        // wrapper at the original path — obligations unchanged.
-        pub(crate) fn init_8259()  {
-
-            // SAFETY: port writes program the 8259 during early init with IF off.
-            
-                outb(PIC1_CMD, 0x11); // ICW1: init, edge-triggered, cascade, ICW4
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC2_CMD, 0x11);
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC1_DATA, PIC_IRQ_BASE); // ICW2: master vector base 0x20
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC2_DATA, PIC_IRQ_BASE + 8); // ICW2: slave vector base 0x28
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC1_DATA, 1 << IRQ_CASCADE); // ICW3: slave hangs off IRQ2
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC2_DATA, IRQ_CASCADE); // ICW3: slave identity 2
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC1_DATA, 0x01); // ICW4: 8086 mode
-                crate::arch::x86_64::cpu::io_wait();
-                outb(PIC2_DATA, 0x01);
-                crate::arch::x86_64::cpu::io_wait();
-
-                // OCW1: mask all lines except the cascade (bit 2 of the master).
-                outb(PIC1_DATA, 0xFF & !(1 << IRQ_CASCADE));
-                outb(PIC2_DATA, 0xFF);
-            
-        }
 
         // INV-ARCH-TRAP-65 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Initialize syscall MSRs (STAR/LSTAR/FMASK) and EFER.SCE.
-        ///
-        /// Also (re-)asserts EFER.NXE: user PTEs carry the NX bit (exec's
-        /// per-segment W^X tighten), and with NXE=0 bit 63 is reserved — every
-        /// access to a data page faults #PF e=0xC (RSVD).  The BSP gets NXE
-        /// from boot.S; APs come out of the trampoline with only LME set, and
-        /// this is the first EFER write on their kernel path.
-        pub fn init_syscall()  {
-
-            extern "C" {
-                static syscall_entry: u8;
-            }
-            // SAFETY: MSR writes configure the syscall entry; values are the
-            // constants documented at the top of this file.
-            
-                let efer = rdmsr(MSR_EFER);
-                wrmsr(MSR_EFER, efer | EFER_SCE | EFER_NXE);
-                wrmsr(MSR_STAR, MSR_STAR_VALUE);
-                wrmsr(MSR_LSTAR, &raw const syscall_entry as u64);
-                wrmsr(MSR_FMASK, MSR_FMASK_VALUE);
-            
-        }
 
         // INV-ARCH-TRAP-66 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -16652,30 +16056,6 @@ pub mod x86_64 {
         // INV-ARCH-UACCESS-22 (collected 2026-11-27 from x86_64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Write one value to user memory.
-        ///
-        /// Routes through [`copy_to_user`] (the riscv64 twin's shape) so a fault
-        /// on a COW/demand page gets the resolve-and-retry instead of a bare
-        /// short copy: a put_user onto a valid but not-yet-writable user page
-        /// must succeed, not report EFAULT.
-        ///
-        /// # Safety
-        /// `to` is validated by access_ok only in this phase.
-        pub  fn put_user<T: Copy>(to: *mut T, value: T) -> bool  {
-
-            let size = core::mem::size_of::<T>();
-
-            if !access_ok(to as usize, size) {
-                return false;
-            }
-
-            // SAFETY: source is a size-of-T kernel stack slot; the destination
-            // write faults into the extable fixup which returns a short count.
-            let uncopied =
-                 copy_to_user(to as *mut u8, &value as *const T as *const u8, size) ;
-
-            uncopied == 0
-        }
 
         // INV-ARCH-UACCESS-23 (collected 2026-11-27 from x86_64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -17171,188 +16551,34 @@ pub mod x86_64 {
             // INV-ARCH-ASID-12 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// # Safety
-            /// `cr3` must be a valid PML4 physical address (tagged form allowed).
-            pub  fn write_satp(cr3: u64)  {
-
-                write_cr3(cr3)
-            }
 
             // INV-ARCH-ASID-13 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Activate `ppn` under `asid` on this CPU — the single switch-to-root
-            /// discipline shared by enable()/disable() and the exec/exit paths:
-            /// - PCID'd root (asid != 0): tagged NOFLUSH write (keep cached
-            ///   translations);
-            /// - kernel root (asid 0 under PCID): tagged NOFLUSH write (its entries
-            ///   are only invalidated by the explicit kernel flush sites);
-            /// - user root WITHOUT a PCID (allocator exhausted, PCID on): plain
-            ///   write — the load flushes PCID 0 so a previous fallback root's
-            ///   entries cannot leak into this one;
-            /// - PCID off: plain write (the legacy flush-on-load).
-            ///
-            /// INV-XE-SWITCHROOT: the ppn is validated before any CR3 write — zero
-            /// or off-machine roots are refused with a bounded line instead of
-            /// loading garbage into CR3 (the same containment the walk guards give).
-            pub fn switch_root(ppn: u64, asid: u16)  {
-
-                if ppn == 0 {
-                    static BAD0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    if BAD0.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
-                        crate::pr_err!("SWITCH-ROOT: refusing ppn=0 asid={}", asid);
-                    }
-                    return;
-                }
-                if crate::mm::page_desc::descs_published()
-                    && !crate::mm::phys_valid((ppn << 12) as usize)
-                {
-                    static BADP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    if BADP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
-                        crate::pr_err!("SWITCH-ROOT: refusing off-machine ppn={:#x}", ppn << 12);
-                    }
-                    return;
-                }
-                if asid != 0 || !pcid_enabled() {
-                    // SAFETY: ppn validated above (live root); tagging per fn doc.
-                     write_cr3(build_satp(asid, ppn)) ;
-                } else {
-                    // SAFETY: validated plain load of a valid root; flushes on entry
-                    // (only reachable with PCID on for a PCID-less user root).
-                     write_cr3(ppn << 12) ;
-                }
-            }
 
             // INV-ARCH-ASID-14 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Flush kernel (global) translations — every PCID inclusive.
-            pub fn flush_tlb_kernel()  {
-
-                if pcid_enabled() {
-                    // SAFETY: type 2 ignores the descriptor content.
-                    
-                        crate::arch::x86_64::cpu::invpcid(crate::arch::x86_64::cpu::INVPCID_ALL_INCL_GLOBAL, 0, 0)
-                    ;
-                } else {
-                    flush_tlb_all();
-                }
-            }
 
             // INV-ARCH-ASID-15 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Flush one page under an explicit PCID (used when the target mm is
-            /// not the current one). No-op-grade fallback to invlpg with PCID off.
-            pub fn flush_tlb_page_asid(addr: u64, asid: u16)  {
-
-                if pcid_enabled() && asid != 0 {
-                    // SAFETY: type 0 takes (PCID, linear address) from the descriptor.
-                     crate::arch::x86_64::cpu::invpcid(crate::arch::x86_64::cpu::INVPCID_ADDR, asid as u64, addr) ;
-                } else {
-                    flush_tlb_page(addr);
-                }
-            }
 
             // INV-ARCH-ASID-16 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Flush one page of the CURRENT address space (the fault paths run in
-            /// the faulting mm; cross-PCID flushes go through flush_tlb_all /
-            /// flush_tlb_asid / the unmap shootdowns).
-            pub fn flush_tlb_page(addr: u64)  {
-
-                // SAFETY: caller passes a canonical address.
-                 invlpg(addr) ;
-            }
 
             // INV-ARCH-ASID-17 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Flush all non-global TLB entries (all PCIDs when PCID is on).
-            pub fn flush_tlb_all()  {
-
-                if pcid_enabled() {
-                    // SAFETY: type 3 ignores the descriptor and is valid in any CR3.
-                    
-                        crate::arch::x86_64::cpu::invpcid(crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL, 0, 0)
-                    ;
-                } else {
-                    // SAFETY: reloading the current CR3 with PCID off flushes
-                    // non-global translations.
-                     write_cr3(read_cr3()) ;
-                }
-            }
 
             // INV-ARCH-ASID-18 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// The smp_call_function payload for the all-CPU flush above: a plain
-            /// fn pointer (no closures across FFI), full local invalidation.
-            pub(crate) fn ipi_flush_all(_arg: *mut core::ffi::c_void)  {
-
-                // SAFETY: type 2/3 ignore the descriptor's PCID/address content and
-                // are legal regardless of the target's current CR3.
-                 crate::arch::x86_64::cpu::invpcid(crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL, 0, 0) ;
-            }
 
             // INV-ARCH-ASID-19 (collected 2026-11-27 from x86_64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Arm PCID on the CURRENT cpu (BSP from mmu_init::init tail, APs from
-            /// their bring-up after switching to the kernel root). Idempotent;
-            /// silently keeps PCID off (and returns false) when the CPU lacks PCID
-            /// or INVPCID — every helper here falls back to flush-on-CR3 behavior
-            /// in that mode, so callers need no branching.
-            ///
-            /// Architectural precondition: CR0.PG=1 and CR3[11:0]=0 (a #GP would
-            /// fault otherwise) — both callers load the static kernel root (clean
-            /// low bits) immediately before.
-            ///
-            /// PER-CPU DISCIPLINE (same as enable_fsgsbase in cpu.rs): CR4.PCIDE
-            /// is a per-CPU bit, and every CPU that will EXECUTE a tagged CR3
-            /// write must arm its own copy. The early return on the global PCID_ON
-            /// that used to open this function skipped the CR4 arming on every AP
-            /// (the BSP arms during mmu_init::init, long before start_secondaries)
-            /// while build_satp kept producing PCID|NOFLUSH-tagged values — on any
-            /// PCID-exposing vCPU (Intel hosts; this dev rig's AMD host and QEMU's
-            /// TCG models expose neither CPUID bit, which is why the layer never
-            /// engaged there) the first user-mm context switch on an AP wrote a
-            /// bit-63 CR3 with CR4.PCIDE=0, which is architecturally #GP(0).
-            pub fn enable_pcid() -> bool  {
-
-                // CPUID.1:ECX[17] = PCID; CPUID.7.0:EBX[10] = INVPCID. INVPCID is
-                // required: without it a full flush cannot reach entries cached
-                // under other PCIDs, and the layer must stay off.
-                let (_, _, ecx1, _) = crate::arch::x86_64::cpu::cpuid(1, 0);
-                let (_, ebx7, _, _) = crate::arch::x86_64::cpu::cpuid(7, 0);
-                if ecx1 & (1 << 17) == 0 || ebx7 & (1 << 10) == 0 {
-                    if !pcid_enabled() {
-                        crate::println!("mm: PCID off (no CPUID PCID/INVPCID)");
-                    }
-                    return false;
-                }
-                let cr3 = read_cr3();
-                if cr3 & 0xfff != 0 {
-                    // Precondition violated (should never happen from the two call
-                    // sites): stay PCID-less rather than fault.
-                    if !pcid_enabled() {
-                        crate::println!("mm: PCID off (CR3 low bits set at enable)");
-                    }
-                    return false;
-                }
-                let first = !pcid_enabled();
-                // SAFETY: single-bit RMW; PG is on and CR3[11:0]=0 checked above.
-                
-                    let cr4 = crate::arch::x86_64::cpu::read_cr4();
-                    crate::arch::x86_64::cpu::write_cr4(cr4 | CR4_PCIDE);
-                
-                PCID_ON.store(true, Ordering::Release);
-                if first {
-                    crate::println!("mm: CR4.PCIDE enabled (12-bit PCIDs, INVPCID flushes)");
-                }
-                true
-            }
         }
 
         pub mod exception {
@@ -18019,59 +17245,6 @@ pub mod x86_64 {
             // INV-ARCH-MM-OPS-25 (collected 2026-11-27 from x86_64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Create user address space: fresh PML4 with the kernel half shared and
-            /// the low identity subtree cloned leaf-only (kernel trap-context device
-            /// access must work under a user CR3 — LAPIC EOI, ECAM probing).
-            pub fn create_user_address_space() -> Option<u64>  {
-
-                let phys_addr = alloc_pages(GfpFlags::GFP_USER, 0);
-                if phys_addr == 0 {
-                    return None;
-                }
-
-                // Validate physical address is within actual physical memory range.
-                if crate::mm::layout::is_kernel_layout_initialized() {
-                    let layout = crate::mm::layout::kernel_layout();
-                    let phys_end = layout.phys_base + layout.phys_size;
-
-                    if phys_addr < layout.phys_base || phys_addr >= phys_end {
-                        // Invalid physical address - outside memory range
-                        return None;
-                    }
-                }
-
-                let root_page = phys_addr as u64;
-
-                // Stamp the root into the PT ledger (it comes from alloc_pages, NOT
-                // alloc_page_table, so it is otherwise unstamped and its teardown free
-                // is refused — one leaked frame per exec'd mm).
-                crate::arch::x86_64::mm::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
-
-                // K1-BAR: from this point on, new kernel-half PML4 entries installed
-                // in the static root (per-BAR ioremap arena) are invisible to mm
-                // trees forked earlier — they copied the kernel-half links at their
-                // own creation. PCI probe must finish before the first user mm;
-                // ioremap_bar_kernel reports a violation loudly.
-                crate::arch::x86_64::mm::mmu_init::mark_user_mms_exist();
-
-                let root_ppn = root_page / PAGE_SIZE;
-                if let Some(root_table) = PtTable::from_phys(root_page) {
-                    root_table.zero_entries();
-                }
-
-                // ALWAYS clone from the static kernel root — root_page_table_ppn()
-                // reads CR3, which is a USER root while another task is current.
-                let kernel_ppn = get_kernel_page_table_ppn();
-                copy_kernel_mappings(root_ppn, kernel_ppn);
-
-                // Fixmap lives in the kernel half (PML4[511]) on x86 — already
-                // shared by the link copy above; nothing to do (riscv64 needs the
-                // explicit copy because its fixmap sits below KERNEL_PGD_START).
-                // (No-op on x86; the fixmap lane owns its conversion.)
-                 crate::arch::x86_64::mm::fixmap::copy_fixmap_to_user(root_ppn) ;
-
-                Some(root_ppn)
-            }
 
             // INV-ARCH-MM-OPS-28 (collected 2026-11-27): the unsafe-carrying methods of this
             // inherent impl, moved verbatim from x86_64/mm/mm_ops.rs (inherent impls may
@@ -18811,90 +17984,10 @@ pub mod x86_64 {
             // INV-ARCH-MMU-INIT-46 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Re-point CR3 at the static kernel root (parity with riscv64 enable()).
-            pub fn enable()  {
-
-                
-                    let root_phys = root_static_phys();
-                    crate::arch::cpu::write_cr3(root_phys);
-                
-            }
 
             // INV-ARCH-MMU-INIT-47 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Map one device BAR (or any device PA range) into the kernel-half
-            /// ioremap arena and register it for `device_alias`.
-            ///
-            /// Returns the kernel-half VA base on success — either an existing
-            /// covering mapping (fixed window or earlier registration) or a fresh
-            /// one. Returns None when the registry or the arena is exhausted, or the
-            /// mapping could not be installed.
-            ///
-            /// Safe to call repeatedly for the same range (idempotent). Call from
-            /// single-threaded boot context (PCI probe); installs PML4 entries in the
-            /// static kernel root.
-            pub fn ioremap_bar_kernel(pa: u64, size: u64) -> Option<u64>  {
-
-                use crate::arch::mm::memory_layout::{
-                    device_alias_fixed, IOREMAP_ARENA_BASE, IOREMAP_ARENA_END,
-                };
-                if size == 0 {
-                    return None;
-                }
-                // Already inside a fixed alias window: nothing to do (and never burn
-                // arena space for it).
-                if let Some(va) = device_alias_fixed(pa) {
-                    return Some(va);
-                }
-                if USER_MMS_EXIST.load(Ordering::Acquire) {
-                    // Not fatal for the boot root, but every existing user CR3 will
-                    // page-fault on this BAR — the callers' warning covers the
-                    // consequence; this names the cause.
-                    crate::pr_err!(
-                        "ioremap_bar_kernel: pa={:#x} mapped AFTER user mms exist — \
-                         existing user CR3s will not see this arena link",
-                        pa
-                    );
-                }
-                // Already registered (re-probe of the same function, two capabilities
-                // sharing one BAR)?
-                if let Some(va) = device_alias_dyn(pa) {
-                    return Some(va);
-                }
-                // Fresh chunk: 2MB-aligned size, bumped atomically.
-                let chunk = (size + 0x1f_ffff) & !0x1f_ffff;
-                let va = DYN_BAR_CURSOR.fetch_add(chunk, Ordering::AcqRel);
-                if va < IOREMAP_ARENA_BASE as u64 || va + chunk > IOREMAP_ARENA_END as u64 {
-                    crate::pr_err!(
-                        "ioremap_bar_kernel: arena exhausted (pa={:#x} size={:#x}) — \
-                         enlarge IOREMAP_ARENA_SIZE",
-                        pa, size
-                    );
-                    return None;
-                }
-                
-                    let device_flags = PageTableEntry::P | PageTableEntry::RW
-                        | PageTableEntry::ACCESSED | PageTableEntry::DIRTY
-                        | PageTableEntry::IO;
-                    map_kernel_region(va, pa, size, device_flags);
-                
-                // Record after the mapping is installed (Release/Acquire pairing).
-                for i in 0..DYN_BAR_SLOTS {
-                    if DYN_BARS.pa_base[i].load(Ordering::Acquire) == 0 {
-                        DYN_BARS.va_base[i].store(va, Ordering::Release);
-                        DYN_BARS.pa_end[i].store(pa + size, Ordering::Release);
-                        DYN_BARS.pa_base[i].store(pa, Ordering::Release);
-                        return Some(va);
-                    }
-                }
-                crate::pr_err!(
-                    "ioremap_bar_kernel: registry full ({} slots) — pa={:#x} left on the \
-                     identity fallback; user-CR3 MMIO on it will KERNPANIC",
-                    DYN_BAR_SLOTS, pa
-                );
-                None
-            }
 
             // INV-ARCH-MMU-INIT-48 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -18978,17 +18071,6 @@ pub mod x86_64 {
             // INV-ARCH-MMU-INIT-49 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Drop the bootstrap identity map (PML4[0] -> boot_pdpt_lo, identity
-            /// 0..2GB supervisor-only) from the kernel CR3. See boot_stack_continuation
-            /// for the call site and the run/perf-review-ledger.md for the contract.
-            pub fn drop_bootstrap_identity()  {
-
-                // Exclusive owner of the kernel root table (init() built it); runs
-                // once on the BSP after the stack switch, task context.
-                PtTable::static_root().set(0, PageTableEntry::new());
-                // SAFETY: reloading the static root's own physical address.
-                 crate::arch::cpu::write_cr3(root_static_phys()) ;
-            }
 
             // INV-ARCH-MMU-INIT-50 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -19423,78 +18505,10 @@ pub mod x86_64 {
             // INV-ARCH-MMU-INIT-52 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Map a single 4K page in a page table WITHOUT flushing the TLB.
-            ///
-            /// Internal batch primitive — region/batch callers flush ONCE after their
-            /// loop; single-page callers use the public `map_page`, which keeps its
-            /// flush so a freshly faulted-in page is immediately usable.
-            ///
-            /// 4-level walk with intermediate-table allocation. A 2MB PMD leaf or 1GB
-            /// PUD leaf cannot host a 4K entry as-is — its PPN names a frame, not a
-            /// table. Linux semantics for a mapping over an existing translation: the
-            /// new mapping REPLACES it, so the leaf is DEMOTED — an intermediate table
-            /// is installed whose entries reproduce the leaf's translation verbatim
-            /// (same phys base, same flag bits) — then the caller's 4K map overwrites
-            /// exactly its own slot below (E8-MM, ported from riscv64; user roots
-            /// clone the kernel's low-half device windows, and a user fixed-address
-            /// mmap landing on one must replace, not silently drop, the window).
-            ///
-            /// # Arguments
-            /// - root_ppn: Root page table physical page number
-            /// - virt: Virtual address
-            /// - phys: Physical address
-            /// - flags: Page table entry flag bits
-            /// SCRIBBLE GUARD: a table-link PTE parsed out of a scribbled slot can
-            /// carry an arbitrary ppn (we saw .text bytes parsed as links — the x86
-            /// text-scribbler self-propagation). Every walk that FOLLOWS a link must
-            /// validate the target lies inside physical RAM before touching it; a
-            /// bad link is reported and the walk refuses to continue (the mapping
-            /// fails loudly instead of writing a "page table" over kernel memory).
-            #[inline]
-            pub(crate) fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool  {
-
-                // Runtime RAM top (discovered memory map — fake-OOM fix: the old
-                // compile-time MAX_PFN rejected every table link above the Kernel.toml
-                // nominal 2 GiB, breaking user page tables on larger machines).
-                let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
-                let phys = ppn << 12;
-                if phys >= ram_top {
-                    return false;
-                }
-                // USER-tree links must also stay above the kernel-image reserve: their
-                // tables come from the zone (floor ~1GB), never from the Early BSS
-                // pool or the image itself. A user-tree link below 0x1E00000 is a
-                // scribbled slot parsing as a pointer — following it would read/write
-                // the kernel image (the x86 scribble engine: PMD[6]=0x300065 steering
-                // writes into .text). The KERNEL root's own tables legitimately live
-                // in the image (BSS pool) and are exempt.
-                root_ppn ==  root_page_table_ppn()  || phys >= 0x1E0_0000
-            }
 
             // INV-ARCH-MMU-INIT-53 (collected 2026-11-27 from x86_64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            pub(crate) fn task_pid_alive(pid: u32) -> bool  {
-
-                if pid == 0 {
-                    return false;
-                }
-                let alive = AtomicBool::new(false);
-                crate::sched::for_each_task(|t| 
-                    if (*t).pid() as u32 == pid {
-                        // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
-                        // they stay in the pid hash until reaped but are NOT live
-                        // owners. Counting them made the EARLY-ROOT-FREE witness fire
-                        // on recycled root frames (stale registry entry + unreaped
-                        // zombie owner) — the exitwalk probe tripped it within seconds.
-                        let st = (*t).state();
-                        if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
-                            alive.store(true, Ordering::Relaxed);
-                        }
-                    }
-                );
-                alive.load(Ordering::Relaxed)
-            }
 
             // INV-ARCH-MMU-INIT-55 (collected 2026-11-27): the unsafe-carrying methods of this
             // inherent impl, moved verbatim from x86_64/mm/mmu_init.rs (inherent impls may
@@ -19862,178 +18876,10 @@ pub mod x86_64 {
             use crate::mm::AddressSpace;
             use crate::arch::x86_64::mm::page_fault::*;
 
-            // INV-ARCH-PAGE-FAULT-11 (collected 2026-11-27 from x86_64/mm/page_fault.rs): verbatim body; callers use the safe
-            // wrapper at the original path — obligations unchanged.
-            #[allow(unused)]
-            pub(crate) fn _root_table_ref() -> usize  {
-
-                // SAFETY: address-of only, no dereference.
-                { &raw mut ROOT_PAGE_TABLE as usize }
-            }
 
             // INV-ARCH-PAGE-FAULT-12 (collected 2026-11-27 from x86_64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Handle a swap fault — read the page back from swap and map it.
-            ///
-            /// Steps:
-            /// 1. Extract swap type and offset from the PTE
-            /// 2. Allocate a physical page
-            /// 3. Read page contents from the swap device
-            /// 4. Build PTE flags from VMA permissions
-            /// 5. Map the page and flush TLB
-            /// 6. Set up rmap (anonymous + SwapBacked)
-            /// 7. Free the swap slot
-            pub(crate) fn handle_swap_fault(
-                addr_space: &AddressSpace,
-                fault_addr: VirtAddr,
-                flags: u32,
-                swap_entry: u64,
-                root_ppn: u64,
-            ) -> MmFaultResult  {
-
-                use crate::mm::page::VirtAddr as PageVirtAddr;
-                use crate::mm::page_desc::{page_desc, PageFlag};
-                use crate::mm::swap;
-
-                // Extract swap type and offset
-                let swap_type = swap::swap_entry_type(swap_entry);
-                let swap_offset = swap::swap_entry_offset(swap_entry);
-
-                // Find VMA for permission bits
-                let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
-                let vma_mgr = addr_space.vma_read();
-                let vma = match vma_mgr.find(page_virt_addr) {
-                    Some(v) => v,
-                    None => return MmFaultResult::Segfault,
-                };
-
-                let vma_flags = vma.flags();
-                let is_write = flags & FaultFlags::WRITE != 0;
-                let is_exec = flags & FaultFlags::EXEC != 0;
-                let is_read = flags & FaultFlags::READ != 0;
-
-                // Verify permissions
-                if is_write && !vma_flags.is_writable() {
-                    return MmFaultResult::PermissionDenied;
-                }
-                if is_exec && !vma_flags.is_executable() {
-                    return MmFaultResult::PermissionDenied;
-                }
-                if is_read && !vma_flags.is_readable() {
-                    return MmFaultResult::PermissionDenied;
-                }
-
-                drop(vma_mgr);
-
-                // Allocate a physical page
-                let phys_addr = match alloc_user_phys_page() {
-                    Some(addr) => addr,
-                    None => return MmFaultResult::OutOfMemory,
-                };
-
-                // Wait for an in-flight swap-out of this slot: the single-mapping
-                // reclaim path installs the swap entry in the PTE BEFORE the device
-                // write; reading the slot before that write lands would swap in
-                // garbage. Bounded spin — the writer is a block write on another
-                // context.
-                {
-                    let mut spins: u64 = 0;
-                    while swap::swap_slot_pending(swap_type, swap_offset) {
-                        spins += 1;
-                        if spins > 64_000_000 {
-                            break; // give up waiting; the read below fails -> retry
-                        }
-                        core::hint::spin_loop();
-                    }
-                }
-
-                // Read page contents from swap device
-                if swap::swap_read_page(swap_type, swap_offset, phys_addr as usize).is_err() {
-                    crate::println!(
-                        "swap: failed to read page from swap (type={}, offset={})",
-                        swap_type,
-                        swap_offset
-                    );
-                    // R21-6: free the freshly allocated page on the failed read (was a
-                    // per-error page leak).
-                    crate::mm::page_alloc::free_page(phys_addr as usize);
-                    return MmFaultResult::OutOfMemory;
-                }
-
-                // Build PTE flags from VMA permissions
-                let mut pte_flags =
-                    PageTableEntry::P | PageTableEntry::A | PageTableEntry::D | PageTableEntry::NX;
-                pte_flags |= PageTableEntry::U;
-
-                if vma_flags.is_writable() {
-                    pte_flags |= PageTableEntry::W;
-                }
-                if vma_flags.is_executable() {
-                    pte_flags &= !PageTableEntry::NX;
-                }
-
-                // Map the page
-                // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
-                // finished above, so no I/O happens inside the irqsave section.
-                let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
-                // Re-check under the lock (same double-fault race as the demand
-                // paths). The swap-in page is exclusively owned, so freeing on loss is
-                // safe; the swap slot is freed by the winner. E8-MM: device-window-
-                // hole rule applies here too (see pte_counts_as_mapped).
-                if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
-                    .map_or(false, |(_ppn, bits)| {
-                        pte_counts_as_mapped(bits, fault_addr.bits() as u64)
-                    })
-                {
-                    drop(_pte_guard);
-                    crate::mm::page_alloc::free_page(phys_addr as usize);
-                    // R8-4: Handled — see the demand-fault sites (no SIGSEGV for the
-                    // race loser).
-                    return MmFaultResult::Handled;
-                }
-                // SAFETY: root_ppn is a valid page table root, phys_addr was just
-                // allocated, and pte_flags are built from valid VMA permissions. The
-                // page is exclusively owned.
-                
-                    if !map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags) {
-                        // PT allocation failure (fake-OOM family): free the swap-in
-                        // page, deliver OOM.
-                        crate::mm::page_alloc::free_page(phys_addr as usize);
-                        return MmFaultResult::OutOfMemory;
-                    }
-
-                    // TLB flush
-                    crate::arch::cpu::invlpg(fault_addr.bits());
-                
-
-                // Set up rmap for the swapped-in page
-                let page_pfn = (phys_addr >> PAGE_SHIFT) as usize;
-                // Fresh exclusive page (INV-FRAME-1).
-                if let Some(page) = crate::mm::page_desc::page_desc(page_pfn) {
-                    page.set_flag(PageFlag::Anonymous);
-                    page.set_flag(PageFlag::SwapBacked);
-                    page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
-                    page.inc_mapcount();
-                    crate::mm::rmap::page_record_mapping(
-                        page,
-                        addr_space as *const _ as usize,
-                        fault_addr.bits() as usize,
-                    );
-
-                    // Add back to anon LRU
-                    crate::mm::lru::page_add_anon_lru(page);
-                }
-                drop(_pte_guard);
-
-                // Free the swap slot (page is back in memory)
-                swap::swap_free_slot(swap_type, swap_offset);
-
-                // RSS accounting: the page is resident again.
-                addr_space.add_rss(1);
-
-                MmFaultResult::Handled
-            }
 
             // INV-ARCH-PAGE-FAULT-13 (collected 2026-11-27 from x86_64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.

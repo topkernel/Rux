@@ -54,8 +54,45 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-PROCESS-6): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn flush_thread() {
-    crate::arch::arch_floor::x86_64::process::flush_thread()
+pub 
+fn flush_thread() {
+
+
+                  if let Some(current) = crate::sched::current() {
+                      // Typed handle — we are the only context that can touch our
+                      // own thread state here.
+                      {
+                          let thread = current.thread_mut();
+                          thread.mark_fpu_clean();
+                          thread.fs_base = 0;
+                          thread.gs_base = 0;
+
+                          // Drop the LIVE FS base too: without this the next
+                          // context-switch-out would resurrect the old image's TLS
+                          // pointer from the MSR (the twin's live-FS=Off discipline,
+                          // x86 form: the exec'ing image has no TLS until
+                          // set_thread_area/arch_prctl installs one).
+                          //
+                          // GS discipline note: the ACTIVE GS base (0xC0000101) is the
+                          // CPU's per-CPU pointer (smp.rs) and must NEVER be cleared
+                          // from task context.  The task's user GS base lives in the
+                          // SWAPGS shadow (0xC0000102) — that is what "no TLS on a
+                          // fresh image" clears here.
+                          // SAFETY: cached-mirror clears (the live per-CPU GS at
+                          // 0xC0000101 is untouched — see the note above).
+
+                              crate::arch::x86_64::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
+                              crate::arch::x86_64::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
+
+
+                          // LAZY FPU: the live registers still hold the OLD image's
+                          // state. Mark them stale (CR0.TS) so the first FP use of the
+                          // new image traps into the clean restore above.
+                          // SAFETY: single CR0 bit set.
+                          crate::arch::x86_64::cpu::stts();
+                      }
+                  }
+
 }
 
 // ============================================================================
@@ -73,8 +110,67 @@ pub(crate) const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-PROCESS-5): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
-    crate::arch::arch_floor::x86_64::process::sys_arch_prctl(args)
+pub 
+fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
+
+
+                                                            let code = args[0];
+                                                            let addr = args[1];
+
+                                                            let Some(current) = crate::sched::current() else {
+                                                                return -crate::errno::constants::ESRCH as i64;
+                                                            };
+
+                                                            match code {
+                                                                ARCH_SET_FS => {
+                                                                    if addr >= 1 << 47 {
+                                                                        return -crate::errno::constants::EFAULT as i64;
+                                                                    }
+                                                                    // SAFETY: current is the running task; we are the only context
+                                                                    // that may touch our own thread state.
+
+                                                                        let thread = (*current).thread_mut();
+                                                                        thread.fs_base = addr;
+                                                                        thread.set_tp(addr);
+                                                                        crate::arch::x86_64::cpu::wrmsr(MSR_FS_BASE, addr);
+
+                                                                    0
+                                                                }
+                                                                ARCH_GET_FS => {
+                                                                    // SAFETY: read-only access to the current task's thread state.
+                                                                    let fs =  (*current).thread().fs_base ;
+                                                                    // SAFETY: writes one userspace word at a validated pointer.
+                                                                    let ok = 
+                                                                        crate::arch::uaccess::put_user(addr as *mut u64, fs)
+                                                                    ;
+                                                                    if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
+                                                                }
+                                                                ARCH_SET_GS => {
+                                                                    // SAFETY: see ARCH_SET_FS.
+
+                                                                        (*current).thread_mut().gs_base = addr;
+                                                                        // closegap/cache-parity: program the SWAPGS shadow too, so
+                                                                        // the live MSR matches thread.gs_base immediately (the
+                                                                        // context switch no longer re-reads the MSR to refresh the
+                                                                        // cache — a stale shadow here would otherwise be saved
+                                                                        // nowhere and visible to userspace until the next switch).
+                                                                        // The ACTIVE GS base (percpu) is untouched, as before.
+                                                                        crate::arch::x86_64::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
+
+                                                                    0
+                                                                }
+                                                                ARCH_GET_GS => {
+                                                                    // SAFETY: read-only access to the current task's thread state.
+                                                                    let gs =  (*current).thread().gs_base ;
+                                                                    // SAFETY: writes one userspace word at a validated pointer.
+                                                                    let ok = 
+                                                                        crate::arch::uaccess::put_user(addr as *mut u64, gs)
+                                                                    ;
+                                                                    if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
+                                                                }
+                                                                _ => -crate::errno::constants::EINVAL as i64,
+                                                            }
+
 }
 
 /// ioperm(2) — x86_64 native nr 173. The reference maintains a per-task

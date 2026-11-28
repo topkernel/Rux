@@ -646,8 +646,29 @@ pub fn register_fork_root(root_ppn: u64, owner_pid: u32) {
 }
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-53): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn task_pid_alive(pid: u32) -> bool {
-    crate::arch::arch_floor::x86_64::mm::mmu_init::task_pid_alive(pid)
+pub(crate) 
+fn task_pid_alive(pid: u32) -> bool {
+
+
+                                    if pid == 0 {
+                                        return false;
+                                    }
+                                    let alive = AtomicBool::new(false);
+                                    crate::sched::for_each_task(|t| 
+                                        if (*t).pid() as u32 == pid {
+                                            // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
+                                            // they stay in the pid hash until reaped but are NOT live
+                                            // owners. Counting them made the EARLY-ROOT-FREE witness fire
+                                            // on recycled root frames (stale registry entry + unreaped
+                                            // zombie owner) — the exitwalk probe tripped it within seconds.
+                                            let st = (*t).state();
+                                            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+                                                alive.store(true, Ordering::Relaxed);
+                                            }
+                                        }
+                                    );
+                                    alive.load(Ordering::Relaxed)
+
 }
 
 impl PtLedger {
@@ -1350,8 +1371,27 @@ pub fn free_user_page_tables(
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-52): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
-    crate::arch::arch_floor::x86_64::mm::mmu_init::valid_table_link_ppn(ppn, root_ppn)
+pub(crate) 
+fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
+
+
+                                                         // Runtime RAM top (discovered memory map — fake-OOM fix: the old
+                                                         // compile-time MAX_PFN rejected every table link above the Kernel.toml
+                                                         // nominal 2 GiB, breaking user page tables on larger machines).
+                                                         let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
+                                                         let phys = ppn << 12;
+                                                         if phys >= ram_top {
+                                                             return false;
+                                                         }
+                                                         // USER-tree links must also stay above the kernel-image reserve: their
+                                                         // tables come from the zone (floor ~1GB), never from the Early BSS
+                                                         // pool or the image itself. A user-tree link below 0x1E00000 is a
+                                                         // scribbled slot parsing as a pointer — following it would read/write
+                                                         // the kernel image (the x86 scribble engine: PMD[6]=0x300065 steering
+                                                         // writes into .text). The KERNEL root's own tables legitimately live
+                                                         // in the image (BSS pool) and are exempt.
+                                                         root_ppn ==  root_page_table_ppn()  || phys >= 0x1E0_0000
+
 }
 
 /// Rate-limited one-liner naming the walk level whose page-table
@@ -1571,8 +1611,16 @@ pub fn init() {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-49): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn drop_bootstrap_identity() {
-    crate::arch::arch_floor::x86_64::mm::mmu_init::drop_bootstrap_identity()
+pub 
+fn drop_bootstrap_identity() {
+
+
+                             // Exclusive owner of the kernel root table (init() built it); runs
+                             // once on the BSP after the stack switch, task context.
+                             PtTable::static_root().set(0, PageTableEntry::new());
+                             // SAFETY: reloading the static root's own physical address.
+                              crate::arch::cpu::write_cr3(root_static_phys()) ;
+
 }
 /// Setup linear mapping for physical memory (PAGE_OFFSET region).
 ///
@@ -1754,8 +1802,69 @@ pub fn device_alias_dyn(pa: u64) -> Option<u64> {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-47): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn ioremap_bar_kernel(pa: u64, size: u64) -> Option<u64> {
-    crate::arch::arch_floor::x86_64::mm::mmu_init::ioremap_bar_kernel(pa, size)
+pub 
+fn ioremap_bar_kernel(pa: u64, size: u64) -> Option<u64> {
+
+
+                                                         use crate::arch::mm::memory_layout::{
+                                                             device_alias_fixed, IOREMAP_ARENA_BASE, IOREMAP_ARENA_END,
+                                                         };
+                                                         if size == 0 {
+                                                             return None;
+                                                         }
+                                                         // Already inside a fixed alias window: nothing to do (and never burn
+                                                         // arena space for it).
+                                                         if let Some(va) = device_alias_fixed(pa) {
+                                                             return Some(va);
+                                                         }
+                                                         if USER_MMS_EXIST.load(Ordering::Acquire) {
+                                                             // Not fatal for the boot root, but every existing user CR3 will
+                                                             // page-fault on this BAR — the callers' warning covers the
+                                                             // consequence; this names the cause.
+                                                             crate::pr_err!(
+                                                                 "ioremap_bar_kernel: pa={:#x} mapped AFTER user mms exist — \
+                                                                  existing user CR3s will not see this arena link",
+                                                                 pa
+                                                             );
+                                                         }
+                                                         // Already registered (re-probe of the same function, two capabilities
+                                                         // sharing one BAR)?
+                                                         if let Some(va) = device_alias_dyn(pa) {
+                                                             return Some(va);
+                                                         }
+                                                         // Fresh chunk: 2MB-aligned size, bumped atomically.
+                                                         let chunk = (size + 0x1f_ffff) & !0x1f_ffff;
+                                                         let va = DYN_BAR_CURSOR.fetch_add(chunk, Ordering::AcqRel);
+                                                         if va < IOREMAP_ARENA_BASE as u64 || va + chunk > IOREMAP_ARENA_END as u64 {
+                                                             crate::pr_err!(
+                                                                 "ioremap_bar_kernel: arena exhausted (pa={:#x} size={:#x}) — \
+                                                                  enlarge IOREMAP_ARENA_SIZE",
+                                                                 pa, size
+                                                             );
+                                                             return None;
+                                                         }
+
+                                                             let device_flags = PageTableEntry::P | PageTableEntry::RW
+                                                                 | PageTableEntry::ACCESSED | PageTableEntry::DIRTY
+                                                                 | PageTableEntry::IO;
+                                                             map_kernel_region(va, pa, size, device_flags);
+
+                                                         // Record after the mapping is installed (Release/Acquire pairing).
+                                                         for i in 0..DYN_BAR_SLOTS {
+                                                             if DYN_BARS.pa_base[i].load(Ordering::Acquire) == 0 {
+                                                                 DYN_BARS.va_base[i].store(va, Ordering::Release);
+                                                                 DYN_BARS.pa_end[i].store(pa + size, Ordering::Release);
+                                                                 DYN_BARS.pa_base[i].store(pa, Ordering::Release);
+                                                                 return Some(va);
+                                                             }
+                                                         }
+                                                         crate::pr_err!(
+                                                             "ioremap_bar_kernel: registry full ({} slots) — pa={:#x} left on the \
+                                                              identity fallback; user-CR3 MMIO on it will KERNPANIC",
+                                                             DYN_BAR_SLOTS, pa
+                                                         );
+                                                         None
+
 }
 
 /// Device/ECAM mappings (q35: MMCONFIG @ 0xb0000000, IOAPIC, LAPIC).
@@ -1825,8 +1934,15 @@ pub fn setup_device_mappings() {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-46): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn enable() {
-    crate::arch::arch_floor::x86_64::mm::mmu_init::enable()
+pub 
+fn enable() {
+
+
+
+            let root_phys = root_static_phys();
+            crate::arch::cpu::write_cr3(root_phys);
+
+
 }
 /// Map identity mapping into the static root (interface parity).
 ///
