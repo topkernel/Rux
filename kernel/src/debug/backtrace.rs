@@ -243,6 +243,32 @@ pub fn dump_stack() {
     let _ = w.write_str("\n");
 }
 
+/// Same frame walk as dump_stack(), but through the printk ring
+/// (KERN_ERR) instead of the raw UART.
+///
+/// The raw-uart dump_stack() stays for true-panic contexts (trap/panic
+/// printer, oops path) where the printk ring may be wedged or the report
+/// must reach the serial line even if the ring write faults. Non-panic
+/// reporters (hung-task watchdog) must use THIS variant: raw-uart output
+/// never entered the printk ring, so `dmesg` missed the report entirely
+/// and it was lost after reboot (2026-11-28 drill b3).
+pub fn dump_stack_ring() {
+    let ra: u64 = caller_return_address();
+    crate::pr_err!("Call Trace:");
+    crate::pr_err!(
+        "  [<{:016x}>] {} (current)",
+        ra,
+        crate::debug::ksyms::format_symbol(ra)
+    );
+    walk_stack_trace(&mut |pc, _fp| {
+        crate::pr_err!(
+            "  [<{:016x}>] {}",
+            pc,
+            crate::debug::ksyms::format_symbol(pc)
+        );
+    });
+}
+
 // ============================================================================
 // Register and CSR Dump
 // ============================================================================

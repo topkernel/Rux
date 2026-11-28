@@ -15,8 +15,6 @@ use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::MAX_CPUS;
 use crate::debug::taint;
 use crate::debug::backtrace;
-use crate::debug::backtrace::ConsoleWriter;
-use core::fmt::Write;
 
 /// Softlockup threshold in seconds (default: 10s)
 const SOFTLOCKUP_THRESHOLD_SECS: u64 = 10;
@@ -198,11 +196,14 @@ pub fn check() {
             }
 
             let elapsed_secs = elapsed / 1_000_000_000;
-            let mut w = ConsoleWriter::new();
 
-            let _ = write!(
-                w,
-                "BUG: soft lockup - CPU#{} stuck for {}s! timer_irq={}\n",
+            // Through the printk ring (KERN_ERR), same discipline as the
+            // hung-task report: the raw-uart ConsoleWriter bypassed the
+            // ring, so `dmesg` never saw the splat and it was lost after
+            // reboot (2026-11-28 drill b3 class). KERN_ERR enters the ring
+            // at any console_loglevel and matches the reference class.
+            crate::pr_err!(
+                "BUG: soft lockup - CPU#{} stuck for {}s! timer_irq={}",
                 cpu, elapsed_secs, timer_cnt
             );
 
@@ -211,11 +212,12 @@ pub fn check() {
             if !stuck_task.is_null() {
                 let pid = crate::debug::forensics_edges::t_pid(stuck_task);
                 let pc = crate::debug::forensics_edges::t_preempt_count(stuck_task);
-                let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
+                crate::pr_err!("  CPU: {} PID: {} pc={:#x}", cpu, pid, pc);
             }
 
-            // Stack trace
-            backtrace::dump_stack();
+            // Stack trace — ring variant (raw-uart dump_stack() is
+            // panic-only).
+            backtrace::dump_stack_ring();
 
             // oh-crash 91st: the DETECTOR's own chain (above) is not the
             // stuck CPU's. Poke the stuck CPU over the IRQ_WORK IPI and
