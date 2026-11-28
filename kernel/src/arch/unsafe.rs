@@ -288,32 +288,6 @@ pub mod riscv64 {
         // INV-ARCH-CONTEXT-11 (collected 2026-11-27 from riscv64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Context switch wrapper function
-        ///
-        /// Flow:
-        /// 1. Save prev FPU state
-        /// 2. switch_mm() - switch page table if address space changed
-        /// 3. __switch_to() - switch registers
-        /// 4. Restore next FPU state (must be AFTER __switch_to!)
-        ///
-        /// # Arguments
-        /// - `prev`: Previous task (being switched out)
-        /// - `next`: Next task (being switched in)
-        ///
-        /// # Safety
-        /// Must be called with interrupts disabled (caller's responsibility)
-        ///
-        /// # Note
-        /// The caller (schedule) must ensure interrupts are disabled before calling.
-        /// After __switch_to, the stack pointer changes, so we must use tp (thread pointer)
-        /// to get the current task for FPU restoration.
-        pub  fn context_switch(prev: &mut Task, next: &mut Task)  {
-
-            // Thin contract wrapper (IRQs-off + locals-invalid-after-switch stay
-            // the caller-visible protocol); the body below is safe Rust over the
-            // audited switch edges.
-            context_switch_body(prev, next)
-        }
 
         // INV-ARCH-CONTEXT-12 (collected 2026-11-27 from riscv64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -3192,135 +3166,14 @@ pub mod riscv64 {
         // INV-ARCH-TRAP-23 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        pub(crate) fn sigbus_has_handler() -> bool  {
-
-            crate::sched::current()
-                .and_then(|t|  (*t).signal.as_ref().map(|s| s.get_action(7)) )
-                .map(|a| a.is_some_and(|a| a.has_handler()))
-                .unwrap_or(false)
-        }
 
         // INV-ARCH-TRAP-24 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Handle page fault
-        ///
-        /// Delegate to mm::exception::do_page_fault for complete handling
-        /// True when the CURRENT task has a user handler installed for SIGSEGV
-        /// (used by the page-fault termination paths to decide between "pend the
-        /// signal and let do_signal deliver it to the handler" and "kill now").
-        pub(crate) fn sigsegv_has_handler() -> bool  {
-
-            crate::sched::current()
-                .and_then(|t|  (*t).signal.as_ref().map(|s| s.get_action(11)) )
-                .map(|a| a.is_some_and(|a| a.has_handler()))
-                .unwrap_or(false)
-        }
 
         // INV-ARCH-TRAP-25 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Handle breakpoint
-        pub(crate) fn handle_breakpoint(regs: &mut PtRegs)  {
-
-            if regs.user_mode() {
-                // gdmr28/r29 bring-up instrumentation (temporary, REMOVE before
-                // merge): an untraced user ebreak is a silent SIGTRAP death
-                // otherwise (gdm-session-worker died this way at gdmr27 with no
-                // diagnostic). Print the epc so the site can be symbolized.
-                let comm_now = crate::sched::current()
-                    .map(|t| {
-                        let c = t.comm();
-                        let len = c.iter().position(|&b| b == 0).unwrap_or(c.len());
-                        core::str::from_utf8(&c[..len]).unwrap_or("?")
-                    })
-                    .unwrap_or("?");
-                // PTRACE_SINGLESTEP (P1): the ebreak we displaced at epc fired —
-                // restore the original instruction and report the step to the
-                // tracer (or pend SIGTRAP when nobody traces). epc is NOT
-                // advanced: the restored instruction re-executes on resume.
-                if let Some(task) = crate::sched::current() {
-                    if (*task).single_step_active() && regs.epc == (*task).single_step_addr() {
-                        let saved = (*task).single_step_saved_insn();
-                        let restored = crate::process::ptrace::write_target_word(
-                            task, regs.epc, saved,
-                        );
-                        (*task).clear_single_step();
-                        if !restored {
-                            // Could not put the instruction back — the tracee's
-                            // text is gone (unmapped racing the step). Kill it.
-                            crate::process::exit::do_exit(
-                                -(crate::signal::Signal::SIGSEGV as i32));
-                        }
-                        if (*task).tracer_pid() != 0 {
-                            // SAFETY: task is the current task in its trap path.
-                            
-                                crate::process::ptrace::ptrace_stop(
-                                    task,
-                                    crate::signal::Signal::SIGTRAP as i32,
-                                    crate::signal::SigInfo::new(
-                                        crate::signal::Signal::SIGTRAP as i32,
-                                        crate::signal::si_code::SI_KERNEL,
-                                        (*task).pid(), 0),
-                                );
-                            
-                        } else {
-                            // Untraced single-step (raced DETACH): plain SIGTRAP.
-                            // gdmr29 (temporary): this path is a SIGTRAP-death
-                            // candidate for the gdm-session-worker kill — name it.
-                            // REMOVE before merge.
-                            //
-                            // Demoted to pr_debug (print-audit lane, 2026-11):
-                            // an untraced ebreak left in text hits this on EVERY
-                            // step attempt — a per-trap pr_info through the
-                            // polled UART, the EXITRP class (e2717687). The hunt
-                            // is closed; release builds pay nothing.
-                            crate::pr_debug!(
-                                "SSBRK: comm={} epc={:#x} (untraced single-step ebreak)",
-                                comm_now,
-                                regs.epc
-                            );
-                            (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
-                        }
-                        return;
-                    }
-                    // A real user ebreak under a tracer stops for the tracer
-                    // instead of dying (gdb inserts/relies on breakpoints).
-                    if (*task).tracer_pid() != 0 {
-                        // Advance past the 4-byte ebreak so CONT resumes at the
-                        // following instruction (Linux do_trap_break).
-                        regs.epc += 4;
-                        // SAFETY: task is the current task in its trap path.
-                        
-                            crate::process::ptrace::ptrace_stop(
-                                task,
-                                crate::signal::Signal::SIGTRAP as i32,
-                                crate::signal::SigInfo::new(
-                                    crate::signal::Signal::SIGTRAP as i32,
-                                    crate::signal::si_code::SI_KERNEL,
-                                    (*task).pid(), 0),
-                            );
-                        
-                        return;
-                    }
-                }
-                // HOTPATH-PRINT: fault-path — see context above
-                crate::pr_info!(
-                    "UBRK: comm={} epc={:#x} ra={:#x}",
-                    comm_now,
-                    regs.epc,
-                    regs.ra
-                );
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
-                // Do NOT advance epc — the task is now ZOMBIE and will not resume
-            } else {
-                // Kernel-mode ebreak is a kernel bug, not something to step over.
-                panic!(
-                    "trap: ebreak in kernel mode at epc={:#x}",
-                    regs.epc
-                );
-            }
-        }
 
         // INV-ARCH-TRAP-26 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -3523,217 +3376,6 @@ pub mod riscv64 {
         // INV-ARCH-TRAP-27 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Handle illegal instruction
-        ///
-        /// Check for FPU first-use before terminating.
-        /// When sstatus.FS = OFF, any FP instruction causes IllegalInstruction.
-        /// We detect this case and enable FPU lazily (set FS = INITIAL),
-        /// zero the FP registers (initial-state semantics), then retry the
-        /// instruction.
-        pub(crate) fn handle_illegal_instruction(regs: &mut PtRegs)  {
-
-            let epc = regs.epc;
-
-            // Read the instruction through the exception-table copy path — for
-            // user-mode faults epc is a USER address, which a raw read_unaligned
-            // would fault on with SUM=0 (review ARCH).
-            let mut insn_buf = [0u8; 4];
-            let uncopied16 = 
-                crate::arch::riscv64::uaccess::copy_from_user(insn_buf.as_mut_ptr(), epc as *const u8, 2)
-            ;
-            if uncopied16 > 0 {
-                // Instruction stream unreadable: cannot decode or retry safely.
-                crate::pr_debug!("trap: unreadable instruction at epc={:#x}", epc);
-                if regs.user_mode() {
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
-                }
-                return;
-            }
-            let instr16 = u16::from_ne_bytes([insn_buf[0], insn_buf[1]]);
-
-            // Check if this is a compressed (16-bit) instruction
-            let is_compressed = (instr16 & 0x3) != 0x3;
-            let instr_size = if is_compressed { 2 } else { 4 };
-
-            // Check if FPU is disabled (FS = OFF) and this might be an FP instruction
-            const SR_FS: u64 = 0x3 << 13;
-            const SR_FS_INITIAL: u64 = 0x1 << 13;
-            let fs = regs.status & SR_FS;
-            if fs == 0 {
-                // FPU is off - check if this is an FP instruction
-                let is_fp = if is_compressed {
-                    // Compressed FP instructions on RV64 with D extension:
-                    // Quadrant 0 (bits[1:0]=00): C.FLD (funct3=001), C.FSD (funct3=101)
-                    // Quadrant 2 (bits[1:0]=10): C.FLDSP (funct3=001), C.FSDSP (funct3=101)
-                    // So for any compressed inst: funct3 (bits[15:13]) = 001 or 101 means FP
-                    let funct3 = (instr16 >> 13) & 0x7;
-                    funct3 == 1 || funct3 == 5
-                } else {
-                    // 32-bit FP instructions:
-                    // Load/Store: opcode[6:0] = 0000111 (FLW/FLD) or 0100111 (FSW/FSD)
-                    // FP compute: opcode[6:0] = 0000101 (FMADD etc) or 0001001 (FMSUB etc)
-                    //             or 0001101 (FNMSUB etc) or 0001110 (FNMADD etc) or 1010011 (FP ops)
-                    let instr32: u32 = if instr_size == 4 {
-                        let _ = 
-                            crate::arch::riscv64::uaccess::copy_from_user(
-                                insn_buf.as_mut_ptr(),
-                                epc as *const u8,
-                                4,
-                            )
-                        ;
-                        u32::from_ne_bytes(insn_buf)
-                    } else {
-                        instr16 as u32
-                    };
-                    let opcode = instr32 & 0x7F;
-                    // FP-state CSR accesses also require FS != Off: csrrw/csrrs/
-                    // csrrc to fflags(0x001)/frm(0x002)/fcsr(0x003) — the frrm/
-                    // frflags/fsrm... assembler forms — trap illegal exactly like
-                    // compute FP when FS=Off. compiler-rt's __multf3/__udivti3
-                    // (i128 emulation, so any shell/libc integer arithmetic that
-                    // widens) reads the rounding mode with `frrm` before touching
-                    // the FP registers, so this class is reachable from binaries
-                    // that never execute an explicit FP instruction (repro: mrsh
-                    // SIGILL at a deterministic __multf3+frrm under the pa49
-                    // trace-capture boot).
-                    let is_fp_csr = opcode == 0x73 && {
-                        let csr = instr32 >> 20;
-                        csr == 0x001 || csr == 0x002 || csr == 0x003
-                    };
-                    opcode == 0x07 || opcode == 0x27 ||   // FLW/FLD, FSW/FSD
-                    opcode == 0x05 || opcode == 0x09 ||   // FMADD, FMSUB
-                    opcode == 0x0D || opcode == 0x0E ||   // FNMSUB, FNMADD
-                    opcode == 0x53 ||                     // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
-                    is_fp_csr                             // fflags/frm/fcsr via SYSTEM opcode
-                };
-
-                if is_fp {
-                    // First FP use: enable the FPU AND zero the FP registers/fcsr.
-                    // FS=Initial means the registers architecturally read as zero;
-                    // without the explicit clear, the registers still hold whatever
-                    // the previous task on this CPU left there (cross-task numeric
-                    // pollution + information leakage — review ARCH, fpu_init had
-                    // zero callers).
-                    // SAFETY: fpu_init sets live sstatus.FS=Initial before touching
-                    // the FP registers (executing FP with FS=Off would trap) and
-                    // zeroes f0-f31 + fcsr. The interrupted context cannot have live
-                    // FP state: FS was Off, so every FP instruction trapped.
-                     crate::arch::riscv64::thread::fpu_init(); 
-                    // Enable FPU in the SAVED status too, so sret does not undo it.
-                    regs.status = (regs.status & !SR_FS) | SR_FS_INITIAL;
-                    return;
-                }
-            }
-
-            // V-extension first use: while sstatus.VS = Off, EVERY vector
-            // instruction traps illegal-instruction (any privilege mode).
-            // Lazy-enable like the FP path above: enable VS, zero the live
-            // vector state (initial-state semantics), retry. Without this,
-            // toolchain-auto-vectorized binaries SIGILL on V-capable harts
-            // even though the hardware can run them (reference-kernel
-            // semantics: RVV code executes when the ISA advertises V; see
-            // arch/riscv64/vext.rs).
-            //
-            // HOISTED out of the `fs == 0` block (session 9, modchurn member
-            // repro): the branch used to live INSIDE the FS-disabled decode,
-            // so a task whose FS was already enabled (any prior FP first-use —
-            // fpu_init sets FS=Initial; the dynamic-loader path enables it
-            // before main even runs) but whose VS was still Off SIGILLed on
-            // its first vector instruction with the V handler never reached.
-            // VS and FS are independent sstatus fields; the first-use enable
-            // of one must not be gated on the state of the other. Repro:
-            // dlopen-churn probe, pid 1, vsetvli at text+0x13ee, forensic
-            // fs=0x2000 (FS=Initial) — SIGILL death on a v=true hart.
-            // Note: a vector LOAD/STORE (opcode 0x07/0x27, funct3 000/101/110/
-            // 111) still matches the `is_fp` shape above when FS==0, costs one
-            // extra trap (fpu_init, retry, re-trap) and then lands here —
-            // correct, just one extra round trip.
-            const SR_VS_FIELD: u64 = 0x3 << 9;
-            const SR_VS_INITIAL_VAL: u64 = 0x1 << 9;
-            if (regs.status & SR_VS_FIELD) == 0
-                && crate::arch::riscv64::vext::hart_has_v()
-                && !is_compressed
-                && instr_size == 4
-            {
-                // Fetch the full word (only the first halfword was read above).
-                let _ = 
-                    crate::arch::riscv64::uaccess::copy_from_user(
-                        insn_buf.as_mut_ptr(),
-                        epc as *const u8,
-                        4,
-                    )
-                ;
-                let instr32: u32 = u32::from_ne_bytes(insn_buf);
-                if crate::arch::riscv64::vext::is_vector_instr32(instr32) {
-                    let mut ok = false;
-                    if let Some(task) = crate::sched::current() {
-                        // SAFETY: task is the current task; the trap path
-                        // holds it on this hart with IRQs disabled.
-                        
-                            ok = (*task).thread_mut().vstate_first_use();
-                        
-                    }
-                    if ok {
-                        // Enable V in the SAVED status too, so sret does
-                        // not undo it; retry the instruction.
-                        regs.status = (regs.status & !SR_VS_FIELD)
-                            | SR_VS_INITIAL_VAL;
-                        return;
-                    }
-                }
-            }
-
-            // Not an FP instruction or FPU already enabled - terminate the process
-            crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
-                epc, if regs.user_mode() { "user" } else { "kernel" });
-
-            // Forensics for user SIGILL deaths (BUG-S004/S005 family: userspace
-            // built for extensions the QEMU CPU model lacks): the re-fetched
-            // instruction word + task identity. This is how "sh died at iter2" was
-            // traced to a c.zext.w (Zcb) halfword from an unpinned libgcc member.
-            if regs.user_mode() {
-                static EMPTY_COMM: [u8; 16] = [0u8; 16];
-                let (pid, comm) = crate::sched::current()
-                    .map(|t|  ((*t).pid(), (*t).comm()) )
-                    .unwrap_or((0, &EMPTY_COMM));
-                let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
-                // HOTPATH-PRINT: fault-path — see the gate/one-shot context above
-                crate::pr_info!(
-                    "trap: user SIGILL pid={} comm={:?} epc={:#x} insn16={:#06x} fs={:#x}",
-                    pid,
-                    core::str::from_utf8(&comm[..comm_len]),
-                    epc,
-                    instr16,
-                    regs.status & SR_FS
-                );
-                // SIGILL-FORENSIC (gnome-sigill): when userspace manages to jump
-                // into a garbage/data page, the halfword alone is not enough —
-                // print WHICH mapping swallowed epc, the page's PTE, a hexdump of
-                // the page around epc, and the full VMA table so the layout of the
-                // dying process is recoverable from the console alone.
-                //
-                // Serial-cleanliness (print-audit lane, 2026-11): one dump is
-                // ~100 lines (~5 KB, tens of ms of polled UART) — "one-shot per
-                // death" was only cheap while deaths were rare. A respawn loop
-                // over a broken binary (the sh-retry family that produced this
-                // probe) paid it per crash. Budget 2 per boot: the first two
-                // deaths carry full attribution, later ones keep the one-liner
-                // above.
-                {
-                    static SIGILL_DUMPS: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if SIGILL_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2 {
-                        sigill_mapping_forensics(pid as usize, epc as usize);
-                    }
-                }
-            }
-
-            if regs.user_mode() {
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
-            }
-
-            // Do NOT advance epc — the task is now ZOMBIE and will not resume
-        }
 
         // INV-ARCH-TRAP-28 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -3846,74 +3488,6 @@ pub mod riscv64 {
         // INV-ARCH-TRAP-30 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Handle timer interrupt
-        pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize)  {
-
-            // Increment interrupt counter for /proc/interrupts
-            interrupts::timer_inc(cpu);
-
-            // Re-arm timer: set stimecmp to a future deadline.
-            crate::drivers::timer::set_next_trigger();
-
-            // Skip scheduler/schedule logic during early SMP boot (tp = hart_id,
-            // no current task).  scheduler_tick() may call wake_up_process() which
-            // interacts with the runqueue; schedule() with null current returns
-            // early but the intermediate state can be inconsistent.
-            if crate::sched::current().is_none() {
-                return;
-            }
-
-            // 0. Per-CPU time accounting for /proc/stat (Linux
-            // account_process_tick): the idle task means the CPU had nothing to
-            // run, otherwise the tick is user time (the timer hit the task in
-            // user mode) or system time (it hit it in kernel mode).
-            crate::fs::procfs::stat::charge_tick(regs.user_mode());
-
-            // 0b. CPU-time accounting (Linux account_process_tick): charge this
-            // tick to the interrupted task as user or system time depending on
-            // the privilege mode the timer hit. Only user tasks are charged
-            // (kthreads are born without an address space).
-            if let Some(task) = crate::sched::current() {
-                // SAFETY: current() returned a live task pointer; we only touch
-                // per-task atomic counters, no teardown race on these fields.
-                
-                    if (*task).address_space().is_some() {
-                        use core::sync::atomic::Ordering::Relaxed;
-                        if regs.user_mode() {
-                            (*task).utime_ticks.fetch_add(1, Relaxed);
-                            crate::debug::syscost::tick_user();
-                            // perf events (PERF_TYPE_SOFTWARE sampling): stash the
-                            // interrupted PC for the softirq charger. Lock-free.
-                            crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid());
-                        } else {
-                            (*task).stime_ticks.fetch_add(1, Relaxed);
-                            crate::debug::syscost::tick_kern(regs.epc);
-                            crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid());
-                        }
-                    } else {
-                        crate::debug::syscost::tick_idle();
-                        crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
-                    }
-                
-            } else {
-                crate::debug::syscost::tick_idle();
-                crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
-            }
-
-            // 1. Update jiffies
-            crate::drivers::timer::timer_interrupt_handler();
-
-            // 2. Scheduler tick
-            crate::sched::scheduler_tick();
-
-            // 3. Check for soft lockups
-            crate::debug::softlockup::check();
-
-            // 4. Reschedule if needed
-            if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
-                crate::sched::schedule();
-            }
-        }
 
         // INV-ARCH-TRAP-31 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -4630,31 +4204,6 @@ pub mod riscv64 {
         // INV-ARCH-UACCESS-14 (collected 2026-11-27 from riscv64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Safe user space write wrapper
-        ///
-        /// # Arguments
-        /// - `to`: User space destination address
-        /// - `value`: Value to write
-        ///
-        /// # Returns
-        /// Returns true on success, false on failure
-        #[inline]
-        pub  fn put_user<T: Copy>(to: *mut T, value: T) -> bool  {
-
-            let size = core::mem::size_of::<T>();
-
-            if !access_ok(to as usize, size) {
-                return false;
-            }
-
-            let uncopied = copy_to_user(
-                to as *mut u8,
-                &value as *const T as *const u8,
-                size,
-            );
-
-            uncopied == 0
-        }
 
         // INV-ARCH-UACCESS-15 (collected 2026-11-27 from riscv64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -5183,15 +4732,6 @@ pub mod riscv64 {
         // INV-ARCH-VEXT-6 (collected 2026-11-27 from riscv64/vext.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Parse the boot DTB's /cpus ISA string and cache the V capability.
-        /// Called once from main.rs on the early mapping, before any user task
-        /// exists. Late hart_has_v() callers (the illegal-instruction trap
-        /// path) only read the cache.
-        pub fn prime_hart_has_v(dtb_phys: u64)  {
-
-            let has =  crate::cmdline::parse_cpu_isa_has_v(dtb_phys) ;
-            HAS_V.store(if has { 2 } else { 1 }, Ordering::Relaxed);
-        }
     }
         pub mod mm {
         // ---------------------------------------------------------------------------
@@ -6135,33 +5675,6 @@ pub mod riscv64 {
             // INV-ARCH-FIXMAP-2 (collected 2026-11-27 from riscv64/mm/fixmap.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Initialize UART fixmap
-            ///
-            /// Maps UART to FixEarlycon slot and returns the virtual address.
-            /// This should be called early in boot, before console is used.
-            ///
-            /// # Returns
-            /// The virtual address of the UART mapping.
-            pub fn init_uart_fixmap() -> usize  {
-
-                let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
-
-                // Device memory flags: RW, accessed, dirty, global
-                let flags = PageTableEntry::V
-                    | PageTableEntry::R
-                    | PageTableEntry::W
-                    | PageTableEntry::A
-                    | PageTableEntry::D
-                    | PageTableEntry::G;
-
-                
-                    set_fixmap(FixedAddress::FixEarlycon, UART_PHYS, flags);
-                
-
-                UART_VIRT_ADDR.store(virt, Ordering::Release);
-
-                virt
-            }
 
             // INV-ARCH-FIXMAP-3 (collected 2026-11-27 from riscv64/mm/fixmap.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -7174,47 +6687,6 @@ pub mod riscv64 {
             // INV-ARCH-MM-OPS-14 (collected 2026-11-27 from riscv64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Create user address space
-            pub fn create_user_address_space() -> Option<u64>  {
-
-                let phys_addr = alloc_pages(GfpFlags::GFP_USER, 0);
-                if phys_addr == 0 {
-                    return None;
-                }
-
-                // Validate physical address is within actual physical memory range
-                // This prevents using addresses that are outside the system's physical memory
-                if crate::mm::layout::is_kernel_layout_initialized() {
-                    let layout = crate::mm::layout::kernel_layout();
-                    let phys_end = layout.phys_base + layout.phys_size;
-
-                    if phys_addr < layout.phys_base || phys_addr >= phys_end {
-                        // Invalid physical address - outside memory range
-                        return None;
-                    }
-                }
-
-                let root_page = phys_addr as u64;
-
-                // Stamp the root into the PT ledger (it comes from alloc_pages, NOT
-                // alloc_page_table, so it is otherwise unstamped and its teardown free
-                // is refused — one leaked frame per exec'd mm).
-                crate::arch::riscv64::mm::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
-
-                if let Some(root_table) = PtTable::from_phys(root_page) {
-                    root_table.zero_entries();
-                }
-
-                let kernel_ppn = crate::arch::riscv64::mm::mmu_init::root_page_table_ppn();
-                let root_ppn = root_page / PAGE_SIZE;
-                copy_kernel_mappings(root_ppn, kernel_ppn);
-
-                // Copy fixmap (UART) to user page table so console works after switch_mm
-                // (fixmap lane owns its conversion; no-op contract documented there.)
-                 crate::arch::riscv64::mm::fixmap::copy_fixmap_to_user(root_ppn) ;
-
-                Some(root_ppn)
-            }
 
             // INV-ARCH-MM-OPS-24 (collected 2026-11-27): the unsafe-carrying methods of this
             // inherent impl, moved verbatim from riscv64/mm/mm_ops.rs (inherent impls may
@@ -7988,11 +7460,6 @@ pub mod riscv64 {
             // INV-ARCH-MMU-INIT-17 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Get kernel page table PPN (physical)
-            pub fn get_kernel_page_table_ppn() -> u64  {
-
-                 root_page_table_ppn() 
-            }
 
             // INV-ARCH-MMU-INIT-18 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -8013,17 +7480,6 @@ pub mod riscv64 {
             // INV-ARCH-MMU-INIT-19 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Enable MMU (secondary function)
-            pub fn enable()  {
-
-                
-                    let root_ppn = root_page_table_ppn();
-                    // (new_kernel keeps the mm-tree's root contract — the mm/ lane
-                    // owns its conversion.)
-                    let addr_space =  MmStruct::new_kernel(root_ppn) ;
-                    addr_space.enable();
-                
-            }
 
             // INV-ARCH-MMU-INIT-20 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -8926,27 +8382,6 @@ pub mod riscv64 {
             // INV-ARCH-MMU-INIT-34 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            pub(crate) fn task_pid_alive(pid: u32) -> bool  {
-
-                if pid == 0 {
-                    return false;
-                }
-                let alive = core::sync::atomic::AtomicBool::new(false);
-                crate::sched::for_each_task(|t| 
-                    if (*t).pid() as u32 == pid {
-                        // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
-                        // they stay in the pid hash until reaped but are NOT live
-                        // owners. Counting them made the EARLY-ROOT-FREE witness fire
-                        // on recycled root frames (stale registry entry + unreaped
-                        // zombie owner) — the exitwalk probe tripped it within seconds.
-                        let st = (*t).state();
-                        if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
-                            alive.store(true, core::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                );
-                alive.load(core::sync::atomic::Ordering::Relaxed)
-            }
 
             // INV-ARCH-MMU-INIT-36 (collected 2026-11-27): the unsafe-carrying methods of this
             // inherent impl, moved verbatim from riscv64/mm/mmu_init.rs (inherent impls may

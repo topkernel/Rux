@@ -126,8 +126,28 @@ pub(crate) static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-FIXMAP-2): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn init_uart_fixmap() -> usize {
-    crate::arch::arch_floor::riscv64::mm::fixmap::init_uart_fixmap()
+pub 
+fn init_uart_fixmap() -> usize {
+
+
+                               let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
+
+                               // Device memory flags: RW, accessed, dirty, global
+                               let flags = PageTableEntry::V
+                                   | PageTableEntry::R
+                                   | PageTableEntry::W
+                                   | PageTableEntry::A
+                                   | PageTableEntry::D
+                                   | PageTableEntry::G;
+
+
+                                   set_fixmap(FixedAddress::FixEarlycon, UART_PHYS, flags);
+
+
+                               UART_VIRT_ADDR.store(virt, Ordering::Release);
+
+                               virt
+
 }
 
 /// Get UART virtual address
