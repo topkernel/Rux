@@ -22064,12 +22064,12 @@ pub mod aarch64 {
         // wrapper at the original path — obligations unchanged.
 
         /// Get device tree pointer (the embedded blob's linked address)
-        pub fn get_dtb_pointer() -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn get_dtb_pointer() -> u64  {
 
             // SAFETY: dtb_pointer is a static extern set by boot.S before
             // rust_main runs; reading it is safe once the kernel has started.
             unsafe { dtb_pointer }
-        } }
+        }
 
         // extern declarations duplicated from aarch64/boot.rs (the original
         // block stays in place; duplicate extern decls unify)
@@ -22100,15 +22100,15 @@ pub mod aarch64 {
 
         /// R56-heal switch-in abort repair (aarch64 twin of riscv_switch_abort)
         #[no_mangle]
-        pub  extern "C" fn aarch64_switch_abort(prev: *mut Task, next: *mut Task)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  extern "C" fn aarch64_switch_abort(prev: *mut Task, next: *mut Task)  {
 
             // 1. Address space: compare-based (only repair if the wrapper already
             //    switched — the early-check site has not)
-            let prev_root = if let Some(mm) = (*prev).address_space() {
+            let prev_root = unsafe { if let Some(mm) = (*prev).address_space() {
                 mm.root_ppn()
             } else {
                 crate::arch::aarch64::mm::mmu_init::root_page_table_ppn()
-            };
+            } };
             if get_current_satp() & 0xFFFF_FFFF_FFFF != prev_root {
                 __switch_mm_linear(prev_root);
             }
@@ -22116,14 +22116,16 @@ pub mod aarch64 {
             // 2. Sched slot + tripwire
             let cpu = crate::arch::cpu_id() as usize;
             crate::sched::sched::republish_current_after_abort(cpu, prev);
+            unsafe {
             crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+            }
 
             // 3. `next` (smp8 orphan-race): a LIVE-published pick that aborts here
             // leaves next unlinked with this CPU's marks and no owner anywhere —
             // adjudicate and re-link it (no-op when a steal or a racing wake
             // already handled it).
             crate::sched::sched::abort_next_release_orphans(cpu, next);
-        } }
+        }
 
         // INV-ARCH-CONTEXT-2 (collected 2026-11-27 from aarch64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22133,7 +22135,7 @@ pub mod aarch64 {
         ///
         /// # Safety
         /// Must be called with interrupts disabled (caller's responsibility)
-        pub  fn context_switch(prev: &mut Task, next: &mut Task)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn context_switch(prev: &mut Task, next: &mut Task)  {
 
             // R56-heal early revoked-pick check (generic pick-state protocol)
             if (*next).pid() != 0 {
@@ -22168,8 +22170,10 @@ pub mod aarch64 {
 
             // Step 2: __switch_to — registers + eager FPSIMD (inside the asm).
             // WARNING: after this call all locals are INVALID (riscv64 twin note).
+            unsafe {
             __switch_to(prev, next);
-        } }
+            }
+        }
 
         // INV-ARCH-CONTEXT-3 (collected 2026-11-27 from aarch64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22179,7 +22183,7 @@ pub mod aarch64 {
         /// # Safety
         /// next_ppn must be a valid user root PPN; asid must belong to this mm
         #[inline]
-        pub  fn switch_mm(next_ppn: u64, asid: u16)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn switch_mm(next_ppn: u64, asid: u16)  {
 
             // SAFETY: TTBR0 switch + ASID-scoped invalidation — the twin of the
             // riscv64 "csrw satp | sfence.vma zero, {asid}" pair. The ASID rides
@@ -22204,7 +22208,7 @@ pub mod aarch64 {
                     options(nostack)
                 );
             }
-        } }
+        }
 
         // INV-ARCH-CONTEXT-4 (collected 2026-11-27 from aarch64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22216,7 +22220,7 @@ pub mod aarch64 {
         /// Caller must ensure next_ppn is a valid page table root PPN
         #[inline(never)]
         #[no_mangle]
-        pub  fn __switch_mm_linear(next_ppn: u64)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn __switch_mm_linear(next_ppn: u64)  {
 
             // SAFETY: TTBR0 switch with full TLB invalidation; the kernel half
             // (TTBR1) is untouched.
@@ -22230,14 +22234,14 @@ pub mod aarch64 {
                     options(nostack)
                 );
             }
-        } }
+        }
 
         // INV-ARCH-CONTEXT-5 (collected 2026-11-27 from aarch64/context.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         #[inline]
         #[no_mangle]
-        pub extern "C" fn get_prev_task() -> *mut Task  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub extern "C" fn get_prev_task() -> *mut Task  {
 
             let cpu = crate::arch::cpu_id() as usize;
             if cpu < crate::arch::aarch64::MAX_CPUS {
@@ -22245,7 +22249,7 @@ pub mod aarch64 {
             } else {
                 core::ptr::null_mut()
             }
-        } }
+        }
 
         // INV-ARCH-CONTEXT-6 (collected 2026-11-27): global_asm! invocation moved verbatim from aarch64/context.rs
 
@@ -22533,7 +22537,7 @@ pub mod aarch64 {
 
         /// Get interrupt mask state (DAIF.I/F)
         #[inline]
-        pub fn get_interrupts_state() -> bool  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn get_interrupts_state() -> bool  {
 
             let daif: u64;
             // SAFETY: DAIF is a read-only view register at EL1.
@@ -22542,14 +22546,14 @@ pub mod aarch64 {
             }
             // IRQ mask bit is bit 7 (I)
             (daif & (1 << 7)) == 0
-        } }
+        }
 
         // INV-ARCH-CPU-2 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Invalidate local TLB (all of EL1; full flush)
         #[inline]
-        pub fn local_flush_tlb_all()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn local_flush_tlb_all()  {
 
             // SAFETY: tlbi vmalle1 invalidates all TLB entries for this EL;
             // callers must have repaired the affected translations first.
@@ -22561,79 +22565,79 @@ pub mod aarch64 {
                     options(nostack, preserves_flags)
                 );
             }
-        } }
+        }
 
         // INV-ARCH-CPU-3 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Data memory barrier
         #[inline]
-        pub fn dmb()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn dmb()  {
 
             // SAFETY: dmb is an ordering barrier; no harmful side effects.
             unsafe {
                 core::arch::asm!("dmb ish", options(nomem, nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-4 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Data synchronization barrier (full system)
         #[inline]
-        pub fn dsb()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn dsb()  {
 
             // SAFETY: dsb sy is a completion barrier; no harmful side effects.
             unsafe {
                 core::arch::asm!("dsb sy", options(nomem, nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-5 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Instruction serialization barrier
         #[inline]
-        pub fn isb()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn isb()  {
 
             // SAFETY: isb serializes instruction fetch; no harmful side effects.
             unsafe {
                 core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-6 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Send event (wakes WFE waiters)
         #[inline]
-        pub fn sev()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn sev()  {
 
             // SAFETY: sev is a hint broadcast; no side effects on this core.
             unsafe {
                 core::arch::asm!("sev", options(nomem, nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-7 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Wait for event (SEV companion)
         #[inline]
-        pub fn wfe()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn wfe()  {
 
             // SAFETY: wfe waits for an event; harmless hint instruction.
             unsafe {
                 core::arch::asm!("wfe", options(nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-8 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Wait for interrupt
         #[inline]
-        pub fn wfi()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn wfi()  {
 
             // SAFETY: wfi halts the core until the next interrupt; no side effects
             // beyond waiting. nomem intentionally omitted (ordering matters
@@ -22641,7 +22645,7 @@ pub mod aarch64 {
             unsafe {
                 core::arch::asm!("wfi", options(nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-9 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22649,7 +22653,7 @@ pub mod aarch64 {
         /// Disable interrupts (set D/A/I/F mask bits in DAIF)
         #[inline]
         #[track_caller]
-        pub fn disable_irq()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn disable_irq()  {
 
             crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: msr daifset atomically sets the DAIF mask bits; safe at any
@@ -22657,7 +22661,7 @@ pub mod aarch64 {
             unsafe {
                 core::arch::asm!("msr daifset, #0xf", options(nomem, nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-10 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22665,7 +22669,7 @@ pub mod aarch64 {
         /// Enable interrupts (clear D/A/I/F mask bits in DAIF)
         #[inline]
         #[track_caller]
-        pub fn enable_irq()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn enable_irq()  {
 
             crate::debug::syscost::irq_note_on();
             // SAFETY: msr daifclr atomically clears the DAIF mask bits; safe at
@@ -22673,14 +22677,14 @@ pub mod aarch64 {
             unsafe {
                 core::arch::asm!("msr daifclr, #0xf", options(nomem, nostack, preserves_flags));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-11 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Read the virtual counter (CNTVCT_EL0) — the monotonic cycle counter
         #[inline]
-        pub fn read_counter() -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn read_counter() -> u64  {
 
             // SAFETY: CNTVCT_EL0 is a read-only monotonic counter.
             let val: u64;
@@ -22688,7 +22692,7 @@ pub mod aarch64 {
                 core::arch::asm!("mrs {}, cntvct_el0", out(reg) val, options(nomem, nostack, pure));
             }
             val
-        } }
+        }
 
         // INV-ARCH-CPU-12 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22696,7 +22700,7 @@ pub mod aarch64 {
         /// Get counter frequency (CNTFRQ_EL0 — the generic timer frequency).
         /// QEMU virt defaults to 64 MHz.
         #[inline]
-        pub fn get_counter_freq() -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn get_counter_freq() -> u64  {
 
             // SAFETY: CNTFRQ_EL0 is a read-only register; reading is always safe.
             let freq: u64;
@@ -22704,28 +22708,28 @@ pub mod aarch64 {
                 core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq, options(nomem, nostack, pure));
             }
             freq
-        } }
+        }
 
         // INV-ARCH-CPU-13 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Set current thread ID (TPIDR_EL1)
         #[inline]
-        pub fn set_thread_id(tid: u64)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn set_thread_id(tid: u64)  {
 
             // SAFETY: writing TPIDR_EL1 stores the kernel thread pointer; the
             /// value is only ever read back by get_thread_id()/assembly.
             unsafe {
                 core::arch::asm!("msr tpidr_el1, {}", in(reg) tid, options(nomem, nostack));
             }
-        } }
+        }
 
         // INV-ARCH-CPU-14 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Get current thread ID (TPIDR_EL1 — the aarch64 "tp")
         #[inline]
-        pub fn get_thread_id() -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn get_thread_id() -> u64  {
 
             // SAFETY: reading TPIDR_EL1 is a pure system-register read.
             let tp: u64;
@@ -22733,7 +22737,7 @@ pub mod aarch64 {
                 core::arch::asm!("mrs {}, tpidr_el1", out(reg) tp, options(nomem, nostack, pure));
             }
             tp
-        } }
+        }
     }
 
     pub mod ipi {
@@ -22755,20 +22759,20 @@ pub mod aarch64 {
         // INV-ARCH-IPI-1 (collected 2026-11-27 from aarch64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        pub(crate) fn ipi_stop_handler()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) fn ipi_stop_handler()  {
 
             loop {
                 // SAFETY: WFI halts the core until an interrupt; this CPU was
                 // told to stop, so parking forever is the intended behavior.
                 unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
             }
-        } }
+        }
 
         // INV-ARCH-IPI-2 (collected 2026-11-27 from aarch64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Drain this CPU's CSD queue (CallFunction IPI handler).
-        pub(crate) fn csd_flush_queue()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) fn csd_flush_queue()  {
 
             let cpu = crate::arch::cpu_id() as usize;
             if cpu >= MAX_CPUS {
@@ -22805,7 +22809,7 @@ pub mod aarch64 {
                     node = next;
                 }
             }
-        } }
+        }
 
         // INV-ARCH-IPI-3 (collected 2026-11-27 from aarch64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22818,7 +22822,7 @@ pub mod aarch64 {
             target: usize,
             func: fn(*mut core::ffi::c_void),
             info: *mut core::ffi::c_void,
-        )  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        )  {
 
             if target >= MAX_CPUS {
                 return;
@@ -22865,12 +22869,12 @@ pub mod aarch64 {
                 crate::sched::cond_resched();
                 core::hint::spin_loop();
             }
-        } }
+        }
 
         // INV-ARCH-IPI-4 (collected 2026-11-27 from aarch64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        pub(crate) fn csd_init()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) fn csd_init()  {
 
             for i in 0..MAX_CPUS {
                 // SAFETY: CSD_QUEUES is a static mutable array touched once
@@ -22879,7 +22883,7 @@ pub mod aarch64 {
                     CSD_QUEUES[i].init();
                 }
             }
-        } }
+        }
 
         // INV-ARCH-IPI-5 (collected 2026-11-27 from aarch64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22888,7 +22892,7 @@ pub mod aarch64 {
         ///
         /// Snapshots and clears the pending bitmap, then dispatches each set
         /// bit LSB-first to its handler.
-        pub fn handle_software_ipi(_cpu: usize)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn handle_software_ipi(_cpu: usize)  {
 
             let cpu = crate::arch::cpu_id() as usize;
             if cpu >= MAX_CPUS {
@@ -22914,13 +22918,13 @@ pub mod aarch64 {
                 }
                 bits &= bits - 1; // clear lowest set bit
             }
-        } }
+        }
 
         // INV-ARCH-IPI-6 (collected 2026-11-27 from aarch64/ipi.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Register an IPI handler. Write-once — panics on double registration.
-        pub fn request_ipi(ipi_type: IpiType, handler: fn())  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn request_ipi(ipi_type: IpiType, handler: fn())  {
 
             let idx = ipi_type as u8 as usize;
             // SAFETY: IPI_HANDLERS is a static mutable array written only
@@ -22933,7 +22937,7 @@ pub mod aarch64 {
                 }
                 IPI_HANDLERS[idx] = Some(handler);
             }
-        } }
+        }
     }
 
     pub mod process {
@@ -22955,13 +22959,13 @@ pub mod aarch64 {
 
         /// Get task's PtRegs (fork child / stack-top frame)
         #[inline]
-        pub fn task_pt_regs(task: *const Task) -> *const PtRegs  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn task_pt_regs(task: *const Task) -> *const PtRegs  {
 
             // SAFETY: caller provides a valid Task pointer; fork_pt_regs()
             // returns the pointer stored by copy_thread, valid for the task
             // lifetime.
             unsafe { (*task).fork_pt_regs() }
-        } }
+        }
 
         // INV-ARCH-PROCESS-2 (collected 2026-11-27 from aarch64/process.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22972,7 +22976,7 @@ pub mod aarch64 {
         /// own libc startup, and until then a stale foreign base is worse than
         /// zero (a fault at ~(base + slot) reads as memory corruption).
         #[inline]
-        pub fn flush_thread()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn flush_thread()  {
 
             if let Some(current) = crate::sched::current() {
                 // We are the current task; no concurrent mutation of our thread
@@ -22998,7 +23002,7 @@ pub mod aarch64 {
                     core::arch::asm!("msr tpidr_el0, xzr", options(nostack, preserves_flags));
                 }
             }
-        } }
+        }
     }
 
     pub mod smp {
@@ -23020,7 +23024,7 @@ pub mod aarch64 {
         /// Get current CPU's interrupt stack top address
         #[no_mangle]
         #[inline(never)]
-        pub extern "C" fn get_per_cpu_intr_stack_top() -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub extern "C" fn get_per_cpu_intr_stack_top() -> usize  {
 
             let cpu = cpu_id();
             if cpu < MAX_CPUS {
@@ -23036,13 +23040,13 @@ pub mod aarch64 {
                     stack_base + INTR_STACK_SIZE
                 }
             }
-        } }
+        }
 
         // INV-ARCH-SMP-2 (collected 2026-11-27 from aarch64/smp.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Initialize per-CPU interrupt stack base pointer for assembly code
-        pub fn init_per_cpu_intr_stacks()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn init_per_cpu_intr_stacks()  {
 
             // SAFETY: only called once during early boot before any traps occur.
             unsafe {
@@ -23051,7 +23055,7 @@ pub mod aarch64 {
                 }
                 __per_cpu_intr_stacks_base = PER_CPU_INTR_STACKS.as_ptr() as usize;
             }
-        } }
+        }
 
         // INV-ARCH-SMP-3 (collected 2026-11-27): static/const moved verbatim from aarch64/smp.rs
 
@@ -23067,7 +23071,7 @@ pub mod aarch64 {
         /// `secondary_start` after the MMU is on, with x0 = cpu index (the PSCI
         /// context_id; TPIDR_EL1 is already set by the stub).
         #[no_mangle]
-        pub extern "C" fn secondary_cpu_entry(cpu: usize) -> !  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub extern "C" fn secondary_cpu_entry(cpu: usize) -> !  {
 
             // Install the high-VA vector table BEFORE marking this CPU started:
             // the stub parked VBAR_EL1 at the table's PHYSICAL address (fetched
@@ -23104,14 +23108,14 @@ pub mod aarch64 {
 
             // Enter scheduler idle loop (timer interrupts enabled inside the loop)
             crate::sched::cpu_idle_loop();
-        } }
+        }
 
         // INV-ARCH-SMP-5 (collected 2026-11-27 from aarch64/smp.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Start secondary CPUs via PSCI CPU_ON.
         /// Must be called AFTER console + scheduler initialization.
-        pub fn start_secondaries()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn start_secondaries()  {
 
             // 1. Publish the boot core's live MMU state for the secondary stub.
             // SAFETY: plain EL1 system-register reads, no side effects.
@@ -23133,7 +23137,7 @@ pub mod aarch64 {
 
             // 2. Conduit + version probe. The DTB /psci node decides hvc vs smc;
             //    defaults (hvc, PSCI 0.2 CPU_ON id) already match QEMU virt.
-            let have_dtb = unsafe {
+            let have_dtb = {
                 // SAFETY: FDT walker only reads the blob through the linear map.
                 detect_psci_from_dtb()
             };
@@ -23232,7 +23236,7 @@ pub mod aarch64 {
                     false,
                 );
             }
-        } }
+        }
 
         // INV-ARCH-SMP-6 (collected 2026-11-27): static/const moved verbatim from aarch64/smp.rs
 
@@ -23259,7 +23263,7 @@ pub mod aarch64 {
 
         /// Issue a PSCI call through the detected conduit. Returns x0 (signed).
         #[inline]
-        pub(crate) fn psci_call(fnid: u64, a1: u64, a2: u64, a3: u64) -> i64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) fn psci_call(fnid: u64, a1: u64, a2: u64, a3: u64) -> i64  {
 
             let ret: i64;
             if CONDUIT_HVC.load(Ordering::Relaxed) {
@@ -23296,14 +23300,14 @@ pub mod aarch64 {
                 }
             }
             ret
-        } }
+        }
 
         // INV-ARCH-SMP-11 (collected 2026-11-27 from aarch64/smp.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Read MPIDR_EL1 (affinity fields of the current core).
         #[inline]
-        pub fn read_mpidr() -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn read_mpidr() -> u64  {
 
             // SAFETY: MPIDR_EL1 is a read-only identification register accessible
             // at EL1; the read has no side effects.
@@ -23312,7 +23316,7 @@ pub mod aarch64 {
                 core::arch::asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack, pure));
                 v
             }
-        } }
+        }
 
         // INV-ARCH-SMP-12 (collected 2026-11-27 from aarch64/smp.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23325,7 +23329,7 @@ pub mod aarch64 {
         /// - After scheduling: TPIDR_EL1 = task_struct pointer; the cpu index
         ///   lives in task_struct.ti_cpu at the fixed offset
         #[inline]
-        pub fn cpu_id() -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn cpu_id() -> usize  {
 
             // IRREDUCIBLE F-ROW (F-TP-A1): TPIDR_EL1 is outside Rust's memory
             // model — reference kernel arch/arm64's current_thread_info()-class
@@ -23355,7 +23359,7 @@ pub mod aarch64 {
                     }
                 }
             }
-        } }
+        }
 
         // extern declarations duplicated from aarch64/smp.rs (the original
         // block stays in place; duplicate extern decls unify)
@@ -23395,7 +23399,7 @@ pub mod aarch64 {
             // reference kernel arch/arm64/kernel/fpsimd.S's fpsimd_save; no safe
             // Rust shape touches the NEON register file. Target: self.fpu (typed
             // [u64; 64] array — the one edge is the asm block).
-            fn fpu_save(&mut self)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            fn fpu_save(&mut self)  {
 
                 unsafe {
                     let dst = self.fpu.as_mut_ptr();
@@ -23429,7 +23433,7 @@ pub mod aarch64 {
                     );
                 }
                 self.fs = 3; // DIRTY
-            } }
+            }
 
         // INV-ARCH-THREAD-1 (collected 2026-11-27 from aarch64/thread.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23438,7 +23442,7 @@ pub mod aarch64 {
             #[inline]
             pub // IRREDUCIBLE F-ROW (F-AFPU-2): FPSIMD restore — fpsimd.S's load
             // path. Source: self.fpu (typed array).
-            fn fpu_restore(&self)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            fn fpu_restore(&self)  {
 
                 unsafe {
                     let src = self.fpu.as_ptr();
@@ -23471,7 +23475,7 @@ pub mod aarch64 {
                         options(nostack, readonly)
                     );
                 }
-            } }
+            }
         }
     }
 
@@ -23492,7 +23496,7 @@ pub mod aarch64 {
         // wrapper at the original path — obligations unchanged.
 
         /// Disable the EL1 timer interrupt
-        pub fn disable_timer_interrupt()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn disable_timer_interrupt()  {
 
             // SAFETY: masking the virtual timer; no side effects beyond the mask.
             unsafe {
@@ -23502,7 +23506,7 @@ pub mod aarch64 {
                     options(nomem, nostack)
                 );
             }
-        } }
+        }
 
         // INV-ARCH-TRAP-2 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23511,7 +23515,7 @@ pub mod aarch64 {
         /// twin: enable the GIC PPI (INTID 27, virtual timer), arm the first
         /// deadline, then unmask the timer itself. Order matters: arming after
         /// the PPI is enabled means the very first expiry is never lost.
-        pub fn enable_timer_interrupt()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn enable_timer_interrupt()  {
 
             // 1. Enable the timer PPI at this CPU's redistributor (idempotent;
             //    the distributor was brought up in intc::init).
@@ -23531,13 +23535,13 @@ pub mod aarch64 {
                     options(nomem, nostack)
                 );
             }
-        } }
+        }
 
         // INV-ARCH-TRAP-3 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Initialize trap handling: install the vector table (VBAR_EL1)
-        pub fn init()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn init()  {
 
             extern "C" {
                 fn aarch64_vector_table();
@@ -23552,7 +23556,7 @@ pub mod aarch64 {
                     options(nostack)
                 );
             }
-        } }
+        }
 
         // INV-ARCH-TRAP-4 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23566,11 +23570,11 @@ pub mod aarch64 {
             fn_arg: *mut core::ffi::c_void,
             fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
             _regs: &mut PtRegs,
-        )  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        )  {
 
             let ret = fn_ptr(fn_arg);
             crate::process::exit::do_exit(ret);
-        } }
+        }
 
         // INV-ARCH-TRAP-5 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23583,7 +23587,7 @@ pub mod aarch64 {
         /// kernel stack instead — the outermost frame position is fixed at
         /// stack_top - PT_REGS_SIZE.
         #[no_mangle]
-        pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> !  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> !  {
 
             let _ = regs_x0;
             if let Some(regs) = current_task_pt_regs() {
@@ -23606,19 +23610,19 @@ pub mod aarch64 {
                 // task's final spin.
                 unsafe { core::arch::asm!("wfi") };
             }
-        } }
+        }
 
         // INV-ARCH-TRAP-6 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// True when the CURRENT task has a user handler installed for `signo`.
-        pub(crate) fn sig_has_handler(signo: usize) -> bool  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) fn sig_has_handler(signo: usize) -> bool  {
 
             crate::sched::current()
-                .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(signo as i32)) })
+                .and_then(|t| { (*t).signal.as_ref().map(|s| s.get_action(signo as i32)) })
                 .map(|a| a.is_some_and(|a| a.has_handler()))
                 .unwrap_or(false)
-        } }
+        }
 
         // INV-ARCH-TRAP-7 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23626,7 +23630,7 @@ pub mod aarch64 {
         /// Timer interrupt (GIC PPI for the EL1 virtual timer) — the riscv64
         /// handle_timer_interrupt twin: re-arm first, then accounting, jiffies,
         /// scheduler tick, softlockup, and the preemptible in-IRQ reschedule.
-        pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize)  {
 
             // Increment interrupt counter for /proc/interrupts
             crate::fs::procfs::interrupts::timer_inc(cpu);
@@ -23650,7 +23654,7 @@ pub mod aarch64 {
             if let Some(task) = crate::sched::current() {
                 // SAFETY: current() returned a live task pointer; only per-task
                 // atomic counters are touched (riscv64/x86_64 twins).
-                unsafe {
+                {
                     if (*task).address_space().is_some() {
                         use core::sync::atomic::Ordering::Relaxed;
                         if regs.user_mode() {
@@ -23685,7 +23689,7 @@ pub mod aarch64 {
             if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
                 crate::sched::schedule();
             }
-        } }
+        }
 
         // INV-ARCH-TRAP-8 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23693,7 +23697,7 @@ pub mod aarch64 {
         /// Trap handler — called by trap.S with the PtRegs pointer (frame base
         /// == x0, SP 16-aligned, DAIF masked).
         #[no_mangle]
-        pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs)  {
 
             let cpu_id = crate::arch::cpu_id() as usize;
 
@@ -23723,7 +23727,7 @@ pub mod aarch64 {
                     static _etext: u8;
                 }
                 // SAFETY: linker symbols _stext/_etext bound the kernel text.
-                let (lo, hi) = unsafe {
+                let (lo, hi) = {
                     (&raw const _stext as usize as u64, &raw const _etext as usize as u64)
                 };
                 if regs_ref.pc >= lo && regs_ref.pc < hi {
@@ -23857,14 +23861,14 @@ pub mod aarch64 {
             CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
 
 
-        } }
+        }
 
         // INV-ARCH-TRAP-9 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Bad-vector dumper (called from the 0x000/0x600 band stubs)
         #[no_mangle]
-        pub(crate) extern "C" fn aarch64_trap_dump()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub(crate) extern "C" fn aarch64_trap_dump()  {
 
             let (esr, elr, far, spsr, sp_el1): (u64, u64, u64, u64, u64);
             // SAFETY: pure system-register reads; safe in any exception context.
@@ -23892,14 +23896,14 @@ pub mod aarch64 {
                 esr_ec(esr),
                 esr_iss(esr)
             );
-        } }
+        }
 
         // INV-ARCH-TRAP-10 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// RIP-equivalent (pc) of another CPU's most recent trap frame
         /// (diagnostic; riscv64 twin semantics)
-        pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64  {
 
             if cpu >= crate::arch::aarch64::MAX_CPUS {
                 return 0;
@@ -23913,13 +23917,13 @@ pub mod aarch64 {
             }
             // SAFETY: diagnostic scalar read of a live-or-stale kernel frame.
             unsafe { core::ptr::addr_of!((*p).pc).read() }
-        } }
+        }
 
         // INV-ARCH-TRAP-11 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
         /// Current task's PtRegs (kernel stack top - sizeof(PtRegs))
-        pub fn current_task_pt_regs() -> Option<&'static mut PtRegs>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn current_task_pt_regs() -> Option<&'static mut PtRegs>  {
 
             use crate::sched::current;
 
@@ -23931,7 +23935,7 @@ pub mod aarch64 {
                 let pt_regs_ptr = (stack_top - PT_REGS_SIZE as u64) as *mut PtRegs;
                 Some(&mut *pt_regs_ptr)
             }
-        } }
+        }
 
         // INV-ARCH-TRAP-12 (collected 2026-11-27): global_asm! invocation moved verbatim from aarch64/trap.rs
         core::arch::global_asm!(
@@ -23986,19 +23990,19 @@ pub mod aarch64 {
         /// entry either way. access_ok must ACCEPT it (the exception table, not
         /// the range check, contains the fault).
         #[cfg(feature = "dfx-aa64-uaccess-selftest")]
-        pub fn selftest()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub fn selftest()  {
 
             // printk's console emit does not reach PL011 on this board yet (the
             // boot table goes through console::putchar directly) — same here.
             fn emit(line: &str) {
                 // SAFETY: putchar is the polled console byte writer (the same
                 // path print_status uses); callable in any context.
-                unsafe {
+
                     for &b in line.as_bytes() {
                         crate::console::putchar(b);
                     }
                     crate::console::putchar(b'\n');
-                }
+
             }
 
             const PROBE: *mut u8 = 0x1_0000_0000 as *mut u8; // 4GB: user window, unmapped
@@ -24097,7 +24101,7 @@ pub mod aarch64 {
                 pass,
                 total
             ));
-        } }
+        }
 
         // INV-ARCH-UACCESS-2 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24107,7 +24111,7 @@ pub mod aarch64 {
         /// Returns the length INCLUDING the NUL terminator, or 0 on fault /
         /// no NUL within maxlen (the riscv64/x86_64 convention: 0 is the
         /// failure-or-too-long sentinel — callers treat 0 as EFAULT).
-        pub  fn strnlen_user(str: *const u8, maxlen: usize) -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn strnlen_user(str: *const u8, maxlen: usize) -> usize  {
 
             if maxlen == 0 {
                 return 0;
@@ -24127,7 +24131,7 @@ pub mod aarch64 {
                 }
             }
             0 // no NUL within maxlen
-        } }
+        }
 
         // INV-ARCH-UACCESS-3 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24144,7 +24148,7 @@ pub mod aarch64 {
             from: *const u8,
             max_len: usize,
             buf: &'a mut [u8],
-        ) -> Result<&'a [u8], i64>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        ) -> Result<&'a [u8], i64>  {
 
             // EFAULT = 14
             const EFAULT: i64 = 14;
@@ -24179,7 +24183,7 @@ pub mod aarch64 {
                 }
             }
             Ok(&buf[..i])
-        } }
+        }
 
         // INV-ARCH-UACCESS-4 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24189,7 +24193,7 @@ pub mod aarch64 {
         /// # Safety
         /// `from` must be aligned and validated by access_ok
         #[inline]
-        pub  fn get_user<T: Copy>(from: *const T) -> Option<T>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn get_user<T: Copy>(from: *const T) -> Option<T>  {
 
             let size = core::mem::size_of::<T>();
             if !access_ok(from as usize, size) {
@@ -24198,14 +24202,14 @@ pub mod aarch64 {
             let mut out = core::mem::MaybeUninit::<T>::zeroed();
             // SAFETY: exception-table copy behind access_ok.
             let uncopied =
-                unsafe { copy_from_user(out.as_mut_ptr() as *mut u8, from as *const u8, size) };
+                { copy_from_user(out.as_mut_ptr() as *mut u8, from as *const u8, size) };
             if uncopied == 0 {
                 // SAFETY: fully initialized by the copy above
                 Some(unsafe { out.assume_init() })
             } else {
                 None
             }
-        } }
+        }
 
         // INV-ARCH-UACCESS-5 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24215,16 +24219,16 @@ pub mod aarch64 {
         /// # Safety
         /// `to` must be aligned and validated by access_ok
         #[inline]
-        pub  fn put_user<T: Copy>(to: *mut T, value: T) -> bool  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn put_user<T: Copy>(to: *mut T, value: T) -> bool  {
 
             let size = core::mem::size_of::<T>();
             if !access_ok(to as usize, size) {
                 return false;
             }
             // SAFETY: exception-table copy behind access_ok.
-            let uncopied = unsafe { copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
+            let uncopied = { copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
             uncopied == 0
-        } }
+        }
 
         // INV-ARCH-UACCESS-6 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24234,7 +24238,7 @@ pub mod aarch64 {
         /// # Safety
         /// `to` is validated by access_ok; a fault lands in the exception table.
         #[inline(never)]
-        pub  fn clear_user(to: *mut u8, n: usize) -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn clear_user(to: *mut u8, n: usize) -> usize  {
 
             if n == 0 {
                 return 0;
@@ -24244,7 +24248,7 @@ pub mod aarch64 {
             }
             // SAFETY: exception-table clear (see copy_to_user).
             unsafe { __aa64_clear_user(to, n) }
-        } }
+        }
 
         // INV-ARCH-UACCESS-7 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24258,7 +24262,7 @@ pub mod aarch64 {
         /// # Safety
         /// `to` must be writable for `n` bytes; `from` is validated by access_ok.
         #[inline(never)]
-        pub  fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize  {
 
             if n == 0 {
                 return 0;
@@ -24268,7 +24272,9 @@ pub mod aarch64 {
                 // historically consumed the buffer even on failure, and leaving
                 // previous kernel heap contents in it is an information leak
                 // (riscv64 twin behavior).
+                unsafe {
                 core::ptr::write_bytes(to, 0, n);
+                }
                 return n;
             }
             // SAFETY: exception-table copy (see copy_to_user).
@@ -24281,7 +24287,7 @@ pub mod aarch64 {
                 unsafe { core::ptr::write_bytes(to.add(copied), 0, uncopied) };
             }
             uncopied
-        } }
+        }
 
         // INV-ARCH-UACCESS-8 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24302,7 +24308,7 @@ pub mod aarch64 {
         /// - `from` must point to valid kernel memory
         /// - `to` is validated by access_ok; a fault lands in the exception table
         #[inline(never)]
-        pub  fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize  {
 
             if n == 0 {
                 return 0;
@@ -24313,7 +24319,7 @@ pub mod aarch64 {
             // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
             // and returns a short count instead of faulting the kernel.
             unsafe { __aa64_copy_to_user(to, from, n) }
-        } }
+        }
 
         // INV-ARCH-UACCESS-9 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -24325,7 +24331,7 @@ pub mod aarch64 {
         ///
         /// # Safety
         /// `uaddr` must point at a 4-byte user word; access_ok-checked here.
-        pub  fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+        pub  fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32>  {
 
             if !access_ok(uaddr as usize, 4) {
                 return None;
@@ -24338,7 +24344,7 @@ pub mod aarch64 {
             } else {
                 Some(packed as u32)
             }
-        } }
+        }
 
         // INV-ARCH-UACCESS-10 (collected 2026-11-27): global_asm! invocation moved verbatim from aarch64/uaccess.rs
 
@@ -24606,7 +24612,7 @@ pub mod aarch64 {
             /// [63:48], the TCR_EL1.A1=0 tag source) with a full flush. The
             /// switch_mm path may prefer ASID-scoped invalidation once generation
             /// rollover lands (stage 2); today every switch flushes.
-            pub fn write_satp(satp: usize)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn write_satp(satp: usize)  {
 
                 let ppn = satp_to_ppn(satp) as u64;
                 let asid = (satp_to_asid(satp) & 0xFF) as u64;
@@ -24625,13 +24631,13 @@ pub mod aarch64 {
                         options(nostack)
                     );
                 }
-            } }
+            }
 
             // INV-ARCH-ASID-2 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Flush kernel-half (global) entries
-            pub fn flush_tlb_kernel()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn flush_tlb_kernel()  {
 
                 // SAFETY: full flush is the conservative kernel-halves choice
                 // (aarch64 has no separate kernel-only tlbi op at EL1 short of
@@ -24644,14 +24650,14 @@ pub mod aarch64 {
                         options(nostack, preserves_flags)
                     );
                 }
-            } }
+            }
 
             // INV-ARCH-ASID-3 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Flush a VA range in one ASID (page-granular loop; asid 0 = all ASIDs,
             /// see flush_tlb_page)
-            pub fn flush_tlb_range(start: usize, end: usize, asid: u16)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn flush_tlb_range(start: usize, end: usize, asid: u16)  {
 
                 let mut va = start & !0xFFF;
                 while va < end {
@@ -24678,7 +24684,7 @@ pub mod aarch64 {
                 unsafe {
                     asm!("dsb ish", "isb", options(nostack, preserves_flags));
                 }
-            } }
+            }
 
             // INV-ARCH-ASID-4 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -24688,7 +24694,7 @@ pub mod aarch64 {
             /// `asid == 0` follows the riscv64 convention "all address spaces" and
             /// emits `tlbi vaae1is` (invalidate by VA across ALL ASIDs); a nonzero
             /// ASID emits `tlbi vae1is` scoped to that ASID.
-            pub fn flush_tlb_page(vaddr: usize, asid: u16)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn flush_tlb_page(vaddr: usize, asid: u16)  {
 
                 let pn = ((vaddr >> 12) & 0x0000_FFFF_FFFF_F) as u64;
                 // SAFETY: page-scoped invalidation; operand = VA[47:12] | ASID<<48.
@@ -24711,13 +24717,13 @@ pub mod aarch64 {
                         );
                     }
                 }
-            } }
+            }
 
             // INV-ARCH-ASID-5 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Flush all entries for one ASID
-            pub fn flush_tlb_asid(asid: u16)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn flush_tlb_asid(asid: u16)  {
 
                 // SAFETY: ASID-scoped inner-shareable invalidation. The operand's
                 // ASID field lives in bits [63:48].
@@ -24730,13 +24736,13 @@ pub mod aarch64 {
                         options(nostack, preserves_flags)
                     );
                 }
-            } }
+            }
 
             // INV-ARCH-ASID-6 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Flush the entire TLB (all EL1, all ASIDs)
-            pub fn flush_tlb_all()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn flush_tlb_all()  {
 
                 // SAFETY: tlbi vmalle1ais broadcasts full invalidation to all PEs;
                 // callers have repaired the affected translations first.
@@ -24748,7 +24754,7 @@ pub mod aarch64 {
                         options(nostack, preserves_flags)
                     );
                 }
-            } }
+            }
         }
 
         pub mod exception {
@@ -24775,7 +24781,7 @@ pub mod aarch64 {
             /// VMA-covered user addresses demand-fill FIRST (R82), then the fixup
             /// (R78), then the stack-overflow panic; user-mode faults run
             /// handle_mm_fault with CowPending resolved through handle_cow_fault.
-            pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult  {
 
                 // /proc/vmstat pgfault + the per-task minflt counter (user mode only)
                 crate::mm::vmstat::note_fault();
@@ -24783,7 +24789,7 @@ pub mod aarch64 {
                     if let Some(task) = crate::sched::current() {
                         // SAFETY: current() returned a live task pointer; per-task
                         // atomic counter only.
-                        unsafe {
+                        {
                             (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         }
                     }
@@ -24857,7 +24863,7 @@ pub mod aarch64 {
                                     // like the user-mode path (retry counts as
                                     // progress).
                                     // SAFETY: faulting mapping of the current task.
-                                    unsafe {
+                                    {
                                         match handle_cow_fault(
                                             addr_space,
                                             addr_space.root_ppn(),
@@ -24887,7 +24893,7 @@ pub mod aarch64 {
                     // Kernel stack overflow
                     let fault_addr_usize = fault_addr.bits() as usize;
                     // SAFETY: current task accessors.
-                    unsafe {
+                    {
                         if current.is_in_kernel_stack(fault_addr_usize)
                             || current.is_stack_overflow(regs.sp as usize)
                         {
@@ -24921,7 +24927,7 @@ pub mod aarch64 {
                     MmFaultResult::CowPending => {
                         // COW page: resolve through the arch walker
                         // SAFETY: faulting mapping of the current task.
-                        unsafe {
+                        {
                             match handle_cow_fault(&addr_space, addr_space.root_ppn(), fault_addr) {
                                 crate::arch::aarch64::mm::mm_ops::CowFaultResult::Resolved => MmFaultResult::Handled,
                                 // PTE changed between the lock-free COW check and
@@ -24957,14 +24963,14 @@ pub mod aarch64 {
                         bad_area(regs, access_type, fault_addr)
                     }
                 }
-            } }
+            }
 
             // INV-ARCH-EXCEPTION-2 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Send a signal to the current process with si_code provenance (twin
             /// contract: a fatal hardware-fault death prints a real origin).
-            pub(crate) fn send_signal(sig: i32, code: i32, _addr: u64, _access_type: u32)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub(crate) fn send_signal(sig: i32, code: i32, _addr: u64, _access_type: u32)  {
 
                 if let Some(current) = crate::sched::current() {
                     let pid = current.pid();
@@ -24974,34 +24980,34 @@ pub mod aarch64 {
                     )
                     .ok();
                     // SAFETY: current() returned a live task pointer.
-                    unsafe { crate::signal::signal_wake_up(current as *mut _) };
+                    { crate::signal::signal_wake_up(current as *mut _) };
                 }
-            } }
+            }
 
             // INV-ARCH-EXCEPTION-3 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Get the exception table entry count
             #[allow(dead_code)]
-            pub fn exception_table_count() -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn exception_table_count() -> usize  {
 
                 // SAFETY: linker-provided bounds.
                 unsafe {
                     (&__ex_table_end as *const _ as usize - &__ex_table_start as *const _ as usize)
                         / core::mem::size_of::<ExceptionTableEntry>()
                 }
-            } }
+            }
 
             // INV-ARCH-EXCEPTION-4 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Check if the exception table is empty
             #[allow(dead_code)]
-            pub fn exception_table_empty() -> bool  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn exception_table_empty() -> bool  {
 
                 // SAFETY: linker-provided bounds.
                 unsafe { &__ex_table_start as *const _ == &__ex_table_end as *const _ }
-            } }
+            }
 
             // INV-ARCH-EXCEPTION-5 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25010,7 +25016,7 @@ pub mod aarch64 {
             ///
             /// Linear search O(n) — the table holds a handful of entries (the three
             /// uaccess copy cores), matching the riscv64/x86_64 twins.
-            pub fn fixup_exception(addr: u64) -> Option<u64>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn fixup_exception(addr: u64) -> Option<u64>  {
 
                 // SAFETY: the section bounds are linker-provided and valid; entries
                 // are immutable after link.
@@ -25026,7 +25032,7 @@ pub mod aarch64 {
                     }
                 }
                 None
-            } }
+            }
 
             // extern declarations duplicated from aarch64/mm/exception.rs (the original
             // block stays in place; duplicate extern decls unify)
@@ -25052,16 +25058,16 @@ pub mod aarch64 {
             // wrapper at the original path — obligations unchanged.
 
             /// Initialize the UART fixmap (map PL011 into the FixEarlycon slot)
-            pub fn init_uart_fixmap() -> usize  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn init_uart_fixmap() -> usize  {
 
                 let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
                 // Device mapping, kernel RW
                 // SAFETY: early single-threaded boot; the fixmap slot is exclusively
                 // ours and the kernel tables are being built.
-                unsafe { crate::arch::aarch64::mm::mmu_init::map_device_page(virt, UART_PHYS, 0) };
+                { crate::arch::aarch64::mm::mmu_init::map_device_page(virt, UART_PHYS, 0) };
                 UART_VIRT_ADDR.store(virt, Ordering::Release);
                 virt
-            } }
+            }
         }
 
         pub mod memory_layout {
@@ -25077,7 +25083,7 @@ pub mod aarch64 {
 
             /// Convert kernel virtual address to physical address (linear mapping)
             #[inline]
-            pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr  {
 
                 let addr = virt.0;
 
@@ -25102,20 +25108,20 @@ pub mod aarch64 {
                     );
                     PhysAddr::new(addr)
                 }
-            } }
+            }
 
             // INV-ARCH-MEMORY-LAYOUT-2 (collected 2026-11-27 from aarch64/mm/memory_layout.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Convert physical address to kernel virtual address (linear mapping)
             #[inline]
-            pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr  {
 
                 // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before
                 // rust_main; va_pa_offset is set once at boot and never modified.
                 let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
                 VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
-            } }
+            }
 
             // INV-ARCH-MEMORY-LAYOUT-3 (collected 2026-11-27): static/const moved verbatim from aarch64/mm/memory_layout.rs
 
@@ -25177,7 +25183,7 @@ pub mod aarch64 {
             /// # Safety
             /// root_ppn must be the caller's live user page-table root; caller
             /// holds the PTE modify section (PTE_MODIFY_LOCK).
-            pub fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32)  {
 
                 // Software base mask. W requires R (hardware AP_RO covers the W=0
                 // half; the software mirror keeps the same fold the fault path uses).
@@ -25247,9 +25253,9 @@ pub mod aarch64 {
                     // PTE section.
                     l3.set(idx, new_pte);
                     // SAFETY: this translation changed; drop any cached walk.
-                    unsafe { crate::arch::aarch64::mm::asid::flush_tlb_page(va as usize, 0) };
+                    { crate::arch::aarch64::mm::asid::flush_tlb_page(va as usize, 0) };
                 }
-            } }
+            }
 
             // INV-ARCH-MM-OPS-2 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25268,7 +25274,7 @@ pub mod aarch64 {
                 virt_addr: u64,
                 size: u64,
                 flags: u64,
-            ) -> Option<u64>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            ) -> Option<u64>  {
 
                 if size == 0 {
                     return None;
@@ -25316,7 +25322,7 @@ pub mod aarch64 {
                 }
 
                 Some(first_phys)
-            } }
+            }
 
             // INV-ARCH-MM-OPS-3 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25333,7 +25339,7 @@ pub mod aarch64 {
                 virt_addr: u64,
                 size: u64,
                 flags: u64,
-            ) -> Option<u64>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            ) -> Option<u64>  {
 
                 if size == 0 {
                     return None;
@@ -25418,7 +25424,7 @@ pub mod aarch64 {
                 }
 
                 Some(first_phys)
-            } }
+            }
 
             // INV-ARCH-MM-OPS-8 (collected 2026-11-27): the unsafe-carrying methods of this
             // inherent impl, moved verbatim from aarch64/mm/mm_ops.rs (inherent impls may
@@ -25428,7 +25434,7 @@ pub mod aarch64 {
             // wrapper at the original path — obligations unchanged.
 
                 /// Map single page (for lazy mapping/page fault handling)
-                pub fn map_single_page(&self, virt_addr: VirtAddr, perm: Perm) -> Result<(), MapError>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+                pub fn map_single_page(&self, virt_addr: VirtAddr, perm: Perm) -> Result<(), MapError>  {
 
                     let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
                     let flags = perm_to_flags(perm, self.space_type());
@@ -25469,7 +25475,7 @@ pub mod aarch64 {
                     }
 
                     Ok(())
-                } }
+                }
 
             // INV-ARCH-MM-OPS-6 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25480,7 +25486,7 @@ pub mod aarch64 {
                 /// variant has no callers (do_brk below is its only wrapper, also
                 /// uncalled). Kept in sync with the mm.brk mirror for when an
                 /// in-kernel caller reappears. (riscv64 twin note, carried over.)
-                pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+                pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError>  {
 
                     use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
 
@@ -25513,7 +25519,7 @@ pub mod aarch64 {
                         while addr < new_brk_aligned {
                             // SAFETY: self.pgd is a valid root PPN and addr is
                             // page-aligned within the user heap region.
-                            if unsafe { PageTableWalker::walk(self.pgd, addr as u64) }.is_none() {
+                            if { PageTableWalker::walk(self.pgd, addr as u64) }.is_none() {
                                 let phys_addr = alloc_pages(GfpFlags::GFP_KERNEL, 0);
                                 if phys_addr == 0 {
                                     return Err(MapError::OutOfMemory);
@@ -25526,7 +25532,7 @@ pub mod aarch64 {
                                 // Re-check under the lock: a racing CLONE_VM thread
                                 // may have mapped this address between the walk and
                                 // here; mapping again would orphan the winner's page.
-                                if unsafe { PageTableWalker::walk(self.pgd, addr as u64) }.is_some() {
+                                if { PageTableWalker::walk(self.pgd, addr as u64) }.is_some() {
                                     drop(_pte_guard);
                                     crate::mm::page_alloc::free_page(phys_addr);
                                 } else {
@@ -25603,14 +25609,14 @@ pub mod aarch64 {
                     }
 
                     Ok(new_brk)
-                } }
+                }
 
             // INV-ARCH-MM-OPS-5 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
                 /// Unmap physical pages in specified range (PTE teardown under
                 /// PTE_MODIFY_LOCK; twin protocol)
-                pub(crate) fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+                pub(crate) fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError>  {
 
                     // Serialize against fork's table walk and COW faults (per-mm PTE
                     // lock; other mms' writers proceed concurrently).
@@ -25621,7 +25627,7 @@ pub mod aarch64 {
                     while addr < end {
                         // SAFETY: self.pgd is a valid root PPN and addr is
                         // page-aligned inside the range being unmapped.
-                        let leaf = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
+                        let leaf = { PageTableWalker::walk(self.pgd, addr as u64) };
 
                         let Some((ppn_val, pte_bits)) = leaf else {
                             addr += PAGE_SIZE_USIZE;
@@ -25648,7 +25654,7 @@ pub mod aarch64 {
                                 });
                             if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
                                 // SAFETY: verified present user leaf.
-                                unsafe { self.clear_pte(addr as u64); }
+                                { self.clear_pte(addr as u64); }
                                 addr += PAGE_SIZE_USIZE;
                                 continue;
                             }
@@ -25680,7 +25686,7 @@ pub mod aarch64 {
                             }
                         }
                         // SAFETY: verified present user leaf.
-                        unsafe {
+                        {
                             self.clear_pte(addr as u64);
                         }
                         // RSS accounting: one resident page leaves this address space.
@@ -25692,13 +25698,13 @@ pub mod aarch64 {
                     // Full local flush + remote shootdown (twin protocol: permission
                     // and mapping changes on a live mm require all-PE invalidation).
                     // SAFETY: translations were repaired above.
-                    unsafe {
+                    {
                         crate::arch::aarch64::mm::asid::flush_tlb_all();
                     }
                     crate::arch::ipi::flush_tlb_others();
 
                     Ok(())
-                } }
+                }
 
             // INV-ARCH-MM-OPS-4 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25707,7 +25713,7 @@ pub mod aarch64 {
                 /// VMA ranges inherited writable, everything else downgraded in BOTH
                 /// parent and child; one vma_read guard spans the exempt scan, the
                 /// PTE copy and the VMA snapshot — R-WRITESTORM-3).
-                pub fn fork(&self) -> Result<MmStruct, MapError>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+                pub fn fork(&self) -> Result<MmStruct, MapError>  {
 
                     let parent_vma_guard = self.vma_read();
 
@@ -25726,7 +25732,7 @@ pub mod aarch64 {
                     // Per-mm section (split mode; riscv64 twin comment): the walk
                     // mutates only THIS mm's tables and the child's unpublished ones.
                     let _pte_guard = pte_lock_for(self).lock_irqsave();
-                    let new_root_ppn = unsafe {
+                    let new_root_ppn = {
                         copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
                     };
                     drop(_pte_guard);
@@ -25734,7 +25740,7 @@ pub mod aarch64 {
                     // SAFETY: new_root_ppn comes from copy_page_table_cow — a valid,
                     // freshly allocated root. space_type and brk are valid by
                     // construction from the current address space.
-                    let new_space = unsafe {
+                    let new_space = {
                         MmStruct::new_shared(
                             new_root_ppn,
                             self.space_type(),
@@ -25826,7 +25832,7 @@ pub mod aarch64 {
                     new_space.add_rss(self.rss());
 
                     Ok(new_space)
-                } }
+                }
             }
         }
 
@@ -25860,14 +25866,14 @@ pub mod aarch64 {
             ///
             /// # Safety
             /// root_ppn must be a valid user root.
-            pub  fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub  fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool  {
 
                 if root_ppn == root_page_table_ppn() {
                     // Kernel-root callers route through the kernel mapping path
                     return map_kernel_page_noflush(virt.bits(), phys.bits(), flags);
                 }
                 crate::arch::aarch64::mm::mm_ops::map_user_page(root_ppn, virt, phys, flags)
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-2 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25876,16 +25882,16 @@ pub mod aarch64 {
             ///
             /// # Safety
             /// Kernel mapping context.
-            pub  fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64)  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub  fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64)  {
 
-                unsafe {
+                {
                     // Identity mappings only make sense for the low half on aarch64
                     // (TTBR0); the kernel builds them in the TTBR1 view at the
                     // aliased VA instead. Stage-2 refines if a consumer appears.
                     let alias = MMIO_ALIAS_BASE as u64 + virt.bits();
                     map_kernel_page_noflush(alias, phys.bits(), flags);
                 }
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-3 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25894,7 +25900,7 @@ pub mod aarch64 {
             /// (phys [0, 1GB) at MMIO_ALIAS_BASE) plus the ECAM window (phys
             /// [PCIE_ECAM_BASE, +PCIE_ECAM_SIZE) at ECAM_ALIAS_BASE), with
             /// Device-nGnRE attributes.
-            pub fn setup_device_mappings()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn setup_device_mappings()  {
 
                 {
                     // Device windows as (first phys, alias VA base, total size); both
@@ -25943,14 +25949,14 @@ pub mod aarch64 {
                     }
                     crate::arch::cpu::local_flush_tlb_all();
                 }
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-4 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
             /// Build the linear mapping over the memblock regions (called from the
             /// generic boot path with the DTB-parsed regions)
-            pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion])  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion])  {
 
                 // SAFETY: single-CPU boot section; no concurrent reader exists.
                 unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
@@ -25980,7 +25986,7 @@ pub mod aarch64 {
 
                     crate::arch::cpu::local_flush_tlb_all();
                 }
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-5 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -26013,7 +26019,7 @@ pub mod aarch64 {
             /// first schedule needs no extra TTBR0 write), and broadcast the TLB
             /// invalidation so cores that walked through the window as secondaries
             /// drop their cached low-VA translations too.
-            pub fn teardown_early_identity_map()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn teardown_early_identity_map()  {
 
                 // 1. Kill the table contents: L0[0] (the [0, 512GB) subtree
                 //    pointer — the whole identity window) and both L1 blocks
@@ -26064,7 +26070,7 @@ pub mod aarch64 {
                         options(nostack, preserves_flags)
                     );
                 }
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-6 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -26074,7 +26080,7 @@ pub mod aarch64 {
             /// Called from rust_main AFTER the boot.S early tables brought us into
             /// the high half. Installs the full linear map (from the memblock
             /// regions), the device windows and the fixmap.
-            pub fn init()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn init()  {
 
                 unsafe {
                     // FIRST: adopt boot.S's early TTBR1 root so every mapping built
@@ -26094,7 +26100,7 @@ pub mod aarch64 {
 
                     MMU_INITIALIZED.store(true, Ordering::Release);
                 }
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-7 (collected 2026-11-27): static/const moved verbatim from aarch64/mm/mmu_init.rs
 
@@ -26120,7 +26126,7 @@ pub mod aarch64 {
             ///
             /// # Safety
             /// Early-boot single-threaded context, or PTE_MODIFY_LOCK held later.
-            pub fn alloc_page_table() -> Option<u64>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn alloc_page_table() -> Option<u64>  {
 
                 match get_alloc_stage() {
                     AllocStage::Early | AllocStage::Fixmap => {
@@ -26151,7 +26157,7 @@ pub mod aarch64 {
                                 }
                             };
                             // SAFETY: KERNEL_MAP is set by boot.S before rust_main.
-                            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                            let offset = { KERNEL_MAP.va_kernel_pa_offset } as u64;
                             Some(ptr.wrapping_sub(offset))
                         }
                     }
@@ -26178,7 +26184,7 @@ pub mod aarch64 {
                         Some(phys as u64)
                     }
                 }
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-10 (collected 2026-11-27): static/const moved verbatim from aarch64/mm/mmu_init.rs
             #[link_section = ".bss"]
@@ -26196,7 +26202,7 @@ pub mod aarch64 {
             /// Get the physical page number of the kernel root table
             /// (ROOT_PAGE_TABLE lives at KERNEL_LINK_ADDR; convert via the image offset)
             #[inline]
-            pub fn root_page_table_ppn() -> u64  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn root_page_table_ppn() -> u64  {
 
                 let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
                 // SAFETY: KERNEL_MAP is set by boot.S before rust_main; the offset
@@ -26204,11 +26210,11 @@ pub mod aarch64 {
                 let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
                 let root_phys = root_virt.wrapping_sub(offset);
                 root_phys / (PAGE_SIZE as u64)
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-14 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
-            pub(crate) fn adopt_boot_ttbr1()  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub(crate) fn adopt_boot_ttbr1()  {
 
                 // Copy all 512 L0 entries (all-but-511 are zero on the boot
                 // root; copying verbatim keeps the two roots identical).
@@ -26230,7 +26236,7 @@ pub mod aarch64 {
                     );
                 }
                 crate::arch::cpu::local_flush_tlb_all();
-            } }
+            }
 
             // INV-ARCH-MMU-INIT-15 (collected 2026-11-27): static/const moved verbatim from aarch64/mm/mmu_init.rs
 
@@ -26284,11 +26290,11 @@ pub mod aarch64 {
 
             /// Get the physical address mapped at a user virtual address
             /// (diagnostics; 4-level user-table walk, block leaves folded)
-            pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64>  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64>  {
 
                 // SAFETY: read-only walk on a valid root.
-                unsafe { PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << PAGE_SHIFT) }
-            } }
+                { PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << PAGE_SHIFT) }
+            }
 
             // INV-ARCH-PAGE-FAULT-2 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -26305,7 +26311,7 @@ pub mod aarch64 {
                 addr_space: &AddressSpace,
                 fault_addr: VirtAddr,
                 flags: u32,
-            ) -> MmFaultResult  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            ) -> MmFaultResult  {
 
                 use crate::mm::page::VirtAddr as PageVirtAddr;
 
@@ -26315,7 +26321,7 @@ pub mod aarch64 {
                 // Already-mapped check (lock-free; the PROT_NONE marker arm runs in
                 // the branch below — markers count as mapped leaves).
                 // SAFETY: read-only walk on the mm's root.
-                let already_mapped = unsafe {
+                let already_mapped = {
                     PageTableWalker::walk(root_ppn, fault_addr.bits()).is_some()
                 };
 
@@ -26336,7 +26342,7 @@ pub mod aarch64 {
                     // history (the marker's HW denial raised this fault; the VMA
                     // is the authority now).
                     // SAFETY: read-only walk on the mm's root.
-                    if let Some((_ppn, raw)) = unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) } {
+                    if let Some((_ppn, raw)) = { PageTableWalker::walk(root_ppn, fault_addr.bits()) } {
                         if crate::arch::aarch64::mm::mm_ops::is_protnone_marker(raw) {
                             return protnone_represent(addr_space, root_ppn, fault_addr, flags);
                         }
@@ -26344,7 +26350,7 @@ pub mod aarch64 {
 
                     // COW check first (write fault on an RO+COW leaf)
                     // SAFETY: read-only walk.
-                    if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+                    if is_write && { is_cow_page(root_ppn, fault_addr) } {
                         crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
                         return MmFaultResult::CowPending;
                     }
@@ -26352,7 +26358,7 @@ pub mod aarch64 {
                     // Permission check against the leaf's software bits
                     // SAFETY: read-only walk.
                     if let Some((has_read, has_write, has_exec, pte_is_user)) =
-                        unsafe { check_pte_permissions(root_ppn, fault_addr) }
+                        { check_pte_permissions(root_ppn, fault_addr) }
                     {
                         let perm_ok = (!is_write || has_write)
                             && (!is_read || has_read)
@@ -26362,7 +26368,7 @@ pub mod aarch64 {
                             // Permissions fine (e.g. AF-clear style refault): flush
                             // and retry.
                             // SAFETY: translation unchanged; drop any stale entry.
-                            unsafe { crate::arch::aarch64::mm::asid::flush_tlb_page(fault_addr.bits() as usize, 0) };
+                            { crate::arch::aarch64::mm::asid::flush_tlb_page(fault_addr.bits() as usize, 0) };
                             return MmFaultResult::Handled;
                         }
                     }
@@ -26484,7 +26490,7 @@ pub mod aarch64 {
                                     );
                                     // SAFETY: page_ptr covers PAGE_SIZE bytes; the
                                     // file was resolved from the fd table.
-                                    let bytes_read = unsafe {
+                                    let bytes_read = {
                                         file.read_at(
                                             file_offset as u64,
                                             page_ptr,
@@ -26531,7 +26537,7 @@ pub mod aarch64 {
                 // round-6 MED), with the R7-C3 re-check (CLONE_VM double-fault race).
                 let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
                 // SAFETY: read-only walk under the lock.
-                if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
+                if { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
                     drop(_pte_guard);
                     // Lost the race: free our exclusively-owned page; retry sees the
                     // winner's mapping (Handled — never AlreadyMapped, which the trap
@@ -26540,7 +26546,7 @@ pub mod aarch64 {
                     return MmFaultResult::Handled;
                 }
                 // SAFETY: valid root, page-aligned fault address, owned filled page.
-                unsafe {
+                {
                     if !map_user_page(root_ppn, fault_addr, phys_addr, pte_flags) {
                         // PT allocation failure: release the data page, deliver OOM.
                         crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
@@ -26614,7 +26620,7 @@ pub mod aarch64 {
                 addr_space.add_rss(1);
 
                 MmFaultResult::Handled
-            } }
+            }
 
             // INV-ARCH-PAGE-FAULT-3 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -26630,7 +26636,7 @@ pub mod aarch64 {
                 root_ppn: u64,
                 fault_addr: VirtAddr,
                 flags: u32,
-            ) -> MmFaultResult  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            ) -> MmFaultResult  {
 
                 use crate::mm::page::VirtAddr as PageVirtAddr;
 
@@ -26674,7 +26680,7 @@ pub mod aarch64 {
                 // lock-free walk and the section).
                 let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
                 // SAFETY: read-only walk on the mm's root.
-                let Some((_ppn, now)) = (unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }) else {
+                let Some((_ppn, now)) = ({ PageTableWalker::walk(root_ppn, fault_addr.bits()) }) else {
                     return MmFaultResult::PermissionDenied;
                 };
                 if !crate::arch::aarch64::mm::mm_ops::is_protnone_marker(now) {
@@ -26712,7 +26718,7 @@ pub mod aarch64 {
                     return MmFaultResult::Handled;
                 }
                 MmFaultResult::PermissionDenied
-            } }
+            }
 
             // INV-ARCH-PAGE-FAULT-4 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -26724,7 +26730,7 @@ pub mod aarch64 {
                 fault_addr: VirtAddr,
                 flags: u32,
                 root_ppn: u64,
-            ) -> MmFaultResult  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            ) -> MmFaultResult  {
 
                 use crate::mm::page::VirtAddr as PageVirtAddr;
                 use crate::mm::page::PAGE_SIZE as MM_PAGE_SIZE;
@@ -26827,7 +26833,7 @@ pub mod aarch64 {
                 // sibling that won the race.
                 let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
                 // SAFETY: read-only walk under the lock.
-                if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
+                if { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
                     drop(_pte_guard);
                     // Lost the race: free our exclusively-owned page; the next entry
                     // sees the winner's mapping (Handled, not AlreadyMapped — the
@@ -26836,7 +26842,7 @@ pub mod aarch64 {
                     return MmFaultResult::Handled;
                 }
                 // SAFETY: root valid, page-aligned address, owned zeroed page.
-                unsafe {
+                {
                     if !map_user_page(root_ppn, fault_addr, phys_addr, pte_flags) {
                         // PT allocation failure: free the data page, deliver OOM
                         // (trap layer SIGKILLs the user task; twin policy).
@@ -26869,7 +26875,7 @@ pub mod aarch64 {
                 addr_space.add_rss(1);
 
                 MmFaultResult::Handled
-            } }
+            }
         }
 
         pub mod pagetable {
@@ -26889,7 +26895,7 @@ pub mod aarch64 {
             /// read from TTBR0_EL1[63:48] (the TCR_EL1.A1=0 tag source), the root
             /// from TTBR0_EL1[47:1] — not CONTEXTIDR_EL1, which is a trace/debug
             /// register and does not drive TLB tags.
-            pub fn get_satp() -> Satp  { unsafe { // blanket: the former unsafe-fn contract, now explicit
+            pub fn get_satp() -> Satp  {
 
                 let ttbr0: u64;
                 // SAFETY: reading TTBR0_EL1 is a pure system-register read, always
@@ -26903,7 +26909,7 @@ pub mod aarch64 {
                 }
                 let asid = ((ttbr0 >> 48) & 0xFFFF) as u16;
                 Satp::long((ttbr0 & 0x0000_FFFF_FFFF_F000) >> 12, asid)
-            } }
+            }
         }
         }
 }
