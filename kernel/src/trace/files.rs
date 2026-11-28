@@ -564,6 +564,21 @@ pub(crate) fn apply_event_token(token: &str) -> usize {
 /// Rux's tracing_on starts off (its events-off default), so the boot
 /// parameter flips it to reach the same net effect.
 pub fn init_from_cmdline() {
+    // Debug-build default (user directive 2026-11-28: a debug boot
+    // localizes with zero flags): the DEBUG=1 profile (build/Makefile
+    // DEBUG_FEAT) compiles the debug-trace-all feature, and that build
+    // arms EVERY event and turns tracing_on on before the boot
+    // parameter is parsed — an explicit trace_event= can still narrow
+    // the set afterwards ('!' tokens disarm). Release builds keep the
+    // reference's events-off default and this block compiles out.
+    #[cfg(feature = "debug-trace-all")]
+    {
+        for e in trace::EVENTS.iter() {
+            e.enabled
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+        trace::set_tracing_on(true);
+    }
     let Some(spec) = crate::cmdline::get_param("trace_event") else {
         return;
     };
