@@ -24,7 +24,11 @@ const O_WCT: u32 = 0o1 | 0o100 | 0o1000;
 pub fn test_vfs_edges() {
     crate::tests::test_group_start("vfs: path edges");
 
-    // scratch dir
+    // scratch dir — fs_io removes /rux-cov at ITS end and group order
+    // is not a contract between test files, so establish the full chain
+    // here (mkdir is not recursive; create the parent first, ignore
+    // EEXIST from either).
+    let _ = crate::fs::vfs::file_mkdir("/rux-cov", 0o755);
     let _ = file_mkdir(DIR, 0o755);
 
     // ---- dot components (DIVERGENCE PIN, observed 2026-11-28) ------------
