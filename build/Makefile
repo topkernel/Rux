@@ -52,17 +52,43 @@ PLATFORM := $(shell $(BUILD_DIR)/current-platform.sh)
 # of every standard build.
 comma := ,
 LOCKOWNER_FEAT := $(if $(LOCKOWNER),$(comma)dfx-lock-owner,)
+# DEBUG=1 — the debug build profile (2026-11-28 drill lane): ONE flag that
+# turns on every debug facility the tree offers as a compile-time feature,
+# for the "boot the debug build and localize a live problem with zero new
+# code" workflow. The release default stays OFF (the 2026-11-19 directive:
+# only measured-zero code ships in every build). The profile is:
+#
+#   dfx-lock-owner   RawSpinlock holder stamps (owner cpu + acquirer
+#                    pid/site/jiffies): the deadlock_warn path and the
+#                    GRQ crime-scene dump name the HOLDER task, not just
+#                    the lock word.
+#   dfx-taskdump-bt  per-task symbolized stack backtrace lines in the
+#                    taskdump family (sysrq-t, hung-task, watchdog).
+#   dfx-grq-wedge    the synthetic GRQ wedge injector (`grqwedge=1` on
+#                    the cmdline): one cpu spins in schedule()'s critical
+#                    section so the holder-naming rig can be PROVED to
+#                    name holder + waiters. Inert unless the boot param
+#                    arms it.
+#
+# Runtime facilities need no flag and are always compiled: tracefs + 109
+# tracepoints, khungtaskd, softlockup, kallsyms symbolization, sysrq,
+# schedstats (sysctl), pstore, oops/taint. Deliberately NOT in the
+# profile: dfx-futex-trace (one uart line per futex op — a flood class
+# that contaminates measurement and log-reading; enable it alone when
+# hunting a specific futex-protocol bug), cov-dump (coverage vehicle, needs
+# -C instrument-coverage), dfx-aa64-uaccess-selftest (aarch64 bring-up).
+DEBUG_FEAT := $(if $(DEBUG),$(comma)dfx-lock-owner$(comma)dfx-taskdump-bt$(comma)dfx-grq-wedge,)
 ifeq ($(PLATFORM),x86_64)
 CARGO_TARGET := x86_64-unknown-none
-CARGO_FEATURE_FLAGS := --no-default-features --features x86_64$(LOCKOWNER_FEAT)
+CARGO_FEATURE_FLAGS := --no-default-features --features x86_64$(LOCKOWNER_FEAT)$(DEBUG_FEAT)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else ifeq ($(PLATFORM),aarch64)
 CARGO_TARGET := aarch64-unknown-none
-CARGO_FEATURE_FLAGS := --no-default-features --features aarch64$(LOCKOWNER_FEAT)
+CARGO_FEATURE_FLAGS := --no-default-features --features aarch64$(LOCKOWNER_FEAT)$(DEBUG_FEAT)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else ifeq ($(PLATFORM),riscv64)
 CARGO_TARGET := riscv64gc-unknown-none-elf
-CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),dfx-lock-owner,)
+CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),dfx-lock-owner,)$(DEBUG_FEAT)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else
 $(error Unsupported platform '$(PLATFORM)' — run `make menuconfig`)
