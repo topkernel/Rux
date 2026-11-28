@@ -22530,7 +22530,7 @@ pub mod aarch64 {
 
             // SAFETY: dtb_pointer is a static extern set by boot.S before
             // rust_main runs; reading it is safe once the kernel has started.
-            { dtb_pointer }
+            { unsafe { dtb_pointer } }
         }
 
         // extern declarations duplicated from aarch64/boot.rs (the original
@@ -22566,11 +22566,11 @@ pub mod aarch64 {
 
             // 1. Address space: compare-based (only repair if the wrapper already
             //    switched — the early-check site has not)
-            let prev_root = { if let Some(mm) = (*prev).address_space() {
+            let prev_root = { unsafe { if let Some(mm) = (*prev).address_space() {
                 mm.root_ppn()
             } else {
                 crate::arch::aarch64::mm::mmu_init::root_page_table_ppn()
-            } };
+            } } };
             if get_current_satp() & 0xFFFF_FFFF_FFFF != prev_root {
                 __switch_mm_linear(prev_root);
             }
@@ -22579,7 +22579,9 @@ pub mod aarch64 {
             let cpu = crate::arch::cpu_id() as usize;
             crate::sched::sched::republish_current_after_abort(cpu, prev);
             {
+            unsafe {
             crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+            }
             }
 
             // 3. `next` (smp8 orphan-race): a LIVE-published pick that aborts here
@@ -22633,7 +22635,9 @@ pub mod aarch64 {
             // Step 2: __switch_to — registers + eager FPSIMD (inside the asm).
             // WARNING: after this call all locals are INVALID (riscv64 twin note).
             {
+            unsafe {
             __switch_to(prev, next);
+            }
             }
         }
 
@@ -22659,6 +22663,7 @@ pub mod aarch64 {
             // and the shared kernel half (global, TTBR1) never thrashes. dsb ish
             // completes the inner-shareable broadcast before the caller proceeds.
 
+                unsafe {
                 core::arch::asm!(
                     "msr ttbr0_el1, {ttbr}",
                     "tlbi aside1is, {asid}",
@@ -22669,6 +22674,7 @@ pub mod aarch64 {
                     asid = in(reg) ((asid as u64) & 0xFF) << 48,
                     options(nostack)
                 );
+                }
 
         }
 
@@ -22686,7 +22692,8 @@ pub mod aarch64 {
 
             // SAFETY: TTBR0 switch with full TLB invalidation; the kernel half
             // (TTBR1) is untouched.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!(
                     "msr ttbr0_el1, {ttbr}",
                     "tlbi vmalle1",
@@ -22695,7 +22702,8 @@ pub mod aarch64 {
                     ttbr = in(reg) next_ppn << 12,
                     options(nostack)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-CONTEXT-5 (collected 2026-11-27 from aarch64/context.rs): verbatim body; callers use the safe
@@ -23003,8 +23011,10 @@ pub mod aarch64 {
 
             let daif: u64;
             // SAFETY: DAIF is a read-only view register at EL1.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack, pure));
+                }
             }
             // IRQ mask bit is bit 7 (I)
             (daif & (1 << 7)) == 0
@@ -23019,14 +23029,16 @@ pub mod aarch64 {
 
             // SAFETY: tlbi vmalle1 invalidates all TLB entries for this EL;
             // callers must have repaired the affected translations first.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!(
                     "tlbi vmalle1",
                     "dsb nsh",
                     "isb",
                     options(nostack, preserves_flags)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-3 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23037,9 +23049,11 @@ pub mod aarch64 {
         pub fn dmb()  {
 
             // SAFETY: dmb is an ordering barrier; no harmful side effects.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("dmb ish", options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-4 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23050,9 +23064,11 @@ pub mod aarch64 {
         pub fn dsb()  {
 
             // SAFETY: dsb sy is a completion barrier; no harmful side effects.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("dsb sy", options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-5 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23063,9 +23079,11 @@ pub mod aarch64 {
         pub fn isb()  {
 
             // SAFETY: isb serializes instruction fetch; no harmful side effects.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-6 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23076,9 +23094,11 @@ pub mod aarch64 {
         pub fn sev()  {
 
             // SAFETY: sev is a hint broadcast; no side effects on this core.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("sev", options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-7 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23089,9 +23109,11 @@ pub mod aarch64 {
         pub fn wfe()  {
 
             // SAFETY: wfe waits for an event; harmless hint instruction.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("wfe", options(nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-8 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23104,9 +23126,11 @@ pub mod aarch64 {
             // SAFETY: wfi halts the core until the next interrupt; no side effects
             // beyond waiting. nomem intentionally omitted (ordering matters
             // against memory operations that set up the wake condition).
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("wfi", options(nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-9 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23120,8 +23144,10 @@ pub mod aarch64 {
             crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: msr daifset atomically sets the DAIF mask bits; safe at any
             /// time.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("msr daifset, #0xf", options(nomem, nostack, preserves_flags));
+                }
             }
         }
 
@@ -23136,8 +23162,10 @@ pub mod aarch64 {
             crate::debug::syscost::irq_note_on();
             // SAFETY: msr daifclr atomically clears the DAIF mask bits; safe at
             /// any time.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("msr daifclr, #0xf", options(nomem, nostack, preserves_flags));
+                }
             }
         }
 
@@ -23150,8 +23178,10 @@ pub mod aarch64 {
 
             // SAFETY: CNTVCT_EL0 is a read-only monotonic counter.
             let val: u64;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("mrs {}, cntvct_el0", out(reg) val, options(nomem, nostack, pure));
+                }
             }
             val
         }
@@ -23166,8 +23196,10 @@ pub mod aarch64 {
 
             // SAFETY: CNTFRQ_EL0 is a read-only register; reading is always safe.
             let freq: u64;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq, options(nomem, nostack, pure));
+                }
             }
             freq
         }
@@ -23180,10 +23212,12 @@ pub mod aarch64 {
         pub fn set_thread_id(tid: u64)  {
 
             // SAFETY: writing TPIDR_EL1 stores the kernel thread pointer; the
-            /// value is only ever read back by get_thread_id()/assembly.
             unsafe {
+            /// value is only ever read back by get_thread_id()/assembly.
+
                 core::arch::asm!("msr tpidr_el1, {}", in(reg) tid, options(nomem, nostack));
             }
+
         }
 
         // INV-ARCH-CPU-14 (collected 2026-11-27 from aarch64/cpu.rs): verbatim body; callers use the safe
@@ -23195,8 +23229,10 @@ pub mod aarch64 {
 
             // SAFETY: reading TPIDR_EL1 is a pure system-register read.
             let tp: u64;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("mrs {}, tpidr_el1", out(reg) tp, options(nomem, nostack, pure));
+                }
             }
             tp
         }
@@ -23226,7 +23262,7 @@ pub mod aarch64 {
             loop {
                 // SAFETY: WFI halts the core until an interrupt; this CPU was
                 // told to stop, so parking forever is the intended behavior.
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+                { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) } };
             }
         }
 
@@ -23246,28 +23282,36 @@ pub mod aarch64 {
                 let _lock = CSD_LOCKS[cpu].lock_irqsave();
                 // SAFETY: under CSD_LOCKS[cpu]; detaching and re-initializing
                 // the queue head is exclusive to the lock holder.
-                unsafe {
+                {
+                    unsafe {
                     if CSD_QUEUES[cpu].is_empty() {
                         return;
                     }
+                    }
+                    unsafe {
                     head = CSD_QUEUES[cpu].next;
+                    }
+                    unsafe {
                     CSD_QUEUES[cpu].init();
+                    }
                 }
             }
 
             // SAFETY: queue_ptr is a stable static address; the detached list
             // is exclusively ours until completion; senders spin on done until
             // after we store true, so no Box is freed under us.
-            let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
+            let queue_ptr = { unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead } };
             let mut node = head;
             while node != queue_ptr {
-                unsafe {
+                {
                     let csd = node as *mut CallSingleData;
-                    let next = (*node).next;
-                    let f = (*csd).func;
-                    let arg = (*csd).info;
+                    let next = unsafe { (*node).next };
+                    let f = unsafe { (*csd).func };
+                    let arg = unsafe { (*csd).info };
                     f(arg);
+                    unsafe {
                     (*csd).done.store(true, Ordering::Release);
+                    }
                     node = next;
                 }
             }
@@ -23308,19 +23352,35 @@ pub mod aarch64 {
                 // SAFETY: we hold CSD_LOCKS[target], serializing all mutations
                 // of CSD_QUEUES[target]; csd is Box-pinned and stays alive until
                 // done is observed.
-                unsafe {
+                {
                     csd.list.init();
+                    unsafe {
                     if CSD_QUEUES[target].is_empty() {
+                        {
                         CSD_QUEUES[target].next = &mut csd.list as *mut _;
+                        }
+                        {
                         CSD_QUEUES[target].prev = &mut csd.list as *mut _;
+                        }
+                        {
                         csd.list.next = &mut CSD_QUEUES[target] as *mut _;
+                        }
+                        {
                         csd.list.prev = &mut CSD_QUEUES[target] as *mut _;
+                        }
                     } else {
-                        let tail = CSD_QUEUES[target].prev;
+                        let tail = { CSD_QUEUES[target].prev };
+                        {
                         (*tail).next = &mut csd.list as *mut _;
+                        }
                         csd.list.prev = tail;
+                        {
                         csd.list.next = &mut CSD_QUEUES[target] as *mut _;
+                        }
+                        {
                         CSD_QUEUES[target].prev = &mut csd.list as *mut _;
+                        }
+                    }
                     }
                 }
             }
@@ -23341,8 +23401,10 @@ pub mod aarch64 {
             for i in 0..MAX_CPUS {
                 // SAFETY: CSD_QUEUES is a static mutable array touched once
                 // during single-threaded boot init, before any IPI can arrive.
-                unsafe {
+                {
+                    unsafe {
                     CSD_QUEUES[i].init();
+                    }
                 }
             }
         }
@@ -23372,9 +23434,11 @@ pub mod aarch64 {
                 if idx < NR_IPI_TYPES {
                     // SAFETY: handler table is fully initialized in init()
                     // before SGIs can be delivered (write-once, see request_ipi).
-                    unsafe {
+                    {
+                        unsafe {
                         if let Some(handler) = IPI_HANDLERS[idx] {
                             handler();
+                        }
                         }
                     }
                 }
@@ -23393,11 +23457,15 @@ pub mod aarch64 {
             // during boot init (before SGIs can arrive: the trap dispatch path
             // that calls handle_software_ipi only runs with DAIF unmasked,
             // which single-threaded boot has not done yet at ipi::init time).
-            unsafe {
+            {
+                unsafe {
                 if IPI_HANDLERS[idx].is_some() {
                     panic!("IPI handler already registered for {:?}", ipi_type);
                 }
+                }
+                unsafe {
                 IPI_HANDLERS[idx] = Some(handler);
+                }
             }
         }
     }
@@ -23426,7 +23494,7 @@ pub mod aarch64 {
             // SAFETY: caller provides a valid Task pointer; fork_pt_regs()
             // returns the pointer stored by copy_thread, valid for the task
             // lifetime.
-            unsafe { (*task).fork_pt_regs() }
+            { unsafe { (*task).fork_pt_regs() } }
         }
 
         // INV-ARCH-PROCESS-2 (collected 2026-11-27 from aarch64/process.rs): verbatim body; callers use the safe
@@ -23460,8 +23528,10 @@ pub mod aarch64 {
                 }
                 // SAFETY: writing our own user TLS register to 0; no side
                 // effects beyond the register value.
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!("msr tpidr_el0, xzr", options(nostack, preserves_flags));
+                    }
                 }
             }
         }
@@ -23491,14 +23561,14 @@ pub mod aarch64 {
             let cpu = cpu_id();
             if cpu < MAX_CPUS {
                 // SAFETY: bounds-checked index into the static per-CPU array.
-                unsafe {
-                    let stack_base = PER_CPU_INTR_STACKS[cpu].as_ptr() as usize;
+                {
+                    let stack_base = unsafe { PER_CPU_INTR_STACKS[cpu].as_ptr() as usize };
                     stack_base + INTR_STACK_SIZE
                 }
             } else {
                 // SAFETY: PER_CPU_INTR_STACKS[0] always exists (MAX_CPUS >= 1).
-                unsafe {
-                    let stack_base = PER_CPU_INTR_STACKS[0].as_ptr() as usize;
+                {
+                    let stack_base = unsafe { PER_CPU_INTR_STACKS[0].as_ptr() as usize };
                     stack_base + INTR_STACK_SIZE
                 }
             }
@@ -23511,12 +23581,14 @@ pub mod aarch64 {
         pub fn init_per_cpu_intr_stacks()  {
 
             // SAFETY: only called once during early boot before any traps occur.
-            unsafe {
+
                 extern "C" {
                     static mut __per_cpu_intr_stacks_base: usize;
                 }
+                unsafe {
                 __per_cpu_intr_stacks_base = PER_CPU_INTR_STACKS.as_ptr() as usize;
-            }
+                }
+
         }
 
         // INV-ARCH-SMP-3 (collected 2026-11-27): static/const moved verbatim from aarch64/smp.rs
@@ -23582,7 +23654,8 @@ pub mod aarch64 {
             // 1. Publish the boot core's live MMU state for the secondary stub.
             // SAFETY: plain EL1 system-register reads, no side effects.
             let (ttbr1, tcr, mair): (u64, u64, u64);
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "mrs {}, ttbr1_el1",
                     "mrs {}, tcr_el1",
@@ -23592,6 +23665,7 @@ pub mod aarch64 {
                     out(reg) mair,
                     options(nomem, nostack)
                 );
+                }
             }
             BOOT_HART_TTBR.store(ttbr1, Ordering::Release);
             BOOT_HART_TCR.store(tcr, Ordering::Release);
@@ -23613,7 +23687,7 @@ pub mod aarch64 {
             //    off, so hand it the physical address (same VA-PA delta boot.S
             //    published in KERNEL_MAP).
             // SAFETY: KERNEL_MAP is populated by boot.S before rust_main runs.
-            let va_kernel_pa_offset = unsafe { crate::arch::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset };
+            let va_kernel_pa_offset = { unsafe { crate::arch::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } };
             // Two-step cast: the fn item has type `unsafe extern "C" fn()` — cast
             // to its own pointer type first (a safe-fn pointer cast is rejected),
             // then fn-pointer → usize is a primitive cast.
@@ -23635,7 +23709,7 @@ pub mod aarch64 {
                 // dsb before the firmware call so the published MMU state and the
                 // .bss stacks are visible to the waking core.
                 // SAFETY: memory barrier, no side effects.
-                unsafe { core::arch::asm!("dsb sy", options(nomem, nostack)) };
+                { unsafe { core::arch::asm!("dsb sy", options(nomem, nostack)) } };
                 let ret = psci_call(
                     CPU_ON_FN.load(Ordering::Acquire) as u64,
                     index_to_mpidr(cpu),
@@ -23732,7 +23806,8 @@ pub mod aarch64 {
                 // SAFETY: HVC #0 at EL1 is the PSCI conduit (firmware call); the
                 // register contract is the PSCI 0.2 calling convention. The call
                 // clobbers x0-x3 (return + returns-in-x1/x2/x3 for CPU_ON none).
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "hvc #0",
                         inlateout("x0") fnid => ret,
@@ -23744,10 +23819,12 @@ pub mod aarch64 {
                         lateout("x3") _,
                         options(nostack)
                     );
+                    }
                 }
             } else {
                 // SAFETY: SMC #0 conduit variant (same calling convention).
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "smc #0",
                         inlateout("x0") fnid => ret,
@@ -23759,6 +23836,7 @@ pub mod aarch64 {
                         lateout("x3") _,
                         options(nostack)
                     );
+                    }
                 }
             }
             ret
@@ -23773,11 +23851,13 @@ pub mod aarch64 {
 
             // SAFETY: MPIDR_EL1 is a read-only identification register accessible
             // at EL1; the read has no side effects.
-            unsafe {
+
                 let v: u64;
+                unsafe {
                 core::arch::asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack, pure));
+                }
                 v
-            }
+
         }
 
         // INV-ARCH-SMP-12 (collected 2026-11-27 from aarch64/smp.rs): verbatim body; callers use the safe
@@ -23797,9 +23877,11 @@ pub mod aarch64 {
             // model — reference kernel arch/arm64's current_thread_info()-class
             // read (__my_cpu_offset). Pure register read; the ti_cpu deref is
             // the one raw edge below.
-            let tp: u64 = unsafe {
+            let tp: u64 = {
                 let v;
+                unsafe {
                 core::arch::asm!("mrs {}, tpidr_el1", out(reg) v, options(nomem, nostack, pure));
+                }
                 v
             };
 
@@ -23811,7 +23893,7 @@ pub mod aarch64 {
                     let cpu_ptr = (tp as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
                     // SAFETY: tp was set by the entry path to a live Task; the
                     // TI_CPU offset read is a relaxed atomic load.
-                    let raw = unsafe { (*cpu_ptr).load(Ordering::Relaxed) };
+                    let raw = { unsafe { (*cpu_ptr).load(Ordering::Relaxed) } };
                     // Defensive: clamp negative or out-of-range (see the riscv64
                     // twin — initial -1 sign-extends to usize::MAX)
                     if raw < 0 || (raw as usize) >= crate::arch::aarch64::MAX_CPUS {
@@ -23863,8 +23945,9 @@ pub mod aarch64 {
             // [u64; 64] array — the one edge is the asm block).
             fn fpu_save(&mut self)  {
 
-                unsafe {
+                {
                     let dst = self.fpu.as_mut_ptr();
+                    unsafe {
                     core::arch::asm!(
                         // Kernel codegen is general-regs-only (see
                         // .cargo/config.toml); this q-register block re-enables
@@ -23893,6 +23976,7 @@ pub mod aarch64 {
                         fpsr = out(reg) self.fpsr,
                         options(nostack)
                     );
+                    }
                 }
                 self.fs = 3; // DIRTY
             }
@@ -23906,10 +23990,11 @@ pub mod aarch64 {
             // path. Source: self.fpu (typed array).
             fn fpu_restore(&self)  {
 
-                unsafe {
+
                     let src = self.fpu.as_ptr();
                     let fpcr = self.fpcr as u64;
                     let fpsr = self.fpsr as u64;
+                    unsafe {
                     core::arch::asm!(
                         // general-regs-only override (see fpu_save)
                         ".arch armv8-a+fp+simd",
@@ -23936,7 +24021,8 @@ pub mod aarch64 {
                         fpsr = in(reg) fpsr,
                         options(nostack, readonly)
                     );
-                }
+                    }
+
             }
         }
     }
@@ -23961,13 +24047,15 @@ pub mod aarch64 {
         pub fn disable_timer_interrupt()  {
 
             // SAFETY: masking the virtual timer; no side effects beyond the mask.
-            unsafe {
+
+                unsafe {
                 asm!(
                     "msr cntv_ctl_el0, {v}",
                     v = in(reg) 3u64, // enable=1, imask=1 (stay armed, masked)
                     options(nomem, nostack)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-TRAP-2 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
@@ -23990,12 +24078,14 @@ pub mod aarch64 {
             // 3. Unmask the timer (enable=1, imask=0).
             // SAFETY: writing CNTV_CTL_EL0 arms the per-cpu virtual timer; the
             // only side effect is the future PPI interrupt.
-            unsafe {
+            {
+                unsafe {
                 asm!(
                     "msr cntv_ctl_el0, {v}",
                     v = in(reg) 1u64,
                     options(nomem, nostack)
                 );
+                }
             }
         }
 
@@ -24010,13 +24100,15 @@ pub mod aarch64 {
             }
             // SAFETY: writing VBAR_EL1 installs the exception base; the table is
             // 2KB-aligned by the asm. ISB makes the new vectors effective.
-            unsafe {
+            {
+                unsafe {
                 asm!(
                     "msr vbar_el1, {v}",
                     "isb",
                     v = in(reg) aarch64_vector_table as u64,
                     options(nostack)
                 );
+                }
             }
         }
 
@@ -24070,7 +24162,7 @@ pub mod aarch64 {
             loop {
                 // SAFETY: wfi halts the core until an interrupt; safe in a dead
                 // task's final spin.
-                unsafe { core::arch::asm!("wfi") };
+                { unsafe { core::arch::asm!("wfi") } };
             }
         }
 
@@ -24171,7 +24263,7 @@ pub mod aarch64 {
             // SAFETY: regs points at the frame trap.S just pushed; it stays
             // valid across the dispatch (the caller asm restores from it after
             // we return, possibly on a freshly thawed stack after schedule()).
-            let regs_ref = unsafe { &mut *regs };
+            let regs_ref = { unsafe { &mut *regs } };
             let esr = regs_ref.esr;
             let cause = Cause::from_cause(esr);
 
@@ -24195,7 +24287,7 @@ pub mod aarch64 {
                 if regs_ref.pc >= lo && regs_ref.pc < hi {
                     // WFI = 0xD503207F, WFE = 0xD503205F
                     // SAFETY: pc is provably inside kernel text and 4-aligned.
-                    let insn = unsafe { core::ptr::read_volatile(regs_ref.pc as *const u32) };
+                    let insn = { unsafe { core::ptr::read_volatile(regs_ref.pc as *const u32) } };
                     if insn == 0xD503_207F || insn == 0xD503_205F {
                         regs_ref.pc += 4;
                     }
@@ -24334,7 +24426,8 @@ pub mod aarch64 {
 
             let (esr, elr, far, spsr, sp_el1): (u64, u64, u64, u64, u64);
             // SAFETY: pure system-register reads; safe in any exception context.
-            unsafe {
+            {
+                unsafe {
                 asm!(
                     "mrs {}, esr_el1",
                     "mrs {}, elr_el1",
@@ -24348,6 +24441,7 @@ pub mod aarch64 {
                     out(reg) sp_el1,
                     options(nomem, nostack)
                 );
+                }
             }
             crate::pr_err!(
                 "AARCH64-BAD-VECTOR: esr={:#x} elr={:#x} far={:#x} spsr={:#x} sp={:#x}",
@@ -24378,7 +24472,7 @@ pub mod aarch64 {
                 return 0;
             }
             // SAFETY: diagnostic scalar read of a live-or-stale kernel frame.
-            unsafe { core::ptr::addr_of!((*p).pc).read() }
+            { unsafe { core::ptr::addr_of!((*p).pc).read() } }
         }
 
         // INV-ARCH-TRAP-11 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
@@ -24391,11 +24485,13 @@ pub mod aarch64 {
 
             // SAFETY: pt_regs lives at the fixed offset from the task's kernel
             // stack top established by the trap entry path.
-            unsafe {
+            {
                 let task = current()?;
                 let stack_top = (*task).get_kernel_stack()? as u64;
                 let pt_regs_ptr = (stack_top - PT_REGS_SIZE as u64) as *mut PtRegs;
+                unsafe {
                 Some(&mut *pt_regs_ptr)
+                }
             }
         }
 
@@ -24509,7 +24605,7 @@ pub mod aarch64 {
             let mut dst = [0xA5u8; N];
             // SAFETY: dst is a valid stack buffer; the user source deliberately
             // faults and must land in the fixup (returns N, zero-fills dst).
-            let uncopied = unsafe { copy_from_user(dst.as_mut_ptr(), PROBE as *const u8, N) };
+            let uncopied = { copy_from_user(dst.as_mut_ptr(), PROBE as *const u8, N) };
             check(
                 uncopied == N && dst.iter().all(|&b| b == 0),
                 "copy_from_user EFAULT",
@@ -24521,7 +24617,7 @@ pub mod aarch64 {
             let src = [0x5Au8; N];
             // SAFETY: src is a valid stack buffer; the user destination
             // deliberately faults and must land in the fixup.
-            let uncopied = unsafe { copy_to_user(PROBE, src.as_ptr(), N) };
+            let uncopied = { copy_to_user(PROBE, src.as_ptr(), N) };
             check(
                 uncopied == N,
                 "copy_to_user EFAULT",
@@ -24530,7 +24626,7 @@ pub mod aarch64 {
 
             // 4. clear_user on the poisoned pointer: uncleared count.
             // SAFETY: the user destination deliberately faults into the fixup.
-            let uncleared = unsafe { clear_user(PROBE, N) };
+            let uncleared = { clear_user(PROBE, N) };
             check(
                 uncleared == N,
                 "clear_user EFAULT",
@@ -24546,15 +24642,15 @@ pub mod aarch64 {
 
             // 6. strnlen_user: 0 sentinel.
             // SAFETY: deliberately faulting user read into the fixup.
-            let slen = unsafe { strnlen_user(PROBE as *const u8, 16) };
+            let slen = { strnlen_user(PROBE as *const u8, 16) };
             check(slen == 0, "strnlen_user EFAULT", &alloc::format!("len={}", slen));
 
             // 7. get_user/put_user sized variants: None / false.
             // SAFETY: deliberately faulting user accesses into the fixup.
-            let g = unsafe { get_user(PROBE as *const u64) };
+            let g = { get_user(PROBE as *const u64) };
             check(g.is_none(), "get_user<u64> EFAULT", "expected None");
             // SAFETY: deliberately faulting user write into the fixup.
-            let p = unsafe { put_user(PROBE as *mut u64, 1u64) };
+            let p = { put_user(PROBE as *mut u64, 1u64) };
             check(!p, "put_user<u64> EFAULT", "expected false");
 
             emit(&alloc::format!(
@@ -24586,7 +24682,7 @@ pub mod aarch64 {
             while len < maxlen {
                 // SAFETY: bounded single-byte reads through the exception-table
                 // copy (get_user → copy_from_user → __aa64_copy_from_user).
-                match unsafe { get_user(str.add(len)) } {
+                match { unsafe { get_user(str.add(len)) } } {
                     Some(0) => return len + 1, // include the NUL
                     Some(_) => len += 1,
                     None => return 0,
@@ -24633,7 +24729,7 @@ pub mod aarch64 {
                 // A NUL at index 0 (empty string) is a SUCCESS returning an
                 // empty slice (twin behavior).
                 // SAFETY: single-byte user read through the exception-table copy.
-                match unsafe { get_user(from.add(i)) } {
+                match { unsafe { get_user(from.add(i)) } } {
                     Some(byte) => {
                         buf[i] = byte;
                         if byte == 0 {
@@ -24667,7 +24763,7 @@ pub mod aarch64 {
                 { copy_from_user(out.as_mut_ptr() as *mut u8, from as *const u8, size) };
             if uncopied == 0 {
                 // SAFETY: fully initialized by the copy above
-                Some(unsafe { out.assume_init() })
+                Some({ unsafe { out.assume_init() } })
             } else {
                 None
             }
@@ -24709,7 +24805,7 @@ pub mod aarch64 {
                 return n;
             }
             // SAFETY: exception-table clear (see copy_to_user).
-            unsafe { __aa64_clear_user(to, n) }
+            { unsafe { __aa64_clear_user(to, n) } }
         }
 
         // INV-ARCH-UACCESS-7 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
@@ -24734,19 +24830,21 @@ pub mod aarch64 {
                 // historically consumed the buffer even on failure, and leaving
                 // previous kernel heap contents in it is an information leak
                 // (riscv64 twin behavior).
+                {
                 unsafe {
                 core::ptr::write_bytes(to, 0, n);
+                }
                 }
                 return n;
             }
             // SAFETY: exception-table copy (see copy_to_user).
-            let uncopied = unsafe { __aa64_copy_from_user(to, from, n) };
+            let uncopied = { unsafe { __aa64_copy_from_user(to, from, n) } };
             if uncopied > 0 {
                 // Zero-fill the uncopied tail: the kernel buffer must never keep
                 // stale contents past the point the user copy reached.
                 let copied = n - uncopied;
                 // SAFETY: `copied` bytes were verifiably written; the rest is `to`'s.
-                unsafe { core::ptr::write_bytes(to.add(copied), 0, uncopied) };
+                { unsafe { core::ptr::write_bytes(to.add(copied), 0, uncopied) } };
             }
             uncopied
         }
@@ -24780,7 +24878,7 @@ pub mod aarch64 {
             }
             // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
             // and returns a short count instead of faulting the kernel.
-            unsafe { __aa64_copy_to_user(to, from, n) }
+            { unsafe { __aa64_copy_to_user(to, from, n) } }
         }
 
         // INV-ARCH-UACCESS-9 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
@@ -24800,7 +24898,7 @@ pub mod aarch64 {
             }
             // SAFETY: the ldxr/stxr core faults into the extable fixup which
             // returns the packed fault marker instead of panicking.
-            let packed = unsafe { __aa64_futex_cmpxchg_u32(uaddr, expected, new) };
+            let packed = { unsafe { __aa64_futex_cmpxchg_u32(uaddr, expected, new) } };
             if packed >> 32 != 0 {
                 None
             } else {
@@ -24944,7 +25042,7 @@ pub mod aarch64 {
             match crate::arch::aarch64::mm::mmu_init::get_alloc_stage() {
                 crate::arch::aarch64::mm::mmu_init::AllocStage::Early => {
                     // Static pools live in the image; convert via the image offset
-                    let offset = unsafe { crate::arch::aarch64::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
+                    let offset = { crate::arch::aarch64::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
                     (phys_addr.wrapping_add(offset)) as *mut PageTable
                 }
                 crate::arch::aarch64::mm::mmu_init::AllocStage::Fixmap | crate::arch::aarch64::mm::mmu_init::AllocStage::Late => {
@@ -24980,7 +25078,7 @@ pub mod aarch64 {
                 // guard above (INV-AE-PT-1). Forming the raw pointer is inert;
                 // every dereference goes through the bounds-masked accessors.
                 Some(PtTable {
-                    ptr: unsafe { crate::arch::aarch64::mm::mmu_init::get_page_table_virt(phys) },
+                    ptr: { unsafe { crate::arch::aarch64::mm::mmu_init::get_page_table_virt(phys) } },
                 })
             }
 
@@ -25002,7 +25100,7 @@ pub mod aarch64 {
             pub fn get_raw(&self, idx: usize) -> u64 {
                 // SAFETY: INV-AE-PT-1 (mapped frame) + INV-AE-PT-2 (masked index)
                 // + INV-AE-PT-3 (raw place projection, no reference formed).
-                unsafe { core::ptr::addr_of!((*self.ptr).entries[idx & 0x1FF]).read() }.bits()
+                { unsafe { core::ptr::addr_of!((*self.ptr).entries[idx & 0x1FF]).read() } }.bits()
             }
 
             /// Typed entry read (see [`Self::get_raw`]).
@@ -25017,9 +25115,11 @@ pub mod aarch64 {
                 // SAFETY: INV-AE-PT-1 (mapped frame) + INV-AE-PT-2 (masked index)
                 // + INV-AE-PT-3 (raw place projection, plain store — the
                 // publication discipline the raw walks used).
-                unsafe {
+                {
+                    unsafe {
                     core::ptr::addr_of_mut!((*self.ptr).entries[idx & 0x1FF])
                         .write(entry)
+                    }
                 };
             }
 
@@ -25053,7 +25153,7 @@ pub mod aarch64 {
             let dst = phys_to_virt(PhysAddr::new(dst_phys)).bits() as *mut u8;
             // SAFETY: INV-AE-COPY-1 — both frames are live, page-sized, and
             // non-overlapping (distinct frames); exactly PAGE_SIZE bytes each.
-            unsafe { core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize) };
+            { unsafe { core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize) } };
         }
 
         pub mod asid {
@@ -25082,7 +25182,8 @@ pub mod aarch64 {
                 // SAFETY: TTBR0 switch (root + ASID) with full invalidation. The
                 // order matches the canonical arm64 switch_mm: root write, barrier,
                 // invalidation, context-sync.
-                unsafe {
+                {
+                    unsafe {
                     asm!(
                         "msr ttbr0_el1, {t}",
                         "dsb ish",
@@ -25092,6 +25193,7 @@ pub mod aarch64 {
                         t = in(reg) ttbr0,
                         options(nostack)
                     );
+                    }
                 }
             }
 
@@ -25104,14 +25206,16 @@ pub mod aarch64 {
                 // SAFETY: full flush is the conservative kernel-halves choice
                 // (aarch64 has no separate kernel-only tlbi op at EL1 short of
                 // vmalle1; kernel mappings are global/nG=0 so this is correct).
-                unsafe {
+
+                    unsafe {
                     asm!(
                         "tlbi vmalle1is",
                         "dsb ish",
                         "isb",
                         options(nostack, preserves_flags)
                     );
-                }
+                    }
+
             }
 
             // INV-ARCH-ASID-3 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
@@ -25125,26 +25229,32 @@ pub mod aarch64 {
                 while va < end {
                     let pn = ((va >> 12) & 0x0000_FFFF_FFFF_F) as u64;
                     // SAFETY: per-page invalidation (see flush_tlb_page).
-                    unsafe {
+                    {
                         if asid == 0 {
+                            unsafe {
                             asm!(
                                 "tlbi vaae1is, {v}",
                                 v = in(reg) pn,
                                 options(nostack, preserves_flags)
                             );
+                            }
                         } else {
+                            unsafe {
                             asm!(
                                 "tlbi vae1is, {v}",
                                 v = in(reg) pn | (((asid & 0xFF) as u64) << 48),
                                 options(nostack, preserves_flags)
                             );
+                            }
                         }
                     }
                     va += 0x1000;
                 }
                 // SAFETY: completion barrier after the loop.
-                unsafe {
+                {
+                    unsafe {
                     asm!("dsb ish", "isb", options(nostack, preserves_flags));
+                    }
                 }
             }
 
@@ -25160,8 +25270,9 @@ pub mod aarch64 {
 
                 let pn = ((vaddr >> 12) & 0x0000_FFFF_FFFF_F) as u64;
                 // SAFETY: page-scoped invalidation; operand = VA[47:12] | ASID<<48.
-                unsafe {
+                {
                     if asid == 0 {
+                        unsafe {
                         asm!(
                             "tlbi vaae1is, {v}",
                             "dsb ish",
@@ -25169,7 +25280,9 @@ pub mod aarch64 {
                             v = in(reg) pn,
                             options(nostack, preserves_flags)
                         );
+                        }
                     } else {
+                        unsafe {
                         asm!(
                             "tlbi vae1is, {v}",
                             "dsb ish",
@@ -25177,6 +25290,7 @@ pub mod aarch64 {
                             v = in(reg) pn | (((asid & 0xFF) as u64) << 48),
                             options(nostack, preserves_flags)
                         );
+                        }
                     }
                 }
             }
@@ -25189,7 +25303,8 @@ pub mod aarch64 {
 
                 // SAFETY: ASID-scoped inner-shareable invalidation. The operand's
                 // ASID field lives in bits [63:48].
-                unsafe {
+
+                    unsafe {
                     asm!(
                         "tlbi aside1is, {a}",
                         "dsb ish",
@@ -25197,7 +25312,8 @@ pub mod aarch64 {
                         a = in(reg) ((asid & 0xFF) as u64) << 48,
                         options(nostack, preserves_flags)
                     );
-                }
+                    }
+
             }
 
             // INV-ARCH-ASID-6 (collected 2026-11-27 from aarch64/mm/asid.rs): verbatim body; callers use the safe
@@ -25208,14 +25324,16 @@ pub mod aarch64 {
 
                 // SAFETY: tlbi vmalle1ais broadcasts full invalidation to all PEs;
                 // callers have repaired the affected translations first.
-                unsafe {
+
+                    unsafe {
                     asm!(
                         "tlbi vmalle1is",
                         "dsb ish",
                         "isb",
                         options(nostack, preserves_flags)
                     );
-                }
+                    }
+
             }
         }
 
@@ -25454,10 +25572,12 @@ pub mod aarch64 {
             pub fn exception_table_count() -> usize  {
 
                 // SAFETY: linker-provided bounds.
-                unsafe {
+
+                    unsafe {
                     (&__ex_table_end as *const _ as usize - &__ex_table_start as *const _ as usize)
                         / core::mem::size_of::<ExceptionTableEntry>()
-                }
+                    }
+
             }
 
             // INV-ARCH-EXCEPTION-4 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
@@ -25468,7 +25588,7 @@ pub mod aarch64 {
             pub fn exception_table_empty() -> bool  {
 
                 // SAFETY: linker-provided bounds.
-                unsafe { &__ex_table_start as *const _ == &__ex_table_end as *const _ }
+                { unsafe { &__ex_table_start as *const _ == &__ex_table_end as *const _ } }
             }
 
             // INV-ARCH-EXCEPTION-5 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
@@ -25482,12 +25602,12 @@ pub mod aarch64 {
 
                 // SAFETY: the section bounds are linker-provided and valid; entries
                 // are immutable after link.
-                unsafe {
-                    let start = &__ex_table_start as *const ExceptionTableEntry;
-                    let end = &__ex_table_end as *const ExceptionTableEntry;
+                {
+                    let start = unsafe { &__ex_table_start as *const ExceptionTableEntry };
+                    let end = unsafe { &__ex_table_end as *const ExceptionTableEntry };
                     let count = (end as usize - start as usize) / core::mem::size_of::<ExceptionTableEntry>();
                     for i in 0..count {
-                        let entry = &*start.add(i);
+                        let entry = unsafe { &*start.add(i) };
                         if entry.insn == addr {
                             return Some(entry.fixup);
                         }
@@ -25551,7 +25671,7 @@ pub mod aarch64 {
 
                 if is_linear_mapping(addr as usize) {
                     // SAFETY: see phys_to_virt.
-                    let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+                    let va_pa_offset = { unsafe { KERNEL_MAP.va_pa_offset } };
                     PhysAddr::new(addr - va_pa_offset as u64)
                 } else if (addr as usize) >= KERNEL_IMAGE_VA
                     && addr < (KERNEL_IMAGE_VA as u64 + 0x2000_000)
@@ -25581,7 +25701,7 @@ pub mod aarch64 {
 
                 // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before
                 // rust_main; va_pa_offset is set once at boot and never modified.
-                let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+                let va_pa_offset = { unsafe { KERNEL_MAP.va_pa_offset } };
                 VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
             }
 
@@ -25764,9 +25884,11 @@ pub mod aarch64 {
 
                     // Zero BEFORE mapping (twin leak-window fix).
                     // SAFETY: exclusively owned fresh block.
-                    unsafe {
+                    {
                         let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+                        unsafe {
                         core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, chunk_bytes);
+                        }
                     }
 
                     map_user_region(
@@ -25836,13 +25958,15 @@ pub mod aarch64 {
                     // Zero BEFORE mapping (twin leak-window fix: the frames are
                     // reachable through the linear map regardless).
                     // SAFETY: exclusively owned fresh block (INV-AE-ZP).
-                    unsafe {
+                    {
                         let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+                        unsafe {
                         core::ptr::write_bytes(
                             virt_addr_ptr.bits() as *mut u8,
                             0,
                             block_pages * PAGE_SIZE as usize,
                         );
+                        }
                     }
 
                     // PRESERVE PRESENT LEAVES (twin: do_brk_flags only maps ABSENT
@@ -25905,8 +26029,10 @@ pub mod aarch64 {
                     {
                         let ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
                         // SAFETY: exclusively owned fresh frame in the linear map.
-                        unsafe {
+                        {
+                            unsafe {
                             core::ptr::write_bytes(ptr.bits() as *mut u8, 0, PAGE_SIZE_USIZE)
+                            }
              };
                         core::sync::atomic::compiler_fence(Ordering::Release);
                     }
@@ -26034,17 +26160,29 @@ pub mod aarch64 {
                                         if !page.is_null() {
                                             // SAFETY: freshly allocated, exclusively
                                             // owned frame; null-checked descriptor.
-                                            unsafe {
+                                            {
+                                                unsafe {
                                                 (*page).set_flag(PageFlag::Anonymous);
+                                                }
+                                                unsafe {
                                                 (*page).set_flag(PageFlag::SwapBacked);
+                                                }
+                                                unsafe {
                                                 (*page).set_index(addr / (PAGE_SIZE as usize));
+                                                }
+                                                unsafe {
                                                 (*page).inc_mapcount();
+                                                }
+                                                unsafe {
                                                 crate::mm::rmap::page_record_mapping(
                                                     &*page,
                                                     self as *const _ as usize,
                                                     addr,
                                                 );
+                                                }
+                                                unsafe {
                                                 crate::mm::lru::page_add_anon_lru(&*page);
+                                                }
                                             }
                                         }
                                     }
@@ -26129,15 +26267,23 @@ pub mod aarch64 {
                             if !page.is_null() {
                                 // SAFETY: null-checked descriptor of the leaf frame
                                 // mapped by this address space at `addr`.
-                                unsafe {
+                                {
+                                    unsafe {
                                     (*page).rmap_alt_remove(
                                         self as *const _ as usize,
                                         addr / PAGE_SIZE_USIZE,
                                     );
-                                    if (*page).is_mapped() {
-                                        crate::mm::rmap::page_remove_rmap(&*page);
                                     }
+                                    unsafe {
+                                    if (*page).is_mapped() {
+                                        {
+                                        crate::mm::rmap::page_remove_rmap(&*page);
+                                        }
+                                    }
+                                    }
+                                    unsafe {
                                     (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_RV);
+                                    }
                                 }
                                 // PCACHE mapping pin drop (kept for parity with the
                                 // twin's filemap port; no aarch64 PCACHE producers
@@ -26397,7 +26543,7 @@ pub mod aarch64 {
                         // driver registers later in boot (early println! is dropped).
                         use core::fmt::Write;
                         let ttbr1: u64;
-                        unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) };
+                        { unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) } };
                         let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         let _ = write!(
                             w,
@@ -26421,7 +26567,7 @@ pub mod aarch64 {
             pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion])  {
 
                 // SAFETY: single-CPU boot section; no concurrent reader exists.
-                unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
+                { unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET } };
                 {
 
                     for region in memory_regions {
@@ -26490,17 +26636,23 @@ pub mod aarch64 {
                 //    volatile so the stores are not reordered away against the
                 //    barrier below.
                 // SAFETY: static boot tables, exclusive boot-core ownership.
-                unsafe {
+                {
                     let l0 = (&raw const idmap_l0) as *mut PageTable;
                     let l1 = (&raw const idmap_l1) as *mut PageTable;
+                    unsafe {
                     (*l0).set(0, PageTableEntry::new());
+                    }
+                    unsafe {
                     (*l1).set(0, PageTableEntry::new());
+                    }
+                    unsafe {
                     (*l1).set(1, PageTableEntry::new());
+                    }
                 }
 
                 // 2. Make the zeroing visible before anyone can observe it.
                 // SAFETY: barrier (memory-safe in any context).
-                unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+                { unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) } };
 
                 // 3. Park this core's TTBR0 on the kernel root, ASID 0 — the
                 //    exact state context_switch installs for a kernel thread
@@ -26510,13 +26662,15 @@ pub mod aarch64 {
                 //    context.rs switch_mm), and root_pa carries ASID 0.
                 let root_pa = root_page_table_ppn() << PAGE_SHIFT;
                 // SAFETY: install the live kernel root (register write + barrier).
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "msr ttbr0_el1, {t}",
                         "isb",
                         t = in(reg) root_pa,
                         options(nostack)
                     );
+                    }
                 }
 
                 // 4. Broadcast invalidation (inner-shareable): the boot core and
@@ -26524,13 +26678,15 @@ pub mod aarch64 {
                 //    translations; vmalle1is clears both halves on every PE and
                 //    they refill from the live tables (one-time boot cost).
                 // SAFETY: TLB invalidation broadcast (memory-safe in any context).
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "tlbi vmalle1is",
                         "dsb sy",
                         "isb",
                         options(nostack, preserves_flags)
                     );
+                    }
                 }
             }
 
@@ -26544,15 +26700,19 @@ pub mod aarch64 {
             /// regions), the device windows and the fixmap.
             pub fn init()  {
 
-                unsafe {
+
                     // FIRST: adopt boot.S's early TTBR1 root so every mapping built
                     // below lands in the table the MMU actually walks.
                     adopt_boot_ttbr1();
 
                     // The boot CPU's early tables already cover the kernel image
                     // window; KERNEL_MAP was populated by boot.S.
+                    unsafe {
                     KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
+                    }
+                    unsafe {
                     KERNEL_MAP.page_offset = PAGE_OFFSET;
+                    }
 
                     // Install the fixmap (UART) so console output survives the
                     // switch off the early identity window (see
@@ -26561,7 +26721,7 @@ pub mod aarch64 {
                     fixmap::init_uart_fixmap();
 
                     MMU_INITIALIZED.store(true, Ordering::Release);
-                }
+
             }
 
             // INV-ARCH-MMU-INIT-7 (collected 2026-11-27): static/const moved verbatim from aarch64/mm/mmu_init.rs
@@ -26596,22 +26756,28 @@ pub mod aarch64 {
                         // claimed slot's address arithmetic is inert.
                         // SAFETY: single-CPU boot section; the fetch_add claims the
                         // slot exclusively.
-                        unsafe {
+                        {
                             let (ptr, i) = {
                                 // Prefer L3 pools for leaf tables; intermediate levels
                                 // have their own pools — the level distinction only
                                 // sizes the accounting, the frames are identical.
                                 let i = EARLY_L3_NEXT.fetch_add(1, Ordering::Relaxed);
                                 if i < NUM_EARLY_L3 {
+                                    unsafe {
                                     (&raw mut EARLY_L3[i] as u64, i)
+                                    }
                                 } else {
                                     let i2 = EARLY_L2_NEXT.fetch_add(1, Ordering::Relaxed);
                                     if i2 < NUM_EARLY_L2 {
+                                        unsafe {
                                         (&raw mut EARLY_L2[i2] as u64, i2)
+                                        }
                                     } else {
                                         let i1 = EARLY_L1_NEXT.fetch_add(1, Ordering::Relaxed);
                                         if i1 < NUM_EARLY_L1 {
+                                            unsafe {
                                             (&raw mut EARLY_L1[i1] as u64, i1)
+                                            }
                                         } else {
                                             return None;
                                         }
@@ -26619,7 +26785,7 @@ pub mod aarch64 {
                                 }
                             };
                             // SAFETY: KERNEL_MAP is set by boot.S before rust_main.
-                            let offset = { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                            let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                             Some(ptr.wrapping_sub(offset))
                         }
                     }
@@ -26637,9 +26803,11 @@ pub mod aarch64 {
                         }
                         // SAFETY: phys is a freshly allocated, exclusively owned
                         // order-0 frame inside the linear map.
-                        unsafe {
+                        {
                             let va = phys_to_virt(PhysAddr::new(phys as u64));
+                            unsafe {
                             core::ptr::write_bytes(va.bits() as *mut u8, 0, PAGE_SIZE as usize);
+                            }
                         }
                         PT_LEDGER.stamp((phys >> PAGE_SHIFT) as u64);
                         PT_LEDGER.live.fetch_add(1, Ordering::Relaxed);
@@ -26669,7 +26837,7 @@ pub mod aarch64 {
                 let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
                 // SAFETY: KERNEL_MAP is set by boot.S before rust_main; the offset
                 // never changes afterwards.
-                let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                 let root_phys = root_virt.wrapping_sub(offset);
                 root_phys / (PAGE_SIZE as u64)
             }
@@ -26682,20 +26850,24 @@ pub mod aarch64 {
                 // root; copying verbatim keeps the two roots identical).
                 // SAFETY: single-CPU boot section; the static roots are exclusively
                 // owned here.
-                unsafe {
+                {
                     let src = (&raw const kern_l0) as *const u8;
                     let dst = (&raw mut ROOT_PAGE_TABLE) as *mut u8;
+                    unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, core::mem::size_of::<PageTable>());
+                    }
                 }
                 let root_pa = root_page_table_ppn() << PAGE_SHIFT;
                 // SAFETY: install the freshly copied root (register write + barrier).
-                unsafe {
+                {
+                    unsafe {
                     asm!(
                         "msr ttbr1_el1, {t}",
                         "isb",
                         t = in(reg) root_pa,
                         options(nostack)
                     );
+                    }
                 }
                 crate::arch::cpu::local_flush_tlb_all();
             }
@@ -26874,7 +27046,7 @@ pub mod aarch64 {
                             return Some(live as usize);
                         }
                         // SAFETY: inode cell written at open time; read-only.
-                        let inode_opt = unsafe { &*f.inode.get() };
+                        let inode_opt = { unsafe { &*f.inode.get() } };
                         inode_opt.as_ref().map(|i| i.get_size() as usize)
                     })
                     .unwrap_or(vma_file_size as usize);
@@ -26924,7 +27096,7 @@ pub mod aarch64 {
                     match vma_type {
                         VmaType::Anonymous | VmaType::SharedMemory => {
                             // SAFETY: fresh exclusive page (INV-AE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                         }
                         VmaType::FileBacked => {
                             // Zero-fill first (partial reads / tail holes), then read
@@ -26933,7 +27105,7 @@ pub mod aarch64 {
                             // pages — twin mmapstress04 note); positional read_at so
                             // the shared file position is never touched (twin R71).
                             // SAFETY: fresh exclusive page (INV-AE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                             if vma_file_fd >= 0 && file_offset < effective_size {
                                 // Prefer the VMA's pinned vm_file (the mapping fd may
                                 // already be closed — twin ld.so note).
@@ -26961,12 +27133,14 @@ pub mod aarch64 {
                                     };
                                     if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
                                         // SAFETY: same fresh page; tail zero.
-                                        unsafe {
+                                        {
+                                            unsafe {
                                             core::ptr::write_bytes(
                                                 page_ptr.add(bytes_read as usize),
                                                 0,
                                                 PAGE_SIZE_USIZE - bytes_read as usize,
                                             )
+                                            }
                                         };
                                     }
                                 }
@@ -27264,12 +27438,14 @@ pub mod aarch64 {
                 // SAFETY: page_ptr derives from phys_to_virt on a freshly allocated,
                 // exclusively owned page.
                 let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
-                unsafe {
+                {
                     match vma_type {
                         VmaType::Anonymous
                         | VmaType::FileBacked
                         | VmaType::SharedMemory => {
+                            unsafe {
                             core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                            }
                         }
                         VmaType::Device => {
                             // Device mapping: don't zero
@@ -27362,12 +27538,14 @@ pub mod aarch64 {
                 let ttbr0: u64;
                 // SAFETY: reading TTBR0_EL1 is a pure system-register read, always
                 // accessible at EL1.
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "mrs {t}, ttbr0_el1",
                         t = out(reg) ttbr0,
                         options(nomem, nostack, preserves_flags)
                     );
+                    }
                 }
                 let asid = ((ttbr0 >> 48) & 0xFFFF) as u16;
                 Satp::long((ttbr0 & 0x0000_FFFF_FFFF_F000) >> 12, asid)
