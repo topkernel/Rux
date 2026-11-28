@@ -60,6 +60,29 @@ else
     echo "Toybox source already exists at $TOYBOX_DIR"
 fi
 
+# Rux-local sh fixes, carried as patches against the pristine tarball.
+# Applied idempotently (patch -N skips already-applied hunks) so a
+# pre-patched tree from an interrupted build re-runs clean.
+# - sh-stdio-restore.patch: restore the shell's own stdin/stdout before
+#   each next-line read. A pipeline left the interactive shell's fd 0 on
+#   the pipeline's read pipe (the undo lived in blk->urd for the NEXT
+#   statement), so the prompt read consumed the pipe residue as commands
+#   and hit EOF on finite producers (dmesg | grep x | head -3) - as PID 1
+#   (init=/bin/sh) that exit drove the kernel's init-exit power-off.
+for p in "$SCRIPT_DIR"/patches/*.patch; do
+    [ -e "$p" ] || continue
+    echo "Applying $(basename "$p")..."
+    patch -d "$TOYBOX_DIR" -p1 -N -r - < "$p" || {
+        rc=$?
+        if [ "$rc" -eq 1 ]; then
+            echo "  (already applied, skipping)"
+        else
+            echo "Error: patch $(basename "$p") failed (rc=$rc)"
+            exit 1
+        fi
+    }
+done
+
 # Build toybox
 cd "$TOYBOX_DIR"
 
