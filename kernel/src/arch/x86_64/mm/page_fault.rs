@@ -370,8 +370,152 @@ pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-PAGE-FAULT-12): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_swap_fault( addr_space: &AddressSpace, fault_addr: VirtAddr, flags: u32, swap_entry: u64, root_ppn: u64, ) -> MmFaultResult {
-    crate::arch::arch_floor::x86_64::mm::page_fault::handle_swap_fault(addr_space, fault_addr, flags, swap_entry, root_ppn)
+pub(crate) 
+fn handle_swap_fault( addr_space: &AddressSpace, fault_addr: VirtAddr, flags: u32, swap_entry: u64, root_ppn: u64, ) -> MmFaultResult {
+
+
+                                                                                                                                      use crate::mm::page::VirtAddr as PageVirtAddr;
+                                                                                                                                      use crate::mm::page_desc::{page_desc, PageFlag};
+                                                                                                                                      use crate::mm::swap;
+
+                                                                                                                                      // Extract swap type and offset
+                                                                                                                                      let swap_type = swap::swap_entry_type(swap_entry);
+                                                                                                                                      let swap_offset = swap::swap_entry_offset(swap_entry);
+
+                                                                                                                                      // Find VMA for permission bits
+                                                                                                                                      let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
+                                                                                                                                      let vma_mgr = addr_space.vma_read();
+                                                                                                                                      let vma = match vma_mgr.find(page_virt_addr) {
+                                                                                                                                          Some(v) => v,
+                                                                                                                                          None => return MmFaultResult::Segfault,
+                                                                                                                                      };
+
+                                                                                                                                      let vma_flags = vma.flags();
+                                                                                                                                      let is_write = flags & FaultFlags::WRITE != 0;
+                                                                                                                                      let is_exec = flags & FaultFlags::EXEC != 0;
+                                                                                                                                      let is_read = flags & FaultFlags::READ != 0;
+
+                                                                                                                                      // Verify permissions
+                                                                                                                                      if is_write && !vma_flags.is_writable() {
+                                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                                      }
+                                                                                                                                      if is_exec && !vma_flags.is_executable() {
+                                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                                      }
+                                                                                                                                      if is_read && !vma_flags.is_readable() {
+                                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                                      }
+
+                                                                                                                                      drop(vma_mgr);
+
+                                                                                                                                      // Allocate a physical page
+                                                                                                                                      let phys_addr = match alloc_user_phys_page() {
+                                                                                                                                          Some(addr) => addr,
+                                                                                                                                          None => return MmFaultResult::OutOfMemory,
+                                                                                                                                      };
+
+                                                                                                                                      // Wait for an in-flight swap-out of this slot: the single-mapping
+                                                                                                                                      // reclaim path installs the swap entry in the PTE BEFORE the device
+                                                                                                                                      // write; reading the slot before that write lands would swap in
+                                                                                                                                      // garbage. Bounded spin — the writer is a block write on another
+                                                                                                                                      // context.
+                                                                                                                                      {
+                                                                                                                                          let mut spins: u64 = 0;
+                                                                                                                                          while swap::swap_slot_pending(swap_type, swap_offset) {
+                                                                                                                                              spins += 1;
+                                                                                                                                              if spins > 64_000_000 {
+                                                                                                                                                  break; // give up waiting; the read below fails -> retry
+                                                                                                                                              }
+                                                                                                                                              core::hint::spin_loop();
+                                                                                                                                          }
+                                                                                                                                      }
+
+                                                                                                                                      // Read page contents from swap device
+                                                                                                                                      if swap::swap_read_page(swap_type, swap_offset, phys_addr as usize).is_err() {
+                                                                                                                                          crate::println!(
+                                                                                                                                              "swap: failed to read page from swap (type={}, offset={})",
+                                                                                                                                              swap_type,
+                                                                                                                                              swap_offset
+                                                                                                                                          );
+                                                                                                                                          // R21-6: free the freshly allocated page on the failed read (was a
+                                                                                                                                          // per-error page leak).
+                                                                                                                                          crate::mm::page_alloc::free_page(phys_addr as usize);
+                                                                                                                                          return MmFaultResult::OutOfMemory;
+                                                                                                                                      }
+
+                                                                                                                                      // Build PTE flags from VMA permissions
+                                                                                                                                      let mut pte_flags =
+                                                                                                                                          PageTableEntry::P | PageTableEntry::A | PageTableEntry::D | PageTableEntry::NX;
+                                                                                                                                      pte_flags |= PageTableEntry::U;
+
+                                                                                                                                      if vma_flags.is_writable() {
+                                                                                                                                          pte_flags |= PageTableEntry::W;
+                                                                                                                                      }
+                                                                                                                                      if vma_flags.is_executable() {
+                                                                                                                                          pte_flags &= !PageTableEntry::NX;
+                                                                                                                                      }
+
+                                                                                                                                      // Map the page
+                                                                                                                                      // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
+                                                                                                                                      // finished above, so no I/O happens inside the irqsave section.
+                                                                                                                                      let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
+                                                                                                                                      // Re-check under the lock (same double-fault race as the demand
+                                                                                                                                      // paths). The swap-in page is exclusively owned, so freeing on loss is
+                                                                                                                                      // safe; the swap slot is freed by the winner. E8-MM: device-window-
+                                                                                                                                      // hole rule applies here too (see pte_counts_as_mapped).
+                                                                                                                                      if  PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) 
+                                                                                                                                          .map_or(false, |(_ppn, bits)| {
+                                                                                                                                              pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+                                                                                                                                          })
+                                                                                                                                      {
+                                                                                                                                          drop(_pte_guard);
+                                                                                                                                          crate::mm::page_alloc::free_page(phys_addr as usize);
+                                                                                                                                          // R8-4: Handled — see the demand-fault sites (no SIGSEGV for the
+                                                                                                                                          // race loser).
+                                                                                                                                          return MmFaultResult::Handled;
+                                                                                                                                      }
+                                                                                                                                      // SAFETY: root_ppn is a valid page table root, phys_addr was just
+                                                                                                                                      // allocated, and pte_flags are built from valid VMA permissions. The
+                                                                                                                                      // page is exclusively owned.
+
+                                                                                                                                          if !map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags) {
+                                                                                                                                              // PT allocation failure (fake-OOM family): free the swap-in
+                                                                                                                                              // page, deliver OOM.
+                                                                                                                                              crate::mm::page_alloc::free_page(phys_addr as usize);
+                                                                                                                                              return MmFaultResult::OutOfMemory;
+                                                                                                                                          }
+
+                                                                                                                                          // TLB flush
+                                                                                                                                          crate::arch::cpu::invlpg(fault_addr.bits());
+
+
+                                                                                                                                      // Set up rmap for the swapped-in page
+                                                                                                                                      let page_pfn = (phys_addr >> PAGE_SHIFT) as usize;
+                                                                                                                                      // Fresh exclusive page (INV-FRAME-1).
+                                                                                                                                      if let Some(page) = crate::mm::page_desc::page_desc(page_pfn) {
+                                                                                                                                          page.set_flag(PageFlag::Anonymous);
+                                                                                                                                          page.set_flag(PageFlag::SwapBacked);
+                                                                                                                                          page.set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                                                                                                                                          page.inc_mapcount();
+                                                                                                                                          crate::mm::rmap::page_record_mapping(
+                                                                                                                                              page,
+                                                                                                                                              addr_space as *const _ as usize,
+                                                                                                                                              fault_addr.bits() as usize,
+                                                                                                                                          );
+
+                                                                                                                                          // Add back to anon LRU
+                                                                                                                                          crate::mm::lru::page_add_anon_lru(page);
+                                                                                                                                      }
+                                                                                                                                      drop(_pte_guard);
+
+                                                                                                                                      // Free the swap slot (page is back in memory)
+                                                                                                                                      swap::swap_free_slot(swap_type, swap_offset);
+
+                                                                                                                                      // RSS accounting: the page is resident again.
+                                                                                                                                      addr_space.add_rss(1);
+
+                                                                                                                                      MmFaultResult::Handled
+
 }
 
 // Keep the static root reachable for diagnostics (interface parity with
@@ -379,6 +523,13 @@ pub(crate) fn handle_swap_fault( addr_space: &AddressSpace, fault_addr: VirtAddr
 /// Collected into `arch::arch_floor` (INV-ARCH-PAGE-FAULT-11): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
 #[allow(unused)]
-pub(crate) fn _root_table_ref() -> usize {
-    crate::arch::arch_floor::x86_64::mm::page_fault::_root_table_ref()
+pub(crate) 
+            // INV-ARCH-PAGE-FAULT-11 (collected 2026-11-27 from x86_64/mm/page_fault.rs): verbatim body; callers use the safe
+            // wrapper at the original path — obligations unchanged.
+fn _root_table_ref() -> usize {
+
+
+                              // SAFETY: address-of only, no dereference.
+                              { &raw mut ROOT_PAGE_TABLE as usize }
+
 }

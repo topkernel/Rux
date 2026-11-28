@@ -216,8 +216,61 @@ pub fn tlb_epochs_advanced(targets: u64, snaps: &[u64; MAX_CPUS]) -> bool {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-IPI-24): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
-    crate::arch::arch_floor::x86_64::ipi::handle_ipi_vector(vector, regs)
+pub 
+fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
+
+
+                                                                       match vector {
+                                                                           VECTOR_RESCHEDULE => {
+                                                                               // Only set the flag.  Calling schedule() here (IRQs off)
+                                                                               // could deadlock on the runqueue lock the same way the
+                                                                               // riscv64 twin documents; the trap-exit path reschedules.
+                                                                               crate::sched::set_need_resched();
+                                                                           }
+                                                                           VECTOR_CALL_FUNCTION => csd_flush_queue(),
+                                                                           VECTOR_TLB_FLUSH => {
+                                                                               // Full non-global flush of the CURRENT address space: no
+                                                                               // kernel PTEs carry the GLOBAL bit, so this covers
+                                                                               // everything the local invlpg/flush_tlb covered. With PCID
+                                                                               // active the CR3 reload would only reach the CURRENT PCID's
+                                                                               // entries, so the flush is INVPCID all-contexts (every PCID
+                                                                               // on this CPU) — the shootdown callers invalidate mappings
+                                                                               // that may be cached under any mm's PCID.
+                                                                               if crate::arch::mm::asid::pcid_enabled() {
+                                                                                   // SAFETY: type 3 ignores the descriptor content and is
+                                                                                   // valid regardless of the current CR3.
+
+                                                                                       crate::arch::x86_64::cpu::invpcid(
+                                                                                           crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL,
+                                                                                           0,
+                                                                                           0,
+                                                                                       )
+                                                                                   ;
+                                                                               } else {
+                                                                                   // SAFETY: reloading the current CR3 with PCID off.
+                                                                                    crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) ;
+                                                                               }
+                                                                               // (fork-frag lane) Flush COMPLETED: publish the epoch advance
+                                                                               // that releases deferred page-table frees waiting on this CPU
+                                                                               // (see TLB_FLUSH_EPOCH above).
+                                                                               let cpu = crate::arch::cpu_id() as usize;
+                                                                               if cpu < MAX_CPUS {
+                                                                                   TLB_FLUSH_EPOCH[cpu].fetch_add(1, Ordering::Release);
+                                                                               }
+                                                                           }
+                                                                           VECTOR_STOP => loop {
+                                                                               crate::arch::cpu::disable_irq();
+                                                                               // HLT parks this CPU forever (panic path); WFI's SAFETY
+                                                                               // contract holds by construction here.
+                                                                               crate::arch::cpu::wfi();
+                                                                           },
+                                                                           VECTOR_IRQ_WORK => {
+                                                                               snapshot_self();
+                                                                               remote_bt_self(regs);
+                                                                           }
+                                                                           _ => {}
+                                                                       }
+
 }
 
 // ============================================================================

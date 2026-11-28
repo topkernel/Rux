@@ -145,8 +145,18 @@ pub(crate) const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-SMP-25): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn load_per_cpu_base(cpu: usize) {
-    crate::arch::arch_floor::x86_64::smp::load_per_cpu_base(cpu)
+pub 
+fn load_per_cpu_base(cpu: usize) {
+
+
+                                 let base = &PER_CPU[cpu] as *const PerCpu as u64;
+                                 // SAFETY: WRMSR of the GS base MSRs with a kernel .bss address and
+                                 // zero; both values are valid in any context that runs kernel code.
+
+                                     wrmsr(MSR_GS_BASE, base);
+                                     wrmsr(MSR_KERNEL_GS_BASE, 0);
+
+
 }
 
 // ============================================================================

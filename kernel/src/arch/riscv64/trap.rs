@@ -211,8 +211,75 @@ pub(crate) fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-30): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
-    crate::arch::arch_floor::riscv64::trap::handle_timer_interrupt(regs, cpu)
+pub(crate) 
+fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+
+
+                                                         // Increment interrupt counter for /proc/interrupts
+                                                         interrupts::timer_inc(cpu);
+
+                                                         // Re-arm timer: set stimecmp to a future deadline.
+                                                         crate::drivers::timer::set_next_trigger();
+
+                                                         // Skip scheduler/schedule logic during early SMP boot (tp = hart_id,
+                                                         // no current task).  scheduler_tick() may call wake_up_process() which
+                                                         // interacts with the runqueue; schedule() with null current returns
+                                                         // early but the intermediate state can be inconsistent.
+                                                         if crate::sched::current().is_none() {
+                                                             return;
+                                                         }
+
+                                                         // 0. Per-CPU time accounting for /proc/stat (Linux
+                                                         // account_process_tick): the idle task means the CPU had nothing to
+                                                         // run, otherwise the tick is user time (the timer hit the task in
+                                                         // user mode) or system time (it hit it in kernel mode).
+                                                         crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+                                                         // 0b. CPU-time accounting (Linux account_process_tick): charge this
+                                                         // tick to the interrupted task as user or system time depending on
+                                                         // the privilege mode the timer hit. Only user tasks are charged
+                                                         // (kthreads are born without an address space).
+                                                         if let Some(task) = crate::sched::current() {
+                                                             // SAFETY: current() returned a live task pointer; we only touch
+                                                             // per-task atomic counters, no teardown race on these fields.
+
+                                                                 if (*task).address_space().is_some() {
+                                                                     use core::sync::atomic::Ordering::Relaxed;
+                                                                     if regs.user_mode() {
+                                                                         (*task).utime_ticks.fetch_add(1, Relaxed);
+                                                                         crate::debug::syscost::tick_user();
+                                                                         // perf events (PERF_TYPE_SOFTWARE sampling): stash the
+                                                                         // interrupted PC for the softirq charger. Lock-free.
+                                                                         crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid());
+                                                                     } else {
+                                                                         (*task).stime_ticks.fetch_add(1, Relaxed);
+                                                                         crate::debug::syscost::tick_kern(regs.epc);
+                                                                         crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid());
+                                                                     }
+                                                                 } else {
+                                                                     crate::debug::syscost::tick_idle();
+                                                                     crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
+                                                                 }
+
+                                                         } else {
+                                                             crate::debug::syscost::tick_idle();
+                                                             crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
+                                                         }
+
+                                                         // 1. Update jiffies
+                                                         crate::drivers::timer::timer_interrupt_handler();
+
+                                                         // 2. Scheduler tick
+                                                         crate::sched::scheduler_tick();
+
+                                                         // 3. Check for soft lockups
+                                                         crate::debug::softlockup::check();
+
+                                                         // 4. Reschedule if needed
+                                                         if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
+                                                             crate::sched::schedule();
+                                                         }
+
 }
 /// Handle software interrupt (IPI)
 ///
@@ -254,8 +321,212 @@ pub(crate) fn handle_syscall(regs: &mut PtRegs) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-27): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_illegal_instruction(regs: &mut PtRegs) {
-    crate::arch::arch_floor::riscv64::trap::handle_illegal_instruction(regs)
+pub(crate) 
+fn handle_illegal_instruction(regs: &mut PtRegs) {
+
+
+                                                 let epc = regs.epc;
+
+                                                 // Read the instruction through the exception-table copy path — for
+                                                 // user-mode faults epc is a USER address, which a raw read_unaligned
+                                                 // would fault on with SUM=0 (review ARCH).
+                                                 let mut insn_buf = [0u8; 4];
+                                                 let uncopied16 = 
+                                                     crate::arch::riscv64::uaccess::copy_from_user(insn_buf.as_mut_ptr(), epc as *const u8, 2)
+                                                 ;
+                                                 if uncopied16 > 0 {
+                                                     // Instruction stream unreadable: cannot decode or retry safely.
+                                                     crate::pr_debug!("trap: unreadable instruction at epc={:#x}", epc);
+                                                     if regs.user_mode() {
+                                                         crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+                                                     }
+                                                     return;
+                                                 }
+                                                 let instr16 = u16::from_ne_bytes([insn_buf[0], insn_buf[1]]);
+
+                                                 // Check if this is a compressed (16-bit) instruction
+                                                 let is_compressed = (instr16 & 0x3) != 0x3;
+                                                 let instr_size = if is_compressed { 2 } else { 4 };
+
+                                                 // Check if FPU is disabled (FS = OFF) and this might be an FP instruction
+                                                 const SR_FS: u64 = 0x3 << 13;
+                                                 const SR_FS_INITIAL: u64 = 0x1 << 13;
+                                                 let fs = regs.status & SR_FS;
+                                                 if fs == 0 {
+                                                     // FPU is off - check if this is an FP instruction
+                                                     let is_fp = if is_compressed {
+                                                         // Compressed FP instructions on RV64 with D extension:
+                                                         // Quadrant 0 (bits[1:0]=00): C.FLD (funct3=001), C.FSD (funct3=101)
+                                                         // Quadrant 2 (bits[1:0]=10): C.FLDSP (funct3=001), C.FSDSP (funct3=101)
+                                                         // So for any compressed inst: funct3 (bits[15:13]) = 001 or 101 means FP
+                                                         let funct3 = (instr16 >> 13) & 0x7;
+                                                         funct3 == 1 || funct3 == 5
+                                                     } else {
+                                                         // 32-bit FP instructions:
+                                                         // Load/Store: opcode[6:0] = 0000111 (FLW/FLD) or 0100111 (FSW/FSD)
+                                                         // FP compute: opcode[6:0] = 0000101 (FMADD etc) or 0001001 (FMSUB etc)
+                                                         //             or 0001101 (FNMSUB etc) or 0001110 (FNMADD etc) or 1010011 (FP ops)
+                                                         let instr32: u32 = if instr_size == 4 {
+                                                             let _ = 
+                                                                 crate::arch::riscv64::uaccess::copy_from_user(
+                                                                     insn_buf.as_mut_ptr(),
+                                                                     epc as *const u8,
+                                                                     4,
+                                                                 )
+                                                             ;
+                                                             u32::from_ne_bytes(insn_buf)
+                                                         } else {
+                                                             instr16 as u32
+                                                         };
+                                                         let opcode = instr32 & 0x7F;
+                                                         // FP-state CSR accesses also require FS != Off: csrrw/csrrs/
+                                                         // csrrc to fflags(0x001)/frm(0x002)/fcsr(0x003) — the frrm/
+                                                         // frflags/fsrm... assembler forms — trap illegal exactly like
+                                                         // compute FP when FS=Off. compiler-rt's __multf3/__udivti3
+                                                         // (i128 emulation, so any shell/libc integer arithmetic that
+                                                         // widens) reads the rounding mode with `frrm` before touching
+                                                         // the FP registers, so this class is reachable from binaries
+                                                         // that never execute an explicit FP instruction (repro: mrsh
+                                                         // SIGILL at a deterministic __multf3+frrm under the pa49
+                                                         // trace-capture boot).
+                                                         let is_fp_csr = opcode == 0x73 && {
+                                                             let csr = instr32 >> 20;
+                                                             csr == 0x001 || csr == 0x002 || csr == 0x003
+                                                         };
+                                                         opcode == 0x07 || opcode == 0x27 ||   // FLW/FLD, FSW/FSD
+                                                         opcode == 0x05 || opcode == 0x09 ||   // FMADD, FMSUB
+                                                         opcode == 0x0D || opcode == 0x0E ||   // FNMSUB, FNMADD
+                                                         opcode == 0x53 ||                     // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
+                                                         is_fp_csr                             // fflags/frm/fcsr via SYSTEM opcode
+                                                     };
+
+                                                     if is_fp {
+                                                         // First FP use: enable the FPU AND zero the FP registers/fcsr.
+                                                         // FS=Initial means the registers architecturally read as zero;
+                                                         // without the explicit clear, the registers still hold whatever
+                                                         // the previous task on this CPU left there (cross-task numeric
+                                                         // pollution + information leakage — review ARCH, fpu_init had
+                                                         // zero callers).
+                                                         // SAFETY: fpu_init sets live sstatus.FS=Initial before touching
+                                                         // the FP registers (executing FP with FS=Off would trap) and
+                                                         // zeroes f0-f31 + fcsr. The interrupted context cannot have live
+                                                         // FP state: FS was Off, so every FP instruction trapped.
+                                                          crate::arch::riscv64::thread::fpu_init(); 
+                                                         // Enable FPU in the SAVED status too, so sret does not undo it.
+                                                         regs.status = (regs.status & !SR_FS) | SR_FS_INITIAL;
+                                                         return;
+                                                     }
+                                                 }
+
+                                                 // V-extension first use: while sstatus.VS = Off, EVERY vector
+                                                 // instruction traps illegal-instruction (any privilege mode).
+                                                 // Lazy-enable like the FP path above: enable VS, zero the live
+                                                 // vector state (initial-state semantics), retry. Without this,
+                                                 // toolchain-auto-vectorized binaries SIGILL on V-capable harts
+                                                 // even though the hardware can run them (reference-kernel
+                                                 // semantics: RVV code executes when the ISA advertises V; see
+                                                 // arch/riscv64/vext.rs).
+                                                 //
+                                                 // HOISTED out of the `fs == 0` block (session 9, modchurn member
+                                                 // repro): the branch used to live INSIDE the FS-disabled decode,
+                                                 // so a task whose FS was already enabled (any prior FP first-use —
+                                                 // fpu_init sets FS=Initial; the dynamic-loader path enables it
+                                                 // before main even runs) but whose VS was still Off SIGILLed on
+                                                 // its first vector instruction with the V handler never reached.
+                                                 // VS and FS are independent sstatus fields; the first-use enable
+                                                 // of one must not be gated on the state of the other. Repro:
+                                                 // dlopen-churn probe, pid 1, vsetvli at text+0x13ee, forensic
+                                                 // fs=0x2000 (FS=Initial) — SIGILL death on a v=true hart.
+                                                 // Note: a vector LOAD/STORE (opcode 0x07/0x27, funct3 000/101/110/
+                                                 // 111) still matches the `is_fp` shape above when FS==0, costs one
+                                                 // extra trap (fpu_init, retry, re-trap) and then lands here —
+                                                 // correct, just one extra round trip.
+                                                 const SR_VS_FIELD: u64 = 0x3 << 9;
+                                                 const SR_VS_INITIAL_VAL: u64 = 0x1 << 9;
+                                                 if (regs.status & SR_VS_FIELD) == 0
+                                                     && crate::arch::riscv64::vext::hart_has_v()
+                                                     && !is_compressed
+                                                     && instr_size == 4
+                                                 {
+                                                     // Fetch the full word (only the first halfword was read above).
+                                                     let _ = 
+                                                         crate::arch::riscv64::uaccess::copy_from_user(
+                                                             insn_buf.as_mut_ptr(),
+                                                             epc as *const u8,
+                                                             4,
+                                                         )
+                                                     ;
+                                                     let instr32: u32 = u32::from_ne_bytes(insn_buf);
+                                                     if crate::arch::riscv64::vext::is_vector_instr32(instr32) {
+                                                         let mut ok = false;
+                                                         if let Some(task) = crate::sched::current() {
+                                                             // SAFETY: task is the current task; the trap path
+                                                             // holds it on this hart with IRQs disabled.
+
+                                                                 ok = (*task).thread_mut().vstate_first_use();
+
+                                                         }
+                                                         if ok {
+                                                             // Enable V in the SAVED status too, so sret does
+                                                             // not undo it; retry the instruction.
+                                                             regs.status = (regs.status & !SR_VS_FIELD)
+                                                                 | SR_VS_INITIAL_VAL;
+                                                             return;
+                                                         }
+                                                     }
+                                                 }
+
+                                                 // Not an FP instruction or FPU already enabled - terminate the process
+                                                 crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
+                                                     epc, if regs.user_mode() { "user" } else { "kernel" });
+
+                                                 // Forensics for user SIGILL deaths (BUG-S004/S005 family: userspace
+                                                 // built for extensions the QEMU CPU model lacks): the re-fetched
+                                                 // instruction word + task identity. This is how "sh died at iter2" was
+                                                 // traced to a c.zext.w (Zcb) halfword from an unpinned libgcc member.
+                                                 if regs.user_mode() {
+                                                     static EMPTY_COMM: [u8; 16] = [0u8; 16];
+                                                     let (pid, comm) = crate::sched::current()
+                                                         .map(|t|  ((*t).pid(), (*t).comm()) )
+                                                         .unwrap_or((0, &EMPTY_COMM));
+                                                     let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+                                                     // HOTPATH-PRINT: fault-path — see the gate/one-shot context above
+                                                     crate::pr_info!(
+                                                         "trap: user SIGILL pid={} comm={:?} epc={:#x} insn16={:#06x} fs={:#x}",
+                                                         pid,
+                                                         core::str::from_utf8(&comm[..comm_len]),
+                                                         epc,
+                                                         instr16,
+                                                         regs.status & SR_FS
+                                                     );
+                                                     // SIGILL-FORENSIC (gnome-sigill): when userspace manages to jump
+                                                     // into a garbage/data page, the halfword alone is not enough —
+                                                     // print WHICH mapping swallowed epc, the page's PTE, a hexdump of
+                                                     // the page around epc, and the full VMA table so the layout of the
+                                                     // dying process is recoverable from the console alone.
+                                                     //
+                                                     // Serial-cleanliness (print-audit lane, 2026-11): one dump is
+                                                     // ~100 lines (~5 KB, tens of ms of polled UART) — "one-shot per
+                                                     // death" was only cheap while deaths were rare. A respawn loop
+                                                     // over a broken binary (the sh-retry family that produced this
+                                                     // probe) paid it per crash. Budget 2 per boot: the first two
+                                                     // deaths carry full attribution, later ones keep the one-liner
+                                                     // above.
+                                                     {
+                                                         static SIGILL_DUMPS: core::sync::atomic::AtomicUsize =
+                                                             core::sync::atomic::AtomicUsize::new(0);
+                                                         if SIGILL_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2 {
+                                                             sigill_mapping_forensics(pid as usize, epc as usize);
+                                                         }
+                                                     }
+                                                 }
+
+                                                 if regs.user_mode() {
+                                                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+                                                 }
+
+                                                 // Do NOT advance epc — the task is now ZOMBIE and will not resume
+
 }
 /// SIGILL-FORENSIC (gnome-sigill): console dump of the dying task's VMA
 ///
@@ -268,15 +539,122 @@ pub(crate) fn sigill_mapping_forensics(pid: usize, epc: usize) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-25): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_breakpoint(regs: &mut PtRegs) {
-    crate::arch::arch_floor::riscv64::trap::handle_breakpoint(regs)
+pub(crate) 
+fn handle_breakpoint(regs: &mut PtRegs) {
+
+
+                                        if regs.user_mode() {
+                                            // gdmr28/r29 bring-up instrumentation (temporary, REMOVE before
+                                            // merge): an untraced user ebreak is a silent SIGTRAP death
+                                            // otherwise (gdm-session-worker died this way at gdmr27 with no
+                                            // diagnostic). Print the epc so the site can be symbolized.
+                                            let comm_now = crate::sched::current()
+                                                .map(|t| {
+                                                    let c = t.comm();
+                                                    let len = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+                                                    core::str::from_utf8(&c[..len]).unwrap_or("?")
+                                                })
+                                                .unwrap_or("?");
+                                            // PTRACE_SINGLESTEP (P1): the ebreak we displaced at epc fired —
+                                            // restore the original instruction and report the step to the
+                                            // tracer (or pend SIGTRAP when nobody traces). epc is NOT
+                                            // advanced: the restored instruction re-executes on resume.
+                                            if let Some(task) = crate::sched::current() {
+                                                if (*task).single_step_active() && regs.epc == (*task).single_step_addr() {
+                                                    let saved = (*task).single_step_saved_insn();
+                                                    let restored = crate::process::ptrace::write_target_word(
+                                                        task, regs.epc, saved,
+                                                    );
+                                                    (*task).clear_single_step();
+                                                    if !restored {
+                                                        // Could not put the instruction back — the tracee's
+                                                        // text is gone (unmapped racing the step). Kill it.
+                                                        crate::process::exit::do_exit(
+                                                            -(crate::signal::Signal::SIGSEGV as i32));
+                                                    }
+                                                    if (*task).tracer_pid() != 0 {
+                                                        // SAFETY: task is the current task in its trap path.
+
+                                                            crate::process::ptrace::ptrace_stop(
+                                                                task,
+                                                                crate::signal::Signal::SIGTRAP as i32,
+                                                                crate::signal::SigInfo::new(
+                                                                    crate::signal::Signal::SIGTRAP as i32,
+                                                                    crate::signal::si_code::SI_KERNEL,
+                                                                    (*task).pid(), 0),
+                                                            );
+
+                                                    } else {
+                                                        // Untraced single-step (raced DETACH): plain SIGTRAP.
+                                                        // gdmr29 (temporary): this path is a SIGTRAP-death
+                                                        // candidate for the gdm-session-worker kill — name it.
+                                                        // REMOVE before merge.
+                                                        //
+                                                        // Demoted to pr_debug (print-audit lane, 2026-11):
+                                                        // an untraced ebreak left in text hits this on EVERY
+                                                        // step attempt — a per-trap pr_info through the
+                                                        // polled UART, the EXITRP class (e2717687). The hunt
+                                                        // is closed; release builds pay nothing.
+                                                        crate::pr_debug!(
+                                                            "SSBRK: comm={} epc={:#x} (untraced single-step ebreak)",
+                                                            comm_now,
+                                                            regs.epc
+                                                        );
+                                                        (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
+                                                    }
+                                                    return;
+                                                }
+                                                // A real user ebreak under a tracer stops for the tracer
+                                                // instead of dying (gdb inserts/relies on breakpoints).
+                                                if (*task).tracer_pid() != 0 {
+                                                    // Advance past the 4-byte ebreak so CONT resumes at the
+                                                    // following instruction (Linux do_trap_break).
+                                                    regs.epc += 4;
+                                                    // SAFETY: task is the current task in its trap path.
+
+                                                        crate::process::ptrace::ptrace_stop(
+                                                            task,
+                                                            crate::signal::Signal::SIGTRAP as i32,
+                                                            crate::signal::SigInfo::new(
+                                                                crate::signal::Signal::SIGTRAP as i32,
+                                                                crate::signal::si_code::SI_KERNEL,
+                                                                (*task).pid(), 0),
+                                                        );
+
+                                                    return;
+                                                }
+                                            }
+                                            // HOTPATH-PRINT: fault-path — see context above
+                                            crate::pr_info!(
+                                                "UBRK: comm={} epc={:#x} ra={:#x}",
+                                                comm_now,
+                                                regs.epc,
+                                                regs.ra
+                                            );
+                                            crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+                                            // Do NOT advance epc — the task is now ZOMBIE and will not resume
+                                        } else {
+                                            // Kernel-mode ebreak is a kernel bug, not something to step over.
+                                            panic!(
+                                                "trap: ebreak in kernel mode at epc={:#x}",
+                                                regs.epc
+                                            );
+                                        }
+
 }
 /// Handle page fault
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-24): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn sigsegv_has_handler() -> bool {
-    crate::arch::arch_floor::riscv64::trap::sigsegv_has_handler()
+pub(crate) 
+fn sigsegv_has_handler() -> bool {
+
+
+                                 crate::sched::current()
+                                     .and_then(|t|  (*t).signal.as_ref().map(|s| s.get_action(11)) )
+                                     .map(|a| a.is_some_and(|a| a.has_handler()))
+                                     .unwrap_or(false)
+
 }
 
 /// True when the CURRENT task blocks SIGSEGV (bit 10) — the thread is
@@ -293,8 +671,15 @@ pub(crate) fn sigsegv_blocked_current() -> bool {
 }
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-23): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn sigbus_has_handler() -> bool {
-    crate::arch::arch_floor::riscv64::trap::sigbus_has_handler()
+pub(crate) 
+fn sigbus_has_handler() -> bool {
+
+
+                                crate::sched::current()
+                                    .and_then(|t|  (*t).signal.as_ref().map(|s| s.get_action(7)) )
+                                    .map(|a| a.is_some_and(|a| a.has_handler()))
+                                    .unwrap_or(false)
+
 }
 
 

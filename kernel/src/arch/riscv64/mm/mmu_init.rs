@@ -379,8 +379,29 @@ pub fn register_fork_root(root_ppn: u64, owner_pid: u32) {
 }
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-34): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn task_pid_alive(pid: u32) -> bool {
-    crate::arch::arch_floor::riscv64::mm::mmu_init::task_pid_alive(pid)
+pub(crate) 
+fn task_pid_alive(pid: u32) -> bool {
+
+
+                                    if pid == 0 {
+                                        return false;
+                                    }
+                                    let alive = core::sync::atomic::AtomicBool::new(false);
+                                    crate::sched::for_each_task(|t| 
+                                        if (*t).pid() as u32 == pid {
+                                            // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
+                                            // they stay in the pid hash until reaped but are NOT live
+                                            // owners. Counting them made the EARLY-ROOT-FREE witness fire
+                                            // on recycled root frames (stale registry entry + unreaped
+                                            // zombie owner) — the exitwalk probe tripped it within seconds.
+                                            let st = (*t).state();
+                                            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+                                                alive.store(true, core::sync::atomic::Ordering::Relaxed);
+                                            }
+                                        }
+                                    );
+                                    alive.load(core::sync::atomic::Ordering::Relaxed)
+
 }
 
 impl PtLedger {
@@ -1199,8 +1220,18 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-19): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn enable() {
-    crate::arch::arch_floor::riscv64::mm::mmu_init::enable()
+pub 
+fn enable() {
+
+
+
+            let root_ppn = root_page_table_ppn();
+            // (new_kernel keeps the mm-tree's root contract — the mm/ lane
+            // owns its conversion.)
+            let addr_space =  MmStruct::new_kernel(root_ppn) ;
+            addr_space.enable();
+
+
 }
 /// Map identity mapping
 ///
@@ -1213,8 +1244,12 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-17): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn get_kernel_page_table_ppn() -> u64 {
-    crate::arch::arch_floor::riscv64::mm::mmu_init::get_kernel_page_table_ppn()
+pub 
+fn get_kernel_page_table_ppn() -> u64 {
+
+
+                                      root_page_table_ppn() 
+
 }
 
 // ==================== mmforensics: live-tree reverse scan ====================

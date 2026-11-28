@@ -117,8 +117,91 @@ pub(crate) fn try_expand_stack( addr_space: &AddressSpace, fault_addr: VirtAddr,
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-PAGE-FAULT-3): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn protnone_represent( addr_space: &AddressSpace, root_ppn: u64, fault_addr: VirtAddr, flags: u32, ) -> MmFaultResult {
-    crate::arch::arch_floor::aarch64::mm::page_fault::protnone_represent(addr_space, root_ppn, fault_addr, flags)
+pub(crate) 
+fn protnone_represent( addr_space: &AddressSpace, root_ppn: u64, fault_addr: VirtAddr, flags: u32, ) -> MmFaultResult {
+
+
+                                                                                                                      use crate::mm::page::VirtAddr as PageVirtAddr;
+
+                                                                                                                      let is_write = flags & FaultFlags::WRITE != 0;
+                                                                                                                      let is_exec = flags & FaultFlags::EXEC != 0;
+                                                                                                                      let is_read = flags & FaultFlags::READ != 0;
+
+                                                                                                                      // VMA lookup + access grant (riscv64 twin's verify order)
+                                                                                                                      let vma_mgr = addr_space.vma_read();
+                                                                                                                      let Some(vma) = (vma_mgr.find(PageVirtAddr::new(fault_addr.as_usize()))) else {
+                                                                                                                          // Was mapped (marker), now outside every VMA — a real gap.
+                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                      };
+                                                                                                                      let vma_flags = vma.flags();
+                                                                                                                      if is_write && !vma_flags.is_writable() {
+                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                      }
+                                                                                                                      if is_exec && !vma_flags.is_executable() {
+                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                      }
+                                                                                                                      if is_read && !vma_flags.is_readable() {
+                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                      }
+                                                                                                                      drop(vma_mgr);
+
+                                                                                                                      // Compose the re-presented software mask from the VMA grant
+                                                                                                                      let mut sw = PageTableEntry::V | PageTableEntry::U
+                                                                                                                          | PageTableEntry::A | PageTableEntry::D;
+                                                                                                                      if vma_flags.is_readable() {
+                                                                                                                          sw |= PageTableEntry::R;
+                                                                                                                      }
+                                                                                                                      if vma_flags.is_writable() {
+                                                                                                                          sw |= PageTableEntry::W | PageTableEntry::R; // W requires R
+                                                                                                                      }
+                                                                                                                      if vma_flags.is_executable() {
+                                                                                                                          sw |= PageTableEntry::X;
+                                                                                                                      }
+
+                                                                                                                      // Re-present under the PTE section, re-checking the marker (R7-C3
+                                                                                                                      // discipline: the leaf may have moved under us between the
+                                                                                                                      // lock-free walk and the section).
+                                                                                                                      let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
+                                                                                                                      // SAFETY: read-only walk on the mm's root.
+                                                                                                                      let Some((_ppn, now)) = ({ PageTableWalker::walk(root_ppn, fault_addr.bits()) }) else {
+                                                                                                                          return MmFaultResult::PermissionDenied;
+                                                                                                                      };
+                                                                                                                      if !crate::arch::aarch64::mm::mm_ops::is_protnone_marker(now) {
+                                                                                                                          // Someone re-presented/unmapped it first: the fresh state rules.
+                                                                                                                          return MmFaultResult::Handled;
+                                                                                                                      }
+                                                                                                                      let cow_bit = now & crate::arch::aarch64::mm::mm_ops::cow_flags::COW;
+                                                                                                                      let pcache_bit = now & crate::arch::aarch64::mm::mm_ops::cow_flags::PCACHE;
+                                                                                                                      if cow_bit != 0 {
+                                                                                                                          sw |= cow_bit;
+                                                                                                                          sw &= !PageTableEntry::W; // W deferred to the COW fault
+                                                                                                                      }
+                                                                                                                      if pcache_bit != 0 {
+                                                                                                                          sw |= pcache_bit;
+                                                                                                                          // PRIVATE cache leaf never gains W in place (first write goes
+                                                                                                                          // through COW); a SHARED cache leaf keeps W (stores must land
+                                                                                                                          // in the cache frame). PCACHE is dormant on aarch64 today; the
+                                                                                                                          // ownership rule rides the bit (riscv64 twin).
+                                                                                                                          if sw & PageTableEntry::W != 0
+                                                                                                                              && !crate::arch::aarch64::mm::mm_ops::cow_flags::pte_is_shared_cache(now)
+                                                                                                                          {
+                                                                                                                              sw |= crate::arch::aarch64::mm::mm_ops::cow_flags::COW;
+                                                                                                                              sw &= !PageTableEntry::W;
+                                                                                                                          }
+                                                                                                                      }
+
+                                                                                                                      // Write the L3 leaf: rebuild preserves the PPN (OUTPUT_ADDR field).
+                                                                                                                      // SAFETY: root_ppn is this mm's live root; marker re-checked under
+                                                                                                                      // the section.
+                                                                                                                      if let Some(l3) = crate::arch::aarch64::mm::mmu_init::user_l3_table_for(root_ppn, fault_addr.bits()) {
+                                                                                                                          let idx = ((fault_addr.bits() >> PAGE_SHIFT) & 0x1FF) as usize;
+                                                                                                                          l3.set(idx, PageTableEntry::rebuild_user_leaf(now, sw));
+                                                                                                                          // This translation changed; drop any cached walk.
+                                                                                                                          crate::arch::aarch64::mm::asid::flush_tlb_page(fault_addr.bits() as usize, 0);
+                                                                                                                          return MmFaultResult::Handled;
+                                                                                                                      }
+                                                                                                                      MmFaultResult::PermissionDenied
+
 }
 
 // ==================== Main Fault Handler ====================
@@ -135,6 +218,11 @@ pub fn handle_mm_fault( addr_space: &AddressSpace, fault_addr: VirtAddr, flags: 
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-PAGE-FAULT-1): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
-    crate::arch::arch_floor::aarch64::mm::page_fault::get_user_phys(root_ppn, vaddr)
+pub 
+fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
+
+
+                                                           // SAFETY: read-only walk on a valid root.
+                                                           { PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << PAGE_SHIFT) }
+
 }

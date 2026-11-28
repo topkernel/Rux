@@ -67,8 +67,13 @@ pub fn outl(port: u16, value: u32) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CPU-54): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn io_wait() {
-    crate::arch::arch_floor::x86_64::cpu::io_wait()
+pub 
+fn io_wait() {
+
+
+             // SAFETY: writing to port 0x80 (POST diagnostic port) is harmless.
+              outb(0x80, 0) ;
+
 }
 
 // ---------------------------------------------------------------------------
@@ -117,15 +122,28 @@ pub fn clts() {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CPU-49): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn stts() {
-    crate::arch::arch_floor::x86_64::cpu::stts()
+pub 
+fn stts() {
+
+
+          // SAFETY: single-bit set, mode bits preserved.
+           write_cr0(read_cr0() | CR0_TS) ;
+
 }
 /// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CPU-48): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn enable_write_protect() {
-    crate::arch::arch_floor::x86_64::cpu::enable_write_protect()
+pub 
+fn enable_write_protect() {
+
+
+                          // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
+
+                              let cr0 = read_cr0();
+                              write_cr0(cr0 | 0x1_0000);
+
+
 }
 /// Collected into `arch::arch_floor` (INV-ARCH-CPU-47): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
@@ -274,15 +292,49 @@ pub fn fsgsbase_enabled() -> bool {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CPU-38): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn enable_fsgsbase() {
-    crate::arch::arch_floor::x86_64::cpu::enable_fsgsbase()
+pub 
+fn enable_fsgsbase() {
+
+
+                     // CPUID leaf 7 subleaf 0, EBX bit 16 = FSGSBASE.
+                     let (_, ebx, _, _) = cpuid(7, 0);
+                     if ebx & (1 << 16) == 0 {
+                         crate::println!("arch: FSGSBASE not available, switches keep wrmsr FS/GS");
+                         return;
+                     }
+                     // SAFETY: CR4 update with the FSGSBASE bit only; CPUID gated and
+                     // idempotent.
+
+                         let cr4 = read_cr4();
+                         write_cr4(cr4 | (1 << 16));
+
+                     FSGSBASE_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+                     crate::println!("arch: CR4.FSGSBASE enabled");
+
 }
 /// CR4.SMEP (bit 20): Supervisor-Mode Execution Prevention. When set, a
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CPU-37): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn enable_smep() {
-    crate::arch::arch_floor::x86_64::cpu::enable_smep()
+pub 
+fn enable_smep() {
+
+
+                 // CPUID leaf 7 subleaf 0, EBX bit 7 = SMEP.
+                 let (_, ebx, _, _) = cpuid(7, 0);
+                 if ebx & (1 << 7) == 0 {
+                     crate::println!("arch: SMEP not available");
+                     return;
+                 }
+                 // SAFETY: CR4 update with the SMEP bit only; CPUID gated and
+                 // idempotent. Set on the BSP before SMP bring-up so every AP
+                 // inherits CR4 via the boot trampoline.
+
+                     let cr4 = read_cr4();
+                     write_cr4(cr4 | (1 << 20));
+
+                 crate::println!("arch: CR4.SMEP enabled (kernel EXEC of user pages faults at the fetch)");
+
 }
 /// WRFSBASE — set FS.base without an MSR write.
 ///
