@@ -127,11 +127,11 @@
           
           
         
-          <tr><td class="mono">lat_tcp 127.0.0.1</td><td class="num">8.0433 µs</td><td class="num">4.89 µs(天花板)</td><td><span class="chip bad">落后 1.64×</span></td></tr>
-          <tr><td class="mono">lat_udp 127.0.0.1</td><td class="num">6.6792 µs</td><td class="num">4.147 µs(天花板)</td><td><span class="chip bad">落后 1.61×</span></td></tr>
-          <tr><td class="mono">lat_fs -s 1k</td><td class="num">20.1k/17.3k files/s</td><td class="num">445k/455k(天花板)</td><td><span class="chip bad">落后 22–26×</span></td></tr>
+          <tr><td class="mono">lat_tcp 127.0.0.1</td><td class="num">12.6 µs</td><td class="num">23.5 µs</td><td><span class="chip good">领先 1.86×</span></td></tr>
+          <tr><td class="mono">lat_udp 127.0.0.1</td><td class="num">6.6792 µs</td><td class="num">20.3240 µs</td><td><span class="chip good">领先 2.0×</span></td></tr>
+          <tr><td class="mono">lat_fs -s 1k</td><td class="num">20.1k/17.3k files/s</td><td class="num">292.1k/361.8k</td><td><span class="chip bad">落后 15–21×</span></td></tr>
           <tr><td class="mono">lat_connect / bw_tcp</td><td class="num">已修复</td><td class="num">66.5 µs(天花板)</td><td><span class="chip cyan">connect() bug 已修</span></td></tr></tbody>
-    <p style="font-size:13px;color:var(--text-3)">注:lat_fs 为全板最大真差距(文件创建/删除热路径);原先高负载下的停滞已修复(三处叠加根因:睡眠豁免误清中断嵌套计数、软中断计数跨任务迁移、tmpfs 页分配持自旋锁),表中为修复后最新一次读数;lat_connect 的 connect() 伪造 ETIMEDOUT 已修;bw_tcp 功能完整(六格参数网格全过,典型 5s),偶发双峰慢模态与 lat_fs 同族(开项);bw_mmap_rd 与 pagefault 为镜像 runner 修复后复真。 注:lat_connect 的 connect() 伪造 ETIMEDOUT 已修(握手完成后对端关闭应返回成功)——2000/2000 连接复现器+net LTP 定向 12/12;bw_tcp 定位中:裸 2MB 批量传输已验证完整快速,卡点在基准自身的块间协议交互(开项)。</p>
+    <p style="font-size:13px;color:var(--text-3)">注:lat_fs 为全板最大真差距(文件创建/删除热路径);原先高负载下的停滞已修复(三处叠加根因:睡眠豁免误清中断嵌套计数、软中断计数跨任务迁移、tmpfs 页分配持自旋锁),表中为修复后最新一次读数;参考列为同机虚拟机内发行版内核(guest 对 guest,同一 QEMU/KVM rig);lat_connect 的 connect() 伪造 ETIMEDOUT 已修;bw_tcp 功能完整(六格参数网格全过,典型 5s),偶发双峰慢模态与 lat_fs 同族(开项);bw_mmap_rd 与 pagefault 为镜像 runner 修复后复真。 注:lat_connect 的 connect() 伪造 ETIMEDOUT 已修(握手完成后对端关闭应返回成功)——2000/2000 连接复现器+net LTP 定向 12/12;bw_tcp 定位中:裸 2MB 批量传输已验证完整快速,卡点在基准自身的块间协议交互(开项)。</p>
       </table>
     </div>
     <p style="font-size:13px;color:var(--text-3)">注:bw_file_rd 与 lat_pagefault 两行为镜像 runner 修复后复真的读数(此前低值不可信);lat_syscall null 的反超来自 fdget 直借+getppid O(1)+PT_REGS+fdreap 静默+NOHZ 栈。机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。lat_mmap 4.525 µs(对天花板 1.12×,近持平带)。</p>
