@@ -207,6 +207,13 @@ pub enum PidFileKind {
     AttrPrev,
     /// /proc/[pid]/attr/keycreate — keyring-create label (writable).
     AttrKeycreate,
+    /// /proc/[pid]/stack — the parked kernel-stack backtrace (fs/proc/stack.c,
+    /// CONFIG_STACKTRACE; the debug-alignment matrix M42 fill).
+    Stack,
+    /// /proc/[pid]/wchan — the wait-channel symbol of the blocked-in
+    /// function (fs/proc/base.c proc_wchan; the M43 fill — also feeds
+    /// stat field 35).
+    Wchan,
 }
 
 /// ProcFS node type
@@ -459,6 +466,8 @@ impl ProcFSNode {
                 PidFileKind::AttrSockcreate => pid::attr_get(pid, pid::ATTR_SOCKCREATE),
                 PidFileKind::AttrPrev => pid::attr_get(pid, pid::ATTR_PREV),
                 PidFileKind::AttrKeycreate => pid::attr_get(pid, pid::ATTR_KEYCREATE),
+                PidFileKind::Stack => pid::generate_stack(pid),
+                PidFileKind::Wchan => pid::generate_wchan(pid),
                 // Symlinks handled by get_link_target()
                 PidFileKind::Exe | PidFileKind::Cwd => Vec::new(),
             };
@@ -1310,6 +1319,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "cgroup" => Some(pid::generate_cgroup(pid)),
                 "mounts" => Some(mounts::generate()),
                 "mountinfo" => Some(mounts::generate_mountinfo()),
+                "stack" => Some(pid::generate_stack(pid)),
+                "wchan" => Some(pid::generate_wchan(pid)),
                 _ => None,
             };
         }
@@ -1365,6 +1376,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "comm" => Some(pid::generate_comm(pid)),
                 "cgroup" => Some(pid::generate_cgroup(pid)),
                 "mounts" => Some(mounts::generate()),
+                "stack" => Some(pid::generate_stack(pid)),
+                "wchan" => Some(pid::generate_wchan(pid)),
                 _ => None,
             };
         }
@@ -1503,6 +1516,8 @@ fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
             b"cgroup" => PidFileKind::Cgroup,
             b"mounts" => PidFileKind::Mounts,
             b"mountinfo" => PidFileKind::Mountinfo,
+            b"stack" => PidFileKind::Stack,
+            b"wchan" => PidFileKind::Wchan,
             _ => {
                 // /proc/[pid]/fd — the fd subdirectory (review 5.7: used to
                 // exist only behind a syscall-layer string special case, so
@@ -1884,6 +1899,8 @@ fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errn
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
             b"mountinfo" => PidFileKind::Mountinfo,
+            b"stack" => PidFileKind::Stack,
+            b"wchan" => PidFileKind::Wchan,
             _ => {
                 // /proc/[pid]/fd directory (review 5.7): a synthetic
                 // directory whose readdir lists the target's open fds —
@@ -2548,6 +2565,8 @@ fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode::VfsDi
         (b"attr", file_type::DT_DIR),
         (b"oom_score", file_type::DT_REG),
         (b"oom_score_adj", file_type::DT_REG),
+        (b"stack", file_type::DT_REG),
+        (b"wchan", file_type::DT_REG),
     ];
 
     for (name, ft) in files.iter() {
