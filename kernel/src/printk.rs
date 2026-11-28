@@ -615,29 +615,34 @@ fn printk_bytes(level: u8, text: &[u8]) {
     // context that holds nothing. Early boot (before PRINTK_INITIALIZED)
     // stays inline: there is no tick to drain yet and the box is
     // single-CPU.
-    if printk_should_defer_output() {
-        CONSOLE_EMIT_PENDING.store(true, Ordering::Release);
-        return;
-    }
+    // DEFERRED EMISSION DISABLED (oh-dbg lane, 2026-11-27): the deferral
+    // below broke the OpenHarmony boot storm. Bisect over
+    // 017bf556b..f1900270e convicted this deferral (first-bad
+    // 6d6ae3f2e); neutralizing ONLY this arm on the first-bad tree
+    // healed the boot (daemon-exit churn in the first 30 s: 69-120 -> 1;
+    // SAFWK "init finished" lines return at 2.5-4.5 s). Two structural
+    // costs, both load-bearing only under the OH storm:
+    //   1. The drain ceiling. Console lines from atomic contexts then
+    //      drain at 1 line/tick (+4/idle pass) ~100 lines/s, vs the
+    //      callers' own inline pace; the emit-lock skips + TX-stall
+    //      drops shed the rest. The OH boot stalls at the SAFWK SA-init
+    //      chain (no service completes OnStart; daemons exit 0 and
+    //      churn; bootanimation never spawns; screen stays black).
+    //   2. An IF=0 UART print on the tick path. service_deferred_kmsg_
+    //      wake() drains from scheduler_tick inside the timer IRQ, so a
+    //      pending line pays its bounded THRE wait at IF=0 every tick —
+    //      the "no new IRQ-OFF print classes" gate class, invisible on
+    //      quiet gates (pending stays clear) and hot under load.
+    // The rest of Rule 2 stays: the ring is still lock-free, the kmsg
+    // reader wake is still always-deferred (KMSG_WAKE_PENDING serviced
+    // by the tick — no print-path scheduler re-entry), and the drain
+    // machinery below remains for its cov-dump caller and any future
+    // rate-honest redesign; with the setter gone the drains no-op.
+    // printk_should_defer_output() (the Rule-2 switch, formerly
+    // preempt_count!=0 || IRQs-off || grq_held_here) is deleted with
+    // the arm; re-land it only behind a drain that keeps up with the
+    // storm and drains off the tick's IF=0 window.
     emit_to_console(text);
-}
-
-/// Should the console emit for THIS print be deferred to the tick/idle
-/// drain? (Rule 2 — see `printk_bytes`.)
-#[inline]
-fn printk_should_defer_output() -> bool {
-    // Before the ring is initialized there is no tick drain to rely on —
-    // early boot emits inline (single CPU, the historical behavior).
-    if !PRINTK_INITIALIZED.load(Ordering::Relaxed) {
-        return false;
-    }
-    // Any spinlock holder (RawSpinlock/Spinlock book PREEMPT_OFFSET on
-    // acquire), any interrupt context (hardirq/softirq/NMI bits), any
-    // explicit preempt-disable, or IRQs off — all pay the serial line
-    // later, from a context that holds nothing.
-    crate::interrupt::preempt::preempt_count() != 0
-        || !crate::arch::cpu::get_interrupts_state()
-        || crate::sched::sched::grq_held_here()
 }
 
 /// A console line is waiting to be emitted by the drain (set by printk
@@ -751,19 +756,26 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     // Wake /dev/kmsg readers (Linux semantics: a blocking kmsg read
     // sleeps until the next record lands).
     //
-    // ALWAYS DEFERRED (Rule 2, grq-lock-1st): `WaitQueueHead::wake_up`
-    // holds the queue's list lock ACROSS `wake_up_process` ->
-    // `wake_up_enqueue_opt` -> `grq().lock_irqsave()` — a wake from the
-    // print path ENTERS THE SCHEDULER. From a GRQ holder it re-acquired
-    // the GRQ on the same cpu (the convicted wedge: holder spins forever
-    // on GRQ+0x0, IRQs dead); from any other locked context it is an
-    // unbounded walk under the caller's lock. The reference never wakes
-    // log readers from inside the printer (console_unlock's deferred
-    // wakeup, printk_deferred); Rux now does the same unconditionally:
-    // the print path only sets the pending flag, the tick services it
-    // from a context that holds nothing. Reader delivery latency is one
-    // tick (the pa11-accepted poll class).
-    KMSG_WAKE_PENDING.store(true, Ordering::Release);
+    // DEFERRED ONLY UNDER THE GRQ (back to the pre-Rule-2 shape, oh-dbg
+    // lane 2026-11-27): `WaitQueueHead::wake_up` holds the queue's list
+    // lock ACROSS `wake_up_process` -> `wake_up_enqueue_opt` ->
+    // `grq().lock_irqsave()` — a wake from the print path ENTERS THE
+    // SCHEDULER, and from a GRQ holder that is the convicted same-cpu
+    // re-acquire wedge. The unconditional Rule-2 deferral (tick
+    // services the pending flag) widened the reader lost-wake window to
+    // a full tick and moved every reader wake into the tick's hardirq.
+    // A/B on the OH boot: this unconditional form dies at the hdcd
+    // null-jump kernel panic on every boot (63.5-167 s across 8 boots,
+    // rip=0x28 kernel-mode jump); with the wake inline-when-GRQ-free
+    // the same rig ran 180 s with zero panics (fixC1) — the bisect +
+    // A/B convict this arm as the panic face. The GRQ stays protected
+    // (defer when held — the pre-Rule-2 pa11 discipline); every other
+    // caller wakes inline at syscall context.
+    if crate::sched::sched::grq_held_here() {
+        KMSG_WAKE_PENDING.store(true, Ordering::Release);
+    } else {
+        KMSG_READ_WQ.wake_up_all();
+    }
 
     // NOTE (klogd redesign): the persistent /var/log/kmsg copy is NO
     // LONGER taken here. The old per-record synchronous ext4 write ran

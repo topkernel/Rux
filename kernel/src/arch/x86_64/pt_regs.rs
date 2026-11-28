@@ -294,8 +294,14 @@ pub fn in_task() -> bool {
 // ==================== Offset constants (for assembly use) ====================
 
 /// Field offsets in PtRegs
+///
+/// pub(crate): the x86 suite's pt_regs pins (kernel/src/tests/pt_regs.rs)
+/// read these constants; the module went private in the Oct 7 arch
+/// convergence (f20b9aea8) and the Nov 19 test port (ee2c94a87) then
+/// broke the x86 test build (E0603) — the merge gates run the riscv
+/// suite, so x86 stayed silently red until this lane's gate run.
 #[allow(dead_code)]
-mod offsets {
+pub(crate) mod offsets {
     use super::*;
 
     pub const R15: usize = core::mem::offset_of!(PtRegs, r15);
