@@ -220,6 +220,33 @@ pub(super) fn drain_tasklet_list(local_head: &mut ListHead) {
 pub(super) fn bracket_task_fields(a_tp: usize, b_tp: usize) -> (i32, i32, i32, i32) {
     let a = a_tp as *mut crate::process::task::Task;
     let b = b_tp as *mut crate::process::task::Task;
+    // PER-CPU MIGRATION: the count fields are gone from the task; the
+    // probe now reports this cpu's word for both legs (the bracket ran
+    // on one cpu — that word is the only count there ever was).
     // SAFETY: INV-IRQ-BRACKET-LEAK-1 above (diagnostic scalar reads).
-    unsafe { ((*a).pid() as i32, (*a).preempt_count(), (*b).pid() as i32, (*b).preempt_count()) }
+    let w = crate::interrupt::preempt::preempt_count();
+    unsafe { ((*a).pid() as i32, w, (*b).pid() as i32, w) }
+}
+
+// ------------------------------------------------------------------
+// Assembly-crossing symbols (the sched/unsafe.rs convention: a symbol
+// exported to assembly IS a raw edge — the link boundary is outside the
+// language's guarantees.)
+// ------------------------------------------------------------------
+
+/// The trap-return preempt gate for the arch asm paths (riscv64 user +
+/// kernel twins, aarch64 user gate — the x86 twin is
+/// `x86_preemptible`): reads THIS cpu's preempt_count word directly.
+/// PER-CPU MIGRATION: the pre-migration gates loaded the per-task field
+/// by offset (riscv64 `lw {task_ti_preempt}(tp)`, aarch64
+/// `ldr [x20, #TI_PREEMPT]`); the word no longer lives in the task, and
+/// these gates are reached only when need_resched is already set, so
+/// the call sits on the resched-pending path only.
+#[no_mangle]
+pub extern "C" fn asm_preemptible() -> i64 {
+    if crate::interrupt::preempt::preemptible() {
+        1
+    } else {
+        0
+    }
 }

@@ -110,11 +110,21 @@ pub struct AcquireEvidence {
 
 /// Freshness bound for acquire evidence, in jiffies. A live spinner
 /// refreshes the stamp every ~0.07-2ms (KVM/native; TCG ~10x slower),
-/// so 10 jiffies (100ms at 100Hz) is a 50-1300x margin over the
-/// refresh period while staying 20x UNDER the heal's own 200-tick
-/// (2s) bar — a leaked count is delayed by at most this window past
-/// its last genuine contended spin.
-pub const ACQUIRE_EVIDENCE_FRESH_JIF: u64 = 10;
+/// so 100ms of wall time is a 50-1300x margin over the refresh period
+/// while staying 20x UNDER the heal's own 2s bar — a leaked count is
+/// delayed by at most this window past its last genuine contended
+/// spin.
+///
+/// HZ=1000 readiness (p23-p1panic): the bound is WALL-TIME semantics
+/// (100 ms, calibrated at kernel_hz=100 as 10 jiffies). A literal
+/// tick count at HZ=1000 shrank the window to 10 ms — tighter than a
+/// KVM spinner's worst refresh period under host steal — so the
+/// tick-side heal refused less often exactly where ticks were 10x
+/// denser, and stole live contended-waiter counts (the lm300
+/// PREEMPT-HEAL + PREEMPT-UNDERFLOW cascade). Scale with KERNEL_HZ:
+/// identical at the calibration HZ, wall-clock-true everywhere.
+pub const ACQUIRE_EVIDENCE_FRESH_JIF: u64 =
+    (crate::config::KERNEL_HZ as u64) / 10;
 
 /// The per-CPU acquire-evidence slots (see [`AcquireEvidence`]).
 pub static ACQUIRE_EVIDENCE: [AcquireEvidence; crate::config::MAX_CPUS] = {

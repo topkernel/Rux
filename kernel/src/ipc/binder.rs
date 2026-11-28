@@ -6207,7 +6207,7 @@ pub fn txn_hang_audit() {
                 tk.ti_cpu(),
                 slot,
                 swout,
-                tk.preempt_count() as u32,
+                crate::interrupt::preempt::cpu_preempt_count(tk.ti_cpu() as usize) as u32,
                 exec_ns / 1_000_000,
                 dx_ms,
             );

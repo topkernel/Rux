@@ -510,7 +510,8 @@ pub fn dump_all_tasks(reason: &str) {
                 Some(tk) => tk,
                 None => continue,
             };
-            let (pid, st, preempt) = (tk.pid(), tk.state().bits(), tk.preempt_count());
+            // PER-CPU MIGRATION: the count is per-cpu now; print the task's last cpu's word.
+let (pid, st, preempt) = (tk.pid(), tk.state().bits(), crate::interrupt::preempt::cpu_preempt_count(tk.ti_cpu() as usize));
             puts("cpu");
             put_dec(c as u64);
             puts(" cur pid=");
@@ -649,7 +650,7 @@ pub fn dump_all_tasks(reason: &str) {
                 puts(" PK-GARBAGE");
             }
             puts(" preempt=");
-            let pv = t.preempt_count() as u64;
+            let pv = crate::interrupt::preempt::cpu_preempt_count(t.ti_cpu() as usize) as u64;
             if (pv as i64) < 0 {
                 putc(b'-');
                 put_dec((pv as i64).unsigned_abs());
@@ -1082,7 +1083,7 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
                 puts("FROZEN-CPU victim pid=");
                 put_dec(tk.pid() as u64);
                 puts(" preempt=");
-                put_dec(tk.preempt_count() as u64);
+                put_dec(crate::interrupt::preempt::cpu_preempt_count(tk.ti_cpu() as usize) as u64);
                 puts(" saved_sp=");
                 put_hex(sp);
                 if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {

@@ -1743,3 +1743,30 @@ The reference image recipe is in userspace/lmbench/init_ref.c (loopback
 bring-up added this round) + /tmp/lmbench-ref.img (store lmbench image +
 init_ref injection); the runner is the run-refkvm.sh shape with
 budget=180 and the case in lmbench=lat_tcp,127.0.0.1 form.
+
+## Sink-write fast path landed (2026-11-28, main=5fc483d94): the write row drops 34% to ahead-of-reference
+
+Two costs removed from the 1-byte sink-write path:
+
+1. The short-write wtrace census block ran its 480-byte copy_in +
+   hex/text conversion + Vec collect on every write <= 256 bytes to a
+   non-console fd even when rux:writetrace was unarmed — only the final
+   pr_info was gated. The armed check now heads the block.
+2. The null/zero sinks consume nothing (the reference's NULL write_iter
+   never touches the user buffer), but the small-stage arm copy_in'd
+   the user bytes into a zero-initialized 256-byte stack buffer before
+   write_slice. Sink ops (NULLDEV_OPS / ZERODEV_OPS) now short-circuit
+   at the ops classify: count was access_ok-validated at entry, so the
+   write is just the length acceptance — no copy_in, no staging
+   zero-init.
+
+Same-rig A/B (med of 3): write 0.0781 → 0.0507/0.0522 (−34%) — the
+guest-in-guest reference is 0.0552, so the write row moves from 1.41x
+behind to ~0.93x, AHEAD. The read twin keeps its fill (the user buffer
+needs the zeros; that copy is the semantic). Gates: riscv make test
+green, triple-arch rc=0.
+
+Recorded: an intermittent write-boot wedge (R87P-GATE-BLOCK pid=1 x8,
+fzms=10–20, no taskdump captured) hit ~40% of the write boots on this
+rig regardless of budget; the read/null/fstat boots never showed it.
+Not reproducible with taskdump armed — queued as its own item.

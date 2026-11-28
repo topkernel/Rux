@@ -2988,7 +2988,7 @@ pub fn param_sender_dump() {
                 pid,
                 comm_s,
                 tk.state().bits(),
-                tk.preempt_count(),
+                crate::interrupt::preempt::cpu_preempt_count(tk.ti_cpu() as usize),
                 tk.pick_state(),
                 tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
                 tk.on_cpu(),

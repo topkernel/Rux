@@ -412,7 +412,10 @@ impl WaitQueueHead {
                         // token return — pid, state bits, preempt_count.
                         if crate::debug::lostpark::armed() {
                             let st = crate::process::edges::borrow_task(task).state();
-                            let pc = crate::process::edges::borrow_task(task).preempt_count();
+                            // PER-CPU MIGRATION: the count is per-cpu now.
+            let pc = crate::interrupt::preempt::cpu_preempt_count(
+                crate::process::edges::borrow_task(task).ti_cpu() as usize,
+            );
                             let pid = crate::process::edges::borrow_task(task).pid();
                             crate::debug::lostpark::record(
                                 4,

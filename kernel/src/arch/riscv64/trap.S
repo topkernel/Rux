@@ -775,18 +775,26 @@ trap_exit:
     // for 31 enqueued tasks) while the parent's sleep(15) expiry, the
     // semctl(SETVAL 0) reaper and the console taskdump all starved.
     //
-    // The load width is load-bearing history: ti_preempt_count is an i32
-    // at offset 4, and the old `ld` (8 bytes) straddled into
+    // The load width was load-bearing history: ti_preempt_count was an
+    // i32 at offset 4, and the old `ld` (8 bytes) straddled into
     // ti_kernel_sp's low half — the or'd-in stack address bits made the
     // bnez almost always taken, silently disabling user preemption
     // machine-wide (the kernel is otherwise cooperative-only: __schedule
     // is reached solely from blocking paths). The KERNEL-path twin at
-    // .Lcheck_resched_kernel deliberately keeps the wide load: switching
-    // a task out of a kernel-mode trap exit is CONFIG_PREEMPT territory
-    // and previously crashed boot (pid 1 SIGSEGV at a kernel epc in user
-    // mode); kernel preemption stays opt-in via explicit schedule()s.
-    lw t0, {task_ti_preempt}(tp)
-    bnez t0, .Lrestore_and_exit
+    // .Lcheck_resched_kernel deliberately kept the same wide load:
+    // switching a task out of a kernel-mode trap exit is CONFIG_PREEMPT
+    // territory and previously crashed boot (pid 1 SIGSEGV at a kernel
+    // epc in user mode); kernel preemption stays opt-in via explicit
+    // schedule()s.
+    //
+    // PER-CPU MIGRATION (p23-percpupreempt): the count no longer lives
+    // in the task — it is THIS cpu's word (interrupt/preempt.rs
+    // PREEMPT_WORDS, the reference x86 pcpu_hot.preempt_count shape).
+    // The gate reads it through asm_preemptible (the x86
+    // x86_preemptible precedent); reached only when need_resched is
+    // already set, so the call is resched-pending-path only.
+    call asm_preemptible
+    beqz a0, .Lrestore_and_exit
 
     // Need resched - call schedule()
     // After schedule() returns (when this task is scheduled back in),
@@ -963,11 +971,13 @@ trap_exit:
     call asm_need_resched
     beqz a0, .Lrestore_kernel_csrs
 
-    // Check preempt_count — only preempt if not in IRQ/softirq context
-    // NOTE: deliberately still `ld` (straddles ti_kernel_sp — see the
-    // user-path note above); kernel-mode trap-exit preemption stays
-    // disabled (CONFIG_PREEMPT territory; it crashed boot historically).
-    ld t0, {task_ti_preempt}(tp)
+    // Kernel-mode trap-exit preemption stays disabled (CONFIG_PREEMPT
+    // territory; it crashed boot historically — pid 1 SIGSEGV at a
+    // kernel epc in user mode). The pre-migration gate refused by
+    // accident (the deliberate wide `ld` straddled ti_kernel_sp — see
+    // the user-path note); the per-CPU word is exact, so the refusal is
+    // now explicit.
+    li t0, 1
     bnez t0, .Lrestore_kernel_csrs
 
     // About to schedule(): save the pt_regs pointer so the post-schedule
