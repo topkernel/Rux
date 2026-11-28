@@ -85,7 +85,7 @@
 
     <h2 id="now"><span class="anchor">§1</span>Current goals (2026-11)</h2>
     <ul>
-      <li><b>The unsafe-consolidation campaign landed (2026-11-27)</b>: the whole repo's unsafe lives in 19 audited unsafe.rs files, 401 files forbid it at the compiler, the machine gate is green repo-wide (rc=0); the unsafe keyword is 1,022 of 375,622 lines = 0.27%, SAFETY coverage 65.5%.</li>
+      <li><b>The unsafe-consolidation campaign completed (collected 2026-11-27; per-statement narrowing + safe-function repatriation 2026-11-28)</b>: the whole repo's unsafe lives in 18 audited per-subsystem unsafe.rs files plus tests/, 401 files forbid it at the compiler, the machine gate is green repo-wide (rc=0); the dual-series total is 3,936 of 397,552 physical lines = 0.99% (campaign arc 5.76% → 0.99%).</li>
       <li><b>Ubuntu 22.04 GNOME desktop: achieved and stability-verified</b> (x86_64 + KVM primary): 5/5 system starts green on main 188+ commits past the previous round (2026-11-16) — shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV.</li>
       <li><b>The full Ubuntu 24.04 desktop</b>: systemd 255 reaches multi-user + graphical targets with serial login (dev-ttyS0 found, getty started, prompt reached); gdm.service and systemd-logind start clean (the 90 s timeout's EROFS root cause fixed); <code>make ubuntu-run</code> boots the full 24.04 desktop by default — remaining face: greeter rendering (the chain is in place once the convoy family clears).</li>
       <li><b>OpenHarmony launcher → desktop</b>: /data mounting and the SystemUI lock screen achieved; advancing toward the full launcher home screen.</li>

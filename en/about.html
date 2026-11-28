@@ -117,20 +117,20 @@
 
     <h2 id="safety"><span class="anchor">§4</span>Safety: not "Rust is safe", but the itemized bill</h2>
     <p>"Rust is safe" is a sentence everyone has heard too often. What is actually worth knowing is: what has gone wrong inside unsafe code, and how I manage it.</p>
-    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 375,622 lines, measured after the consolidation campaign completed on 2026-11-27:</p>
+    <p><b>How large the unsafe surface is.</b> <code>kernel/src</code> is 397,552 physical lines (tests/ excluded), measured after per-statement narrowing + safe-function repatriation landed on 2026-11-28:</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Series</th><th>Value</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>unsafe keyword lines</td><td class="num"><b>1,022 lines = 0.27%</b></td><td>the pre-campaign register held 6,396 unsafe regions</td></tr>
-        <tr><td>files containing unsafe</td><td class="num"><b>19 audited unsafe.rs files</b></td><td>one collection per subsystem + the root; every block under an INV contract</td></tr>
+        <tr><td>dual-series total</td><td class="num"><b>3,936 lines = 0.99%</b></td><td>block series 1,329 blocks / 3,661 lines (0.92%) + fn/impl series 165 items / 275 lines (0.07%); the pre-campaign register held 6,396 unsafe regions</td></tr>
+        <tr><td>files containing unsafe</td><td class="num"><b>18 audited unsafe.rs files + tests/</b></td><td>one audited file per subsystem; per-statement granularity, every block under an INV contract</td></tr>
         <tr><td>forbid(unsafe_code) files</td><td class="num"><b>401</b></td><td>every other file forbids unsafe at the compiler</td></tr>
         <tr><td>Machine gate</td><td class="num"><b>rc=0</b></td><td>gate_unsafe_mainline.py scans the whole repo: zero unsafe outside the audited files</td></tr>
       </tbody>
     </table></div>
-    <p>The boundary is enforced by the compiler and the machine gate: unsafe in the forbidden set fails the build outright; adding unsafe means entering the subsystem's audited file with a numbered INV contract. SAFETY-comment coverage is 65.5%, target 95%.</p>
+    <p>The boundary is enforced by the compiler and the machine gate: unsafe in the forbidden set fails the build outright; adding unsafe means entering the subsystem's audited file with a numbered INV contract. Every unsafe region is per-statement granularity — a statement stays inside unsafe only when the compiler demands it (E0133-guided); the arch floor <code>arch/unsafe.rs</code> carries 2,181 of 25,343 lines, and 73 safe functions were repatriated from it to their home subsystem files.</p>
     <p><b>The defect history.</b> <b>35</b> memory-corruption-class bugs over Rux's whole history, each adjudicated individually: <b>23</b> had the defect inside unsafe code or assembly, <b>12</b> were in safe code — and every one of those twelve is an ownership, refcount, lock-protocol or stack-depth decision (the reduction campaign contributed two: a manual refcount release kept beside an RAII handle, and a self-referential list head left pointing at a dead constructor temporary — both caught by the data-integrity battery, both fixed at the protocol level). The classes that dominate the CVE history of C kernels — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are <b>zero</b> in safe code. Six of the 35 were caught in review before any boot ran them.</p>
     <p><b>Formal verification.</b> 164 Kani harnesses discharge the core unsafe code for all inputs; 1,184 host-side tests; loom enumerates the interleavings of the mutex, PI-chain and timer primitives; 4 SPIN models; Miri nightly.</p>
-    <div class="callout">"I am 99.7% safe Rust" is not the claim. The claim is: here is exactly what the remaining 0.27% is, where it concentrates (19 audited files), and which tool watches it. That is auditable safety, not a slogan. See the <a href="../security/index.html">security overview</a> and the <a href="../security/taxonomy.html">defect taxonomy</a>.</div>
+    <div class="callout">"Almost all safe Rust" is not the claim. The claim is: here is exactly what the remaining 0.99% is, where it concentrates (18 audited files), and which tool watches it. That is auditable safety, not a slogan. See the <a href="../security/index.html">security overview</a> and the <a href="../security/taxonomy.html">defect taxonomy</a>.</div>
 
     <h2 id="perf"><span class="anchor">§5</span>Performance: same machine, same accelerator — the wins and the losses both published</h2>
     <p>Every row is a QEMU + KVM comparison on the same host with the same accelerator; numbers from different environments are never mixed into one line.</p>
@@ -162,7 +162,7 @@
     <ul>
       <li>LTP: 1,139 of 1,869 pass; several hundred still fail. TIMEOUT cases are adjudicated one by one, and every failure that is not ours stays on record</li>
       <li>lmbench: 13 rows trail, the largest at 22–26×; 1 MiB direct write sits at 0.75–0.83×. Each row carries a measured decomposition of the gap</li>
-      <li>The unsafe surface: 0.27% (1,022 of 375,622 lines), all of it inside the 19 audited unsafe.rs files, every block under an INV contract (see the <a href="../security/unsafe.html">ledger</a>)</li>
+      <li>The unsafe surface: 0.99% (dual-series total 3,936 of 397,552 physical lines), all of it inside the 18 audited unsafe.rs files plus tests/, per-statement granularity, every block under an INV contract (see the <a href="../security/unsafe.html">ledger</a>)</li>
       <li>Kani covers the core unsafe code, not every key path; loom and SPIN cover the concurrency primitives</li>
       <li>Whether the AI working model holds at 400,000 lines is under observation, not settled</li>
       <li>The 29 registered divergences need their compatibility evidence kept current</li>

@@ -111,10 +111,10 @@
     <h2 id="layers"><span class="anchor">§2</span>Layering and unsafe governance</h2>
     <p><code>docs/architecture/kernel-layers.md</code> defines the longest-prefix-match layering: unmatched files default into the safest bucket.</p>
     <ul>
-      <li><b>The consolidation campaign (2026-11-27) landed</b>: the whole repo's unsafe lives in <b>19 audited <code>unsafe.rs</code> files</b> (one collection per subsystem + the root), every block under an INV contract (SAFETY-comment coverage 65.5%); the other <b>401 files</b> carry file-level <code>forbid(unsafe_code)</code>.</li>
+      <li><b>The consolidation campaign (collected 2026-11-27; per-statement narrowing + safe-function repatriation 2026-11-28) landed</b>: the whole repo's unsafe lives in <b>18 audited per-subsystem <code>unsafe.rs</code> files plus tests/</b>, per-statement granularity with every block under an INV contract; the other <b>401 files</b> carry file-level <code>forbid(unsafe_code)</code>.</li>
       <li><b>The machine gate</b>: <code>scripts/gate_unsafe_mainline.py</code> is green repo-wide (rc=0) — zero unsafe outside the audited files; new unsafe is a compile error.</li>
       <li><b>The syscall boundary</b>: entries validate and translate user pointers in one place; uaccess_safe.rs provides typed copy_in/copy_out (INV-UACCESS-1).</li>
-      <li><b>The unsafe keyword is 0.27% of the kernel</b> (1,022 of 375,622 lines; 6,396 regions before the campaign).</li>
+      <li><b>The dual-series total is 0.99% of the kernel</b> (3,936 of 397,552 physical lines: 1,329 blocks / 3,661 lines + 165 fn-impl items / 275 lines; 6,396 regions before the campaign).</li>
     </ul>
 
     <h2 id="repo"><span class="anchor">§3</span>Top-level repository layout</h2>

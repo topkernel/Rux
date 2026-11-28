@@ -65,15 +65,15 @@ This is not "an assistant filling in a few lines." It places AI where subsystems
 
 ## Safety: the itemized bill, not the slogan
 
-**The surface.** The kernel tree (`kernel/`) is 421,180 lines ([structure](docs/architecture/structure.md)); the ledger below counts `kernel/src` Rust at 396,139 lines on its own basis (non-blank, generated files excluded) — the shares use that basis:
+**The surface.** The kernel tree (`kernel/`) is 421,180 lines ([structure](docs/architecture/structure.md)); the ledger below counts `kernel/src` at 397,552 physical lines (tests/ excluded) — the shares use that basis:
 
 | Series | Lines | Share |
 |---|---:|---:|
-| `unsafe { … }` block bodies | 8,759 | 2.2% |
-| `unsafe fn` / `unsafe impl` bodies | 2,539 | 0.6% |
-| **Dual series — the honest total** | **10,742** | **2.2%** |
+| `unsafe { … }` block bodies (1,329 blocks) | 3,661 | 0.92% |
+| `unsafe fn` / `unsafe impl` bodies (165 items) | 275 | 0.07% |
+| **Dual series — the honest total** | **3,936** | **0.99%** |
 
-The unsafe that remains is a territory, not a population: **165 modules are compiler-enforced zero-unsafe** (`#![forbid(unsafe_code)]`; CI ratchets the set — a file that regresses fails the build), and what is left concentrates in the Framework layer — per-arch entry, page-table, and uaccess edges plus one named edge module per subsystem, each block under a numbered INV contract. 67% of unsafe blocks carry a written `// SAFETY:` contract, and CI fails when a region appears in the tree without a row in the [verification ledger](docs/development/unsafe-verification.md). The defect classes that dominate C-kernel CVE history — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are **zero in safe code** (the adjudicated record behind this claim: [defect taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html)).
+The unsafe that remains is a territory, not a population: unsafe exists **only in 18 audited per-subsystem `unsafe.rs` files plus `tests/`** — every other file (about 401) carries a compile-time `#![forbid(unsafe_code)]`, and a gate script fails the build if `unsafe` appears outside the audited set. Every unsafe region is per-statement granularity: a statement stays inside `unsafe` only when the compiler demands it (E0133), so each region is a compiler-verified necessity with no codegen effect from the block boundaries. The floor is the arch edge — `arch/unsafe.rs` holds 2,181 unsafe lines in its 25,343 lines — and 73 safe functions were repatriated from it to their home subsystem files. The meter read 22,881 lines / 5.76% when the campaign began (2026-11-27); per-statement narrowing plus repatriation brought it to 3,936 / 0.99% (2026-11-28). 67% of unsafe blocks carry a written `// SAFETY:` contract, and CI fails when a region appears in the tree without a row in the [verification ledger](docs/development/unsafe-verification.md). The defect classes that dominate C-kernel CVE history — indexing overrun, iterator invalidation, format-string injection, wild pointer arithmetic — are **zero in safe code** (the adjudicated record behind this claim: [defect taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html)).
 
 **The proofs.** 164 Kani harnesses discharge core unsafe routines for all inputs; 1,184 host-side tests run in CI; loom enumerates interleavings for the mutex, PI-chain, and timer primitives; 4 SPIN models check the futex, interrupt/preempt, lock-ordering, and scheduler models; Miri runs nightly.
 
@@ -126,7 +126,7 @@ Because the host can use KVM, x86_64 is the primary platform for both function a
 - **LTP**: 1,139 of 1,869 pass. Several hundred still fail; the TIMEOUT class is adjudicated case by case, and each failure that is not ours is recorded as such.
 - **lmbench**: 13 rows trail, the largest deficit file creation at 22–26× and loopback socket latency at 2.1–2.2×. Each row carries a measured decomposition of the gap.
 - **Direct I/O**: 1 MiB sequential streams sit at 0.75–0.83× of the reference.
-- **The unsafe surface**: 2.2% of the kernel (10,742 lines) still depends on human review. The campaign target is ≤5,000 lines (≤1%) with a per-block irreducibility proof — which primitive owns the block, why no safe shape exists, the reference counterpart — recorded in the [ledger](docs/development/unsafe-verification.md); the ladder is in [the plan](docs/development/unsafe-5000-plan.md).
+- **The unsafe floor**: the ≤5,000-line (≤1%) campaign target is met — 3,936 lines, 0.99% — but the remaining surface still depends on human review; the per-region irreducibility records (which primitive owns the region, why no safe shape exists, the reference counterpart) live in the [ledger](docs/development/unsafe-verification.md), and the campaign ladder is in [the plan](docs/development/unsafe-5000-plan.md).
 - **Formal verification**: Kani covers the core unsafe primitives, not every key path; loom and SPIN cover the concurrency primitives.
 - **The AI working model** at 400,000 lines is under observation, not settled.
 - **The 29 registered divergences** need their compatibility evidence kept current as the kernel moves.
@@ -139,13 +139,14 @@ make build                   # kernel (default riscv64)
 make user rootfs             # userspace + minimal rootfs image
 make run                     # boot to a shell
 PLATFORM=x86_64 make build   # x86_64 / aarch64
+DEBUG=1 make build           # compile-time debug features (see below)
 make test                    # 1,584-case in-kernel suite
 make ubuntu-run              # boot the Ubuntu desktop
 make oh-run                  # boot OpenHarmony to the launcher
 make ci                      # full stress pipeline, unattended
 ```
 
-The serial console is the primary log (`console=ttyS0`); on panic the trap printer emits epc/ra/sp/badaddr and stack words for `riscv64-linux-gnu-addr2line`.
+The serial console is the primary log (`console=ttyS0`); on panic the trap printer emits epc/ra/sp/badaddr and stack words for `riscv64-linux-gnu-addr2line`. Runtime debug facilities need no build flag — tracefs (109 events), sysrq, the `/proc` debug files (per-task stack and wchan), kallsyms symbolization, and the hung-task detector are always present. `DEBUG=1 make build` additionally compiles in the compile-time debug features (lock-owner stamps, symbolized per-task backtraces, the synthetic wedge injector); the release default has none of them.
 [Getting started](https://topkernel.github.io/Rux/guides/getting-started.html) walks a first session end to end.
 
 ## Contributing

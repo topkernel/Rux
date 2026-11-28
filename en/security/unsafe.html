@@ -86,16 +86,16 @@
     <div class="sub">The memory-safety TCB's definition, the consolidation rules, machine-census numbers and the roadmap — answering "how much unsafe exists, where, and under what constraints" · Canonical: docs/architecture/safety-and-performance.md (the consolidation round + the INV index), docs/architecture/kernel-layers.md (the layering rules)</div>
 
     <h2 id="definition"><span class="anchor">§1</span>Defining the memory-safety TCB</h2>
-    <p>This kernel's memory-safety TCB (trusted computing base) is defined as: <b>the code whose memory safety depends on human review rather than the Rust compiler — i.e. every line inside an unsafe block</b>. Everything else is memory-safe by construction (compiler-enforced). The consolidation campaign completed 2026-11-27: those lines all live in <b>19 audited <code>unsafe.rs</code> files</b> (one collection per subsystem plus the root collection), and the other 401 files forbid unsafe at the compiler (machine gate green repo-wide, rc=0). The unsafe keyword occupies <b>1,022 of 375,622 kernel lines = 0.27%</b> (the pre-campaign register held 6,396 unsafe regions); SAFETY-comment coverage is 65.5%.</p>
+    <p>This kernel's memory-safety TCB (trusted computing base) is defined as: <b>the code whose memory safety depends on human review rather than the Rust compiler — i.e. every line inside an unsafe region</b>. Everything else is memory-safe by construction (compiler-enforced). The collection campaign completed 2026-11-27, and 2026-11-28 added per-statement narrowing + safe-function repatriation: those lines all live in <b>18 audited per-subsystem <code>unsafe.rs</code> files plus <code>tests/</code></b>, and the other ~401 files forbid unsafe at the compiler (machine gate green repo-wide, rc=0). The dual-series reading: unsafe totals <b>3,936 lines = 0.99% of 397,552 physical lines (kernel/src, tests/ excluded)</b> — block series 1,329 blocks / 3,661 lines (0.92%), <code>unsafe fn</code>/<code>unsafe impl</code> series 165 items / 275 lines (0.07%); campaign arc: 22,881 lines = 5.76% post-collection (2026-11-27) → 3,936 lines = 0.99% (2026-11-28), with the pre-campaign register holding 6,396 unsafe regions.</p>
     <div class="callout"><b>The honest boundary (carried by every ledger report)</b>: Rust's unsafe discipline covers accidental memory unsafety only. It is not a proof against logic bugs, ABI/spec violations, or compromised build tooling — those are carried by formal verification, the defect taxonomy, and stress testing (the other pages of this section).</div>
 
     <h2 id="layers"><span class="anchor">§2</span>The consolidation rules: the audited set and the forbidden set</h2>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Set</th><th>Contents</th><th>unsafe policy</th></tr></thead>
       <tbody>
-        <tr><td><b>Audited set</b> (19 files)</td><td>one <code>unsafe.rs</code> collection file per subsystem (arch/mm/fs/sched/process/drivers/ipc/net/sync/syscall/dfx/trace/timer/interrupt/perf/io_uring/safety/security) plus the root collection; the hardware/privilege operations (trap entry, page tables, context switch, raw MMIO/DMA, uaccess, low-level sync primitives) all live in their subsystem's audited file</td><td>unsafe permitted; <b>every block carries an INV contract</b> (a numbered machine-verifiable precondition declaration); each audited file's header comment carries its contract list; SAFETY-comment coverage 65.5%</td></tr>
+        <tr><td><b>Audited set</b> (18 files + tests/)</td><td>one <code>unsafe.rs</code> audited file per subsystem (arch/mm/fs/sched/process/drivers/ipc/net/sync/syscall/dfx/trace/timer/interrupt/perf/io_uring/safety/security); the hardware/privilege operations (trap entry, page tables, context switch, raw MMIO/DMA, uaccess, low-level sync primitives) all live in their subsystem's audited file</td><td>unsafe permitted; <b>every block carries an INV contract</b> (a numbered machine-verifiable precondition declaration); each audited file's header comment carries its contract list; <b>per-statement granularity</b> — a statement stays inside unsafe only when the compiler demands it (E0133), so every region is a compiler-verified necessity and block boundaries have no codegen effect</td></tr>
         <tr><td><b>Forbidden set</b> (401 files)</td><td>every other <code>kernel/src</code> file</td><td>file-level <code>#![forbid(unsafe_code)]</code> — compiler-enforced zero unsafe; <b>the machine gate (<code>scripts/gate_unsafe_mainline.py</code>) is green repo-wide (rc=0)</b>: any unsafe outside the audited files fails the build</td></tr>
-        <tr><td>tests</td><td>test code</td><td>excluded from the headline figure</td></tr>
+        <tr><td>tests</td><td>test code</td><td>may carry unsafe; excluded from the headline figure (the audited surface is kernel/src)</td></tr>
       </tbody>
     </table></div>
     <ul>
@@ -103,49 +103,38 @@
       <li><b>The user-memory boundary</b>: the syscall entry validates and translates user pointers uniformly; the rest of the kernel does not touch user memory directly — user copies go through <code>arch/uaccess_safe.rs</code>'s address/slice-typed copy_in/copy_out (INV-UACCESS-1: the kernel-side operand is proven by the type system, the user side is access_ok-checked with the exception table as the backstop).</li>
     </ul>
 
-    <h2 id="numbers"><span class="anchor">§3</span>Ledger numbers (machine census + line basis)</h2>
-    <h3>Line basis</h3>
+    <h2 id="numbers"><span class="anchor">§3</span>Ledger numbers (machine census + dual series)</h2>
+    <h3>Dual series</h3>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Measure</th><th class="num">Value</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Series</th><th class="num">Value</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>unsafe keyword lines</td><td class="num"><b>1,022 / 375,622 lines = 0.27%</b></td><td>all inside the 19 audited files; the pre-campaign register held 6,396 unsafe regions</td></tr>
+        <tr><td>Block series (<code>unsafe { … }</code> bodies)</td><td class="num"><b>1,329 blocks / 3,661 lines = 0.92%</b></td><td>denominator 397,552 physical lines (kernel/src, tests/ excluded)</td></tr>
+        <tr><td>fn/impl series (<code>unsafe fn</code> / <code>unsafe impl</code> bodies)</td><td class="num"><b>165 items / 275 lines = 0.07%</b></td><td>same denominator</td></tr>
+        <tr><td>Dual-series total</td><td class="num"><b>3,936 lines = 0.99%</b></td><td>all of it inside the 18 audited files plus tests/; the pre-campaign register held 6,396 unsafe regions</td></tr>
         <tr><td>Machine gate</td><td class="num">rc=0</td><td><code>scripts/gate_unsafe_mainline.py</code> scans the whole repo: zero unsafe outside the audited files</td></tr>
         <tr><td>forbid files</td><td class="num">401</td><td>file-level <code>#![forbid(unsafe_code)]</code> — removing the attribute fails the build</td></tr>
-        <tr><td>SAFETY-comment coverage</td><td class="num">65.5%</td><td>target 95% (class 2-3 blocks)</td></tr>
       </tbody>
     </table></div>
-    <h3>Region basis (scripts/unsafe_census.py: 2,046 unsafe regions across 46 files)</h3>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Subsystem (audited file)</th><th class="num">unsafe regions</th><th>Notes</th></tr></thead>
-      <tbody>
-        <tr><td>arch</td><td class="num">1,131</td><td>the inevitable home of three-arch trap/context-switch/page-table/inline-asm operations</td></tr>
-        <tr><td>fs</td><td class="num">135</td><td>ext4 and page-cache raw-block edges</td></tr>
-        <tr><td>sched</td><td class="num">106</td><td>the GRQ/switch paths</td></tr>
-        <tr><td>drivers</td><td class="num">79</td><td>device registers and DMA windows</td></tr>
-        <tr><td>mm</td><td class="num">74</td><td>allocator unsafety is cohesive inside the primitives</td></tr>
-        <tr><td>process / dfx / sync / ipc</td><td class="num">70 / 63 / 57 / 48</td><td>typed handles, forensic instruments, sync primitives, IPC edges</td></tr>
-        <tr><td>the rest (top+safety+net+perf+syscall+io_uring+interrupt+trace+security+timer)</td><td class="num">162</td><td>one collection file per subsystem, every block under an INV contract</td></tr>
-        <tr><td>tests</td><td class="num">105</td><td>excluded from the headline</td></tr>
-      </tbody>
-    </table></div>
-    <p>Accounting note: the line basis (lines carrying the unsafe keyword) is the headline number; the region basis (unsafe blocks/fns/impls) is the audit-registration unit — both are machine-generated. External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% under the same kind of measurement (no dual-series figure published).</p>
+    <h3>Region basis (per-statement granularity)</h3>
+    <p>Every unsafe region is <b>per-statement granularity</b>: a statement stays inside unsafe if and only if the compiler requires it (narrowing guided by E0133, landed 2026-11-28; zero behavior change — block boundaries have no codegen effect). The arch floor: <code>arch/unsafe.rs</code> carries 2,181 unsafe lines (of the file's 25,343 lines); 73 safe functions were repatriated from it to their home subsystem files.</p>
+    <p>Accounting note: the dual series (block-body lines + fn/impl-body lines) is the headline number; the individual statement is the audit-registration unit — both are machine-generated. External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% (no dual-series figure published).</p>
 
     <h2 id="forbid"><span class="anchor">§4</span>The forbid coverage and the roadmap</h2>
     <ul>
       <li>Current: <b>401 files</b> carry <code>#![forbid(unsafe_code)]</code> and the machine gate (<code>scripts/gate_unsafe_mainline.py</code>) is green repo-wide (rc=0) — the campaign's target state (zero unsafe outside the audited files) is reached and machine-enforced.</li>
-      <li>SAFETY-comment coverage 65.5% → <b>95%</b> (class 2-3 blocks) is the goal.</li>
+      <li>The campaign's quantitative target (≤5,000 lines, ≤1%) is met: <b>3,936 lines = 0.99%</b>; the audited floor stays under the double constraint of the machine gate and the compiler.</li>
       <li>The graded audit continues: class 1 (checked accessor reads) → class 3 (raw pointers with hand-rolled invariants); every audited block's INV contract is registered in safety-and-performance.md's Primitive INV index.</li>
     </ul>
 
     <h2 id="argument"><span class="anchor">§5</span>The layering argument: why this shape deserves trust</h2>
     <ul>
       <li><b>Class elimination (compile time)</b>, against C-kernel CVE history: buffer overruns (bounds-checked slices), Arc-owned use-after-free/double-free, data races on typed shared state (Send/Sync), iterator invalidation (borrowck), format-string injection (typed formatting) — the dominant classes are <b>unrepresentable in safe code</b>; the taxonomy's zero pointer-expression defects is the empirical face of the same argument (see <a href="taxonomy.html">taxonomy</a>).</li>
-      <li><b>The density argument</b>: the audited files' region distribution (arch 1,131 — the inevitable concentration of three-arch hardware operations; sync just 57) is the consolidation's living sample — unsafe area scales with primitive complexity, not API surface.</li>
+      <li><b>The density argument</b>: the arch floor file (<code>arch/unsafe.rs</code>, 2,181 of 25,343 lines) carries the inevitable concentration of three-arch hardware operations — the consolidation's living sample: unsafe area scales with primitive complexity, not API surface.</li>
       <li><b>The pairing argument</b>: every primitive carries (a) a Kani harness, (b) a proptest, and (c) a Verus function spec (the registered next step, page-flag/refcount algebra first); RustBelt is cited as the trust anchor, not a build dependency.</li>
-      <li><b>The budget argument</b>: the monotone-down rule on the 0.27% line basis + unsafe in the forbidden set being a compile error — TCB growth is constrained by the compiler and the machine gate, not by convention.</li>
+      <li><b>The budget argument</b>: the monotone-down rule on the dual-series reading (campaign arc 5.76% → 0.99%) + unsafe in the forbidden set being a compile error — TCB growth is constrained by the compiler and the machine gate, not by convention.</li>
     </ul>
 
-    <div class="callout">Reproduce: python3 scripts/gate_unsafe_mainline.py (the machine gate); python3 scripts/unsafe_census.py (the region basis). Canonical: docs/architecture/safety-and-performance.md (the consolidation round + the Primitive INV index), docs/architecture/kernel-layers.md (the layering rules). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>
+    <div class="callout">Reproduce: python3 scripts/gate_unsafe_mainline.py (the machine gate). Canonical: docs/architecture/safety-and-performance.md (the consolidation round + the Primitive INV index), docs/architecture/kernel-layers.md (the layering rules). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>
   </article>
 </div>
 </main>

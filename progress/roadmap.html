@@ -85,7 +85,7 @@
 
     <h2 id="now"><span class="anchor">§1</span>当前目标(2026-11)</h2>
     <ul>
-      <li><b>unsafe 收拢战役落地(2026-11-27)</b>:全库 unsafe 收进 19 个审计 unsafe.rs 文件,401 个文件编译期禁止,机器门禁全库 rc=0;unsafe 关键字 1,022/375,622 行 = 0.27%,SAFETY 覆盖 65.5%。</li>
+      <li><b>unsafe 收拢战役完成(2026-11-27 收拢,2026-11-28 逐语句收窄 + safe 函数回迁)</b>:全库 unsafe 收进 18 个按子系统的审计 unsafe.rs 文件与 tests/,401 个文件编译期禁止,机器门禁全库 rc=0;双口径合计 3,936/397,552 物理行 = 0.99%(战役弧线 5.76% → 0.99%)。</li>
       <li><b>Ubuntu 22.04 GNOME 桌面:达成并完成稳定性验证</b>(x86_64 + KVM 主平台):2026-11-16 在 188+ 提交后的 main 上 5/5 次启动全绿(shell 5 s、成帧 9.1 s、零 panic/OOM/SIGSEGV)。</li>
       <li><b>Ubuntu 24.04 完整桌面</b>:systemd 255 到 multi-user + graphical 目标、串口登录达成(dev-ttyS0 找到、getty 启动、提示符可达);gdm.service 与 systemd-logind 干净启动(90 秒超时根因 EROFS 已修);<code>make ubuntu-run</code> 默认启动完整 24.04 桌面 —— 收尾面:greeter 渲染(脱困 convoy 家族后链路已就绪)。</li>
       <li><b>OpenHarmony launcher → 桌面</b>:/data 挂载与 SystemUI 锁屏已达成,继续向完整 launcher 主屏推进。</li>

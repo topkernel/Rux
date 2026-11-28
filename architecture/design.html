@@ -84,8 +84,8 @@
     <div class="sub">每个子系统的机制、数据结构与实测数字 · 数字出处见各仓库文档,未测处如实标注</div>
 
     <h2 id="overview"><span class="anchor">§0</span>总览</h2>
-<h2 id="safety"><span class="anchor">§0+</span>unsafe 收拢:19 个审计文件之外的内核是零 unsafe</h2>
-    <p>整个内核的 unsafe 操作收拢在 <b>19 个审计文件</b>里(每个子系统一个 <code>unsafe.rs</code> 集中文件,外加根集合);其余全部文件——<b>401 个</b>——在文件头带 <code>#![forbid(unsafe_code)]</code>,在编译器层面禁止出现新的 unsafe。机器门禁 <code>scripts/gate_unsafe_mainline.py</code> 全库扫描 rc=0:审计文件之外 unsafe 为零。unsafe 关键字占全核 <b>1,022 / 375,622 行 = 0.27%</b>(收拢前登记表有 6,396 处 unsafe 区域);SAFETY 注记覆盖率 65.5%。</p>
+<h2 id="safety"><span class="anchor">§0+</span>unsafe 收拢:18 个审计文件与 tests/ 之外的内核是零 unsafe</h2>
+    <p>整个内核的 unsafe 操作收拢在 <b>18 个按子系统的审计 <code>unsafe.rs</code> 文件</b>与 tests/ 里;其余全部文件——<b>401 个</b>——在文件头带 <code>#![forbid(unsafe_code)]</code>,在编译器层面禁止出现新的 unsafe。机器门禁 <code>scripts/gate_unsafe_mainline.py</code> 全库扫描 rc=0:审计文件之外 unsafe 为零。双口径合计 <b>3,936 行 = 397,552 物理行(kernel/src,不含 tests/)的 0.99%</b> —— 块口径 1,329 块 / 3,661 行(0.92%)+ fn/impl 口径 165 项 / 275 行(0.07%);战役弧线 22,881 行 = 5.76%(2026-11-27 收拢后)→ 3,936 行 = 0.99%(2026-11-28,逐语句收窄 + safe 函数回迁),收拢前登记表有 6,396 处 unsafe 区域。</p>
     <div class="callout" style="margin-top:8px"><b>术语说明。</b><b>INV 契约(INV contract)</b>:每一段留在审计文件里的 unsafe 代码都附带一条编号的机器可验证前提声明。例如 INV-SCE-3 声明:"全局运行队列的存储由 <code>grq_init</code> 在 GRQ_READY 标志的 CAS 竞争下写入一次;后续读取仅发生在该标志的 Acquire 屏障之后"——这规定了该 unsafe 块之所以成立所需的内存可见性条件。每条声明回答三个问题:<b>该代码依赖什么前提才能正确执行</b>(如"此页已映射且对齐")、<b>执行过程中不得违反什么约束</b>(如"不得在持有此指针时调用可能释放它的函数")、<b>退出时必须完成什么清理</b>(如"必须释放引用计数")。声明登记在 docs/architecture/safety-and-performance.md 中,与代码行一一对应;每个审计文件的头注释携带该子系统的契约清单。</div>
     <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 394 个系统调用对齐Linux ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
     <div class="tbl-wrap">
@@ -106,7 +106,7 @@
         </tbody>
       </table>
     </div>
-    <p>分层模型(<code>docs/architecture/kernel-layers.md</code>):全库的 unsafe 收拢在 19 个审计 <code>unsafe.rs</code> 文件中,块块要求 INV 契约;其余 401 个文件全部 <code>forbid(unsafe_code)</code> 编译期禁止(机器门禁 rc=0,unsafe 关键字占全核 0.27%);syscall 入口统一校验并翻译用户指针。</p>
+    <p>分层模型(<code>docs/architecture/kernel-layers.md</code>):全库的 unsafe 收拢在 18 个审计 <code>unsafe.rs</code> 文件与 tests/ 中,逐语句粒度、块块要求 INV 契约;其余 401 个文件全部 <code>forbid(unsafe_code)</code> 编译期禁止(机器门禁 rc=0,双口径合计占全核 0.99%);syscall 入口统一校验并翻译用户指针。</p>
 
     <!-- ================= 调度 ================= -->
     <div class="mod-anchor" id="sched"></div>
@@ -281,7 +281,7 @@
     <p>核心主张:<b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>出处:<code>docs/architecture/safety-and-performance.md</code>。</p>
     <ul>
       <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):33 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>10 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。33 例中 6 例在任何 boot 前被评审抓到。</li>
-      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 关键字占全核 0.27%(1,022/375,622 行),全部住在 19 个审计 unsafe.rs 文件;401 个文件编译期 forbid(unsafe_code),机器门禁全库 rc=0;SAFETY 注记覆盖 65.5%;164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
+      <li><b>unsafe 表面已枚举且带合同</b>:双口径合计占全核 0.99%(3,936/397,552 物理行:块 1,329 个/3,661 行 + fn/impl 165 项/275 行),全部住在 18 个审计 unsafe.rs 文件与 tests/;401 个文件编译期 forbid(unsafe_code),机器门禁全库 rc=0;逐语句粒度(编译器验证必要性);164 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
       <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与调度事件普查的判定结果记入同一张表;代价侧(futex 唤醒正在运行的任务时 ~10ms tick 量化)如实记录。</li>
       <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>
     </ul>
