@@ -201,6 +201,8 @@ pub mod procfs_all;
 pub mod kernel_misc;
 #[cfg(feature = "unit-test")]
 pub mod vfs_edges;
+#[cfg(feature = "unit-test")]
+pub mod syscall_dispatch_probe;
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
@@ -755,6 +757,13 @@ pub fn run_all_tests() {
 
     test_group_start("syscall_misc");
     syscall_misc::test_syscall_misc();
+
+    // Dispatch sweep (kernel/src/tests/syscall_dispatch_probe.rs): the
+    // REAL entry (syscall_handler over a stack-built PtRegs) across
+    // identity/errno syscalls with invalid arguments + unknown numbers —
+    // the PtRegs decode, table lookup and ENOSYS fall-through no test
+    // ever walked.
+    syscall_dispatch_probe::test_syscall_dispatch_probe();
 
     // ===== VFS create-mode rules (creat09) =====
     test_group_start("sgid_mode");
