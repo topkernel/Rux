@@ -205,8 +205,23 @@ pub fn get_user<T: Copy>(from: *const T) -> Option<T> {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-22): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
-    crate::arch::arch_floor::x86_64::uaccess::put_user::<T>(to, value)
+pub 
+fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
+
+
+                                                   let size = core::mem::size_of::<T>();
+
+                                                   if !access_ok(to as usize, size) {
+                                                       return false;
+                                                   }
+
+                                                   // SAFETY: source is a size-of-T kernel stack slot; the destination
+                                                   // write faults into the extable fixup which returns a short count.
+                                                   let uncopied =
+                                                        copy_to_user(to as *mut u8, &value as *const T as *const u8, size) ;
+
+                                                   uncopied == 0
+
 }
 /// Safely read a null-terminated string from user space
 ///

@@ -22,6 +22,10 @@
 #include <fcntl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <string.h>
 #include <unistd.h>
 
 int main(void)
@@ -43,6 +47,23 @@ int main(void)
         if (c > 2)
             close(c);
     }
+    /* Bring up the loopback interface: the reference kernel does not
+     * auto-configure it, and lat_tcp/lat_udp/lat_connect target
+     * 127.0.0.1 — without SIOCSIFFLAGS(IFF_UP) connect(2) fails with
+     * ENETUNREACH. Same one-time setup ifconfig lo up performs. */
+    {
+        struct ifreq ifr;
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            memset(&ifr, 0, sizeof(ifr));
+            strncpy(ifr.ifr_name, "lo", IFNAMSIZ);
+            ioctl(s, SIOCGIFFLAGS, &ifr);
+            ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+            ioctl(s, SIOCSIFFLAGS, &ifr);
+            close(s);
+        }
+    }
+
     write(1, "REFKVM INIT WRAPPER OK\n", 23);
 
     execl("/test/lmbench_run", "lmbench_run", (char *)0);

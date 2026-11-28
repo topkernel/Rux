@@ -709,15 +709,33 @@ pub fn get_current_satp_pub() -> u64 {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-2): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    crate::arch::arch_floor::aarch64::mm::mmu_init::map_identity(virt, phys, flags)
+pub 
+fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
+
+
+                                                            {
+                                                                // Identity mappings only make sense for the low half on aarch64
+                                                                // (TTBR0); the kernel builds them in the TTBR1 view at the
+                                                                // aliased VA instead. Stage-2 refines if a consumer appears.
+                                                                let alias = MMIO_ALIAS_BASE as u64 + virt.bits();
+                                                                map_kernel_page_noflush(alias, phys.bits(), flags);
+                                                            }
+
 }
 /// Map into a USER root (TTBR0) — stage 2 (the user walker + COW)
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MMU-INIT-1): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
-    crate::arch::arch_floor::aarch64::mm::mmu_init::map_page(root_ppn, virt, phys, flags)
+pub 
+fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+
+
+                                                                               if root_ppn == root_page_table_ppn() {
+                                                                                   // Kernel-root callers route through the kernel mapping path
+                                                                                   return map_kernel_page_noflush(virt.bits(), phys.bits(), flags);
+                                                                               }
+                                                                               crate::arch::aarch64::mm::mm_ops::map_user_page(root_ppn, virt, phys, flags)
+
 }
 
 /// Kernel-device window PTE probe (diagnostics parity)

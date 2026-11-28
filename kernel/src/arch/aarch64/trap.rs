@@ -264,8 +264,68 @@ pub(crate) fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-7): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
-    crate::arch::arch_floor::aarch64::trap::handle_timer_interrupt(regs, cpu)
+pub(crate) 
+fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+
+
+                                                         // Increment interrupt counter for /proc/interrupts
+                                                         crate::fs::procfs::interrupts::timer_inc(cpu);
+
+                                                         // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
+                                                         // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
+                                                         // line still high re-latches pending and storms).
+                                                         crate::drivers::timer::set_next_trigger();
+
+                                                         // Skip scheduler/schedule logic during early boot (TPIDR holds the
+                                                         // cpu index, no current task yet — riscv64 twin guard).
+                                                         if crate::sched::current().is_none() {
+                                                             return;
+                                                         }
+
+                                                         // 0. Per-CPU time accounting for /proc/stat
+                                                         crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+                                                         // 0b. CPU-time accounting: user or system time by the mode the
+                                                         // timer hit; idle accounting for kthreads.
+                                                         if let Some(task) = crate::sched::current() {
+                                                             // SAFETY: current() returned a live task pointer; only per-task
+                                                             // atomic counters are touched (riscv64/x86_64 twins).
+                                                             {
+                                                                 if (*task).address_space().is_some() {
+                                                                     use core::sync::atomic::Ordering::Relaxed;
+                                                                     if regs.user_mode() {
+                                                                         (*task).utime_ticks.fetch_add(1, Relaxed);
+                                                                         crate::debug::syscost::tick_user();
+                                                                         crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
+                                                                     } else {
+                                                                         (*task).stime_ticks.fetch_add(1, Relaxed);
+                                                                         crate::debug::syscost::tick_kern(regs.pc);
+                                                                         crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
+                                                                     }
+                                                                 } else {
+                                                                     crate::debug::syscost::tick_idle();
+                                                                     crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
+                                                                 }
+                                                             }
+                                                         } else {
+                                                             crate::debug::syscost::tick_idle();
+                                                             crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
+                                                         }
+
+                                                         // 1. Update jiffies (+ vDSO page refresh, timer softirqs)
+                                                         crate::drivers::timer::timer_interrupt_handler();
+
+                                                         // 2. Scheduler tick
+                                                         crate::sched::scheduler_tick();
+
+                                                         // 3. Check for soft lockups
+                                                         crate::debug::softlockup::check();
+
+                                                         // 4. Reschedule if needed
+                                                         if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
+                                                             crate::sched::schedule();
+                                                         }
+
 }
 
 /// User-mode illegal instruction: route through signal delivery with
@@ -296,8 +356,15 @@ pub(crate) fn handle_illegal_instruction(regs: &mut PtRegs) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-TRAP-6): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn sig_has_handler(signo: usize) -> bool {
-    crate::arch::arch_floor::aarch64::trap::sig_has_handler(signo)
+pub(crate) 
+fn sig_has_handler(signo: usize) -> bool {
+
+
+                                         crate::sched::current()
+                                             .and_then(|t| { (*t).signal.as_ref().map(|s| s.get_action(signo as i32)) })
+                                             .map(|a| a.is_some_and(|a| a.has_handler()))
+                                             .unwrap_or(false)
+
 }
 
 /// True when the CURRENT task blocks `signo` — Linux force_sig_info

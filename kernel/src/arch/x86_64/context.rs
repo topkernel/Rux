@@ -68,8 +68,14 @@ pub(crate) const _: () = {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CONTEXT-26): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn switch_mm(next_ppn: u64, asid: u16) {
-    crate::arch::arch_floor::x86_64::context::switch_mm(next_ppn, asid)
+pub 
+fn switch_mm(next_ppn: u64, asid: u16) {
+
+
+                                       // SAFETY: caller guarantees a valid PML4 physical address; the
+                                       // tagging/fallback discipline lives in asid::switch_root.
+                                        crate::arch::x86_64::mm::asid::switch_root(next_ppn, asid) ;
+
 }
 
 // ============================================================================
@@ -102,8 +108,15 @@ pub fn set_prev_task(prev: *mut Task) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CONTEXT-21): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn context_switch(prev: &mut Task, next: &mut Task) {
-    crate::arch::arch_floor::x86_64::context::context_switch(prev, next)
+pub 
+fn context_switch(prev: &mut Task, next: &mut Task) {
+
+
+                                                    // Thin contract wrapper (IRQs-off + locals-invalid-after-switch stay
+                                                    // the caller-visible protocol); the body below is safe Rust over the
+                                                    // audited switch edges.
+                                                    context_switch_body(prev, next)
+
 }
 /// Collected into `arch::arch_floor` (INV-ARCH-CONTEXT-20): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.

@@ -64,8 +64,24 @@ pub(crate) fn wrpkru(v: u32) {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MPK-5): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub(crate) fn enable_pke() -> bool {
-    crate::arch::arch_floor::x86_64::mpk::enable_pke()
+pub(crate) 
+fn enable_pke() -> bool {
+
+
+                        let (_, _, ecx, _) = crate::arch::x86_64::cpu::cpuid(7, 0);
+                        if ecx & (1 << 3) == 0 {
+                            // OSPKE not exposed (KVM did not pass it through even though
+                            // the host has it): the honest negative's primary datum.
+                            return false;
+                        }
+                        // SAFETY: CR4 update with the PKE bit only, CPUID-gated and
+                        // idempotent (the enable_smep template).
+
+                            let cr4 = crate::arch::x86_64::cpu::read_cr4();
+                            crate::arch::x86_64::cpu::write_cr4(cr4 | (1 << 22));
+
+                        true
+
 }
 
 /// Key 1's bits in PKRU (bit 2 = AD, bit 3 = WD for key 1).
@@ -127,8 +143,25 @@ pub fn closed_pkru() -> u32 {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MPK-3): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn guard_arm() -> bool {
-    crate::arch::arch_floor::x86_64::mpk::guard_arm()
+pub 
+fn guard_arm() -> bool {
+
+
+                       let (_, _, ecx, _) = crate::arch::x86_64::cpu::cpuid(7, 0);
+                       if ecx & (1 << 3) == 0 {
+                           crate::println!("mpkguard: PKU absent — guard NOT armed");
+                           return false;
+                       }
+                       // SAFETY: CR4.PKE arm (idempotent, CPUID-gated — the probe template).
+
+                           let cr4 = crate::arch::x86_64::cpu::read_cr4();
+                           crate::arch::x86_64::cpu::write_cr4(cr4 | (1 << 22));
+
+                       wrpkru(closed_pkru());
+                       GUARD.store(true, core::sync::atomic::Ordering::Release);
+                       crate::println!("mpkguard: armed (keys 1-15 AD|WD, key0 open)");
+                       true
+
 }
 
 /// Is the standing guard armed?

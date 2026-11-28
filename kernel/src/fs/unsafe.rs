@@ -633,18 +633,18 @@ pub(crate) fn load_segment_fill(
     filesz: usize,
     memsz: usize,
 ) -> Result<(), crate::fs::elf::ElfError> {
-    // SAFETY: INV-FS-SEGMENT-1 (exec-path-mapped destination span).
-    unsafe {
-        if filesz > 0 {
-            let src = data.as_ptr().add(offset);
-            let dst = vaddr as *mut u8;
-            core::ptr::copy_nonoverlapping(src, dst, filesz);
-        }
-        if memsz > filesz {
-            let bss_start = vaddr.checked_add(filesz as u64).ok_or(crate::fs::elf::ElfError::InvalidSegment)?;
-            let bss_size = memsz - filesz;
-            core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
-        }
+    // SAFETY: INV-FS-SEGMENT-1 (exec-path-mapped destination span); the
+    // source offset, the two raw copies are the unsafe ops — the bounds
+    // tests and the checked_add are safe.
+    if filesz > 0 {
+        let src = unsafe { data.as_ptr().add(offset) };
+        let dst = vaddr as *mut u8;
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, filesz) };
+    }
+    if memsz > filesz {
+        let bss_start = vaddr.checked_add(filesz as u64).ok_or(crate::fs::elf::ElfError::InvalidSegment)?;
+        let bss_size = memsz - filesz;
+        unsafe { core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size) };
     }
     Ok(())
 }
@@ -732,13 +732,13 @@ pub(crate) fn file_dentry_arc(file: &File) -> Option<alloc::sync::Arc<crate::fs:
 /// count is untouched, the caller gets a fresh owning Arc). Provenance:
 /// the pointer owns exactly one strong count for the object's life.
 pub(crate) fn arc_clone_leak<T>(p: *const T) -> alloc::sync::Arc<T> {
-    // SAFETY: INV-FS-RAWTAKE-3 (the count round-trip documented above).
-    unsafe {
-        let arc = alloc::sync::Arc::from_raw(p);
-        let cloned = arc.clone();
-        let _ = alloc::sync::Arc::into_raw(arc);
-        cloned
-    }
+    // SAFETY: INV-FS-RAWTAKE-3 (the count round-trip documented above);
+    // from_raw/into_raw are the unsafe ops — the clone and the return
+    // are safe.
+    let arc = unsafe { alloc::sync::Arc::from_raw(p) };
+    let cloned = arc.clone();
+    let _ = unsafe { alloc::sync::Arc::into_raw(arc) };
+    cloned
 }
 
 /// INV-FS-BUFCHUNK-1: borrow `len` bytes at offset `off` inside a

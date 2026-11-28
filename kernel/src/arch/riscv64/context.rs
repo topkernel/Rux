@@ -119,8 +119,15 @@ extern "C" {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-CONTEXT-11): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn context_switch(prev: &mut Task, next: &mut Task) {
-    crate::arch::arch_floor::riscv64::context::context_switch(prev, next)
+pub 
+fn context_switch(prev: &mut Task, next: &mut Task) {
+
+
+                                                    // Thin contract wrapper (IRQs-off + locals-invalid-after-switch stay
+                                                    // the caller-visible protocol); the body below is safe Rust over the
+                                                    // audited switch edges.
+                                                    context_switch_body(prev, next)
+
 }
 /// Collected into `arch::arch_floor` (INV-ARCH-CONTEXT-10): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.

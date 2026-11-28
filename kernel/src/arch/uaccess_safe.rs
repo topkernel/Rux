@@ -33,64 +33,135 @@ use super::uaccess;
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-18): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn copy_out(dst_user: usize, src: &[u8]) -> usize {
-    crate::arch::arch_floor::uaccess_safe::copy_out(dst_user, src)
+pub 
+fn copy_out(dst_user: usize, src: &[u8]) -> usize {
+                                                  // blanket: the former unsafe-fn contract, now explicit
+
+                                                        // SAFETY: `src` is a shared slice, so src.len() readable bytes at
+                                                        // src.as_ptr() are guaranteed by the type system. The user side is
+                                                        // access_ok-checked and faults through the exception table inside
+                                                        // the primitive; any dst_user value is sound to pass.
+                                                         uaccess::copy_to_user(dst_user as *mut u8, src.as_ptr(), src.len()) 
+
 }
 /// Copy bytes in from the user address `src_user` into `dst`.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-17): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn copy_in(dst: &mut [u8], src_user: usize) -> usize {
-    crate::arch::arch_floor::uaccess_safe::copy_in(dst, src_user)
+pub 
+fn copy_in(dst: &mut [u8], src_user: usize) -> usize {
+                                                     // blanket: the former unsafe-fn contract, now explicit
+
+                                                           // SAFETY: `dst` is a mutable slice, so dst.len() writable bytes are
+                                                           // guaranteed by the type system. The user side is access_ok-checked
+                                                           // and faults through the exception table inside the primitive; any
+                                                           // src_user value is sound to pass.
+                                                            uaccess::copy_from_user(dst.as_mut_ptr(), src_user as *const u8, dst.len()) 
+
 }
 /// Read one `Copy` value from user memory at `src_user`.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-16): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn read_user<T: Copy>(src_user: usize) -> Option<T> {
-    crate::arch::arch_floor::uaccess_safe::read_user::<T>(src_user)
+pub 
+fn read_user<T: Copy>(src_user: usize) -> Option<T> {
+                                                    // blanket: the former unsafe-fn contract, now explicit
+
+                                                          // SAFETY: T is Copy (no drop glue for a partially-read value) and
+                                                          // the primitive validates/fault-safes the user address itself.
+                                                           uaccess::get_user(src_user as *const T) 
+
 }
 /// Write one `Copy` value to user memory at `dst_user`.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-15): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn write_user<T: Copy>(dst_user: usize, value: T) -> bool {
-    crate::arch::arch_floor::uaccess_safe::write_user::<T>(dst_user, value)
+pub 
+fn write_user<T: Copy>(dst_user: usize, value: T) -> bool {
+                                                          // blanket: the former unsafe-fn contract, now explicit
+
+                                                                // SAFETY: T is Copy and the primitive validates/fault-safes the
+                                                                // user address itself.
+                                                                 uaccess::put_user(dst_user as *mut T, value) 
+
 }
 /// Zero-fill `n` bytes at the user address `dst_user`.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-14): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn clear_user(dst_user: usize, n: usize) -> usize {
-    crate::arch::arch_floor::uaccess_safe::clear_user(dst_user, n)
+pub 
+fn clear_user(dst_user: usize, n: usize) -> usize {
+                                                  // blanket: the former unsafe-fn contract, now explicit
+
+                                                        // SAFETY: the primitive access_ok-checks and faults through the
+                                                        // exception table; any dst_user value is sound to pass.
+                                                         uaccess::clear_user(dst_user as *mut u8, n) 
+
 }
 /// Length of the NUL-terminated user string at `src_user` (length
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-13): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn strnlen_user(src_user: usize, maxlen: usize) -> usize {
-    crate::arch::arch_floor::uaccess_safe::strnlen_user(src_user, maxlen)
+pub 
+fn strnlen_user(src_user: usize, maxlen: usize) -> usize {
+                                                         // blanket: the former unsafe-fn contract, now explicit
+
+                                                               // SAFETY: the primitive access_ok-checks and faults through the
+                                                               // exception table; any src_user value is sound to pass.
+                                                                uaccess::strnlen_user(src_user as *const u8, maxlen) 
+
 }
 /// Atomic compare-exchange on a user u32 word (PI futex protocol).
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-12): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn futex_cmpxchg_u32(uaddr: usize, expected: u32, new: u32) -> Option<u32> {
-    crate::arch::arch_floor::uaccess_safe::futex_cmpxchg_u32(uaddr, expected, new)
+pub 
+fn futex_cmpxchg_u32(uaddr: usize, expected: u32, new: u32) -> Option<u32> {
+                                                                           // blanket: the former unsafe-fn contract, now explicit
+
+                                                                                 // SAFETY: the primitive access_ok-checks the 4-byte user word and
+                                                                                 // reports faults as None; any uaddr value is sound to pass.
+                                                                                  uaccess::futex_cmpxchg_u32_user(uaddr as *mut u32, expected, new) 
+
 }
 /// Copy one `T` in from user memory at `src_user` into `dst`.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-11): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn copy_in_t<T: Copy>(dst: &mut T, src_user: usize) -> usize {
-    crate::arch::arch_floor::uaccess_safe::copy_in_t::<T>(dst, src_user)
+pub 
+fn copy_in_t<T: Copy>(dst: &mut T, src_user: usize) -> usize {
+                                                             // blanket: the former unsafe-fn contract, now explicit
+
+                                                                   // SAFETY: the kernel side is a live `&mut T` (caller-initialized);
+                                                                   // the user side is access_ok-checked and faults through the
+                                                                   // exception table, so any src_user value is sound to pass.
+
+                                                                       uaccess::copy_from_user(
+                                                                           dst as *mut T as *mut u8,
+                                                                           src_user as *const u8,
+                                                                           core::mem::size_of::<T>(),
+                                                                       )
+
+
 }
 /// Copy one `T` out from kernel memory to user address `dst_user`.
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-UACCESS-SAFE-10): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn copy_out_t<T: Copy>(dst_user: usize, src: &T) -> usize {
-    crate::arch::arch_floor::uaccess_safe::copy_out_t::<T>(dst_user, src)
+pub 
+fn copy_out_t<T: Copy>(dst_user: usize, src: &T) -> usize {
+                                                          // blanket: the former unsafe-fn contract, now explicit
+
+                                                                // SAFETY: the kernel side is a shared `&T` (size_of::<T>() readable
+                                                                // bytes by the type system); the user side fault-safes inside.
+
+                                                                    uaccess::copy_to_user(
+                                                                        dst_user as *mut u8,
+                                                                        src as *const T as *const u8,
+                                                                        core::mem::size_of::<T>(),
+                                                                    )
+
+
 }
 
 /// Typed handle to one `Copy` value living in user memory.

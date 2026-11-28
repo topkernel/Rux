@@ -110,8 +110,13 @@ pub fn hart_has_v() -> bool {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-VEXT-6): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn prime_hart_has_v(dtb_phys: u64) {
-    crate::arch::arch_floor::riscv64::vext::prime_hart_has_v(dtb_phys)
+pub 
+fn prime_hart_has_v(dtb_phys: u64) {
+
+
+                                   let has =  crate::cmdline::parse_cpu_isa_has_v(dtb_phys) ;
+                                   HAS_V.store(if has { 2 } else { 1 }, Ordering::Relaxed);
+
 }
 /// True when the hart's vector length fits the fixed per-task buffer.
 ///

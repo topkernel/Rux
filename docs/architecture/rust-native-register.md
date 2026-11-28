@@ -1105,10 +1105,10 @@ the open gap — the fire-late/hrtimer-re-arm attribution is queued (rt-r4).
 
 ## T. The audited-collection boundary: unsafe collapses to 0.27% under a compiler-enforced fence (docs lane, 2026-11-27, evidence-backed)
 
-**The design**: the whole kernel's unsafe operations live in exactly
-19 audited collection files (one `<subsystem>/unsafe.rs` per
-subsystem plus the root collection); every other file — 401 of them —
-carries `#![forbid(unsafe_code)]`, and the machine gate
+**The design**: the whole kernel's unsafe operations live in 18 audited
+per-subsystem `unsafe.rs` files plus `tests/` (the root collection was
+repatriated in the 2026-11-28 round, below); every other file — 401 of
+them — carries `#![forbid(unsafe_code)]`, and the machine gate
 (`scripts/gate_unsafe_mainline.py`) enforces the partition repo-wide.
 This is a property a C kernel cannot state, let alone enforce: in C
 the "no new unsafe here" rule is a review convention; here it is a
@@ -1131,3 +1131,16 @@ tree.
   triple fix, trap call-chain capture at 25.9% kernel-frame samples,
   apic.rs repair, LAYOUT-8 heap window, 1000 Hz sampling carrier) —
   see safety-and-performance.md's unsafe-consolidation round.
+- **2026-11-28 round (per-statement narrowing)**: every unsafe region
+  narrowed to per-statement granularity, guided by compiler E0133
+  errors — a statement stays inside `unsafe` only if the compiler
+  requires it, so every region is a compiler-verified necessity (zero
+  behavior change; block boundaries have no codegen effect); 73 safe
+  functions repatriated from `arch/unsafe.rs` to their home subsystem
+  files (arch floor: 2,181 unsafe lines of its 25,343). Dual-series
+  meter on `kernel/src` 397,552 physical lines (tests/ excluded):
+  block series 1,329 blocks / 3,661 lines (0.92%), `unsafe fn`/
+  `unsafe impl` series 165 items / 275 lines (0.07%), total **3,936
+  lines = 0.99%** (origin/main 11cc4e2bb; arc: 22,881 lines = 5.76%
+  post-collection on 2026-11-27). Gates: triple-arch build rc=0,
+  in-kernel suite 1,597/1,597, unsafe gate rc=0.

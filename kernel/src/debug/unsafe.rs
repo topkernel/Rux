@@ -256,19 +256,13 @@ pub(crate) fn fp_read_raw() -> u64 {
     let fp: u64;
     #[cfg(feature = "riscv64")]
     // SAFETY: INV-FOR-4 — pure register read.
-    unsafe {
-        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack)) };
     #[cfg(feature = "x86_64")]
     // SAFETY: INV-FOR-4 — pure register read.
-    unsafe {
-        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack)) };
     #[cfg(feature = "aarch64")]
     // SAFETY: INV-FOR-4 — pure register read.
-    unsafe {
-        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack)) };
     #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
     {
         fp = 0;
@@ -283,19 +277,13 @@ pub(crate) fn caller_ra_read_raw() -> u64 {
     let ra: u64;
     #[cfg(feature = "riscv64")]
     // SAFETY: INV-FOR-4 — pure register read.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack)) };
     #[cfg(feature = "x86_64")]
     // SAFETY: INV-FOR-4 — [rbp+8] is this function's return address.
-    unsafe {
-        core::arch::asm!("mov {}, [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) ra, options(nomem, nostack)) };
     #[cfg(feature = "aarch64")]
     // SAFETY: INV-FOR-4 — [x29+8] is the LR slot.
-    unsafe {
-        core::arch::asm!("ldr {}, [x29, 8]", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("ldr {}, [x29, 8]", out(reg) ra, options(nomem, nostack)) };
     #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
     {
         ra = 0;
@@ -308,15 +296,14 @@ pub(crate) fn caller_ra_read_raw() -> u64 {
 /// reads are the standard unwind operation).
 #[inline]
 pub(crate) fn unwind_frame_raw(fp: u64) -> Option<(u64, u64)> {
-    // SAFETY: INV-FOR-2 — caller-validated frame-pointer reads.
-    unsafe {
-        let ret_addr = *((fp + 8) as *const u64);
-        let next_fp = *(fp as *const u64);
-        if ret_addr == 0 {
-            return None;
-        }
-        Some((ret_addr, next_fp))
+    // SAFETY: INV-FOR-2 — caller-validated frame-pointer reads (the two
+    // raw word loads are the unsafe ops; the zero test is safe).
+    let ret_addr = unsafe { *((fp + 8) as *const u64) };
+    let next_fp = unsafe { *(fp as *const u64) };
+    if ret_addr == 0 {
+        return None;
     }
+    Some((ret_addr, next_fp))
 }
 
 /// Spill the integer registers into a dump array (INV-FOR-4: balanced
@@ -660,48 +647,48 @@ pub(crate) fn kroot_pollution_scan() -> (u64, u64, u64, u64, u64) {
     let mut user_leaves = 0u64;
     // SAFETY: INV-FOR-2 — read-only diagnostic walk of the kernel root
     // and its mapped sub-tables (get_page_table_virt's arch contract:
-    // ppn names a mapped page-table frame).
-    unsafe {
-        let root_ptr = core::ptr::addr_of!(crate::arch::mm::mmu_init::ROOT_PAGE_TABLE);
-        let root = &*root_ptr;
-        for i in 0..2usize {
-            let pte2 = root.get(i);
-            if !pte2.is_valid() || pte2.is_leaf() {
+    // ppn names a mapped page-table frame). Only the reference adoptions
+    // and the sub-table dereferences are unsafe; the PTE tests and the
+    // counters are safe.
+    let root_ptr = core::ptr::addr_of!(crate::arch::mm::mmu_init::ROOT_PAGE_TABLE);
+    let root = unsafe { &*root_ptr };
+    for i in 0..2usize {
+        let pte2 = root.get(i);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            continue;
+        }
+        l1n += 1;
+        let t1 = unsafe { crate::arch::mm::mmu_init::get_page_table_virt(pte2.ppn() << 12) };
+        if t1.is_null() {
+            continue;
+        }
+        for j in 0..512usize {
+            let pte1 = unsafe { (*t1).get(j) };
+            if !pte1.is_valid() {
                 continue;
             }
-            l1n += 1;
-            let t1 = crate::arch::mm::mmu_init::get_page_table_virt(pte2.ppn() << 12);
-            if t1.is_null() {
+            let va = ((i as u64) << 30) | ((j as u64) << 21);
+            if va < min_va {
+                min_va = va;
+            }
+            if va + (1 << 21) > max_va {
+                max_va = va + (1 << 21);
+            }
+            if pte1.is_leaf() {
+                if pte1.is_user() {
+                    user_leaves += 1;
+                }
                 continue;
             }
-            for j in 0..512usize {
-                let pte1 = (*t1).get(j);
-                if !pte1.is_valid() {
-                    continue;
-                }
-                let va = ((i as u64) << 30) | ((j as u64) << 21);
-                if va < min_va {
-                    min_va = va;
-                }
-                if va + (1 << 21) > max_va {
-                    max_va = va + (1 << 21);
-                }
-                if pte1.is_leaf() {
-                    if pte1.is_user() {
-                        user_leaves += 1;
-                    }
-                    continue;
-                }
-                l0n += 1;
-                let t0 = crate::arch::mm::mmu_init::get_page_table_virt(pte1.ppn() << 12);
-                if t0.is_null() {
-                    continue;
-                }
-                for k in 0..512usize {
-                    let pte0 = (*t0).get(k);
-                    if pte0.is_valid() && pte0.is_leaf() && pte0.is_user() {
-                        user_leaves += 1;
-                    }
+            l0n += 1;
+            let t0 = unsafe { crate::arch::mm::mmu_init::get_page_table_virt(pte1.ppn() << 12) };
+            if t0.is_null() {
+                continue;
+            }
+            for k in 0..512usize {
+                let pte0 = unsafe { (*t0).get(k) };
+                if pte0.is_valid() && pte0.is_leaf() && pte0.is_user() {
+                    user_leaves += 1;
                 }
             }
         }
@@ -720,20 +707,18 @@ pub(crate) fn page_diag_read(
     page: *const super::super::mm::page_desc::Page,
 ) -> (i32, bool, bool, bool, bool, bool, bool) {
     use super::super::mm::page_desc::PageFlag;
-    // SAFETY: INV-FOR-9 — in-span descriptor; read-only lock-free flag
-    // loads (a racing writer costs a torn snapshot in a print).
-    unsafe {
-        let p = &*page;
-        (
-            p.refcount(),
-            p.test_flag(PageFlag::OnFreelist),
-            p.is_reserved(),
-            p.is_anonymous(),
-            p.is_cow(),
-            p.is_mapped(),
-            p.test_flag(PageFlag::Lru),
-        )
-    }
+    // SAFETY: INV-FOR-9 — in-span descriptor; the reference adoption is
+    // the unsafe op, the flag loads that follow are safe (&Page methods).
+    let p = unsafe { &*page };
+    (
+        p.refcount(),
+        p.test_flag(PageFlag::OnFreelist),
+        p.is_reserved(),
+        p.is_anonymous(),
+        p.is_cow(),
+        p.is_mapped(),
+        p.test_flag(PageFlag::Lru),
+    )
 }
 
 /// One page-descriptor flag snapshot for the mmforensics capture report
@@ -743,19 +728,18 @@ pub(crate) fn page_diag_read(
 pub(crate) fn page_diag_words(
     page: *const super::super::mm::page_desc::Page,
 ) -> (i32, i32, u32, bool, u32, usize, usize) {
-    // SAFETY: INV-FOR-9 — in-span descriptor, read-only snapshot.
-    unsafe {
-        let p = &*page;
-        (
-            p.refcount(),
-            p.mapcount(),
-            p.order() as u32,
-            p.is_mapped(),
-            p.page_type() as u32,
-            p.mapping() as usize,
-            p.index(),
-        )
-    }
+    // SAFETY: INV-FOR-9 — in-span descriptor, read-only snapshot (the
+    // reference adoption is the unsafe op).
+    let p = unsafe { &*page };
+    (
+        p.refcount(),
+        p.mapcount(),
+        p.order() as u32,
+        p.is_mapped(),
+        p.page_type() as u32,
+        p.mapping() as usize,
+        p.index(),
+    )
 }
 
 /// The named flag bits of one descriptor (INV-FOR-9 capture arm): 8
@@ -765,20 +749,19 @@ pub(crate) fn page_diag_flags(
     page: *const super::super::mm::page_desc::Page,
 ) -> [bool; 8] {
     use super::super::mm::page_desc::PageFlag;
-    // SAFETY: INV-FOR-9 — in-span descriptor, read-only snapshot.
-    unsafe {
-        let p = &*page;
-        [
-            p.test_flag(PageFlag::OnFreelist),
-            p.test_flag(PageFlag::OnPcp),
-            p.test_flag(PageFlag::Lru),
-            p.test_flag(PageFlag::Anonymous),
-            p.test_flag(PageFlag::Dirty),
-            p.test_flag(PageFlag::UpToDate),
-            p.test_flag(PageFlag::Reserved),
-            p.test_flag(PageFlag::Active),
-        ]
-    }
+    // SAFETY: INV-FOR-9 — in-span descriptor, read-only snapshot (the
+    // reference adoption is the unsafe op).
+    let p = unsafe { &*page };
+    [
+        p.test_flag(PageFlag::OnFreelist),
+        p.test_flag(PageFlag::OnPcp),
+        p.test_flag(PageFlag::Lru),
+        p.test_flag(PageFlag::Anonymous),
+        p.test_flag(PageFlag::Dirty),
+        p.test_flag(PageFlag::UpToDate),
+        p.test_flag(PageFlag::Reserved),
+        p.test_flag(PageFlag::Active),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -826,39 +809,42 @@ pub(crate) fn pstore_capture_write(
     use super::pstore::{RecordHeader, PSTORE_RAM_SIZE, MAGIC, VERSION};
     let hdr_size = core::mem::size_of::<RecordHeader>();
     // SAFETY: INV-FOR-11 — dying-boot-owned reserved region; bounded
-    // writes below never pass `limit`.
+    // writes below never pass `limit`. Only the pointer arithmetic
+    // (ptr::add), the raw copies/slice adoption and the volatile header
+    // stores are unsafe; the budget math and the closure plumbing are
+    // safe.
+    let budget = PSTORE_RAM_SIZE - hdr_size;
+    let limit = virt.addr() + hdr_size + budget;
+    let mut dst = unsafe { virt.add(hdr_size) };
+    let mut write = |src: &[u8]| {
+        let take = src.len().min(limit - dst.addr());
+        unsafe { copy_nonoverlapping(src.as_ptr(), dst, take) };
+        dst = unsafe { dst.add(take) };
+    };
+
+    // 1. The identity head.
+    write(head);
+
+    // 2. The staged report — the static sink, pre-reconstructed
+    // ring-wise by the caller (atomic loads).
+    write(b"--- report (as printed) ---\n");
+    write(sink_bytes);
+
+    // 3. The console tail, formatted straight into the region's
+    // remaining space (try-lock inside — a stopped CPU may hold the
+    // printk ring; the panic path must never wait).
+    if dst.addr() < limit {
+        let tail = unsafe { core::slice::from_raw_parts_mut(dst, limit - dst.addr()) };
+        let n = crate::printk::ring_tail_into(tail);
+        dst = unsafe { dst.add(n) };
+    }
+    let length = dst.addr() - virt.addr() - hdr_size;
+
+    // Header last-word-first: everything but the magic now, magic
+    // LAST — a crash inside this function must not leave a record
+    // the next boot would trust halfway.
+    let hdr = virt as *mut RecordHeader;
     unsafe {
-        let budget = PSTORE_RAM_SIZE - hdr_size;
-        let limit = virt.addr() + hdr_size + budget;
-        let mut dst = virt.add(hdr_size);
-        let mut write = |src: &[u8]| {
-            let take = src.len().min(limit - dst.addr());
-            copy_nonoverlapping(src.as_ptr(), dst, take);
-            dst = dst.add(take);
-        };
-
-        // 1. The identity head.
-        write(head);
-
-        // 2. The staged report — the static sink, pre-reconstructed
-        // ring-wise by the caller (atomic loads).
-        write(b"--- report (as printed) ---\n");
-        write(sink_bytes);
-
-        // 3. The console tail, formatted straight into the region's
-        // remaining space (try-lock inside — a stopped CPU may hold the
-        // printk ring; the panic path must never wait).
-        if dst.addr() < limit {
-            let tail = core::slice::from_raw_parts_mut(dst, limit - dst.addr());
-            let n = crate::printk::ring_tail_into(tail);
-            dst = dst.add(n);
-        }
-        let length = dst.addr() - virt.addr() - hdr_size;
-
-        // Header last-word-first: everything but the magic now, magic
-        // LAST — a crash inside this function must not leave a record
-        // the next boot would trust halfway.
-        let hdr = virt as *mut RecordHeader;
         core::ptr::write_volatile(&mut (*hdr).version, VERSION);
         core::ptr::write_volatile(
             &mut (*hdr).jiffies,
@@ -868,8 +854,8 @@ pub(crate) fn pstore_capture_write(
         core::ptr::write_volatile(&mut (*hdr)._reserved, [0; 2]);
         core::ptr::write_volatile(&mut (*hdr).length, length as u32);
         core::ptr::write_volatile(&mut (*hdr).magic, MAGIC);
-        length
     }
+    length
 }
 
 // ---------------------------------------------------------------------------

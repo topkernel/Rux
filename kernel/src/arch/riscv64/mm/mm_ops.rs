@@ -875,8 +875,48 @@ pub fn alloc_user_phys_page() -> Option<u64> {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MM-OPS-14): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn create_user_address_space() -> Option<u64> {
-    crate::arch::arch_floor::riscv64::mm::mm_ops::create_user_address_space()
+pub 
+fn create_user_address_space() -> Option<u64> {
+
+
+                                              let phys_addr = alloc_pages(GfpFlags::GFP_USER, 0);
+                                              if phys_addr == 0 {
+                                                  return None;
+                                              }
+
+                                              // Validate physical address is within actual physical memory range
+                                              // This prevents using addresses that are outside the system's physical memory
+                                              if crate::mm::layout::is_kernel_layout_initialized() {
+                                                  let layout = crate::mm::layout::kernel_layout();
+                                                  let phys_end = layout.phys_base + layout.phys_size;
+
+                                                  if phys_addr < layout.phys_base || phys_addr >= phys_end {
+                                                      // Invalid physical address - outside memory range
+                                                      return None;
+                                                  }
+                                              }
+
+                                              let root_page = phys_addr as u64;
+
+                                              // Stamp the root into the PT ledger (it comes from alloc_pages, NOT
+                                              // alloc_page_table, so it is otherwise unstamped and its teardown free
+                                              // is refused — one leaked frame per exec'd mm).
+                                              crate::arch::riscv64::mm::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
+
+                                              if let Some(root_table) = PtTable::from_phys(root_page) {
+                                                  root_table.zero_entries();
+                                              }
+
+                                              let kernel_ppn = crate::arch::riscv64::mm::mmu_init::root_page_table_ppn();
+                                              let root_ppn = root_page / PAGE_SIZE;
+                                              copy_kernel_mappings(root_ppn, kernel_ppn);
+
+                                              // Copy fixmap (UART) to user page table so console works after switch_mm
+                                              // (fixmap lane owns its conversion; no-op contract documented there.)
+                                               crate::arch::riscv64::mm::fixmap::copy_fixmap_to_user(root_ppn) ;
+
+                                              Some(root_ppn)
+
 }
 
 /// Copy kernel mappings to user page table
