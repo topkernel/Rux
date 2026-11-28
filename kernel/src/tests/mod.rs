@@ -201,7 +201,7 @@ pub mod procfs_all;
 pub mod kernel_misc;
 #[cfg(feature = "unit-test")]
 pub mod vfs_edges;
-#[cfg(feature = "unit-test")]
+#[cfg(all(feature = "unit-test", feature = "riscv64"))]
 pub mod syscall_dispatch_probe;
 #[cfg(feature = "unit-test")]
 pub mod pipe_signal_edges;
@@ -765,6 +765,7 @@ pub fn run_all_tests() {
     // identity/errno syscalls with invalid arguments + unknown numbers —
     // the PtRegs decode, table lookup and ENOSYS fall-through no test
     // ever walked.
+    #[cfg(feature = "riscv64")]
     syscall_dispatch_probe::test_syscall_dispatch_probe();
 
     // Pipe-buffer ring + signal pending-queue mechanics
