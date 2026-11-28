@@ -489,7 +489,11 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // one early service retrying "GetSystemAbilityManager failed" burned
     // the whole global 4000 budget in ~3999 lines (boot b43) and the
     // graphics services' output stayed invisible.
-    if count <= 256 && fd != 1 && fd != 2 {
+    if count <= 256
+        && fd != 1
+        && fd != 2
+        && crate::trace::EVENT_WRITETRACE.armed()
+    {
         // 512/pid: samgr's runtime HILOGE lines (the SAMStub
         // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
         // its ~20 init-time frames; the old 48/pid budget cut exactly
@@ -541,9 +545,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                             .take(32)
                             .filter(|&&b| b.is_ascii_graphic() || b == b' ')
                             .count();
-                        if head >= 24
-                            && crate::trace::EVENT_WRITETRACE.armed()
-                        {
+                        if head >= 24 {
                             crate::pr_info!("w pid {} fd {} hx {}: {}", pid, fd, hexout, t);
                         }
                     }
@@ -672,6 +674,17 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // (Not taken for plain ext4 buffered writes — the user fast path
     // below serves every size with ONE user→frame copy.)
     const SMALL_STAGE: usize = 256;
+    // /dev/null fast path (null sink consumes nothing — the reference's
+    // NULL write_iter never touches the user buffer): skip the copy_in
+    // AND the staging zero-init entirely. count was access_ok-validated
+    // at entry, so the "write" is just the length acceptance.
+    if ops.is_some_and(|o| {
+        core::ptr::eq(o as *const _, &crate::fs::devfs::NULLDEV_OPS as *const _)
+    }) || ops.is_some_and(|o| {
+        core::ptr::eq(o as *const _, &crate::fs::devfs::ZERODEV_OPS as *const _)
+    }) {
+        return count as i64;
+    }
     if count <= SMALL_STAGE
         && !ops.is_some_and(|o| {
             core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _)

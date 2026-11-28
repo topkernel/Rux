@@ -281,7 +281,7 @@ fn nulldev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-pub(crate) static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(nulldev_read)
     .write(nulldev_write)
     .poll(nulldev_poll)
@@ -384,7 +384,7 @@ fn zerodev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-pub(crate) static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(zerodev_read)
     .write(zerodev_write)
     .poll(zerodev_poll)
