@@ -184,6 +184,7 @@ boundary — 10 rows:*
 | 31 | GRQ keyed-lock swap discarded the returned guard — the lock silently released at end-of-statement, every critical section ran unexcluded (CFS-timeline btree corruption panic family; convicted by 13-boot paired bisection) | safe API misuse; guards are `#[must_use]` since | 2b092c49, convicted b1fe066f/623c4736; mechanism corrected 75dbf637 |
 | 32 | recvmsg family re-fetched the user iovec array after validating it — a racing thread redirected scatter copies to unvalidated addresses (review-found) | safe TOCTOU protocol | 32fd359f |
 | 33 | PCACHE_SHARED defined as bit 10 — bit 10 is PPN[0] in Sv39, every shared mapping aliased a frame 4 KiB off the cache page (silent neighbour-page corruption; caught in snapshot review before any boot ran it) | safe constant at the unsafe PTE boundary | 6b49140ba1c6 |
+| 34 | preempt_count leak carriers (sc69-sc73: guard add/drop split across task contexts) left user-bound tasks permanently unpreemptible/unswitchable until the tick-side PREEMPT-HEAL stripped the count MID-KERNEL — the theft that produced the HZ=1000 sampling-rig crash family (wild-PC #UD/#PF/#GP, double-run cpu slots, measured 4/4 300 s lmbench+sample windows on b8ccee477) | repair at the one provably-safe boundary: user return (all guard frames unwound, count must be 0) zeroes stranded bits in the task's own context; kernel-thread carriers still rely on the tick heal, the upstream producer hunt stays open | b9957277b (UR-PC-REPAIR; evidence: live LEAK-ORIGIN captures pid 1 cnt=4 / pid 311 cnt=2, fdreapd PARK-REFUSED with the small_alloc class lock as outermost acquire) |
 
 **Boundary rows — corruption-class consequences without a kernel
 memory-safety violation** (counted separately, not in the 33): wrong
@@ -265,6 +266,32 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   one-step-kill/panic class, 11 items (83d0b691), and the get_cwd UB
   + UTF-8 cmdline panic fix (830e3f8c). Test-harness-only panics
   (unit-test Vec drop) are excluded by method.
+
+### Bug-class ELIMINATED by structure: the guard add/drop cross-task
+split (p23-percpupreempt, 2026-11-28)
+
+The sc69-sc73 family (a guard's +PREEMPT_OFFSET booked by the
+acquire-time task, its -1 landing on the release-time task after a
+switch inside the bracket) had three layers of treatment stacked on
+it: the 119th per-CPU booked-task stack + remote
+release_hardirq_base_on, the s14 IRQ-PAIR capture, and the
+UR-PC-REPAIR boundary fix. The preempt_count per-CPU migration
+(reference form pcpu_hot.preempt_count) removes the split surface
+itself: a bracket's add and sub always hit the same cpu word.
+Measured on the HZ=1000 sampling rig (the load that produced the
+family's crash faces): IRQ-PAIR-SPLIT x0 and IRQ-BOOK-SPLIT x0
+across every window of the final rig batches — the booking-discipline
+probes, kept leakhunt-gated as migration witnesses, are silent by
+construction. Remediation machinery that existed only because counts
+could strand on innocent tasks is deleted (-2.2k lines): PREEMPT-HEAL,
+PARKED-HEAL, PICK-PC-ZERO, WAKE-HEAL, the parkwalk, and the booking
+stack. The schedule()-entry base check now mirrors the reference's
+__schedule_bug clamp (report + preempt_count_repair + proceed) and
+the user-return repair acts on the cpu word at the same provably-safe
+boundary. Gates on this tree: riscv64 unit suite 1792/1792, x86_64
+unit suite 1711/1711 (kernel_hz=100), tri-arch builds rc=0.
+
+
 
 ## 3. Performance, measured (each fast path IS a safe path)
 - lmbench, same host, same accel, both kernels under one q35+KVM rig

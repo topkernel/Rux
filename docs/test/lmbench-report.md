@@ -1770,3 +1770,25 @@ Recorded: an intermittent write-boot wedge (R87P-GATE-BLOCK pid=1 x8,
 fzms=10–20, no taskdump captured) hit ~40% of the write boots on this
 rig regardless of budget; the read/null/fstat boots never showed it.
 Not reproducible with taskdump armed — queued as its own item.
+
+## lat_fs 10k verdict correction (2026-11-28): the 126x label was a measurement artifact — real gap is 10x, and Rux's tmpfs itself is validated
+
+The "-s 10240" single-round run on current main (quiet serial,
+loglevel=3) produced the interleaved row: **20771 create / 14045 delete
+files/s** — consistent with the lf10k direct probe (create+10KiB
+write+close 100 files per directory: 50-60 µs/file, 10000 files in
+~0.55 s). The "126x" figure from the guest-in-guest table compared the
+FOURTH round of the default battery (which runs after 0k/1k/4k churned
+the same directory tree) against the reference's fresh 10k round — the
+comparison was not round-matched. The 10k row's real standing is the
+same family as the 1k row: **~10x/11.8x behind**, one gap, one cause
+(tmpfs per-file create/write cost: 3x 4KiB page allocations + BTreeMap
+inserts + node locking per file — the reference's shmem_getpage is
+cheaper per page).
+
+The tmpfs engine itself is validated by the probe: no pathological
+cost in write_at's page loop on current main (the sink-write and
+tmpfs-alloc fixes hold).
+
+Correction to the guest-in-guest table: lat_fs 10k row = 10x/11.8x
+behind (round-matched single-round measurement), not 126x.
