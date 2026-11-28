@@ -22,15 +22,23 @@ are each annotated with the safety property their design carries.
 
 ### 2.0 Safe-by-construction surface
 All non-arch kernel paths are `no_std` safe Rust. The unsafe-consolidation
-campaign (completed 2026-11-27) collapsed the entire unsafe surface into
-**19 audited `unsafe.rs` files** (one per subsystem plus the root
-collection) — the machine gate
+campaign (per-statement narrowing + safe-function repatriation completed
+2026-11-28) holds the entire unsafe surface in
+**18 audited per-subsystem `unsafe.rs` files plus `tests/`** — the machine gate
 (`scripts/gate_unsafe_mainline.py`) is green repo-wide (rc=0): zero
 unsafe outside the audited files, with **401 files carrying file-level
 `#![forbid(unsafe_code)]`** so a violation is a compile error. The
-unsafe keyword occupies **1,022 of 375,622 kernel lines — 0.27%**
-(down from 6,396 unsafe regions before the consolidation rounds);
-SAFETY-comment coverage 65.5%; every audited block carries its INV
+dual-series meter reads **3,936 unsafe lines = 0.99% of 397,552
+`kernel/src` physical lines (tests/ excluded)** — block series 1,329
+blocks / 3,661 lines (0.92%), `unsafe fn`/`unsafe impl` series 165
+items / 275 lines (0.07%); the campaign arc: 22,881 lines = 5.76%
+post-collection (2026-11-27) → 3,936 = 0.99% (2026-11-28). Every unsafe
+region is per-statement granularity — a statement stays inside `unsafe`
+only when the compiler demands it (E0133), so each region is a
+compiler-verified necessity; 73 safe functions were repatriated from the
+arch floor file to their home subsystem files, and `arch/unsafe.rs`
+holds the arch floor at 2,181 unsafe lines of its 25,343. Every audited
+region carries its INV
 contract (Primitive INV index at the bottom of this file); 157 Kani
 harnesses, 1,104 proptests, 4 SPIN models, Miri on the verify crate
 (generated ledger: docs/development/tcb-ledger.md; security-design.md §0).
@@ -555,9 +563,10 @@ absents stated plainly. Each absent names what closing looks like.
 
 **By construction (the property is the language, not a build option):**
 - Memory safety of the non-unsafe bulk — the reason KASAN-class tools
-  exist in C. Evidence: 12.9% unsafe lines whole-kernel
-  (docs/development/tcb-ledger.md), 47 `forbid(unsafe_code)` service
-  files, §2.1's zero pointer-expression defects in safe code.
+  exist in C. Evidence: 3,936 unsafe lines = 0.99% of `kernel/src`
+  physical lines, confined to 18 audited per-subsystem `unsafe.rs`
+  files plus `tests/` (§2.0), 401 `forbid(unsafe_code)` files,
+  §2.1's zero pointer-expression defects in safe code.
 - Bounds-checked indexing everywhere in safe code (FORTIFY-class).
   Receipt: §2.2's pcp refill race — the would-be OOB write panicked
   at the check (165ee5fcebc0).
@@ -1979,6 +1988,35 @@ machine gate holds the boundary.
   28→32 MB at 7375290e2); 1000 Hz sampling ready (carrier zeroed).
 - **Gates**: triple-arch build rc=0 (x86_64 KVM, riscv64, aarch64).
   [docs lane, 2026-11-27]
+
+## Unsafe per-statement narrowing round (2026-11-28): every unsafe region compiler-proven necessary
+
+The collection round's block-granular unsafe was narrowed to
+per-statement granularity, and safe functions were repatriated from the
+arch floor file to their home subsystem files.
+
+- **What landed**: per-statement narrowing of the audited unsafe files,
+  guided by compiler E0133 errors — a statement stays inside `unsafe`
+  only if the compiler requires it, so every region is a
+  compiler-verified necessity (zero behavior change; block boundaries
+  have no codegen effect); 73 safe functions returned from
+  `arch/unsafe.rs` to their home subsystem files.
+- **Structure**: unsafe exists only in the 18 audited per-subsystem
+  `unsafe.rs` files plus `tests/`; every other file (~401) carries
+  file-level `#![forbid(unsafe_code)]`; the arch floor file
+  (`arch/unsafe.rs`) holds 2,181 unsafe lines of its 25,343.
+- **Numbers**: dual-series meter on `kernel/src` 397,552 physical
+  lines (tests/ excluded) — block series 1,329 blocks / 3,661 lines
+  (0.92%), `unsafe fn`/`unsafe impl` series 165 items / 275 lines
+  (0.07%), total **3,936 lines = 0.99%** (reference origin/main
+  11cc4e2bb). Campaign arc: 22,881 lines = 5.76% post-collection
+  (2026-11-27) → 3,936 = 0.99% (2026-11-28).
+- **Nothing traded away**: the narrowing moved statements across block
+  boundaries, it did not weaken checks — every INV contract stays with
+  its region, and the audited-file header still carries the
+  subsystem's contract list.
+- **Gates**: triple-arch build rc=0; in-kernel suite 1,597/1,597;
+  unsafe gate rc=0. [docs lane, 2026-11-28]
 
 ## Primitive INV index (literal ids — machine-greppable)
 
