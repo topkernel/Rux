@@ -380,6 +380,24 @@ tracepoints! {
     call (id: i64, ret: i64),
     render |args: &[u64; TRACE_ARGS]| { format!("NR {} = {}", args[0] as i64, args[1] as i64) };
 
+    /// rux:tmpfsop — tmpfs per-operation timing (the lat_fs tmpfs 10x
+    /// campaign). kind: 0=create 1=write_at 2=close 3=unlink. ns = the
+    /// operation's wall time in nanoseconds (read_time ticks x 100).
+    /// Armed only by trace_event=tmpfsop; zero cost otherwise.
+    EVENT_TMPOP / tmpop_fmt / trace_tmpop : "rux", "tmpfsop", 1,
+    print: "\"kind=%ld ino=%lu bytes=%lu ns=%lu\", REC->kind, REC->ino, REC->bytes, REC->ns",
+    fields: "\tfield:long kind;\toffset:8;\tsize:8;\tsigned:1;\n\
+             \tfield:unsigned long ino;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long bytes;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long ns;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (kind: i64, ino: u64, bytes: u64, ns: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "kind={} ino={} bytes={} ns={}",
+            args[0] as i64, args[1], args[2], args[3]
+        )
+    };
+
     /// sched:sched_switch — a context switch. the reference host's
     /// events/sched/sched_switch; the print fmt is the live file's blob
     /// verbatim (the __print_flags expression for prev_state).
@@ -399,6 +417,7 @@ tracepoints! {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
             String::from_utf8_lossy(&bytes[..end]).into_owned()
         };
+
         let pc = comm_from_words(args[0], args[1]);
         let nc = comm_from_words(args[5], args[6]);
         format!(

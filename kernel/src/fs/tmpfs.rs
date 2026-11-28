@@ -327,6 +327,8 @@ impl TmpfsNode {
         if data.is_empty() {
             return 0;
         }
+        // rux:tmpfsop kind=1 (write_at): campaign timing point.
+        let wt0 = crate::drivers::timer::read_time();
 
         // r-tmpfs wedge fix (2026-11-19, lat_fs official-rig residual):
         // the page object is a 4 KiB KERNEL-HEAP Box. Allocating it
@@ -400,6 +402,12 @@ impl TmpfsNode {
             }
         }
 
+        crate::trace::trace_tmpop(
+            1,
+            self.ino,
+            data.len() as u64,
+            (crate::drivers::timer::read_time() - wt0) / 10,
+        );
         // MAP_SHARED alias bridge (fsx-linux coherence): the node copy
         // above is the fd-read face, but SHARED mappers alias PAGE-CACHE
         // frames — push the same bytes into every live frame so both
@@ -922,6 +930,8 @@ fn tmpfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
 fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+    // rux:tmpfsop kind=0: the lat_fs tmpfs-gap campaign's timing point.
+    let t0 = crate::drivers::timer::read_time();
     let node = node_of(dir)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -937,11 +947,15 @@ fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>,
     // Honor the caller's permission bits (umask is applied by the VFS layer).
     *file.mode.lock() = InodeMode::S_IFREG | (mode.bits() & 0o7777);
     node.add_child(file.clone());
-    Ok(tmpfs_make_inode(&file))
+    let ino = file.ino;
+    let r = tmpfs_make_inode(&file);
+    crate::trace::trace_tmpop(0, ino, 0, (crate::drivers::timer::read_time() - t0) / 10);
+    Ok(r)
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
 fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+    let t0 = crate::drivers::timer::read_time();
     let node = node_of(dir)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -956,7 +970,10 @@ fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, 
     let d = sb.new_node(name.to_vec(), TmpfsType::Directory);
     *d.mode.lock() = InodeMode::S_IFDIR | (mode.bits() & 0o7777);
     node.add_child(d.clone());
-    Ok(tmpfs_make_inode(&d))
+    let ino = d.ino;
+    let r = tmpfs_make_inode(&d);
+    crate::trace::trace_tmpop(4, ino, 0, (crate::drivers::timer::read_time() - t0) / 10);
+    Ok(r)
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
@@ -1068,6 +1085,9 @@ fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
 fn tmpfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
+    // rux:tmpfsop kind=3 (unlink): campaign timing point.
+    let ut0 = crate::drivers::timer::read_time();
+    let utrace = crate::trace::EVENT_TMPOP.armed();
     let node = match node_of(dir) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1084,6 +1104,14 @@ fn tmpfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     }
     if node.remove_child(name) {
+        if utrace {
+            crate::trace::trace_tmpop(
+                3,
+                0,
+                0,
+                (crate::drivers::timer::read_time() - ut0) / 10,
+            );
+        }
         0
     } else {
         errno::Errno::NoSuchFileOrDirectory.as_neg_i32()

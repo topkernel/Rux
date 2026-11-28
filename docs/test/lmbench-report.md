@@ -1792,3 +1792,29 @@ tmpfs-alloc fixes hold).
 
 Correction to the guest-in-guest table: lat_fs 10k row = 10x/11.8x
 behind (round-matched single-round measurement), not 126x.
+
+## lat_fs 10k round-matched measurement (2026-11-28, follow-up): 17x/14.8x — same family as the 1k row; open(O_CREAT) is the convicted path
+
+Round-matched reference run (lat_fs -s 10240 on the reference guest
+kernel, same rig): **352974/208095** vs Rux **20771/14045** = 17.0x
+create / 14.8x delete behind. The earlier 126x figure is retired
+(round-mismatch artifact); the whole lat_fs family sits at one gap.
+
+The decomposition probes (lf10k family) localized the cost: tmpfs
+write_at of 10 KiB is FREE (create-only vs create+write loops are the
+same speed); **open(O_CREAT) costs 67-145 µs per call** (first open
+232 µs, steady-state avg 67 µs over 300 creates; close 0.76 µs). The
+reference's create+write+close totals ~5 µs/file. So the convicted
+path is open(O_CREAT) → path_lookup(miss) → tmpfs_create → make_inode
+→ install_fd, and the whole lat_fs family (1k, 4k, 10k — all rounds
+now one number) is that single path. read/stat rows' 37/62 ns deltas
+are separate smaller items.
+
+Also banked: rux:tmpfsop trace event (kind=0 create / 1 write_at /
+3 unlink / 4 mkdir, ino/bytes/ns) added to the trace framework for the
+next decomposition pass — armed only via trace_event=tmpfsop.
+
+Also fixed: the tmpfs sink-write fast path (5fc483d94) covered
+NULLDEV_OPS/ZERODEV_OPS write dispatch; verified the O_CREAT probe
+still exercises tmpfs_create (the sink path only skips user-buffer
+copies for writes, creates still run the full path).
