@@ -140,8 +140,53 @@ pub fn walk_stack_trace(cb: &mut dyn FnMut(u64, u64)) {
 
     let mut frame_count = 0u32;
     while fp != 0 && frame_count < 32 {
-        // Validate fp: must be 8-byte aligned and in kernel address range
-        if fp < 0x8000_0000 || fp > 0xFFFF_FFFF_FFFF_FFFF || fp % 8 != 0 {
+        // Validate fp: must be 8-byte aligned and inside a window the
+        // kernel actually maps — the old `>= 0x8000_0000` lower bound
+        // let a junk frame pointer like 0x4f30_0000_edfe_0dd8 through (8
+        // aligned, inside the giant band, but unmapped): the WARN path
+        // faulted the kernel mid-print (KERNPANIC re-entered during
+        // dump, coverage-suite boot 2026-11-28). Two windows are legal
+        // per arch: the IMAGE half (boot/init stacks + text) and the
+        // DIRECT MAP (task stacks from the compact-stack slab / heap
+        // live here). Per-arch constants mirror the memory-layout
+        // modules' PAGE_OFFSET / KERNEL_LINK_ADDR. Anything else cannot
+        // be a frame.
+        #[cfg(feature = "riscv64")]
+        {
+            const IMG_LO: u64 = 0xffff_ffff_8000_0000;
+            const IMG_HI: u64 = 0xffff_ffff_8200_0000;
+            const MAP_LO: u64 = 0xffff_ffd6_0000_0000;
+            const MAP_HI: u64 = 0xffff_ffe0_0000_0000; // 64 GiB direct map
+            let ok = (fp >= IMG_LO && fp < IMG_HI) || (fp >= MAP_LO && fp < MAP_HI);
+            if !ok || fp % 8 != 0 {
+                break;
+            }
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            const IMG_LO: u64 = 0xffff_ffff_8000_0000;
+            const IMG_HI: u64 = 0xffff_ffff_8200_0000;
+            const MAP_LO: u64 = 0xffff_8880_0000_0000;
+            const MAP_HI: u64 = 0xffff_c880_0000_0000; // 64 TiB direct map
+            let ok = (fp >= IMG_LO && fp < IMG_HI) || (fp >= MAP_LO && fp < MAP_HI);
+            if !ok || fp % 8 != 0 {
+                break;
+            }
+        }
+        #[cfg(feature = "aarch64")]
+        {
+            const IMG_LO: u64 = 0xffff_ffff_8000_0000;
+            const IMG_HI: u64 = 0xffff_ffff_ff00_0000;
+            const MAP_LO: u64 = 0xffff_c000_0000_0000;
+            const MAP_HI: u64 = 0xffff_e000_0000_0000; // linear map half
+            let ok = (fp >= IMG_LO && fp < IMG_HI) || (fp >= MAP_LO && fp < MAP_HI);
+            if !ok || fp % 8 != 0 {
+                break;
+            }
+        }
+        #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
+        {
+            let _ = fp;
             break;
         }
 
