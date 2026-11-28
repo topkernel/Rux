@@ -69,6 +69,10 @@ LOCKOWNER_FEAT := $(if $(LOCKOWNER),$(comma)dfx-lock-owner,)
 #                    section so the holder-naming rig can be PROVED to
 #                    name holder + waiters. Inert unless the boot param
 #                    arms it.
+#   debug-trace-all  arm EVERY trace event and boot with tracing_on on
+#                    (user directive 2026-11-28: a debug boot localizes
+#                    with zero flags). Release keeps the reference's
+#                    events-off default.
 #
 # Runtime facilities need no flag and are always compiled: tracefs + 109
 # tracepoints, khungtaskd, softlockup, kallsyms symbolization, sysrq,
@@ -77,7 +81,7 @@ LOCKOWNER_FEAT := $(if $(LOCKOWNER),$(comma)dfx-lock-owner,)
 # that contaminates measurement and log-reading; enable it alone when
 # hunting a specific futex-protocol bug), cov-dump (coverage vehicle, needs
 # -C instrument-coverage), dfx-aa64-uaccess-selftest (aarch64 bring-up).
-DEBUG_FEAT := $(if $(DEBUG),$(comma)dfx-lock-owner$(comma)dfx-taskdump-bt$(comma)dfx-grq-wedge,)
+DEBUG_FEAT := $(if $(DEBUG),$(comma)dfx-lock-owner$(comma)dfx-taskdump-bt$(comma)dfx-grq-wedge$(comma)debug-trace-all,)
 ifeq ($(PLATFORM),x86_64)
 CARGO_TARGET := x86_64-unknown-none
 CARGO_FEATURE_FLAGS := --no-default-features --features x86_64$(LOCKOWNER_FEAT)$(DEBUG_FEAT)

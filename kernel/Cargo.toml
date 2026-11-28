@@ -64,6 +64,12 @@ dfx-aa64-uaccess-selftest = []
 # always on.
 dfx-grq-wedge = []
 
+# Debug-build tracing default (DEBUG=1 profile): arm EVERY trace event
+# and start with tracing_on on, so a debug boot localizes with zero
+# boot flags. Release builds keep the reference's events-off default;
+# an explicit trace_event= still narrows or overrides in either build.
+debug-trace-all = []
+
 [[bin]]
 name = "rux"
 path = "src/main.rs"
