@@ -101,12 +101,11 @@ pub fn set_task_user_tls(task: &mut Task, tls: u64) {
     {
         // SAFETY: INV-PROC-TLS-1 — the frame lives as long as the task
         // and the &mut borrow excludes concurrent writers; the null
-        // check covers not-yet-framed kthreads.
-        unsafe {
-            let regs = task.pt_regs();
-            if !regs.is_null() {
-                (*regs).tp = tls;
-            }
+        // check covers not-yet-framed kthreads. The frame write is the
+        // unsafe op; pt_regs() and the null test are safe.
+        let regs = task.pt_regs();
+        if !regs.is_null() {
+            unsafe { (*regs).tp = tls };
         }
     }
     #[cfg(feature = "x86_64")]
@@ -803,34 +802,41 @@ pub fn exec_set_leaf_flags_range(root: u64, seg_start: u64, seg_end: u64, seg_fl
             let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
             // SAFETY: the walk descends the fresh tree's own tables
             // (root allocated by this loader, unpublished — INV-LOCK-7);
-            // each level's validity is checked before descending and only
-            // the leaf permission bits are rewritten (PPN preserved).
-            unsafe {
-                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+            // each level's get_page_table_virt call, table dereference and
+            // leaf rewrite is its own unsafe op; the validity tests and
+            // stride bookkeeping are safe.
+            let root_table = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     root << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte2 = (*root_table).get(vpn2);
-                if !pte2.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                )
+            };
+            let pte2 = unsafe { (*root_table).get(vpn2) };
+            if !pte2.is_valid() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            let table1 = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte1 = (*table1).get(vpn1);
-                if !pte1.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                )
+            };
+            let pte1 = unsafe { (*table1).get(vpn1) };
+            if !pte1.is_valid() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            let table0 = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let old_pte = (*table0).get(vpn0);
-                if !old_pte.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                )
+            };
+            let old_pte = unsafe { (*table0).get(vpn0) };
+            if !old_pte.is_valid() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+            unsafe {
                 (*table0).set(
                     vpn0,
                     crate::arch::mm::PageTableEntry::from_bits(new_bits),
@@ -850,52 +856,61 @@ pub fn exec_set_leaf_flags_range(root: u64, seg_start: u64, seg_end: u64, seg_fl
             let i1 = ((vaddr >> 12) & 0x1FF) as usize;
             // SAFETY: the walk descends the fresh tree's own tables
             // (root allocated by this loader, unpublished — INV-LOCK-7);
-            // each level's validity is checked before descending and only
-            // the leaf permission bits are rewritten (PPN preserved).
-            unsafe {
-                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+            // each level's get_page_table_virt call, table dereference and
+            // leaf rewrite is its own unsafe op; the validity tests, the
+            // bit math and the stride bookkeeping are safe.
+            let root_table = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     root << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte4 = (*root_table).get(i4);
-                if !pte4.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
+                )
+            };
+            let pte4 = unsafe { (*root_table).get(i4) };
+            if !pte4.is_valid() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            let table3 = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte3 = (*table3).get(i3);
-                if !pte3.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
+                )
+            };
+            let pte3 = unsafe { (*table3).get(i3) };
+            if !pte3.is_valid() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            let table2 = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let pte2 = (*table2).get(i2);
-                if !pte2.is_valid() || pte2.is_leaf() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                )
+            };
+            let pte2 = unsafe { (*table2).get(i2) };
+            if !pte2.is_valid() || pte2.is_leaf() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            let table1 = unsafe {
+                crate::arch::mm::mmu_init::get_page_table_virt(
                     pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                );
-                let old_pte = (*table1).get(i1);
-                if !old_pte.is_valid() {
-                    vaddr += crate::arch::mm::PAGE_SIZE as u64;
-                    continue;
-                }
-                // x86 permission bits: clear W|U|NX, then set from the
-                // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
-                // non-exec is expressed via NX).
-                let clear =
-                    crate::arch::mm::PageTableEntry::W
-                        | crate::arch::mm::PageTableEntry::U
-                        | crate::arch::mm::PageTableEntry::NX;
-                let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
-                if !seg_exec {
-                    new_bits |= crate::arch::mm::PageTableEntry::NX;
-                }
+                )
+            };
+            let old_pte = unsafe { (*table1).get(i1) };
+            if !old_pte.is_valid() {
+                vaddr += crate::arch::mm::PAGE_SIZE as u64;
+                continue;
+            }
+            // x86 permission bits: clear W|U|NX, then set from the
+            // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
+            // non-exec is expressed via NX).
+            let clear =
+                crate::arch::mm::PageTableEntry::W
+                    | crate::arch::mm::PageTableEntry::U
+                    | crate::arch::mm::PageTableEntry::NX;
+            let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
+            if !seg_exec {
+                new_bits |= crate::arch::mm::PageTableEntry::NX;
+            }
+            unsafe {
                 (*table1).set(
                     i1,
                     crate::arch::mm::PageTableEntry::from_bits(new_bits),
