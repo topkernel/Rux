@@ -203,6 +203,8 @@ pub mod kernel_misc;
 pub mod vfs_edges;
 #[cfg(feature = "unit-test")]
 pub mod syscall_dispatch_probe;
+#[cfg(feature = "unit-test")]
+pub mod pipe_signal_edges;
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
@@ -764,6 +766,10 @@ pub fn run_all_tests() {
     // the PtRegs decode, table lookup and ENOSYS fall-through no test
     // ever walked.
     syscall_dispatch_probe::test_syscall_dispatch_probe();
+
+    // Pipe-buffer ring + signal pending-queue mechanics
+    // (kernel/src/tests/pipe_signal_edges.rs).
+    pipe_signal_edges::test_pipe_signal_edges();
 
     // ===== VFS create-mode rules (creat09) =====
     test_group_start("sgid_mode");
