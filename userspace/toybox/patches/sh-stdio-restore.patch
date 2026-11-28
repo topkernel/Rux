@@ -1,0 +1,21 @@
+--- a/toys/pending/sh.c	2025-10-15 00:45:35.000000000 +0800
++++ b/toys/pending/sh.c	2026-11-28 16:29:04.920769065 +0800
+@@ -4538,6 +4538,18 @@
+   for (;;) {
+     // if this fcall has source but not dlist_terminate()d pl, get line & parse
+     if (TT.ff->source && (!TT.ff->pl || TT.ff->pl->prev)) {
++      // A pipeline's parent-side plumbing (save_redirect of the previous
++      // segment's read end onto fd 0, undone by the NEXT statement's
++      // segment-start unredirect) leaves this shell's fd 0 pointing at
++      // the pipeline's read pipe across the statement boundary. With
++      // interactive/script input on fd 0, the next line read landed in
++      // that pipe: upstream shells restore the shell's own stdio before
++      // the next line read, so do the same here. Without this, a finite
++      // producer (dmesg | head -3) had the prompt read hit pipe EOF and
++      // the shell exited — under init=/bin/sh that powered the machine
++      // down (Rux init-exit policy).
++      unredirect(TT.ff->blk->urd);
++      TT.ff->blk->urd = 0;
+       new = get_next_line(TT.ff->source, more+1);
+       more = parse_line(new, &expect);
+       free(new);
