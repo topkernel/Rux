@@ -43,8 +43,11 @@ if [ "${1:-}" != "report-only" ]; then
     # Same shape as the suite.sh probe boots: bounded run, snapshot-free
     # scratch image, verdict parsed from the log (the test suite triggers
     # the profile dump itself; init exiting afterwards is expected).
+    # thread=single (not MTTCG): the console-hex fallback needs an
+    # uncontended UART stream; MTTCG lets another hart's printk
+    # interleave whole/partial lines into it.
     timeout 300 qemu-system-riscv64 \
-        -M virt -accel tcg,thread=multi \
+        -M virt -accel tcg,thread=single \
         -cpu rv64,zbb=true,zba=true,zbs=true \
         -m 1G -smp 2 -display none -serial stdio \
         -drive file="$ROOTFS_IMG",if=none,id=rootfs,format=raw,file.locking=off \
@@ -60,7 +63,18 @@ echo "=== [3/4] Extract profile + test suite verdict ==="
 grep -c "COV: PASS" "$COV_DIR/boot.log" || true
 grep "COV: FAIL" "$COV_DIR/boot.log" || echo "no test suite failures"
 grep -m1 "PANIC:" "$COV_DIR/boot.log" || true
-python3 - "$COV_DIR/boot.log" "$COV_DIR/rux.profraw" <<'PYEOF'
+
+# Primary transport (kernel-side, 2026-11-28): trigger_write prefers
+# /coverage.profraw ON the mounted rootfs -- the console-hex stream drops
+# bytes under the live-scheduler boot (726 of 1,356,264 observed), which
+# llvm-profdata rejects as a corrupt header. Extract the file from the
+# image (the boot ran WITHOUT -snapshot, so the write persisted), and
+# fall back to console-hex extraction for older boots.
+rm -f "$COV_DIR/rux.profraw"
+debugfs -R "dump /coverage.profraw $COV_DIR/rux.profraw" "$ROOTFS_IMG" >/dev/null 2>&1 || true
+if [ ! -s "$COV_DIR/rux.profraw" ]; then
+    echo "    rootfs transport empty; falling back to console hex"
+    python3 - "$COV_DIR/boot.log" "$COV_DIR/rux.profraw" <<'PYEOF'
 import sys
 lines = open(sys.argv[1], errors="replace").read().splitlines()
 try:
@@ -81,6 +95,7 @@ data = bytes.fromhex(hexdata)
 open(sys.argv[2], "wb").write(data)
 print(f"profraw: {len(data)} bytes")
 PYEOF
+fi
 PROF_SIZE=$(stat -c%s "$COV_DIR/rux.profraw")
 if [ "$PROF_SIZE" -lt 64 ]; then
     echo "coverage-test suite: profraw too small" >&2

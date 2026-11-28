@@ -48,15 +48,48 @@ fn cov_line(bytes: &[u8]) {
 }
 
 /// KCOV-alignment trigger: a write to /proc/sys/kernel/cov_dump from a
-/// userspace test process captures the whole-kernel profile and emits it
-/// on the console (the reference exposes coverage through debugfs to the
-/// driving process; the console-hex variant keeps our extraction pipeline
-/// identical across boot shapes).
+/// userspace test process captures the whole-kernel profile. When a
+/// writable rootfs is mounted (the userspace-test boot), the profile is
+/// written to /coverage.profraw and the host pipeline extracts it from
+/// the image with debugfs — the console-hex stream drops bytes under the
+/// live-scheduler boot (observed 2026-11-28: 726 of 1,356,264 bytes lost
+/// at 1.3 MB, corrupting the profraw header). When the file path is not
+/// available (suite boots before/at any mount, or open fails), the
+/// console-hex transport stays the fallback so both extraction pipelines
+/// keep working.
 pub fn trigger_write(input: &[u8]) -> i32 {
+    match dump_to_rootfs() {
+        Ok(_) => return input.len() as i32,
+        Err(_) => {}
+    }
     match dump_to_console() {
         Ok(_) => input.len() as i32,
         Err(e) => e,
     }
+}
+
+/// Write the captured profile to /coverage.profraw on the mounted rootfs
+/// (O_WRONLY|O_CREAT|O_TRUNC). Returns the byte count written, or a
+/// negative errno when the rootfs is not writable (then the caller falls
+/// back to the console transport).
+pub fn dump_to_rootfs() -> Result<usize, i32> {
+    let buf = capture_profile()?;
+    const O_WCT: u32 = 0o1 | 0o100 | 0o1000;
+    let fd = crate::fs::vfs::file_open("/coverage.profraw", O_WCT, 0o644)?;
+    let mut total = 0usize;
+    let result = loop {
+        if total >= buf.len() {
+            break Ok(total);
+        }
+        let end = (total + 65536).min(buf.len());
+        match crate::fs::vfs::file_write(fd, &buf[total..end], end - total) {
+            Ok(0) => break Ok(total),
+            Ok(n) => total += n,
+            Err(e) => break Err(e),
+        }
+    };
+    let _ = crate::fs::vfs::file_close(fd);
+    result
 }
 
 /// Read side of the trigger file: "0\n" (dump-on-write knob).
