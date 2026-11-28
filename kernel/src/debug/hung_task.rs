@@ -299,7 +299,11 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
                     None => break,
                 };
                 if v >= lo && v < hi && (v & 1) == 0 {
-                    let _ = write!(w, " {:#x}", v);
+                    // Symbolize inline (2026-11-28 drill lane): the raw
+                    // hex forced offline addr2line correlation before the
+                    // wait site could be named; the ksym table rides in
+                    // .rodata either way.
+                    let _ = write!(w, " {:#x}({})", v, crate::debug::ksyms::format_symbol(v));
                     shown += 1;
                     if shown >= 8 {
                         break;

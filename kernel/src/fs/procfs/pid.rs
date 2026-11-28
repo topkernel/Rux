@@ -586,6 +586,143 @@ pub fn generate_schedstat(pid: u64) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Kernel text segment bounds for the parked-stack scans — the same
+/// discipline the hung-task HUNG-STK scan and taskdump::parked_kstack_syms
+/// use (the two arch linker scripts spell the bounds differently).
+fn text_bounds() -> (u64, u64) {
+    #[cfg(feature = "x86_64")]
+    extern "C" {
+        static __stext: u8;
+        static __etext: u8;
+    }
+    #[cfg(not(feature = "x86_64"))]
+    extern "C" {
+        static _stext: u8;
+        static _etext: u8;
+    }
+    #[cfg(feature = "x86_64")]
+    let lo = core::ptr::addr_of!(__stext) as u64;
+    #[cfg(feature = "x86_64")]
+    let hi = core::ptr::addr_of!(__etext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let lo = core::ptr::addr_of!(_stext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let hi = core::ptr::addr_of!(_etext) as u64;
+    (lo, hi)
+}
+
+/// The task's kernel-text words on its parked kernel stack, innermost
+/// (nearest the saved switch sp) first. Empty for a task that is on CPU
+/// (its stack words belong to the live frame chain, not a parked chain)
+/// or whose saved sp is not a canonical kernel stack pointer.
+///
+/// The walk is the bounds-checked KernelStackWindow read (INV-WINDOW-*)
+/// over the task's own stack pages, identical in discipline to the
+/// hung-task report and sysrq per-CPU scans; the Task pin (PinnedTask)
+/// keeps the pages alive for the duration.
+fn parked_stack_words(task: &crate::process::task::Task) -> Vec<u64> {
+    let mut out = Vec::new();
+    let thsp = task.thread().sp;
+    if (thsp >> 48) != 0xffff || (thsp & 7) != 0 || thsp <= 0x1000 {
+        return out;
+    }
+    // On-CPU task: the saved sp belongs to the switch machinery of a
+    // LIVE frame chain, and reading a running task's stack races its
+    // execution — the reference renders /proc/[pid]/stack empty for
+    // running tasks too (its reader refuses unless the task is not on
+    // a cpu).
+    if task.on_cpu() {
+        return out;
+    }
+    let (lo, hi) = text_bounds();
+    let top = match task.kernel_stack_top_checked() {
+        Some(t) => t,
+        None => return out,
+    };
+    let Some(win) =
+        crate::safety::frame::KernelStackWindow::new(top - crate::config::KERNEL_STACK_SIZE, top)
+    else {
+        return out;
+    };
+    for k in 0..512 {
+        let v = match win.read_u64(thsp as usize + k * 8) {
+            Some(v) => v,
+            None => break,
+        };
+        if v >= lo && v < hi && (v & 1) == 0 {
+            out.push(v);
+            if out.len() >= 16 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// /proc/[pid]/stack — the task's parked kernel-stack backtrace (the
+/// reference's CONFIG_STACKTRACE fs/proc/stack.c shape):
+/// `[<0xaddr>] symbol+0xoff/0xsize` per line, innermost first. A task
+/// running on a CPU renders an empty file, like the reference's.
+pub fn generate_stack(pid: u64) -> Vec<u8> {
+    use crate::process::{current_pid, current_task};
+    use core::fmt::Write as _;
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => Some(g.get()),
+            None => return Vec::new(),
+        }
+    };
+    let Some(task) = task else { return Vec::new() };
+    let mut s = String::new();
+    for v in parked_stack_words(task) {
+        let _ = write!(s, "[<{:#x}>] {}\n", v, crate::debug::ksyms::format_symbol(v));
+    }
+    s.into_bytes()
+}
+
+/// The wait-channel symbol for /proc/[pid]/wchan and stat field 35: the
+/// innermost kernel-text word on the task's parked stack, symbolized
+/// ("0" when none — running task, no canonical sp, or no text words).
+/// The reference resolves wchan from the scheduler's per-park symbol;
+/// Rux derives it from the parked chain the same way its hung-task and
+/// sysrq diagnostics do.
+fn wchan_symbol(task: &crate::process::task::Task) -> String {
+    match parked_stack_words(task).first() {
+        Some(v) => {
+            // A parked task's innermost surviving text word sits in the
+            // context-switch machinery (schedule / the wait stitch); the
+            // reference's wchan convention wants just the function name.
+            match crate::debug::ksyms::lookup(*v) {
+                Some((name, _, _)) => String::from(name),
+                None => alloc::format!("{:#x}", v),
+            }
+        }
+        None => String::from("0"),
+    }
+}
+
+/// /proc/[pid]/wchan — one line, the symbol name of the function the
+/// task is blocked in ("0" if not blocked in kernel text).
+pub fn generate_wchan(pid: u64) -> Vec<u8> {
+    use crate::process::{current_pid, current_task};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => Some(g.get()),
+            None => return Vec::new(),
+        }
+    };
+    let Some(task) = task else { return Vec::new() };
+    let mut s = wchan_symbol(task);
+    s.push('\n');
+    s.into_bytes()
+}
+
 pub fn generate_stat(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
     use alloc::string::ToString;
@@ -603,7 +740,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
 
     let (name_str, ppid, state_ch, vsize_pages, rss_pages, sig_mask, exit_code,
          utime, stime, cutime, cstime, priority, nice, threads, processor, policy,
-         min_flt, maj_flt, start_jiffies) = match task {
+         min_flt, maj_flt, start_jiffies, wchan_sym) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
             let vsize = t.address_space_arc().map(|mm| mm.total_vm()).unwrap_or(0);
@@ -638,12 +775,16 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
                 t.maj_flt.load(Relaxed),
                 t.start_jiffies.load(Relaxed),
             );
+            // Field 35 wchan: the symbol the task is blocked in (the
+            // reference renders the wait-channel symbol here; "0" for a
+            // task not parked in kernel text).
+            let wc = wchan_symbol(&t);
             (task_comm(&t).into_owned(), t.ppid(), ch, vsize, rss, sigmask, ec,
              ticks.0, ticks.1, ticks.2, ticks.3, prio, nice, threads, processor, policy,
-             faults.0, faults.1, faults.2)
+             faults.0, faults.1, faults.2, wc)
         }
         None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0, 0,
-                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, alloc::string::String::from("0")),
     };
 
     // Linux's /proc/[pid]/stat has exactly 52 fields (verified against a
@@ -695,7 +836,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
     fields.push("0".into()); // 32 blocked
     fields.push("0".into()); // 33 sigignore
     fields.push("0".into()); // 34 sigcatch
-    fields.push("0".into()); // 35 wchan
+    fields.push(wchan_sym); // 35 wchan
     fields.push("0".into()); // 36 nswap
     fields.push("0".into()); // 37 cnswap
     fields.push("0".into()); // 38 exit_signal
