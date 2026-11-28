@@ -1553,6 +1553,16 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
                 // Invalid timespec: match Linux poll_select_set_timeout().
                 return -(errno::EINVAL as i64);
             }
+            if (tv_sec as i64) < 0 {
+                // timespec64_valid() requires tv_sec >= 0: the reference
+                // rejects a negative tv_sec with EINVAL before waiting.
+                // Read as u64 a negative tv_sec is a huge value that used
+                // to saturate past i32::MAX and become timeout_ms = -1 —
+                // ppoll({-1,0}) slept forever instead of failing (the
+                // sibling sys_pselect6 parser already rejects tv_sec < 0
+                // the same way).
+                return -(errno::EINVAL as i64);
+            }
             if tv_sec == 0 && tv_nsec == 0 {
                 0  // Immediate return
             } else {
