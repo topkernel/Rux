@@ -10829,7 +10829,7 @@ pub mod x86_64 {
             // SAFETY: INV-XE-FRAME-1/2 — the one audited reference-forming
             // edge; the trap-entry contract supplies the proof.
             SavedFrame {
-                inner: unsafe { &mut *regs },
+                inner: { &mut *regs },
             }
         }
 
@@ -10900,7 +10900,7 @@ pub mod x86_64 {
         pub fn boot_cmdline() -> &'static str  {
 
             // SAFETY: written once in early_boot_init, read-only afterwards.
-            let bytes: &[u8] = unsafe { &BOOT_CMDLINE };
+            let bytes: &[u8] = { unsafe { &BOOT_CMDLINE } };
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             core::str::from_utf8(&bytes[..end]).unwrap_or("")
         }
@@ -10912,10 +10912,12 @@ pub mod x86_64 {
         pub fn boot_memory_regions() -> &'static [BootMemoryRegion]  {
 
             // SAFETY: written once in early_boot_init, read-only afterwards.
-            unsafe {
-                let count = core::ptr::read_volatile(&raw const BOOT_MMAP_COUNT);
+
+                let count = unsafe { core::ptr::read_volatile(&raw const BOOT_MMAP_COUNT) };
+                unsafe {
                 &BOOT_MMAP[..count]
-            }
+                }
+
         }
 
         // INV-ARCH-BOOT-6 (collected 2026-11-27 from x86_64/boot.rs): verbatim body; callers use the safe
@@ -10934,12 +10936,14 @@ pub mod x86_64 {
             // guards). CR0 survives the later CR3 switch.
             crate::arch::cpu::enable_write_protect();
 
-            let mbi: &MultibootInfo = unsafe {
-                let ptr = core::ptr::read_volatile(&raw const boot_mb_info) as usize as *const MultibootInfo;
+            let mbi: &MultibootInfo = {
+                let ptr = unsafe { core::ptr::read_volatile(&raw const boot_mb_info) as usize as *const MultibootInfo };
                 if ptr as usize == 0 {
                     return;
                 }
+                unsafe {
                 &*ptr
+                }
             };
 
             // BSS scratch, single-threaded early boot context: each raw
@@ -10947,7 +10951,7 @@ pub mod x86_64 {
             {
 
             // SAFETY: single-threaded boot BSS.
-            unsafe { BOOT_MAGIC = get_boot_magic() };
+            { unsafe { BOOT_MAGIC = get_boot_magic() } };
 
             // ---- bzImage (Linux protocol): QEMU's linuxboot ROM has already
             // patched the boot_params zero page at 0x10000 (where our setup
@@ -10960,42 +10964,44 @@ pub mod x86_64 {
                 // stored the map at setup+0x660 with count (u16) at setup+0x658
                 // (setup is loaded at linear 0x10000).
                 // SAFETY: boot-protocol fixed physical location (setup+0x658).
-                let count = unsafe { core::ptr::read_volatile(0x10658usize as *const u16) } as usize;
+                let count = { unsafe { core::ptr::read_volatile(0x10658usize as *const u16) } } as usize;
                 let mut idx = 0usize;
                 for i in 0..count.min(32) {
                     // BIOS entries are 20 bytes, packed (repr(C) with u64 would
                     // stride 24 — read fields manually at 20-byte stride).
                     let base = 0x10660usize + i * 20;
-                    let addr = unsafe { core::ptr::read_volatile(base as *const u64) };
-                    let size = unsafe { core::ptr::read_volatile((base + 8) as *const u64) };
-                    let mtype = unsafe { core::ptr::read_volatile((base + 16) as *const u32) };
+                    let addr = { unsafe { core::ptr::read_volatile(base as *const u64) } };
+                    let size = { unsafe { core::ptr::read_volatile((base + 8) as *const u64) } };
+                    let mtype = { unsafe { core::ptr::read_volatile((base + 16) as *const u32) } };
                     // SAFETY: single-threaded boot BSS.
-                    unsafe {
+                    {
+                        unsafe {
                         BOOT_MMAP[idx] = BootMemoryRegion {
                             start: addr,
                             end: addr + size,
                             usable: mtype == 1,
                         }
+                        }
                     };
                     idx += 1;
                 }
                 // SAFETY: single-threaded boot BSS.
-                unsafe { BOOT_MMAP_COUNT = idx };
+                { unsafe { BOOT_MMAP_COUNT = idx } };
 
                 // command line from boot_params.cmd_line_ptr (setup header at
                 // 0x10000; QEMU/rom honor our cmd_line_ptr = 0x20000)
                 // SAFETY: boot-protocol fixed physical location (setup+0x228).
-                let cl = u64::from(unsafe { core::ptr::read_volatile(0x10228usize as *const u32) }) as usize;
+                let cl = u64::from({ unsafe { core::ptr::read_volatile(0x10228usize as *const u32) } }) as usize;
                 if cl != 0 {
                     let src = cl as *const u8;
                     let mut i = 0usize;
                     while i < CMDLINE_MAX - 1 {
-                        let b = unsafe { core::ptr::read_volatile(src.add(i)) };
+                        let b = { unsafe { core::ptr::read_volatile(src.add(i)) } };
                         if b == 0 {
                             break;
                         }
                         // SAFETY: single-threaded boot BSS.
-                        unsafe { BOOT_CMDLINE[i] = b; };
+                        { unsafe { BOOT_CMDLINE[i] = b; } };
                         i += 1;
                     }
                 }
@@ -11008,30 +11014,32 @@ pub mod x86_64 {
                 let mut idx = 0usize;
                 while off < mbi.mmap_length && idx < MAX_MMAP_ENTRIES {
                     // SAFETY: the multiboot-provided mmap table, mapped at boot.
-                    let entry = unsafe { &*((mbi.mmap_addr + off) as *const MbMmapEntry) };
+                    let entry = { unsafe { &*((mbi.mmap_addr + off) as *const MbMmapEntry) } };
                     let size = if entry.size != 0 { entry.size } else { 20 };
                     let start = (entry.addr_low as u64) | ((entry.addr_high as u64) << 32);
                     let len = (entry.len_low as u64) | ((entry.len_high as u64) << 32);
                     // SAFETY: single-threaded boot BSS.
-                    unsafe {
+                    {
+                        unsafe {
                         BOOT_MMAP[idx] = BootMemoryRegion {
                             start,
                             end: start + len,
                             usable: entry.mtype == 1,
+                        }
                         }
                     };
                     idx += 1;
                     off += size + 4;
                 }
                 // SAFETY: single-threaded boot BSS.
-                unsafe { BOOT_MMAP_COUNT = idx };
+                { unsafe { BOOT_MMAP_COUNT = idx } };
             } else {
                 // Fall back to mem_lower/mem_upper (flags bit 0).
                 let upper_end = (1u64 << 20) + mbi.mem_upper as u64 * 1024;
                 // SAFETY: single-threaded boot BSS.
-                unsafe { BOOT_MMAP[0] = BootMemoryRegion { start: 0, end: upper_end, usable: true }; };
+                { unsafe { BOOT_MMAP[0] = BootMemoryRegion { start: 0, end: upper_end, usable: true }; } };
                 // SAFETY: single-threaded boot BSS.
-                unsafe { BOOT_MMAP_COUNT = 1 };
+                { unsafe { BOOT_MMAP_COUNT = 1 } };
             }
 
             // ---- Command line (flags bit 2) ----
@@ -11039,12 +11047,12 @@ pub mod x86_64 {
                 let src = mbi.cmdline as *const u8;
                 let mut i = 0usize;
                 while i < CMDLINE_MAX - 1 {
-                    let b = unsafe { core::ptr::read_volatile(src.add(i)) };
+                    let b = { unsafe { core::ptr::read_volatile(src.add(i)) } };
                     if b == 0 {
                         break;
                     }
                     // SAFETY: single-threaded boot BSS.
-                    unsafe { BOOT_CMDLINE[i] = b; };
+                    { unsafe { BOOT_CMDLINE[i] = b; } };
                     i += 1;
                 }
             }
@@ -11059,7 +11067,7 @@ pub mod x86_64 {
         pub fn get_boot_magic() -> u32  {
 
             // SAFETY: written by boot.S before any Rust code runs.
-            unsafe { core::ptr::read_volatile(&raw const boot_mb_magic) }
+            { unsafe { core::ptr::read_volatile(&raw const boot_mb_magic) } }
         }
 
         // extern declarations duplicated from x86_64/boot.rs (the original
@@ -11355,7 +11363,8 @@ pub mod x86_64 {
                     // live) shadow slot, swapgs restores the kernel's percpu
                     // view. Three native instructions.
                     // SAFETY: FSGSBASE armed; gs_next is a cached canonical base.
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "swapgs",
                             "wrgsbase {}",
@@ -11363,6 +11372,7 @@ pub mod x86_64 {
                             in(reg) gs_next,
                             options(nostack, preserves_flags)
                         )
+                        }
                     };
                 }
             } else {
@@ -11385,7 +11395,7 @@ pub mod x86_64 {
             crate::debug::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
             // SAFETY: the scheduler's switch protocol (IRQs off; both tasks valid
             // pick targets) — the one register/stack switch edge.
-            unsafe { __switch_to(prev, next) };
+            { unsafe { __switch_to(prev, next) } };
 
             // cctx: the incoming task closes the asm bracket parked by the
             // outgoing task on this CPU (IRQs stayed off across the switch).
@@ -11881,13 +11891,15 @@ pub mod x86_64 {
 
             let flags: u64;
             // SAFETY: PUSHF/POPQ reads RFLAGS without modifying state.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "pushfq",
                     "pop {}",
                     out(reg) flags,
                     options(nostack)
                 );
+                }
             }
             (flags & (1 << 9)) != 0
         }
@@ -11900,7 +11912,7 @@ pub mod x86_64 {
         pub fn dmb()  {
 
             // SAFETY: LFENCE orders loads; no side effects beyond ordering.
-            unsafe { core::arch::asm!("lfence", options(nomem, nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("lfence", options(nomem, nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-29 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -11911,7 +11923,7 @@ pub mod x86_64 {
         pub fn dsb()  {
 
             // SAFETY: MFENCE orders all memory operations; no side effects beyond ordering.
-            unsafe { core::arch::asm!("mfence", options(nomem, nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("mfence", options(nomem, nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-30 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -11923,7 +11935,8 @@ pub mod x86_64 {
 
             // SAFETY: CPUID serializes the pipeline. rbx is reserved by LLVM, so
             // save/restore it around the instruction explicitly.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!(
                     "xor eax, eax",
                     "push rbx",
@@ -11932,7 +11945,8 @@ pub mod x86_64 {
                     out("eax") _, out("ecx") _, out("edx") _,
                     options(nostack)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-31 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -11944,7 +11958,7 @@ pub mod x86_64 {
 
             // SAFETY: HLT halts until the next interrupt; interrupts must be
             // enabled or the CPU hangs forever — the idle loop guarantees that.
-            unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("hlt", options(nomem, nostack)) } };
         }
 
         // INV-ARCH-CPU-32 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -11960,7 +11974,7 @@ pub mod x86_64 {
             // irq_save / lock_irq*) to the critical-section owner.
             crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: clearing IF is always safe.
-            unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("cli", options(nomem, nostack)) } };
         }
 
         // INV-ARCH-CPU-33 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -11975,7 +11989,7 @@ pub mod x86_64 {
             // close/heal decision sees the pre-sti state); no-op when off.
             crate::debug::syscost::irq_note_on();
             // SAFETY: setting IF is safe at any point the caller wants IRQs on.
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("sti", options(nomem, nostack)) } };
         }
 
         // INV-ARCH-CPU-34 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -11993,7 +12007,8 @@ pub mod x86_64 {
             // SAFETY: CPUID is a pure query. rbx is reserved by LLVM, so stash
             // EBX in a scratch register around the push/pop (same discipline as
             // cpu::isb, extended to recover the EBX result).
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "push rbx",
                     "cpuid",
@@ -12007,6 +12022,7 @@ pub mod x86_64 {
                     lateout("edx") d,
                     options(nostack)
                 );
+                }
             }
             (a, b, c, d)
         }
@@ -12023,7 +12039,7 @@ pub mod x86_64 {
         #[inline]
         pub  fn wrgsbase(base: u64)  {
 
-            unsafe { core::arch::asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-36 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12037,7 +12053,7 @@ pub mod x86_64 {
         #[inline]
         pub  fn wrfsbase(base: u64)  {
 
-            unsafe { core::arch::asm!("wrfsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("wrfsbase {}", in(reg) base, options(nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-37 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12115,7 +12131,7 @@ pub mod x86_64 {
             let lo: u32;
             let hi: u32;
             // SAFETY: RDTSC is a pure counter read.
-            unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)) } };
             (lo as u64) | ((hi as u64) << 32)
         }
 
@@ -12135,13 +12151,15 @@ pub mod x86_64 {
             let desc: [u64; 2] = [pcid & 0xfff, addr];
             // SAFETY: see fn doc; the descriptor is stack memory whose ADDRESS is
             // an input (the instruction reads it, it does not write through it).
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "invpcid {kind}, [{desc}]",
                     kind = in(reg) kind,
                     desc = in(reg) &desc as *const [u64; 2] as usize,
                     options(nostack, preserves_flags)
                 );
+                }
             }
         }
 
@@ -12156,7 +12174,7 @@ pub mod x86_64 {
         #[inline]
         pub  fn write_cr4(value: u64)  {
 
-            unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-42 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12168,7 +12186,7 @@ pub mod x86_64 {
 
             let value: u64;
             // SAFETY: reading CR4 is always safe.
-            unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack)) } };
             value
         }
 
@@ -12185,7 +12203,7 @@ pub mod x86_64 {
         #[inline]
         pub fn invlpg(addr: u64)  {
 
-            unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-44 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12200,8 +12218,10 @@ pub mod x86_64 {
 
             let lo = value as u32;
             let hi = (value >> 32) as u32;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("wrmsr", in("eax") lo, in("edx") hi, in("ecx") msr, options(nomem, nostack));
+                }
             }
         }
 
@@ -12216,8 +12236,10 @@ pub mod x86_64 {
         pub  fn rdmsr(msr: u32) -> u64  {
 
             let (lo, hi): (u32, u32);
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("rdmsr", out("eax") lo, out("edx") hi, in("ecx") msr, options(nomem, nostack));
+                }
             }
             (lo as u64) | ((hi as u64) << 32)
         }
@@ -12232,7 +12254,7 @@ pub mod x86_64 {
         #[inline]
         pub  fn write_cr3(value: u64)  {
 
-            unsafe { core::arch::asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-47 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12242,7 +12264,7 @@ pub mod x86_64 {
 
             let value: u64;
             // SAFETY: reading CR3 is always safe.
-            unsafe { core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack)) } };
             value
         }
 
@@ -12292,7 +12314,7 @@ pub mod x86_64 {
         pub fn clts()  {
 
             // SAFETY: single-bit clear, mode bits preserved.
-            unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) };
+            { unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) } };
         }
 
         // INV-ARCH-CPU-51 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12308,7 +12330,7 @@ pub mod x86_64 {
         pub  fn write_cr0(value: u64)  {
 
             // SAFETY: caller keeps the mode-defining bits intact.
-            unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) } };
         }
 
         // INV-ARCH-CPU-52 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12320,7 +12342,7 @@ pub mod x86_64 {
 
             let value: u64;
             // SAFETY: reading CR0 is always safe.
-            unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) } };
             value
         }
 
@@ -12333,7 +12355,7 @@ pub mod x86_64 {
 
             let value: u64;
             // SAFETY: CR2 is a read-only control register; reading is always safe.
-            unsafe { core::arch::asm!("mov {}, cr2", out(reg) value, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("mov {}, cr2", out(reg) value, options(nomem, nostack)) } };
             value
         }
 
@@ -12355,9 +12377,11 @@ pub mod x86_64 {
         #[inline]
         pub fn outl(port: u16, value: u32)  {
 
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("out dx, eax", in("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-56 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12368,8 +12392,10 @@ pub mod x86_64 {
         pub fn inl(port: u16) -> u32  {
 
             let value: u32;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+                }
             }
             value
         }
@@ -12381,9 +12407,11 @@ pub mod x86_64 {
         #[inline]
         pub fn outw(port: u16, value: u16)  {
 
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("out dx, ax", in("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-58 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12394,8 +12422,10 @@ pub mod x86_64 {
         pub fn inw(port: u16) -> u16  {
 
             let value: u16;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+                }
             }
             value
         }
@@ -12407,9 +12437,11 @@ pub mod x86_64 {
         #[inline]
         pub fn outb(port: u16, value: u8)  {
 
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("out dx, al", in("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-60 (collected 2026-11-27 from x86_64/cpu.rs): verbatim body; callers use the safe
@@ -12420,8 +12452,10 @@ pub mod x86_64 {
         pub fn inb(port: u16) -> u8  {
 
             let value: u8;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
+                }
             }
             value
         }
@@ -12459,20 +12493,26 @@ pub mod x86_64 {
                 let _lock = CSD_LOCKS[cpu].lock_irqsave();
                 // SAFETY: We hold CSD_LOCKS[cpu], serializing access to CSD_QUEUES[cpu].
                 // Detaching the list and re-initializing the queue head is safe under the lock.
-                unsafe {
+                {
+                    unsafe {
                     if CSD_QUEUES[cpu].is_empty() {
                         return;
                     }
+                    }
+                    unsafe {
                     head = CSD_QUEUES[cpu].next;
+                    }
                     // Re-init queue head to empty
+                    unsafe {
                     CSD_QUEUES[cpu].init();
+                    }
                 }
             }
 
             // Walk detached list, call each callback
             // SAFETY: queue_ptr is a stable address of a static. The list was detached under
             // lock above, so we have exclusive ownership of all nodes until completion.
-            let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
+            let queue_ptr = { unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead } };
             // The list link sits at an offset INSIDE CallSingleData: node→struct
             // requires the back-adjustment (a bare cast reads the link pointers
             // as func/info and calls the queue head).
@@ -12482,13 +12522,15 @@ pub mod x86_64 {
                 // SAFETY: node points into the detached list of CallSingleData entries.
                 // Each node was allocated via Box::new and is valid. The sender is
                 // spin-waiting on done, so the Box is not freed until after we store true.
-                unsafe {
-                    let csd = (node as *mut u8).sub(list_off) as *mut CallSingleData;
-                    let next = (*node).next;
-                    let f = (*csd).func;
-                    let arg = (*csd).info;
+                {
+                    let csd = unsafe { (node as *mut u8).sub(list_off) as *mut CallSingleData };
+                    let next = unsafe { (*node).next };
+                    let f = unsafe { (*csd).func };
+                    let arg = unsafe { (*csd).info };
                     f(arg);
+                    unsafe {
                     (*csd).done.store(true, Ordering::Release);
+                    }
                     node = next;
                 }
             }
@@ -12531,14 +12573,14 @@ pub mod x86_64 {
             // is stable for the lifetime of the Box (leaked on timeout).
             csd_fire(
                 target,
-                unsafe { &raw mut (*csd).list as *mut ListHead },
+                { unsafe { &raw mut (*csd).list as *mut ListHead } },
             );
 
             let hz = crate::drivers::timer::HZ as u64;
             let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
             // SAFETY: csd is a valid allocation we own until done is observed;
             // done is set only by the target after detaching the node.
-            while !unsafe { (*csd).done.load(Ordering::Acquire) } {
+            while !{ unsafe { (*csd).done.load(Ordering::Acquire) } } {
                 if crate::drivers::timer::get_jiffies() >= deadline {
                     return false; // node stays linked + leaked; see doc comment
                 }
@@ -12547,7 +12589,7 @@ pub mod x86_64 {
             }
             // SAFETY: done was observed; the target no longer touches the node
             // (ListHead has no Drop; plain dealloc is correct).
-            unsafe { drop(Box::from_raw(csd)) };
+            { unsafe { drop(Box::from_raw(csd)) } };
             true
         }
 
@@ -12570,25 +12612,45 @@ pub mod x86_64 {
                 // SAFETY: We hold CSD_LOCKS[target], which serializes all mutations
                 // to CSD_QUEUES[target]. The csd_list pointer stays valid until
                 // `done` is set (caller contract, same as smp_call_function).
-                unsafe {
+                {
+                    unsafe {
                     (*csd_list).init();
+                    }
+                    unsafe {
                     if CSD_QUEUES[target].is_empty() {
                         // First entry — set up circular list
+                        {
                         CSD_QUEUES[target].next = csd_list;
+                        }
+                        {
                         CSD_QUEUES[target].prev = csd_list;
+                        }
+                        {
                         (*csd_list).next = &mut CSD_QUEUES[target] as *mut _;
+                        }
+                        {
                         (*csd_list).prev = &mut CSD_QUEUES[target] as *mut _;
+                        }
                     } else {
                         // Insert at tail
-                        let tail = CSD_QUEUES[target].prev;
+                        let tail = { CSD_QUEUES[target].prev };
                         // SAFETY: tail was read from the queue under lock and points to a valid
                         // ListHead node in the queue. The lock prevents concurrent modification.
                         
+                            {
                             (*tail).next = csd_list;
+                            }
+                            {
                             (*csd_list).prev = tail;
+                            }
+                            {
                             (*csd_list).next = &mut CSD_QUEUES[target] as *mut _;
+                            }
+                            {
                             CSD_QUEUES[target].prev = csd_list;
+                            }
                         
+                    }
                     }
                 }
             }
@@ -12604,8 +12666,10 @@ pub mod x86_64 {
             for i in 0..MAX_CPUS {
                 // SAFETY: CSD_QUEUES is a static mutable array. Called only once during boot
                 // init before any CSD operations, so no concurrent access.
-                unsafe {
+                {
+                    unsafe {
                     CSD_QUEUES[i].init();
+                    }
                 }
             }
         }
@@ -12663,8 +12727,8 @@ pub mod x86_64 {
                     format_args!("REMOTE-BT[{}] cpu={}: (no current task) rip={:#x} rsp={:#x}\n", why, target, rip, rsp),
                 );
             } else {
-                let pid = unsafe { (*cur).pid() };
-                let comm = unsafe { (*cur).comm() };
+                let pid = { unsafe { (*cur).pid() } };
+                let comm = { unsafe { (*cur).comm() } };
                 let mut cbuf = [0u8; 17];
                 let mut cl = 0;
                 for &b in comm.iter() {
@@ -12731,8 +12795,10 @@ pub mod x86_64 {
                     // SAFETY: fp validated above (aligned, kernel range); the
                     // two frame-word reads are the standard unwind operation on
                     // a live kernel stack.
-                    let (ret, next) = unsafe {
+                    let (ret, next) = {
+                        unsafe {
                         (*((fp + 8) as *const u64), *(fp as *const u64))
+                        }
                     };
                     if ret == 0 {
                         break;
@@ -12832,8 +12898,10 @@ pub mod x86_64 {
 
             // SAFETY: setting IF via STI is safe in any context that intends to
             // enable interrupts.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("sti", options(nomem, nostack));
+                }
             }
             println!("arch: Interrupts enabled (STI)");
         }
@@ -12858,7 +12926,7 @@ pub mod x86_64 {
 
             // SAFETY: the ex_table bracket converts the expected #PF to rc=1;
             // if it unexpectedly lands, rc=0 = the guard is NOT standing.
-            let rc = unsafe { mpk_guard_escape(target) };
+            let rc = { unsafe { mpk_guard_escape(target) } };
             crate::println!(
                 "mpkguard: escape probe (zone closed) rc={} -> {}",
                 rc,
@@ -12943,8 +13011,10 @@ pub mod x86_64 {
             // write — total/n with a warmup).
             let tsc = |lo: &mut u32, hi: &mut u32| {
                 // SAFETY: RDTSC (the pbench probe's own clock class).
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!("rdtsc", lateout("eax") *lo, lateout("edx") *hi, options(nostack));
+                    }
                 }
             };
             let mut lo = 0u32;
@@ -13016,8 +13086,8 @@ pub mod x86_64 {
 
             // Phase A: key ENABLED (clear AD|WD for key 1) — the write must land.
             wrpkru(reset_pkru & !(KEY1_AD | KEY1_WD));
-            let rc_a = unsafe { mpk_probe_write(target) };
-            let val = unsafe { core::ptr::read_volatile(target) };
+            let rc_a = { unsafe { mpk_probe_write(target) } };
+            let val = { unsafe { core::ptr::read_volatile(target) } };
             crate::println!(
                 "mpk: fault-inject phase A (key1 enabled): rc={} value={:#x} -> {}",
                 rc_a,
@@ -13028,7 +13098,7 @@ pub mod x86_64 {
             // Phase B: key DISABLED (AD set) — the SAME write must #PF into the
             // ex_table fixup: the hardware backstop proven.
             wrpkru(reset_pkru | KEY1_AD | KEY1_WD);
-            let rc_b = unsafe { mpk_probe_write(target) };
+            let rc_b = { unsafe { mpk_probe_write(target) } };
             crate::println!(
                 "mpk: fault-inject phase B (key1 disabled): rc={} -> {}",
                 rc_b,
@@ -13079,7 +13149,8 @@ pub mod x86_64 {
         pub(crate) fn wrpkru(v: u32)  {
 
             // SAFETY: pure register write; serializing per the ISA.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!(
                     "xor ecx, ecx",
                     "xor edx, edx",
@@ -13087,7 +13158,8 @@ pub mod x86_64 {
                     in("eax") v,
                     options(nostack)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-MPK-7 (collected 2026-11-27 from x86_64/mpk.rs): verbatim body; callers use the safe
@@ -13100,7 +13172,8 @@ pub mod x86_64 {
 
             let v: u32;
             // SAFETY: pure register read (the F-REG class: no memory effect).
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "xor ecx, ecx",
                     "xor edx, edx",
@@ -13110,6 +13183,7 @@ pub mod x86_64 {
                     out("edx") _,
                     options(nostack)
                 );
+                }
             }
             v
         }
@@ -13380,11 +13454,13 @@ pub mod x86_64 {
             // Linker-bound symbols; the blob is read-only data.
             // SAFETY: symbol arithmetic + a bounded from_raw_parts over the
             // linker section (len clamped to TRAMP_SIZE).
-            unsafe {
+            {
                 let start = &raw const __ap_trampoline_start as usize;
                 let end = &raw const __ap_trampoline_end as usize;
                 let len = (end - start).min(TRAMP_SIZE);
+                unsafe {
                 tramp_write(0, core::slice::from_raw_parts(start as *const u8, len));
+                }
             }
 
             // gdtr base: linear address of the GDT inside the copy.
@@ -13416,17 +13492,25 @@ pub mod x86_64 {
             let pd = tramp_va(TRAMP_PD_PHYS);
             // SAFETY: freshly zero-initialized scratch tables in low reserved
             // memory, written via the linear map before any AP can see them.
-            unsafe {
+            {
                 for p in [pml4, pdpt, pd] {
+                    unsafe {
                     core::ptr::write_bytes(p as *mut u8, 0, 4096);
+                    }
                 }
                 let pml4 = pml4 as *mut u64;
                 let pdpt = pdpt as *mut u64;
                 let pd = pd as *mut u64;
+                unsafe {
                 *pml4.add(0) = (TRAMP_PDPT_PHYS as u64) | PDE_P | PDE_RW;
+                }
+                unsafe {
                 *pdpt.add(0) = (TRAMP_PD_PHYS as u64) | PDE_P | PDE_RW;
+                }
                 for i in 0..512u64 {
+                    unsafe {
                     *pd.add(i as usize) = (i << 21) | PDE_P | PDE_RW | PDE_PS;
+                    }
                 }
                 // Copy the kernel upper half out of the static kernel root.
                 let kernel_root = crate::arch::mm::memory_layout::phys_to_virt(
@@ -13434,9 +13518,11 @@ pub mod x86_64 {
                 )
                 .as_usize() as *const u64;
                 for i in 256..512usize {
-                    let e = core::ptr::read_volatile(kernel_root.add(i));
+                    let e = unsafe { core::ptr::read_volatile(kernel_root.add(i)) };
                     if e & PDE_P != 0 {
+                        unsafe {
                         *pml4.add(i) = e;
+                        }
                     }
                 }
             }
@@ -13453,10 +13539,12 @@ pub mod x86_64 {
             );
             // SAFETY: the trampoline window 0x8000..0xC000 is inside the
             // memblock-reserved low region and mapped by the linear map.
-            unsafe {
+            {
                 let dst = va.as_usize() as *mut u8;
                 for (i, b) in bytes.iter().enumerate() {
+                    unsafe {
                     core::ptr::write_volatile(dst.add(i), *b);
+                    }
                 }
             }
         }
@@ -13477,12 +13565,14 @@ pub mod x86_64 {
             let id: u32;
             // SAFETY: %gs:0 reads this CPU's PerCpu.cpu_number; the GS base is
             // established before any code that can reach here runs.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "mov {0:e}, dword ptr gs:[0]",
                     out(reg) id,
                     options(nomem, nostack, preserves_flags)
                 );
+                }
             }
             id as u64
         }
@@ -13549,9 +13639,11 @@ pub mod x86_64 {
             // Per-asm audited blocks: register RMWs and CPUID-gated enablement
             // (no memory effects; the xsave area is untouched here).
             // SAFETY: CR4 read (register-only).
-            let mut cr4: u64 = unsafe {
+            let mut cr4: u64 = {
                 let v;
+                unsafe {
                 core::arch::asm!("mov {}, cr4", out(reg) v, options(nomem, nostack));
+                }
                 v
             };
             {
@@ -13569,7 +13661,7 @@ pub mod x86_64 {
                     cr4 |= 1 << 18; // OSXSAVE
                 }
                 // SAFETY: CR4 write (feature-bit RMW).
-                unsafe { core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags)) };
+                { unsafe { core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags)) } };
 
                 // FSGSBASE (CPUID-gated inside): per-CPU CR4 bit the context
                 // switch gates on — fpu_init runs once per CPU (BSP + every AP),
@@ -13582,15 +13674,17 @@ pub mod x86_64 {
                 crate::arch::x86_64::cpu::enable_smep();
 
                 // SAFETY: CR0 read (register-only).
-                let mut cr0: u64 = unsafe {
+                let mut cr0: u64 = {
                     let v;
+                    unsafe {
                     core::arch::asm!("mov {}, cr0", out(reg) v, options(nomem, nostack));
+                    }
                     v
                 };
                 cr0 &= !(1 << 2); // clear EM (no emulation)
                 cr0 |= 1 << 1; // set MP (monitor coprocessor)
                 // SAFETY: CR0 write (feature-bit RMW).
-                unsafe { core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags)) };
+                { unsafe { core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags)) } };
 
                 // XCR0 = every user component the CPU enumerates in leaf 0xD
                 // ANDed with the imm8-reachable set {x87, SSE, AVX, OPMASK,
@@ -13623,7 +13717,8 @@ pub mod x86_64 {
                     }
                     // SAFETY: xsetbv with ECX=0 programs XCR0; EDX:EAX holds the
                     // mask. Only the bits CPUID reported are set.
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "xsetbv",
                             in("eax") mask as u32,
@@ -13631,6 +13726,7 @@ pub mod x86_64 {
                             in("ecx") 0u32,
                             options(nostack, preserves_flags),
                         );
+                        }
                     }
                     // Only now may the switch paths use the xsave/xrstor pair
                     // (they #UD while OSXSAVE is clear).
@@ -13651,7 +13747,8 @@ pub mod x86_64 {
                     // the live register so a regression is one grep away.
                     let (lo, hi): (u32, u32);
                     // SAFETY: xgetbv reads XCR0 (OSXSAVE is set above).
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "xgetbv",
                             lateout("eax") lo,
@@ -13659,6 +13756,7 @@ pub mod x86_64 {
                             in("ecx") 0u32,
                             options(nostack, preserves_flags),
                         );
+                        }
                     }
                     crate::pr_info!(
                         "fpu: OSXSAVE+XCR0={:#x}{} (cpu feature mask {:#x}, xsave area {:#x} = rt_sigframe fpstate reserve)",
@@ -13682,13 +13780,15 @@ pub mod x86_64 {
                 // ABI default explicitly so the boot CPU starts fully masked too.
                 // (ldmxcsr is m32-only — no register form.)
                 // SAFETY: register init + constant MXCSR load.
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "fninit",
                         "ldmxcsr [{mxcsr}]",
                         mxcsr = in(reg) &MXCSR_DEFAULT,
                         options(nostack, preserves_flags),
                     );
+                    }
                 }
             }
         }
@@ -13709,12 +13809,14 @@ pub mod x86_64 {
                 if !xsave_ready() {
                     // SAFETY: fxsave64 writes 512 bytes at the given address;
                     // the FxsaveArea field is 64-byte aligned.
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "fxsave64 ({ptr})",
                             ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
                             options(att_syntax, nostack, preserves_flags),
                         );
+                        }
                     }
                 } else {
                     // closegap: xsaveopt64 when the CPU offers it — identical
@@ -13724,7 +13826,8 @@ pub mod x86_64 {
                     // SAFETY: writes at most the enabled components into the
                     // 4096-byte area.
                     if xsaveopt_ready() {
-                        unsafe {
+                        {
+                            unsafe {
                             core::arch::asm!(
                                 "xsaveopt64 ({ptr})",
                                 ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
@@ -13732,9 +13835,11 @@ pub mod x86_64 {
                                 in("edx") 0xFFFF_FFFFu32,
                                 options(att_syntax, nostack, preserves_flags),
                             );
+                            }
                         }
                     } else {
-                        unsafe {
+                        {
+                            unsafe {
                             core::arch::asm!(
                                 "xsave64 ({ptr})",
                                 ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
@@ -13742,6 +13847,7 @@ pub mod x86_64 {
                                 in("edx") 0xFFFF_FFFFu32,
                                 options(att_syntax, nostack, preserves_flags),
                             );
+                            }
                         }
                     }
                 }
@@ -13776,7 +13882,8 @@ pub mod x86_64 {
                             // SAFETY: xrstor64 reads the image written by
                             // fpu_save_for_switch (or built by mark_fpu_clean —
                             // XSTATE_BV=0 initializes every extended component).
-                            unsafe {
+                            {
+                                unsafe {
                                 core::arch::asm!(
                                     "xrstor64 ({ptr})",
                                     ptr = in(reg) self.fpu.bytes.as_ptr(),
@@ -13784,20 +13891,24 @@ pub mod x86_64 {
                                     in("edx") 0xFFFF_FFFFu32,
                                     options(att_syntax, nostack, preserves_flags),
                                 );
+                                }
                             }
                         } else {
                             // SAFETY: legacy pair for the pre-fpu_init window.
-                            unsafe {
+                            {
+                                unsafe {
                                 core::arch::asm!(
                                     "fxrstor64 ({ptr})",
                                     ptr = in(reg) self.fpu.bytes.as_ptr(),
                                     options(att_syntax, nostack, preserves_flags),
                                 );
+                                }
                             }
                         }
                     } else {
                         // SAFETY: register-level init (no memory operands except
                         // the constant MXCSR load).
+                        {
                         unsafe {
                         core::arch::asm!(
                             "fninit",
@@ -13822,13 +13933,16 @@ pub mod x86_64 {
                             options(att_syntax, nostack),
                         );
                         }
+                        }
                         // Wipe the YMM half too — but only where XCR0 actually
                         // enables AVX: vzeroall on a part (or XCR0 mask) without
                         // it would itself #UD.
                         if avx_enabled() {
                             // SAFETY: vzeroall only writes YMM registers.
-                            unsafe {
+                            {
+                                unsafe {
                                 core::arch::asm!("vzeroall", options(nostack, preserves_flags));
+                                }
                             }
                         }
                     }
@@ -13879,7 +13993,7 @@ pub mod x86_64 {
             use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
             let rsp: u64;
             // SAFETY: reading rsp is side-effect free.
-            unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) } };
             taskdump_raw_line(b"\ntrap: DOUBLE FAULT (#8) on IST1, rsp=");
             taskdump_dec(rsp);
             taskdump_raw_line(b" - kernel state unrecoverable, halting\n");
@@ -14214,7 +14328,7 @@ pub mod x86_64 {
                         // SAFETY: hlt with IF=0 never wakes — the intentional
                         // permanent park of a crashed CPU.
                         loop {
-                            unsafe { core::arch::asm!("hlt") };
+                            { unsafe { core::arch::asm!("hlt") } };
                         }
                     }
                     // Raw serial print (printk may be wedged on a lock this CPU
@@ -14274,7 +14388,7 @@ pub mod x86_64 {
                         }
                         // SAFETY: bounded read of our own kernel stack (see the
                         // R73 comment above).
-                        let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                        let v = { unsafe { core::ptr::read_volatile(addr as *const u64) } };
                         for &b in b"kp-stk " {
                             crate::console::uart_putc_raw(b);
                         }
@@ -14293,11 +14407,13 @@ pub mod x86_64 {
                             break;
                         }
                         // SAFETY: bounds-checked reads of the current kernel stack.
-                        let (next, ret) = unsafe {
+                        let (next, ret) = {
+                            unsafe {
                             (
                                 core::ptr::read_volatile(rbp as *const u64),
                                 core::ptr::read_volatile((rbp + 8) as *const u64),
                             )
+                            }
                         };
                         for &b in b"kp-frame " {
                             crate::console::uart_putc_raw(b);
@@ -14360,11 +14476,11 @@ pub mod x86_64 {
                             // contract as the kp-stk scan above (bounded by the
                             // KP_DUMP_ENTERED latch; the page is mapped or the
                             // latch stops the recursion).
-                            unsafe { core::ptr::read_volatile(p as *const u64) }
+                            { unsafe { core::ptr::read_volatile(p as *const u64) } }
                         }
                         fn kp_read32(p: *const u8) -> u32 {
                             if p.is_null() { return 0; }
-                            unsafe { core::ptr::read_volatile(p as *const u32) }
+                            { unsafe { core::ptr::read_volatile(p as *const u32) } }
                         }
                         let ring_base: usize = cur_task as usize;
                         if ring_base == 0 {
@@ -14390,11 +14506,11 @@ pub mod x86_64 {
                             let mut m = leader;
                             let mut guard = 0u32;
                             while m != 0 && guard < 24 {
-                                let pid = kp_read32(unsafe { (m as *const u8).add(task_offsets::TASK_PID) } ) as u64;
-                                let st = kp_read32(unsafe { (m as *const u8).add(task_offsets::TASK_STATE) } ) as u64;
-                                let child_next = kp_read64(unsafe { (m as *const u8).add(task_offsets::TASK_CHILDREN) } );
-                                let child_prev = kp_read64(unsafe { (m as *const u8).add(task_offsets::TASK_CHILDREN + 8) } );
-                                let sib_next = kp_read64(unsafe { (m as *const u8).add(task_offsets::TASK_SIBLING) } );
+                                let pid = kp_read32({ unsafe { (m as *const u8).add(task_offsets::TASK_PID) } } ) as u64;
+                                let st = kp_read32({ unsafe { (m as *const u8).add(task_offsets::TASK_STATE) } } ) as u64;
+                                let child_next = kp_read64({ unsafe { (m as *const u8).add(task_offsets::TASK_CHILDREN) } } );
+                                let child_prev = kp_read64({ unsafe { (m as *const u8).add(task_offsets::TASK_CHILDREN + 8) } } );
+                                let sib_next = kp_read64({ unsafe { (m as *const u8).add(task_offsets::TASK_SIBLING) } } );
                                 for &b in b"kp-ring m=" { crate::console::uart_putc_raw(b); }
                                 kp_put_hex(m as u64);
                                 for &b in b" pid=" { crate::console::uart_putc_raw(b); }
@@ -14408,7 +14524,7 @@ pub mod x86_64 {
                                 for &b in b" sb.nx=" { crate::console::uart_putc_raw(b); }
                                 kp_put_hex(sib_next);
                                 crate::console::uart_putc_raw(b'\n');
-                                let nx = kp_read64(unsafe { (m as *const u8).add(OFF_NEXT) }) as usize;
+                                let nx = kp_read64({ unsafe { (m as *const u8).add(OFF_NEXT) } }) as usize;
                                 if nx == 0 || nx == m || nx == leader { break; }
                                 m = nx;
                                 guard += 1;
@@ -14466,7 +14582,7 @@ pub mod x86_64 {
                 loop {
                     // SAFETY: hlt with IF=0 never wakes — the intentional
                     // permanent park of a crashed forensic context.
-                    unsafe { core::arch::asm!("hlt") };
+                    { unsafe { core::arch::asm!("hlt") } };
                 }
             }
             segv_hist_note(fault_addr);
@@ -14630,12 +14746,12 @@ pub mod x86_64 {
         fn dump_mm_ops(tag: &str, t: *const crate::process::task::Task) {
                     use core::sync::atomic::Ordering::Relaxed;
                     const N: usize = 16;
-                    let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
+                    let cur = { unsafe { (*t).mm_ops_cur.load(Relaxed) } };
                     let mut shown = 0usize;
                     for k in 0..N {
                         let i = (cur + N - 1 - k) % N;
-                        let w0 = unsafe { (*t).mm_ops[i * 2].load(Relaxed) };
-                        let w1 = unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) };
+                        let w0 = { unsafe { (*t).mm_ops[i * 2].load(Relaxed) } };
+                        let w1 = { unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) } };
                         let op = w0 & 0xff;
                         if op == 0 {
                             continue; // slot never written
@@ -14652,7 +14768,7 @@ pub mod x86_64 {
                             6 => "madvise",
                             _ => "mremap",
                         };
-                        let pid = unsafe { (*t).pid() };
+                        let pid = { unsafe { (*t).pid() } };
                         if shown < 12 {
                             // HOTPATH-PRINT: fatal-path forensics — bounded dump for the SIGSEGV death report
                             crate::pr_err!(
@@ -14674,7 +14790,7 @@ pub mod x86_64 {
                     let mut sibs = 0usize;
                     let skipped = crate::sched::for_each_task_try(|t| {
                         let tp = t as *const crate::process::task::Task;
-                        if unsafe { (*tp).tgid() } == tgid && tp != self_ptr {
+                        if { unsafe { (*tp).tgid() } } == tgid && tp != self_ptr {
                             sibs += 1;
                             if sibs <= 6 {
                                 dump_mm_ops("sib", tp);
@@ -14934,7 +15050,7 @@ pub mod x86_64 {
                     crate::arch::mm::memory_layout::PhysAddr::new((phys.0 << 12) | (va & 0xfff)),
                 );
                 // SAFETY: kv points at the mapped user page through the linear map.
-                Some(unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) })
+                Some({ unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) } })
             }
             if let Some(aspace) = addr_space.as_ref() {
                 let root = aspace.root_ppn();
@@ -15069,13 +15185,13 @@ pub mod x86_64 {
             let Some(tk) = crate::sched::current() else { return };
             let dump = |tag: &str, t: *const crate::process::task::Task| {
                 const N: usize = 16;
-                let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
-                let pid = unsafe { (*t).pid() };
+                let cur = { unsafe { (*t).mm_ops_cur.load(Relaxed) } };
+                let pid = { unsafe { (*t).pid() } };
                 let mut shown = 0usize;
                 for k in 0..N {
                     let i = (cur + N - 1 - k) % N;
-                    let w0 = unsafe { (*t).mm_ops[i * 2].load(Relaxed) };
-                    let w1 = unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) };
+                    let w0 = { unsafe { (*t).mm_ops[i * 2].load(Relaxed) } };
+                    let w1 = { unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) } };
                     let op = w0 & 0xff;
                     if op == 0 {
                         continue;
@@ -15111,7 +15227,7 @@ pub mod x86_64 {
             let mut sibs = 0usize;
             let _skipped = crate::sched::for_each_task_try(|t| {
                 let tp = t as *const crate::process::task::Task;
-                if unsafe { (*tp).tgid() } == tgid && tp != self_ptr {
+                if { unsafe { (*tp).tgid() } } == tgid && tp != self_ptr {
                     sibs += 1;
                     if sibs <= 6 {
                         dump("sib", tp);
@@ -15186,7 +15302,7 @@ pub mod x86_64 {
                             (-999, -999)
                         } else {
                             // SAFETY: descriptor read of the mapped frame.
-                            unsafe { ((*pd).refcount(), (*pd).mapcount()) }
+                            { unsafe { ((*pd).refcount(), (*pd).mapcount()) } }
                         };
                         let inring = crate::perf::ring_frame_member(ppn as u64);
                         // hp89 hunt: the descriptor's flag set + rmap slot-0 index
@@ -15199,8 +15315,10 @@ pub mod x86_64 {
                             (0u64, 0usize)
                         } else {
                             // SAFETY: descriptor read of the mapped frame.
-                            unsafe {
+                            {
+                                unsafe {
                                 ((*pd).flags().raw() as u64, (*pd).index())
+                                }
                             }
                         };
                         crate::pr_debug!(
@@ -15221,7 +15339,7 @@ pub mod x86_64 {
                         let kv = crate::arch::mm::memory_layout::phys_to_virt(
                             crate::arch::mm::memory_layout::PhysAddr::new((phys.0 << 12) | (va & 0xfff)),
                         );
-                        Some(unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) })
+                        Some({ unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) } })
                     };
                     let w0 = read_at(v & !0x7);
                     let w1 = read_at((v & !0x7) + 8);
@@ -15455,8 +15573,10 @@ pub mod x86_64 {
                                     ),
                                 );
                                 // SAFETY: mapped user page through the linear map.
-                                Some(unsafe {
+                                Some({
+                                    unsafe {
                                     core::ptr::read_volatile(kv.as_u64() as *const u8)
+                                    }
                                 })
                             })();
                             match byte {
@@ -15650,7 +15770,7 @@ pub mod x86_64 {
                             let addr = regs.rsp as *const u64;
                             // SAFETY: kernel-half canonical address; the kernel
                             // stack stays mapped, so the scalar read cannot fault.
-                            let w = unsafe { core::ptr::addr_of!((*addr.add(i))).read_volatile() };
+                            let w = { unsafe { core::ptr::addr_of!((*addr.add(i))).read_volatile() } };
                             putchar(b' ');
                             if w >= lo && w < hi {
                                 ph(w);
@@ -15821,14 +15941,14 @@ pub mod x86_64 {
                 taskdump_raw_line(b" vector=0x");
                 taskdump_dec(vector);
                 taskdump_raw_line(b" rip=0x");
-                taskdump_dec(unsafe { (*regs).rip });
+                taskdump_dec({ unsafe { (*regs).rip } });
                 taskdump_raw_line(b" gsbase_msr=0x");
                 let gsbase =  rdmsr(0xC000_0101) ;
                 taskdump_dec(gsbase);
                 taskdump_raw_line(b"\n");
                 // SAFETY: the kernel cannot proceed with a broken GS base.
                 loop {
-                    unsafe { core::arch::asm!("cli; hlt") };
+                    { unsafe { core::arch::asm!("cli; hlt") } };
                 }
             }
             // SCRIBBLE2-GUARD (foreign-frame entry): a user-origin TRAP or IRQ
@@ -15848,7 +15968,7 @@ pub mod x86_64 {
             // loads on the hottest path in the kernel) is already established by
             // those two checks.
             if cpu_id < crate::config::MAX_CPUS && vector != SYSCALL_VECTOR {
-                let user_entry = unsafe { ((*regs).cs & 3) != 0 };
+                let user_entry = { unsafe { ((*regs).cs & 3) != 0 } };
                 if user_entry {
                     let tp = crate::arch::x86_64::smp::PER_CPU[cpu_id]
                         .current_task
@@ -15859,7 +15979,7 @@ pub mod x86_64 {
                         // SAFETY: executing further on a foreign stack only tears
                         // the victim more; park this CPU with interrupts off.
                         loop {
-                            unsafe { core::arch::asm!("cli; hlt") };
+                            { unsafe { core::arch::asm!("cli; hlt") } };
                         }
                     }
                 }
@@ -15867,7 +15987,7 @@ pub mod x86_64 {
             // The frame edge: ONE audited reference formation per entry
             // (INV-XE-FRAME-1/2 in unsafe_edges.rs). Everything below is safe
             // Rust over the typed handle.
-            let mut frame = unsafe { SavedFrame::<'static>::from_trap(regs) };
+            let mut frame = { unsafe { SavedFrame::<'static>::from_trap(regs) } };
 
             // Save and swap PtRegs pointer. Nesting save/restore mirrors
             // the riscv64 twin: a timer IRQ landing inside a deeper trap
@@ -16256,7 +16376,7 @@ pub mod x86_64 {
                 let tss = &raw mut TSS_PER_CPU;
                 // SAFETY: per-CPU TSS mirror (broken-machine read; the report
                 // is the point).
-                scribble_put_hex(unsafe { (*tss)[cpu].read_u64(TSS_OFF_RSP0) });
+                scribble_put_hex({ unsafe { (*tss)[cpu].read_u64(TSS_OFF_RSP0) } });
                 scribble_put_str(b"\nFRAME:");
                 for i in 0..21usize {
                     if i % 4 == 0 {
@@ -16265,7 +16385,7 @@ pub mod x86_64 {
                     scribble_put_str(b" ");
                     // SAFETY: frame walk of the foreign stack — best-effort
                     // forensic read (the CPU parks after this report).
-                    scribble_put_hex(unsafe { core::ptr::read_volatile((frame + i * 8) as *const u64) });
+                    scribble_put_hex({ unsafe { core::ptr::read_volatile((frame + i * 8) as *const u64) } });
                 }
                 // Frame surroundings: the slots just above the frame belong to the
                 // stack owner's earlier execution — torn words there name what the
@@ -16274,7 +16394,7 @@ pub mod x86_64 {
                 let mut a = frame + 0xa8;
                 while a < frame + 0xa8 + 0x100 {
                     scribble_put_str(b" ");
-                    scribble_put_hex(unsafe { core::ptr::read_volatile(a as *const u64) });
+                    scribble_put_hex({ unsafe { core::ptr::read_volatile(a as *const u64) } });
                     a += 8;
                 }
             }
@@ -16302,16 +16422,16 @@ pub mod x86_64 {
         pub(crate) fn frame_in_task_stack(task: *mut crate::process::task::Task, frame: usize) -> bool  {
 
             // SAFETY: header reads of a task the per-CPU slot names as current.
-            unsafe {
-                let top = (*task).get_kernel_stack().map_or(0, |p| p as usize);
+
+                let top = unsafe { (*task).get_kernel_stack().map_or(0, |p| p as usize) };
                 if top == 0 {
                     // No owned stack recorded (early boot / idle special paths) —
                     // cannot validate; allow rather than false-positive.
                     return true;
                 }
-                let bottom = (*task).kernel_stack_bottom();
+                let bottom = unsafe { (*task).kernel_stack_bottom() };
                 frame >= bottom && frame < top
-            }
+
         }
 
         // INV-ARCH-TRAP-54 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16352,9 +16472,11 @@ pub mod x86_64 {
             let task = crate::sched::current()?;
             // SAFETY: kernel stack top is allocated by the task subsystem; the user
             // entry frame sits at the fixed offset from it.
-            unsafe {
+            {
                 let stack_top = (*task).get_kernel_stack()? as u64;
+                unsafe {
                 Some(&mut *((stack_top - PT_REGS_SIZE as u64) as *mut PtRegs))
+                }
             }
         }
 
@@ -16383,7 +16505,7 @@ pub mod x86_64 {
             // SAFETY: canonical kernel address; the frame page stays mapped
             // (physmap/linear addresses of kernel stacks are never unmapped),
             // so the scalar read cannot fault — any value is diagnostic-only.
-            unsafe { core::ptr::addr_of!((*p).rip).read() }
+            { unsafe { core::ptr::addr_of!((*p).rip).read() } }
         }
 
         // INV-ARCH-TRAP-57 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16418,7 +16540,7 @@ pub mod x86_64 {
             }
             // SAFETY: sti enables interrupts at the end of boot bring-up, the
             // x86 mirror of the twin's sstatus.SIE step.
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            { unsafe { core::arch::asm!("sti", options(nomem, nostack)) } };
         }
 
         // INV-ARCH-TRAP-58 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16446,8 +16568,10 @@ pub mod x86_64 {
             });
             // SAFETY: "irq/" + digits + '-' + a registered &'static name is
             // valid UTF-8.
-            let tname: &'static str = unsafe {
+            let tname: &'static str = {
+                unsafe {
                 core::str::from_utf8_unchecked(alloc::boxed::Box::leak(owned.into_boxed_slice()))
+                }
             };
             INTX_IRQ_THREADS[line as usize].spawn(
                 tname,
@@ -16477,7 +16601,7 @@ pub mod x86_64 {
             }
             // SAFETY: nonzero values were stored from fn pointers by
             // request_irq_line_named.
-            let f: fn() = unsafe { core::mem::transmute(h) };
+            let f: fn() = { unsafe { core::mem::transmute(h) } };
             f();
             if crate::trace::EVENT_IRQ_HANDLER_EXIT.armed() {
                 crate::trace::trace_irq_handler_exit(line as i32, 1);
@@ -16622,7 +16746,7 @@ pub mod x86_64 {
         pub fn init_secondary(cpu: usize)  {
 
             // SAFETY: one-time per-CPU feature setup, interrupts still off.
-            unsafe {
+            {
                 crate::arch::x86_64::thread::fpu_init();
                 init_cpu_state(cpu);
                 let idtr = PseudoDescriptor {
@@ -16631,7 +16755,9 @@ pub mod x86_64 {
                     // interrupts; the shared IDT is read-only here.
                     base: &raw mut IDT_X86 as usize as u64,
                 };
+                unsafe {
                 x86_load_idt(&idtr);
+                }
             }
             init_syscall();
         }
@@ -16734,7 +16860,7 @@ pub mod x86_64 {
                 // SAFETY: single-CPU boot section; the static-mut IDT is
                 // exclusively owned here until lidt publishes it.
                 let idt =  &raw mut IDT_X86 ;
-                for (v, entry) in unsafe { (*idt).iter_mut() }.enumerate() {
+                for (v, entry) in { unsafe { (*idt).iter_mut() } }.enumerate() {
                     // int1/int3/into are reachable from user mode (DPL 3); #DF
                     // uses IST1; everything else is a plain kernel interrupt gate.
                     let lv = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as usize;
@@ -16758,7 +16884,7 @@ pub mod x86_64 {
                 };
                 // SAFETY: lidt loads the interrupt descriptor table base/limit;
                 // the table is fully initialized above and static.
-                unsafe { x86_load_idt(&idtr) };
+                { unsafe { x86_load_idt(&idtr) } };
 
                 // ---- PIC 8259 (before any interrupt can fire; IF is still off) ----
                 init_8259();
@@ -16769,12 +16895,14 @@ pub mod x86_64 {
         // wrapper at the original path — obligations unchanged.
         pub(crate) fn init_cpu_state(cpu: usize)  {
 
-            unsafe {
+            {
                 // ---- TSS ----
                 let tss = &raw mut TSS_PER_CPU;
-                let ist1 = DOUBLE_FAULT_STACKS[cpu].0.as_ptr() as usize + DOUBLE_FAULT_STACKS[cpu].0.len();
+                let ist1 = unsafe { DOUBLE_FAULT_STACKS[cpu].0.as_ptr() as usize + DOUBLE_FAULT_STACKS[cpu].0.len() };
+                unsafe {
                 (*tss)[cpu].write_u64(TSS_OFF_IST1, ist1 as u64);
-                (*tss)[cpu].write_u64(TSS_OFF_RSP0, 0); // no task kernel stack until the scheduler starts
+                }
+                unsafe { (*tss)[cpu].write_u64(TSS_OFF_RSP0, 0); } // no task kernel stack until the scheduler starts
 
                 // ---- GDT: fill the TSS system descriptor (idx 7/8, sel 0x38) ----
                 // System-descriptor base layout: base[23:0] at bits 16..39,
@@ -16783,22 +16911,28 @@ pub mod x86_64 {
                 // ffffffff80a53500 -> ffffffff00a53500; LTR then "works", but
                 // the first interrupt delivery from user mode reads TSS.rsp0
                 // from an unmapped page — #PF inside delivery, triple fault.)
-                let base = &raw const (*tss)[cpu] as usize as u64;
+                let base = unsafe { &raw const (*tss)[cpu] as usize as u64 };
                 let limit = (TSS_SIZE - 1) as u64;
                 let gdt = &raw mut GDT_PER_CPU;
+                unsafe {
                 (*gdt)[cpu].0[7] = (limit & 0xFFFF)
                     | ((base & 0x00FF_FFFF) << 16)
                     | (0x89 << 40)
                     | (((base >> 24) & 0xFF) << 56);
+                }
+                unsafe {
                 (*gdt)[cpu].0[8] = base >> 32;
+                }
 
-                let gdtr = PseudoDescriptor {
+                let gdtr = unsafe { PseudoDescriptor {
                     limit: (core::mem::size_of::<Gdt>() - 1) as u16,
                     base: &raw const (*gdt)[cpu] as usize as u64,
-                };
+                } };
                 // SAFETY: x86_load_gdt lgdt's the table initialized above (a
                 // static), reloads the segment registers and ltr's the TSS.
+                unsafe {
                 x86_load_gdt(&gdtr);
+                }
             }
             crate::arch::x86_64::smp::load_per_cpu_base(cpu);
         }
@@ -16814,9 +16948,11 @@ pub mod x86_64 {
             // SAFETY: the TSS slot belongs to this CPU; the only racing context
             // (an entry reading rsp0) either sees the old valid stack or the new
             // one.
-            unsafe {
+            {
                 let tss = &raw mut TSS_PER_CPU;
+                unsafe {
                 (*tss)[cpu].write_u64(TSS_OFF_RSP0, top);
+                }
             }
             crate::arch::x86_64::smp::PER_CPU[cpu].tss_rsp0.store(top, core::sync::atomic::Ordering::Release);
         }
@@ -16838,7 +16974,7 @@ pub mod x86_64 {
 
                 // SAFETY: off is a fixed field offset inside self; unaligned
                 // 8-byte writes are architecturally fine on x86_64.
-                unsafe { core::ptr::write_unaligned(self.bytes.as_mut_ptr().add(off) as *mut u64, v) };
+                { unsafe { core::ptr::write_unaligned(self.bytes.as_mut_ptr().add(off) as *mut u64, v) } };
             }
 
         // INV-ARCH-TRAP-71 (collected 2026-11-27 from x86_64/trap.rs): verbatim body; callers use the safe
@@ -16849,7 +16985,7 @@ pub mod x86_64 {
             pub(crate) fn read_u64(&self, off: usize) -> u64  {
 
                 // SAFETY: off is a fixed field offset inside self.
-                unsafe { core::ptr::read_unaligned(self.bytes.as_ptr().add(off) as *const u64) }
+                { unsafe { core::ptr::read_unaligned(self.bytes.as_ptr().add(off) as *const u64) } }
             }
         }
 
@@ -16977,7 +17113,7 @@ pub mod x86_64 {
 
             let mut len = 0;
             while len < maxlen {
-                match unsafe { get_user(str.add(len)) } {
+                match { unsafe { get_user(str.add(len)) } } {
                     Some(0) => return len + 1, // Include null terminator
                     Some(_) => len += 1,
                     None => return 0,
@@ -17050,15 +17186,19 @@ pub mod x86_64 {
                 // SAFETY: buf is `limit` bytes; done+want stays inside it. The
                 // raw exception-table copy handles user faults: it returns the
                 // bytes NOT copied of this chunk.
-                let uncopied = unsafe {
+                let uncopied = {
+                    unsafe {
                     __x64_copy_from_user(buf.as_mut_ptr().add(done), from.add(done), want)
+                    }
                 };
                 let got = want - uncopied;
                 if uncopied > 0 {
                     // SAFETY: zero the never-written tail so the NUL scan below
                     // cannot see stale kernel bytes.
-                    unsafe {
+                    {
+                        unsafe {
                         core::ptr::write_bytes(buf.as_mut_ptr().add(done + got), 0, uncopied)
+                        }
                     };
                 }
                 if let Some(rel) = buf[done..done + got].iter().position(|&b| b == 0) {
@@ -17124,13 +17264,15 @@ pub mod x86_64 {
 
             // SAFETY: destination is a size-of-T kernel stack slot; the source
             // read faults into the extable fixup which returns a short count.
-            let uncopied = unsafe {
+            let uncopied = {
+                unsafe {
                 __x64_copy_from_user(value.as_mut_ptr() as *mut u8, from as *const u8, size)
+                }
             };
 
             if uncopied == 0 {
                 // SAFETY: `size` bytes were copied into the slot.
-                Some(unsafe { value.assume_init() })
+                Some({ unsafe { value.assume_init() } })
             } else {
                 None
             }
@@ -17151,14 +17293,14 @@ pub mod x86_64 {
                 return n;
             }
             // SAFETY: exception-table clear (see copy_to_user).
-            let uncleared = unsafe { __x64_clear_user(to, n) };
+            let uncleared = { unsafe { __x64_clear_user(to, n) } };
             if uncleared == 0 {
                 return 0;
             }
             // Best-effort COW/demand resolution on the user range.
             if fault_in_write(to, n) {
                 // SAFETY: exception-table retry after resolution.
-                return unsafe { __x64_clear_user(to, n) };
+                return { unsafe { __x64_clear_user(to, n) } };
             }
             uncleared
         }
@@ -17182,20 +17324,24 @@ pub mod x86_64 {
             if !access_ok(from as usize, n) {
                 // Zero the whole kernel buffer: callers that proceed with a
                 // failed copy must never see stale kernel heap contents.
+                {
                 unsafe {
                 core::ptr::write_bytes(to, 0, n);
+                }
                 }
                 return n;
             }
             // SAFETY: exception-table copy (see copy_to_user).
-            let uncopied = unsafe { __x64_copy_from_user(to, from, n) };
+            let uncopied = { unsafe { __x64_copy_from_user(to, from, n) } };
             if uncopied > 0 {
                 // Zero-fill the uncopied tail (reference semantics): the kernel
                 // buffer must never keep stale contents past the point the user
                 // copy reached.
                 let copied = n - uncopied;
+                {
                 unsafe {
                 core::ptr::write_bytes(to.add(copied), 0, uncopied);
+                }
                 }
             }
             uncopied
@@ -17225,14 +17371,14 @@ pub mod x86_64 {
             }
             // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
             // and returns the remaining count instead of faulting the kernel.
-            let uncopied = unsafe { __x64_copy_to_user(to, from, n) };
+            let uncopied = { unsafe { __x64_copy_to_user(to, from, n) } };
             if uncopied == 0 {
                 return 0;
             }
             // Best-effort COW/demand resolution on the user range.
             if fault_in_write(to, n) {
                 // SAFETY: exception-table retry after resolution.
-                return unsafe { __x64_copy_to_user(to, from, n) };
+                return { unsafe { __x64_copy_to_user(to, from, n) } };
             }
             uncopied
         }
@@ -17254,7 +17400,7 @@ pub mod x86_64 {
             }
             // SAFETY: the asm core faults into the extable fixup which returns
             // the packed fault marker instead of panicking.
-            let packed = unsafe { __x64_futex_cmpxchg_u32(uaddr, expected, new) };
+            let packed = { unsafe { __x64_futex_cmpxchg_u32(uaddr, expected, new) } };
             if packed >> 32 != 0 {
                 None
             } else {
@@ -17463,7 +17609,7 @@ pub mod x86_64 {
                 // guard above (INV-XE-PT-1). Forming the raw pointer is inert;
                 // every dereference goes through the bounds-checked accessors.
                 Some(PtTable {
-                    ptr: unsafe { crate::arch::x86_64::mm::mmu_init::get_page_table_virt(phys) },
+                    ptr: { unsafe { crate::arch::x86_64::mm::mmu_init::get_page_table_virt(phys) } },
                 })
             }
 
@@ -17491,7 +17637,7 @@ pub mod x86_64 {
                 }
                 // SAFETY: INV-XE-PT-1 (mapped frame) + INV-XE-PT-2 (bounds above)
                 // + INV-XE-PT-3 (raw place projection, no reference formed).
-                unsafe { core::ptr::addr_of!((*self.ptr).entries[idx]).read() }
+                { unsafe { core::ptr::addr_of!((*self.ptr).entries[idx]).read() } }
             }
 
             /// Typed entry read (see [`Self::get_raw`]).
@@ -17510,8 +17656,10 @@ pub mod x86_64 {
                 // SAFETY: INV-XE-PT-1 (mapped frame) + INV-XE-PT-2 (bounds above)
                 // + INV-XE-PT-3 (raw place projection, plain store — the TSO PTE
                 // publication discipline the raw walks used).
-                unsafe {
+                {
+                    unsafe {
                     core::ptr::addr_of_mut!((*self.ptr).entries[idx]).write(entry.bits())
+                    }
                 };
             }
 
@@ -17549,8 +17697,10 @@ pub mod x86_64 {
                 // SAFETY: the static root lives inside the kernel image (BSS);
                 // the stage-aware conversion is inert for image memory.
                 PtTable {
-                    ptr: unsafe {
+                    ptr: {
+                        unsafe {
                         crate::arch::x86_64::mm::mmu_init::get_page_table_virt(crate::arch::x86_64::mm::mmu_init::root_static_phys())
+                        }
                     },
                 }
             }
@@ -17567,7 +17717,7 @@ pub mod x86_64 {
             let dst = phys_to_virt(PhysAddr::new(dst_phys)).bits() as *mut u8;
             // SAFETY: INV-XE-COPY-1 — both frames are live, page-sized, and
             // non-overlapping (distinct frames); exactly PAGE_SIZE bytes each.
-            unsafe { core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize) };
+            { unsafe { core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize) } };
         }
 
         pub mod asid {
@@ -18079,8 +18229,10 @@ pub mod x86_64 {
                                     phex(c as u64);
                                     ptag(b"=pid:");
                                     // SAFETY: header reads only.
-                                    unsafe {
+                                    {
+                                        unsafe {
                                         phex((*(cur as *mut crate::process::Task)).pid() as u64);
+                                        }
                                     }
                                 }
                             }
@@ -18124,7 +18276,7 @@ pub mod x86_64 {
                                     // SAFETY: best-effort diagnostic read inside the
                                     // direct map; faults here are impossible (linear
                                     // map is fully mapped) — raw read.
-                                    let v = unsafe { core::ptr::read_volatile(a as *const u64) };
+                                    let v = { unsafe { core::ptr::read_volatile(a as *const u64) } };
                                     if v >= 0xffff_ffff_8000_0000u64 && v <= 0xffff_ffff_ffff_f000u64 {
                                         ptag(b"KSO-F +");
                                         phex((a - (regs.rsp as usize & !7)) as u64);
@@ -18192,15 +18344,15 @@ pub mod x86_64 {
                     // otherwise hide the driver that computed the bad address).
                     // SAFETY: best-effort kernel-stack reads; a bad frame just stops
                     // the walk (bounds + canonicality checked per hop).
-                    unsafe {
+                    {
                         let mut rbp = regs.rbp as *const u64;
                         let stack_top = (regs.rsp | 0x3FFF) + 1; // within this 16K kernel stack
                         for _ in 0..12 {
                             if (rbp as u64) & 7 != 0 || (rbp as u64) + 16 >= stack_top {
                                 break;
                             }
-                            let ret = *rbp.offset(1);
-                            let next = *rbp;
+                            let ret = unsafe { *rbp.offset(1) };
+                            let next = unsafe { *rbp };
                             if ret < 0xffff_8000_0000_0000 || next <= rbp as u64 || next >= stack_top {
                                 break;
                             }
@@ -18318,16 +18470,18 @@ pub mod x86_64 {
             pub fn fixup_exception(addr: u64) -> Option<u64>  {
 
                 // SAFETY: linker symbols bound the table; only addresses are read.
-                unsafe {
+                {
                     let start = &raw const __ex_table_start as *const ExceptionTableEntry;
                     let end = &raw const __ex_table_end as *const ExceptionTableEntry;
                     let mut p = start;
                     while p < end {
-                        let e = &*p;
+                        let e = unsafe { &*p };
                         if e.fault_rip == addr {
                             return Some(e.fixup_rip);
                         }
+                        unsafe {
                         p = p.add(1);
+                        }
                     }
                 }
                 None
@@ -18365,7 +18519,8 @@ pub mod x86_64 {
                         let (ret1, ret2): (u64, u64);
                         // SAFETY: frame pointers are forced on; walk the rbp chain two
                         // frames up for this diagnostic only.
-                        unsafe {
+                        {
+                            unsafe {
                             core::arch::asm!(
                                 "movq 8(%rbp), {}",
                                 "movq (%rbp), %rax",
@@ -18375,6 +18530,7 @@ pub mod x86_64 {
                                 out("rax") _,
                                 options(att_syntax)
                             );
+                            }
                         }
                         crate::println!("phys_to_virt OVERFLOW: bogus phys={:#x} ret1={:#x} ret2={:#x}", phys.0, ret1, ret2);
                         panic!("phys_to_virt overflow");
@@ -19069,11 +19225,11 @@ pub mod x86_64 {
                     // heap is linearly mapped) and a stale value is filtered by the
                     // ledger validation below.
                     // SAFETY: see the comment above the closure.
-                    let (pid, root) = unsafe {
-                        let root = (*t)
+                    let (pid, root) = {
+                        let root = unsafe { (*t)
                             .mm_ptr_peek()
                             .map(|mm| (*mm).pgd)
-                            .unwrap_or(0);
+                            .unwrap_or(0) };
                         ((*t).pid() as u32, root)
                     };
                     roots[tasks] = (pid, root);
@@ -19210,8 +19366,10 @@ pub mod x86_64 {
                 let vpn4 = virt.pgd_index() as usize;
                 let ppn = phys.ppn();
 
-                unsafe {
+                {
+                    unsafe {
                     ROOT_PAGE_TABLE.set(vpn4, PageTableEntry::from_bits((ppn << PAGE_SHIFT) | flags));
+                    }
                 }
             }
 
@@ -19317,7 +19475,7 @@ pub mod x86_64 {
                 {
                     // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys
                     // SAFETY: single-CPU boot section; no concurrent reader exists.
-                    unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
+                    { unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET } };
 
                     let linear_flags = PageTableEntry::P | PageTableEntry::RW
                         | PageTableEntry::ACCESSED | PageTableEntry::DIRTY;
@@ -19369,7 +19527,7 @@ pub mod x86_64 {
                     // braces for flows whose image reservation is size-based.)
                     {
                         // SAFETY: boot section, single CPU (see above).
-                        let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                        let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                         let pool_virt = &raw const EARLY_TABLES as u64;
                         let pool_phys = pool_virt.wrapping_sub(offset);
                         let used = (EARLY_TABLE_NEXT.load(Ordering::Acquire).min(NUM_EARLY_TABLES))
@@ -19502,7 +19660,7 @@ pub mod x86_64 {
                     // Record the real image size for /proc-style consumers.
                     let image_size = (kernel_image_phys_end() - KERNEL_ENTRY) as usize;
                     // SAFETY: single-CPU boot section; no concurrent reader exists.
-                    unsafe { KERNEL_MAP.size = image_size };
+                    { unsafe { KERNEL_MAP.size = image_size } };
 
                     println!(
                         "mm: switched CR3 to real PML4 (phys {:#x}), image {:#x}-{:#x}",
@@ -19790,9 +19948,11 @@ pub mod x86_64 {
                                 phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as *const u8;
                             // SAFETY: both are kernel linear-map addresses of the two
                             // frames; read-only compare of 16 bytes each.
-                            let equal = unsafe {
+                            let equal = {
+                                unsafe {
                                 core::slice::from_raw_parts(old_kv, 16)
                                     == core::slice::from_raw_parts(new_kv, 16)
+                                }
                             };
                             let comm = crate::process::current_task()
                                 .map(|t| {
@@ -19970,14 +20130,16 @@ pub mod x86_64 {
                             let page = crate::mm::page_desc::pfn_to_page(ppn as usize);
                             if !page.is_null() {
                                 // SAFETY: read-only descriptor access on the diagnostic path.
-                                let (rc, linked, lru, anon) = unsafe {
+                                let (rc, linked, lru, anon) = {
                                     use crate::mm::page_desc::PageFlag;
+                                    unsafe {
                                     (
                                         (*page).refcount(),
                                         (*page).test_flag(PageFlag::OnFreelist),
                                         (*page).test_flag(PageFlag::Lru),
                                         (*page).test_flag(PageFlag::Anonymous),
                                     )
+                                    }
                                 };
                                 crate::pr_err!(
                                     "  PTLEDGER: frame state refcount={} on_freelist={} lru={} anon={}",
@@ -20019,7 +20181,7 @@ pub mod x86_64 {
                 // during Early boot — by Late stage the pool is dormant).
                 // SAFETY: KERNEL_MAP is set before any Late-stage free can run;
                 // reading the pool's address is inert.
-                let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                 let pool_start = (&raw const EARLY_TABLES as u64).wrapping_sub(offset);
                 let pool_end = pool_start + (NUM_EARLY_TABLES * PAGE_SIZE as usize) as u64;
 
@@ -20044,14 +20206,14 @@ pub mod x86_64 {
                         // (the image's constant VMA-LMA offset holds for the whole image).
                         // SAFETY: single-CPU boot section; the pool slot is claimed
                         // exclusively by the fetch_add below.
-                        let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                        let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                         let idx = EARLY_TABLE_NEXT.fetch_add(1, Ordering::AcqRel);
                         if idx < NUM_EARLY_TABLES {
-                            let table_virt = unsafe { &raw const EARLY_TABLES[idx] as u64 };
+                            let table_virt = { unsafe { &raw const EARLY_TABLES[idx] as u64 } };
                             let table_phys = table_virt.wrapping_sub(offset);
                             // SAFETY: static BSS pool slot just claimed exclusively by
                             // the fetch_add above (INV-XE-ZP).
-                            unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) };
+                            { unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) } };
                             return Some(table_phys);
                         }
                         panic!(
@@ -20179,9 +20341,11 @@ pub mod x86_64 {
                                 [0; crate::debug::memwatch::SITE_FRAMES];
                             // SAFETY: reading rbp is register-only; the frame-pointer
                             // chain walk is the dfx edge (guarded against wild frames).
-                            let mw_bp: u64 = unsafe {
+                            let mw_bp: u64 = {
                                 let v;
+                                unsafe {
                                 core::arch::asm!("mov {}, rbp", out(reg) v, options(nomem, nostack));
+                                }
                                 v
                             };
                             // SAFETY: the chain walk is the dfx stack-forensics edge;
@@ -20213,7 +20377,7 @@ pub mod x86_64 {
 
                 // SAFETY: INV-XE-ZP — freshly allocated, exclusively owned frames;
                 // the address comes from the audited stage-aware conversion.
-                unsafe { core::ptr::write_bytes(virt as *mut u8, 0, bytes) };
+                { unsafe { core::ptr::write_bytes(virt as *mut u8, 0, bytes) } };
             }
 
             // INV-ARCH-MMU-INIT-59 (collected 2026-11-27): static/const moved verbatim from x86_64/mm/mmu_init.rs
@@ -20229,10 +20393,12 @@ pub mod x86_64 {
             pub fn root_static_phys() -> u64  {
 
                 // SAFETY: address arithmetic on a static; no dereference.
-                unsafe {
+
                     let vma = &raw mut ROOT_PAGE_TABLE as *mut PageTable as u64;
+                    unsafe {
                     vma - KERNEL_MAP.va_kernel_pa_offset as u64
-                }
+                    }
+
             }
 
             // extern declarations duplicated from x86_64/mm/mmu_init.rs (the original
@@ -20267,7 +20433,7 @@ pub mod x86_64 {
             pub(crate) fn _root_table_ref() -> usize  {
 
                 // SAFETY: address-of only, no dereference.
-                unsafe { &raw mut ROOT_PAGE_TABLE as usize }
+                { &raw mut ROOT_PAGE_TABLE as usize }
             }
 
             // INV-ARCH-PAGE-FAULT-12 (collected 2026-11-27 from x86_64/mm/page_fault.rs): verbatim body; callers use the safe
@@ -20620,7 +20786,7 @@ pub mod x86_64 {
                             return Some(live);
                         }
                         // SAFETY: inode cell written at open time; read-only.
-                        let inode_opt = unsafe { &*f.inode.get() };
+                        let inode_opt = { unsafe { &*f.inode.get() } };
                         inode_opt.as_ref().map(|i| i.get_size())
                     })
                     .unwrap_or(vma_file_size) as usize;
@@ -20930,7 +21096,7 @@ pub mod x86_64 {
                                 // above passed for the faulting page.
                                 let page_index =
                                     ((vma_offset + (fault_page - vma_start)) / PAGE_SIZE_USIZE) as u64;
-                                let inode_ref = unsafe { &*file.inode.get() }.as_ref();
+                                let inode_ref = { unsafe { &*file.inode.get() } }.as_ref();
                                 if let Some(inode) = inode_ref {
                                     let cache = crate::fs::page_cache::get_page_cache();
                                     let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
@@ -21386,7 +21552,7 @@ pub mod x86_64 {
                                     // ext4 only: the flush walker is the ext4
                                     // writeback; tmpfs aliases have no disk and
                                     // their frames are authoritative while mapped.
-                                    if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
+                                    if let Some(inode) = { unsafe { &*file.inode.get() } }.as_ref() {
                                         crate::fs::page_cache::get_page_cache().mark_dirty(
                                             inode.fs_id,
                                             inode.ino as u64,
@@ -21689,12 +21855,14 @@ pub mod x86_64 {
                         };
                         // SAFETY: phys_to_virt of a freshly allocated, exclusively
                         // owned page; the memset stays within its PAGE_SIZE bounds.
-                        unsafe {
+                        {
+                            unsafe {
                             core::ptr::write_bytes(
                                 phys_to_virt(PhysAddr::new(pa)).bits() as *mut u8,
                                 0,
                                 PAGE_SIZE_USIZE,
                             )
+                            }
                         };
                         phys[filled] = pa;
                         filled += 1;
@@ -21815,7 +21983,7 @@ pub mod x86_64 {
                     match vma_type {
                         VmaType::Anonymous => {
                             // SAFETY: fresh exclusive page (INV-XE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                         }
                         VmaType::FileBacked => {
                             // Fill from the pinned vm_file using the entry-time
@@ -21839,7 +22007,7 @@ pub mod x86_64 {
                                 && effective_size.saturating_sub(file_offset) >= PAGE_SIZE_USIZE;
                             if !will_full_read {
                                 // SAFETY: fresh exclusive page (INV-XE-ZP).
-                                unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                                { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                             }
 
                             // Read file data if we have a valid fd
@@ -21886,12 +22054,14 @@ pub mod x86_64 {
                                         };
                                         if will_full_read && good < PAGE_SIZE_USIZE {
                                             // SAFETY: same fresh page; tail zero.
-                                            unsafe {
+                                            {
+                                                unsafe {
                                                 core::ptr::write_bytes(
                                                     page_ptr.add(good),
                                                     0,
                                                     PAGE_SIZE_USIZE - good,
                                                 )
+                                                }
                                             };
                                         }
                                     }
@@ -21904,7 +22074,7 @@ pub mod x86_64 {
                         }
                         VmaType::SharedMemory => {
                             // SAFETY: fresh exclusive page (INV-XE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                         }
                     }
                 }
@@ -22059,7 +22229,7 @@ pub mod x86_64 {
                     return None;
                 }
                 // SAFETY: inode cell written at open time, read-only afterwards.
-                let inode = unsafe { &*file.inode.get() }.as_ref()?;
+                let inode = { unsafe { &*file.inode.get() } }.as_ref()?;
                 let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
                 let page_index = (file_offset / PAGE_SIZE_USIZE) as u64;
                 let cache = crate::fs::page_cache::get_page_cache();
@@ -22086,7 +22256,7 @@ pub mod x86_64 {
                     return None;
                 }
                 // SAFETY: same read-only inode resolution as above.
-                let inode = unsafe { &*file.inode.get() }.as_ref()?;
+                let inode = { unsafe { &*file.inode.get() } }.as_ref()?;
                 static ZERO_PAGE: [u8; 4096] = [0; 4096];
                 cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &ZERO_PAGE);
                 cache.get_phys(fs_id, ino, page_index)
@@ -22121,7 +22291,7 @@ pub mod x86_64 {
                     file_offset < effective_size && effective_size - file_offset >= PAGE_SIZE_USIZE;
                 if !will_full_read {
                     // SAFETY: fresh exclusive page frame (INV-XE-ZP).
-                    unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                    { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                 }
                 if file_offset >= effective_size {
                     return; // within VMA but past EOF: stays zero (sparse/hole)
@@ -22137,7 +22307,7 @@ pub mod x86_64 {
                 };
                 if good < PAGE_SIZE_USIZE {
                     // SAFETY: same frame; tail zero of the uncovered bytes.
-                    unsafe { core::ptr::write_bytes(page_ptr.add(good), 0, PAGE_SIZE_USIZE - good) };
+                    { unsafe { core::ptr::write_bytes(page_ptr.add(good), 0, PAGE_SIZE_USIZE - good) } };
                 }
             }
 
@@ -22241,11 +22411,11 @@ pub mod x86_64 {
                 match vma_type {
                     VmaType::Anonymous => {
                         // SAFETY: fresh exclusive page (INV-XE-ZP).
-                        unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                        { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                     }
                     VmaType::FileBacked | VmaType::SharedMemory => {
                         // SAFETY: fresh exclusive page (INV-XE-ZP).
-                        unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                        { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                     }
                     VmaType::Device => {
                         // Device mapping: don't zero
@@ -22360,7 +22530,7 @@ pub mod aarch64 {
 
             // SAFETY: dtb_pointer is a static extern set by boot.S before
             // rust_main runs; reading it is safe once the kernel has started.
-            unsafe { dtb_pointer }
+            { dtb_pointer }
         }
 
         // extern declarations duplicated from aarch64/boot.rs (the original
@@ -22396,7 +22566,7 @@ pub mod aarch64 {
 
             // 1. Address space: compare-based (only repair if the wrapper already
             //    switched — the early-check site has not)
-            let prev_root = unsafe { if let Some(mm) = (*prev).address_space() {
+            let prev_root = { if let Some(mm) = (*prev).address_space() {
                 mm.root_ppn()
             } else {
                 crate::arch::aarch64::mm::mmu_init::root_page_table_ppn()
@@ -22408,7 +22578,7 @@ pub mod aarch64 {
             // 2. Sched slot + tripwire
             let cpu = crate::arch::cpu_id() as usize;
             crate::sched::sched::republish_current_after_abort(cpu, prev);
-            unsafe {
+            {
             crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
             }
 
@@ -22462,7 +22632,7 @@ pub mod aarch64 {
 
             // Step 2: __switch_to — registers + eager FPSIMD (inside the asm).
             // WARNING: after this call all locals are INVALID (riscv64 twin note).
-            unsafe {
+            {
             __switch_to(prev, next);
             }
         }
@@ -22488,7 +22658,7 @@ pub mod aarch64 {
             // entries from a (re)allocated ASID's previous owner die on switch-in,
             // and the shared kernel half (global, TTBR1) never thrashes. dsb ish
             // completes the inner-shareable broadcast before the caller proceeds.
-            unsafe {
+
                 core::arch::asm!(
                     "msr ttbr0_el1, {ttbr}",
                     "tlbi aside1is, {asid}",
@@ -22499,7 +22669,7 @@ pub mod aarch64 {
                     asid = in(reg) ((asid as u64) & 0xFF) << 48,
                     options(nostack)
                 );
-            }
+
         }
 
         // INV-ARCH-CONTEXT-4 (collected 2026-11-27 from aarch64/context.rs): verbatim body; callers use the safe
