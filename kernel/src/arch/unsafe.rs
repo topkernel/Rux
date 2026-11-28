@@ -49,7 +49,7 @@ pub mod riscv64 {
             // SAFETY: INV-RE-FRAME-1/2 — the one audited reference-forming
             // edge; the trap-entry contract supplies the proof.
             SavedFrame {
-                inner: unsafe { &mut *regs },
+                inner: { &mut *regs },
             }
         }
 
@@ -94,7 +94,7 @@ pub mod riscv64 {
 
             // SAFETY: dtb_pointer is a static extern set by boot.S before rust_main runs.
             // Reading it is safe once the kernel has started.
-            unsafe { dtb_pointer }
+            { unsafe { dtb_pointer } }
         }
 
         // extern declarations duplicated from riscv64/boot.rs (the original
@@ -148,11 +148,11 @@ pub mod riscv64 {
 
             // 1. Address space: compare-based so the wrapper's early-check site
             //    (satp not yet switched) writes nothing.
-            let prev_root = unsafe { if let Some(mm) = (*prev).address_space() {
+            let prev_root = { unsafe { if let Some(mm) = (*prev).address_space() {
                 mm.root_ppn()
             } else {
                 crate::arch::riscv64::mm::mmu_init::root_page_table_ppn()
-            } };
+            } } };
             if get_current_satp() & 0xFFFF_FFFF_FFFF != prev_root {
                 // Full-flush linear switch: this ran on next's page table for a
                 // few instructions of kernel-only execution, but a full sfence is
@@ -163,8 +163,10 @@ pub mod riscv64 {
             // 2. Sched slot + tripwire.
             let cpu = crate::arch::cpu_id() as usize;
             crate::sched::sched::republish_current_after_abort(cpu, prev);
+            {
             unsafe {
             crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+            }
             }
 
             // 3. `next` (smp8 orphan-race): the "the steal already re-linked it"
@@ -265,7 +267,7 @@ pub mod riscv64 {
             // calling us, so there is nothing to do here after the switch.
             // SAFETY: the scheduler's switch protocol (IRQs off; both tasks valid
             // pick targets) — the one register/stack switch edge.
-            unsafe { __switch_to(prev, next) };
+            { unsafe { __switch_to(prev, next) } };
 
             // Restore the incoming task's FPU state (review ARCH-H1). tp and the
             // per-CPU current now refer to `next`; locals above are invalid, so
@@ -321,8 +323,10 @@ pub mod riscv64 {
 
             let satp: u64;
             // SAFETY: satp is a supervisor CSR; reading it is always safe.
-            unsafe {
+            {
+                unsafe {
                 asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack));
+                }
             }
             satp
         }
@@ -349,6 +353,7 @@ pub mod riscv64 {
             // owner, and flushing just that ASID's entries on switch-in is cheap
             // (typically none exist). Kernel/global mappings are unaffected by an
             // rs2!=0 sfence, so the shared kernel half never thrashes.
+            {
             unsafe {
             core::arch::asm!(
                 "csrw satp, {satp}",
@@ -357,6 +362,7 @@ pub mod riscv64 {
                 asid = in(reg) asid as u64,
                 options(nostack, preserves_flags)
             );
+            }
             }
         }
 
@@ -377,6 +383,7 @@ pub mod riscv64 {
 
             // Use inline asm for the entire switch sequence
             // This code runs in the linear mapping region (VPN2 >= 256)
+            {
             unsafe {
             asm!(
                 // First sfence
@@ -388,6 +395,7 @@ pub mod riscv64 {
                 satp = in(reg) satp,
                 options(nostack)
             );
+            }
             }
         }
 
@@ -421,7 +429,7 @@ pub mod riscv64 {
 
             // SAFETY: the switch-in protocol guarantees `task` is a live Task
             // (it was just picked and affirmed) and we now run as it.
-            let (pid, comm) = unsafe { ((*task).pid(), (*task).comm()) };
+            let (pid, comm) = { unsafe { ((*task).pid(), (*task).comm()) } };
             let comm_str = core::str::from_utf8(
                 comm.split(|c| *c == 0).next().unwrap_or(&[]),
             )
@@ -756,12 +764,16 @@ pub mod riscv64 {
 
             // SAFETY: tp was set to a valid Task pointer by __switch_to (assembly context switch);
             // the Task object is allocated by the task subsystem and lives for the task's lifetime.
-            unsafe {
+
                 let tp: u64;
+                unsafe {
                 asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
+                }
                 // tp is guaranteed to be a valid task pointer after __switch_to
+                unsafe {
                 &mut *(tp as *mut Task)
-            }
+                }
+
         }
 
         // extern declarations duplicated from riscv64/context.rs (the original
@@ -791,11 +803,13 @@ pub mod riscv64 {
 
             // SAFETY: csrrci atomically reads sstatus and clears the SIE bit in one
             // instruction — no TOCTOU race. The returned value has the pre-clear SIE state.
-            unsafe {
+
                 let state: u64;
+                unsafe {
                 asm!("csrrci {0}, sstatus, 2", out(reg) state, options(nomem, nostack));
+                }
                 (state & 2) != 0
-            }
+
         }
 
         // INV-ARCH-CPU-16 (collected 2026-11-27 from riscv64/cpu.rs): verbatim body; callers use the safe
@@ -807,8 +821,10 @@ pub mod riscv64 {
 
             let sstatus: u64;
             // SAFETY: sstatus is a supervisor CSR; reading it is always safe.
-            unsafe {
+            {
+                unsafe {
                 asm!("csrr {}, sstatus", out(reg) sstatus, options(nomem, nostack, pure));
+                }
             }
             // sstatus.SIE bit (bit 1)
             (sstatus & (1 << 1)) != 0
@@ -822,9 +838,11 @@ pub mod riscv64 {
         pub fn dmb()  {
 
             // SAFETY: fence is a memory ordering barrier; no harmful side effects.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("fence", options(nomem, nostack));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-18 (collected 2026-11-27 from riscv64/cpu.rs): verbatim body; callers use the safe
@@ -835,9 +853,11 @@ pub mod riscv64 {
         pub fn dsb()  {
 
             // SAFETY: fence is a memory ordering barrier; no harmful side effects.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("fence", options(nomem, nostack));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-19 (collected 2026-11-27 from riscv64/cpu.rs): verbatim body; callers use the safe
@@ -848,9 +868,11 @@ pub mod riscv64 {
         pub fn isb()  {
 
             // SAFETY: fence.i is a local instruction cache barrier; it has no harmful side effects.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("fence.i", options(nomem, nostack));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-20 (collected 2026-11-27 from riscv64/cpu.rs): verbatim body; callers use the safe
@@ -863,8 +885,10 @@ pub mod riscv64 {
             let cycles: u64;
             // SAFETY: rdtime is a pure register read (CSR-less Zicsr-free form);
             // no memory access, no side effects.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("rdtime {}", out(reg) cycles, options(nostack, readonly));
+                }
             }
             cycles
         }
@@ -879,9 +903,11 @@ pub mod riscv64 {
             // SAFETY: wfi halts the hart until the next interrupt; no side effects beyond waiting.
             // Note: nomem is intentionally omitted — WFI has side effects (it wakes on interrupts)
             // and must not be reordered past memory operations that set up the wake condition.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("wfi", options(nostack));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-22 (collected 2026-11-27 from riscv64/cpu.rs): verbatim body; callers use the safe
@@ -896,8 +922,10 @@ pub mod riscv64 {
             // x86_64 twin); no-op when off.
             crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
             // SAFETY: csrci atomically clears the SIE bit in sstatus; safe at any time.
-            unsafe {
+            {
+                unsafe {
                 asm!("csrci sstatus, 2", options(nomem, nostack));
+                }
             }
         }
 
@@ -912,8 +940,10 @@ pub mod riscv64 {
             // syscost probe: pre-sti edge (see the x86_64 twin); no-op when off.
             crate::debug::syscost::irq_note_on();
             // SAFETY: csrsi atomically sets the SIE bit in sstatus; safe at any time.
-            unsafe {
+            {
+                unsafe {
                 asm!("csrsi sstatus, 2", options(nomem, nostack));
+                }
             }
         }
 
@@ -936,8 +966,10 @@ pub mod riscv64 {
             // instruction word, 0xc0101573). The canonical read form is `csrr`
             // (csrrs rd, csr, x0): no write attempt, value-identical result —
             // the same read semantics the reference kernel's timing helpers use.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("csrr {}, time", out(reg) time, options(nomem, nostack, pure));
+                }
             }
             time
         }
@@ -950,9 +982,11 @@ pub mod riscv64 {
         pub fn set_thread_id(tid: u64)  {
 
             // SAFETY: writing tp (x4) is a simple register move; the value is used as a thread pointer.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("mv tp, {}", in(reg) tid, options(nomem, nostack));
-            }
+                }
+
         }
 
         // INV-ARCH-CPU-26 (collected 2026-11-27 from riscv64/cpu.rs): verbatim body; callers use the safe
@@ -965,8 +999,10 @@ pub mod riscv64 {
             // RISC-V uses tp register (x4) to store thread pointer
             // SAFETY: reading tp is a simple register move, no memory or side effects.
             let tp: u64;
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
+                }
             }
             tp
         }
@@ -1015,12 +1051,14 @@ pub mod riscv64 {
 
             // SAFETY: plain per-hart CSR bit set; idempotent, callable from any
             // point of secondary bring-up with no concurrent sie access.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!(
                     "csrsi sie, 2",  // Set bit 1 (SSIE = 0x2)
                     options(nomem, nostack)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-IPI-8 (collected 2026-11-27 from riscv64/ipi.rs): verbatim body; callers use the safe
@@ -1046,11 +1084,13 @@ pub mod riscv64 {
             // Enable software interrupt
             // SAFETY: Setting SSIE in sie allows this hart to receive software interrupts.
             // This is done once during init with no concurrent access to sie.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!(
                     "csrsi sie, 2",  // Set bit 1 (SSIE = 0x2)
                     options(nomem, nostack)
                 );
+                }
             }
 
             // Register PLIC IRQ handlers
@@ -1071,8 +1111,10 @@ pub mod riscv64 {
                     loop {
                         // SAFETY: WFI halts the hart. This is a legacy stop path; the CPU
                         // spins here permanently.
-                        unsafe {
+                        {
+                            unsafe {
                             core::arch::asm!("wfi", options(nomem, nostack));
+                            }
                         }
                     }
                 }
@@ -1099,8 +1141,10 @@ pub mod riscv64 {
                     loop {
                         // SAFETY: WFI halts the hart. This is a legacy stop path; the CPU
                         // spins here permanently.
-                        unsafe {
+                        {
+                            unsafe {
                             core::arch::asm!("wfi", options(nomem, nostack));
+                            }
                         }
                     }
                 }
@@ -1119,10 +1163,14 @@ pub mod riscv64 {
 
             // SAFETY: sfence.vma with all-zero operands invalidates all
             // non-global TLB entries on the local hart. No memory operands.
-            unsafe {
+
+                unsafe {
                 core::arch::asm!("fence iorw, iorw");
+                }
+                unsafe {
                 core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
-            }
+                }
+
         }
 
         // INV-ARCH-IPI-12 (collected 2026-11-27 from riscv64/ipi.rs): verbatim body; callers use the safe
@@ -1133,8 +1181,10 @@ pub mod riscv64 {
             loop {
                 // SAFETY: WFI halts the hart until an interrupt. This CPU is being stopped,
                 // so spinning in WFI is the intended behavior.
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
+                    }
                 }
             }
         }
@@ -1156,32 +1206,40 @@ pub mod riscv64 {
                 let _lock = CSD_LOCKS[cpu].lock_irqsave();
                 // SAFETY: We hold CSD_LOCKS[cpu], serializing access to CSD_QUEUES[cpu].
                 // Detaching the list and re-initializing the queue head is safe under the lock.
-                unsafe {
+                {
+                    unsafe {
                     if CSD_QUEUES[cpu].is_empty() {
                         return;
                     }
+                    }
+                    unsafe {
                     head = CSD_QUEUES[cpu].next;
+                    }
                     // Re-init queue head to empty
+                    unsafe {
                     CSD_QUEUES[cpu].init();
+                    }
                 }
             }
 
             // Walk detached list, call each callback
             // SAFETY: queue_ptr is a stable address of a static. The list was detached under
             // lock above, so we have exclusive ownership of all nodes until completion.
-            let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
+            let queue_ptr = { unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead } };
             let mut node = head;
             while node != queue_ptr {
                 // SAFETY: node points into the detached list of CallSingleData entries.
                 // Each node was allocated via Box::new and is valid. The sender is
                 // spin-waiting on done, so the Box is not freed until after we store true.
-                unsafe {
+                {
                     let csd = node as *mut CallSingleData;
-                    let next = (*node).next;
-                    let f = (*csd).func;
-                    let arg = (*csd).info;
+                    let next = unsafe { (*node).next };
+                    let f = unsafe { (*csd).func };
+                    let arg = unsafe { (*csd).info };
                     f(arg);
+                    unsafe {
                     (*csd).done.store(true, Ordering::Release);
+                    }
                     node = next;
                 }
             }
@@ -1221,25 +1279,41 @@ pub mod riscv64 {
                 // SAFETY: We hold CSD_LOCKS[target], which serializes all mutations to
                 // CSD_QUEUES[target]. The csd and queue pointers remain valid for the
                 // duration of the lock since csd is pinned on our stack via Box.
-                unsafe {
+                {
                     csd.list.init();
+                    unsafe {
                     if CSD_QUEUES[target].is_empty() {
                         // First entry — set up circular list
+                        {
                         CSD_QUEUES[target].next = &mut csd.list as *mut _;
+                        }
+                        {
                         CSD_QUEUES[target].prev = &mut csd.list as *mut _;
+                        }
+                        {
                         csd.list.next = &mut CSD_QUEUES[target] as *mut _;
+                        }
+                        {
                         csd.list.prev = &mut CSD_QUEUES[target] as *mut _;
+                        }
                     } else {
                         // Insert at tail
-                        let tail = CSD_QUEUES[target].prev;
+                        let tail = { CSD_QUEUES[target].prev };
                         // SAFETY: tail was read from the queue under lock and points to a valid
                         // ListHead node in the queue. The lock prevents concurrent modification.
                         
+                            {
                             (*tail).next = &mut csd.list as *mut _;
+                            }
                             csd.list.prev = tail;
+                            {
                             csd.list.next = &mut CSD_QUEUES[target] as *mut _;
+                            }
+                            {
                             CSD_QUEUES[target].prev = &mut csd.list as *mut _;
+                            }
                         
+                    }
                     }
                 }
             }
@@ -1275,8 +1349,10 @@ pub mod riscv64 {
             for i in 0..MAX_CPUS {
                 // SAFETY: CSD_QUEUES is a static mutable array. Called only once during boot
                 // init before any CSD operations, so no concurrent access.
-                unsafe {
+                {
+                    unsafe {
                     CSD_QUEUES[i].init();
+                    }
                 }
             }
         }
@@ -1308,9 +1384,11 @@ pub mod riscv64 {
                 if idx < NR_IPI_TYPES {
                     // SAFETY: Handler table is initialized during ipi::init() before any IPIs
                     // can arrive. Handlers are write-once, so reading here is safe.
-                    unsafe {
+                    {
+                        unsafe {
                         if let Some(handler) = IPI_HANDLERS[idx] {
                             handler();
+                        }
                         }
                     }
                 }
@@ -1327,11 +1405,15 @@ pub mod riscv64 {
             let idx = ipi_type as usize;
             // SAFETY: IPI_HANDLERS is a static mutable array accessed only during boot init.
             // Write-once semantics enforced by the panic on double registration.
-            unsafe {
+            {
+                unsafe {
                 if IPI_HANDLERS[idx].is_some() {
                     panic!("IPI handler already registered for {:?}", ipi_type);
                 }
+                }
+                unsafe {
                 IPI_HANDLERS[idx] = Some(handler);
+                }
             }
         }
     }
@@ -1354,9 +1436,11 @@ pub mod riscv64 {
             // SAFETY: Reading tp is a pure register read. When tp < 0x1000 it holds a
             // hart_id set by boot.S; otherwise it points to the current task_struct
             // (set by trap.S), and the fixed ti_cpu offset is within the struct layout.
-            unsafe {
+
                 let tp_value: u64;
+                unsafe {
                 asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
+                }
 
                 // Check if tp is a small value (hart_id during early boot phase)
                 // Valid task_struct pointers should be in kernel address space (>= 0x80000000)
@@ -1368,7 +1452,7 @@ pub mod riscv64 {
                     // ti_cpu offset in Task struct is 0x18 (24 bytes)
                     let ti_cpu_offset = 0x18;
                     let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-                    let raw = (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed);
+                    let raw = unsafe { (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) };
                     // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
                     if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
                         0
@@ -1376,7 +1460,7 @@ pub mod riscv64 {
                         raw as u64
                     }
                 }
-            }
+
         }
 
         // INV-ARCH-MOD-2 (collected 2026-11-27 from riscv64/mod.rs): verbatim body; callers use the safe
@@ -1386,15 +1470,19 @@ pub mod riscv64 {
 
             // SAFETY: Setting SIE in sstatus enables supervisor-mode interrupts.
             // This is called during normal kernel init with no special preconditions.
-            unsafe {
+
                 // Set sstatus.SIE (Supervisor Interrupt Enable)
                 let mut sstatus: u64;
+                unsafe {
                 asm!("csrrw {}, sstatus, zero", out(reg) sstatus);
+                }
                 sstatus |= 1 << 1; // Set SIE
+                unsafe {
                 asm!("csrw sstatus, {}", in(reg) sstatus);
+                }
 
                 println!("arch: Supervisor-mode interrupts enabled");
-            }
+
         }
 
         // INV-ARCH-MOD-3 (collected 2026-11-27 from riscv64/mod.rs): verbatim body; callers use the safe
@@ -1410,12 +1498,16 @@ pub mod riscv64 {
             // Disable interrupts
             // SAFETY: Clearing SIE in sstatus disables supervisor-mode interrupts.
             // Reading and writing sstatus are plain CSR operations with no special preconditions.
-            unsafe {
+            {
                 // RISC-V: Clear sstatus.SIE (Supervisor Interrupt Enable)
                 let mut sstatus: u64;
+                unsafe {
                 asm!("csrrw {}, sstatus, zero", out(reg) sstatus);
+                }
                 sstatus &= !(1 << 1); // Clear SIE
+                unsafe {
                 asm!("csrw sstatus, {}", in(reg) sstatus);
+                }
 
                 println!("arch: Interrupts disabled in supervisor mode");
             }
@@ -1430,9 +1522,11 @@ pub mod riscv64 {
             // LTP utime01/02/03 before/after windows.)
             // SAFETY: scounteren is an S-mode read/write CSR; setting all bits
             // only permits U-mode reads of the counters.
-            unsafe {
+            {
                 let all: u64 = 0xffff;
+                unsafe {
                 asm!("csrw scounteren, {}", in(reg) all, options(nomem, nostack));
+                }
             }
 
             // Print CPU info
@@ -1474,10 +1568,12 @@ pub mod riscv64 {
 
             // SAFETY: Caller must provide a valid Task pointer. fork_pt_regs() returns the
             // PtRegs pointer stored by copy_thread(), which remains valid for the task lifetime.
-            unsafe {
+
                 // Task structure's fork_child field stores PtRegs pointer
+                unsafe {
                 (*task).fork_pt_regs()
-            }
+                }
+
         }
 
         // INV-ARCH-PROCESS-4 (collected 2026-11-27 from riscv64/process.rs): verbatim body; callers use the safe
@@ -1519,11 +1615,15 @@ pub mod riscv64 {
                     // first FP instruction traps and goes through the fpu_init
                     // path (zeroed registers).
                     // SAFETY: sstatus CSR RMW (FS/VS fields, register-only).
-                    unsafe {
+                    {
                         let sstatus: u64;
+                        unsafe {
                         asm!("csrr {}, sstatus", out(reg) sstatus);
+                        }
                         let new_sstatus = sstatus & !SR_FS_MASK & !crate::arch::riscv64::vext::SR_VS;
+                        unsafe {
                         asm!("csrw sstatus, {}", in(reg) new_sstatus);
+                        }
                     }
                 }
             }
@@ -1556,15 +1656,15 @@ pub mod riscv64 {
                 // SAFETY: PER_CPU_INTR_STACKS is a static array of size MAX_CPUS, indexed by
                 // a bounds-checked cpu_id. Each stack is INTR_STACK_SIZE bytes; adding that
                 // gives the stack top. Only the owning CPU accesses its own stack.
-                unsafe {
-                    let stack_base = PER_CPU_INTR_STACKS[cpu].as_ptr() as usize;
+                {
+                    let stack_base = unsafe { PER_CPU_INTR_STACKS[cpu].as_ptr() as usize };
                     stack_base + INTR_STACK_SIZE
                 }
             } else {
                 // Fallback to CPU 0 stack if CPU ID is invalid
                 // SAFETY: PER_CPU_INTR_STACKS[0] always exists (MAX_CPUS >= 1).
-                unsafe {
-                    let stack_base = PER_CPU_INTR_STACKS[0].as_ptr() as usize;
+                {
+                    let stack_base = unsafe { PER_CPU_INTR_STACKS[0].as_ptr() as usize };
                     stack_base + INTR_STACK_SIZE
                 }
             }
@@ -1579,13 +1679,15 @@ pub mod riscv64 {
 
             // SAFETY: __per_cpu_intr_stacks_base is a mutable global defined in boot.S.
             // Only called once during early boot before any traps occur, so no races.
-            unsafe {
+
                 // Set the assembly variable to point to our stack array
                 extern "C" {
                     static mut __per_cpu_intr_stacks_base: usize;
                 }
+                unsafe {
                 __per_cpu_intr_stacks_base = PER_CPU_INTR_STACKS.as_ptr() as usize;
-            }
+                }
+
         }
 
         // INV-ARCH-SMP-15 (collected 2026-11-27): static/const moved verbatim from riscv64/smp.rs
@@ -1621,9 +1723,11 @@ pub mod riscv64 {
             // scounteren must be programmed on every hart for the vDSO's
             // rdtime interpolation to be legal in user space).
             // SAFETY: plain S-mode CSR write, no preconditions.
-            unsafe {
+            {
                 let all: u64 = 0xffff;
+                unsafe {
                 core::arch::asm!("csrw scounteren, {}", in(reg) all, options(nomem, nostack));
+                }
             }
 
             // Wait for boot CPU to finish ALL single-CPU initialization.
@@ -1695,8 +1799,10 @@ pub mod riscv64 {
             // Save current satp (permanent page table) for secondaries
             let current_satp: u64;
             // SAFETY: Reading the satp CSR is a simple register read with no side effects.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("csrr {}, satp", out(reg) current_satp, options(nomem, nostack));
+                }
             }
             BOOT_HART_SATP.store(current_satp, Ordering::Release);
 
@@ -1804,9 +1910,11 @@ pub mod riscv64 {
             // arch/riscv's current_thread_info()->cpu (same tp-relative load).
             // The nomem/nostack/pure asm guarantees no side effects; the
             // ti_cpu dereference is the one raw edge below.
-            let tp_value: u64 = unsafe {
+            let tp_value: u64 = {
                 let v;
+                unsafe {
                 asm!("mv {}, tp", out(reg) v, options(nomem, nostack, pure));
+                }
                 v
             };
 
@@ -1821,7 +1929,7 @@ pub mod riscv64 {
                 // protocol); the TI_CPU offset read is a relaxed atomic load.
                 let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
                 let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-                let raw = unsafe { (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) };
+                let raw = { unsafe { (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) } };
                     // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
                     // ti_cpu is i32; -1 (initial value) would sign-extend to
                     // usize::MAX which corrupts cpu_state indexing.
@@ -1870,19 +1978,24 @@ pub mod riscv64 {
         pub fn fpu_init()  {
 
             // SAFETY: sstatus CSR RMW (FS field).
-            unsafe {
+            {
                 let mut sstatus: u64;
                 
                 
+                unsafe {
                 asm!("csrr {}, sstatus", out(reg) sstatus);
+                }
             ;
             ;
                 sstatus = (sstatus & !(0x3 << 13)) | (0x1 << 13);
+                unsafe {
                 asm!("csrw sstatus, {}", in(reg) sstatus);
+                }
             }
 
             // Zero all floating-point registers
-            unsafe {
+            {
+                    unsafe {
                     asm!(
                         "fcvt.d.l f0, zero",
                         "fcvt.d.l f1, zero",
@@ -1918,11 +2031,12 @@ pub mod riscv64 {
                         "fcvt.d.l f31, zero",
                         options(nostack)
                     );
+                    }
             };
 
             // Zero fcsr
             // SAFETY: register-only CSR write.
-            unsafe { asm!("fscsr zero") };
+            { unsafe { asm!("fscsr zero") } };
         }
 
         // INV-ARCH-THREAD-14 (collected 2026-11-27): the unsafe-carrying methods of this
@@ -1944,9 +2058,11 @@ pub mod riscv64 {
                 // SAFETY: reading sstatus CSR is safe; FPU access is valid because this is called
                 // from a context where FPU may be active (FS == DIRTY check follows).
                 // SAFETY: sstatus CSR read (register-only).
-                let sstatus: u64 = unsafe {
+                let sstatus: u64 = {
                     let v;
+                    unsafe {
                     asm!("csrr {}, sstatus", out(reg) v);
+                    }
                     v
                 };
 
@@ -1956,7 +2072,7 @@ pub mod riscv64 {
                     // Set FS to CLEAN after saving
                     let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
                     // SAFETY: sstatus CSR write (FS field).
-                    unsafe { asm!("csrw sstatus, {}", in(reg) new_sstatus) };
+                    { unsafe { asm!("csrw sstatus, {}", in(reg) new_sstatus) } };
                 }
             }
 
@@ -1979,11 +2095,15 @@ pub mod riscv64 {
                     self.__fstate_restore();
                     // Set FS to CLEAN after restoring
                     // SAFETY: sstatus CSR RMW (FS field).
-                    unsafe {
+                    {
                         let sstatus: u64;
+                        unsafe {
                         asm!("csrr {}, sstatus", out(reg) sstatus);
+                        }
                         let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
+                        unsafe {
                         asm!("csrw sstatus, {}", in(reg) new_sstatus);
+                        }
                     }
                 }
             }
@@ -2003,9 +2123,11 @@ pub mod riscv64 {
                 // The asm targets are this struct's own typed arrays; the CSR
                 // RMW fences the register visibility.
                 // SAFETY: sstatus CSR read (register-only).
-                let sstatus: u64 = unsafe {
+                let sstatus: u64 = {
                     let v;
+                    unsafe {
                     asm!("csrr {}, sstatus", out(reg) v);
+                    }
                     v
                 };
 
@@ -2022,7 +2144,7 @@ pub mod riscv64 {
                 // Disable FPU for this task
                 let new_sstatus = sstatus & !SR_FS;
                 // SAFETY: sstatus CSR write (FS field).
-                unsafe { asm!("csrw sstatus, {}", in(reg) new_sstatus) };
+                { unsafe { asm!("csrw sstatus, {}", in(reg) new_sstatus) } };
             }
 
         // INV-ARCH-THREAD-10 (collected 2026-11-27 from riscv64/thread.rs): verbatim body; callers use the safe
@@ -2042,8 +2164,10 @@ pub mod riscv64 {
             pub  fn vstate_save_for_switch(&mut self)  {
 
                 let sstatus: u64;
+                {
                 unsafe {
                 asm!("csrr {}, sstatus", out(reg) sstatus);
+                }
                 }
 
                 let vs = sstatus & crate::arch::riscv64::vext::SR_VS;
@@ -2055,8 +2179,10 @@ pub mod riscv64 {
 
                 // Disable the vector unit for the outgoing task
                 let new_sstatus = sstatus & !crate::arch::riscv64::vext::SR_VS;
+                {
                 unsafe {
                 asm!("csrw sstatus, {}", in(reg) new_sstatus);
+                }
                 }
             }
 
@@ -2080,13 +2206,17 @@ pub mod riscv64 {
                     crate::arch::riscv64::vext::vstate_restore(&self.vcsrs, &self.vregs);
                     // Live state now equals the buffer: record Clean.
                     let sstatus: u64;
+                    {
                     unsafe {
                     asm!("csrr {}, sstatus", out(reg) sstatus);
                     }
+                    }
                     let new_sstatus =
                         (sstatus & !crate::arch::riscv64::vext::SR_VS) | crate::arch::riscv64::vext::SR_VS_CLEAN;
+                    {
                     unsafe {
                     asm!("csrw sstatus, {}", in(reg) new_sstatus);
+                    }
                     }
                 }
             }
@@ -2104,8 +2234,10 @@ pub mod riscv64 {
             pub  fn save_vstate(&mut self)  {
 
                 let sstatus: u64;
+                {
                 unsafe {
                 asm!("csrr {}, sstatus", out(reg) sstatus);
+                }
                 }
 
                 if (sstatus & crate::arch::riscv64::vext::SR_VS) == crate::arch::riscv64::vext::SR_VS_DIRTY {
@@ -2113,8 +2245,10 @@ pub mod riscv64 {
                     // vstate_save leaves live == buffer: record Clean.
                     let new_sstatus =
                         (sstatus & !crate::arch::riscv64::vext::SR_VS) | crate::arch::riscv64::vext::SR_VS_CLEAN;
+                    {
                     unsafe {
                     asm!("csrw sstatus, {}", in(reg) new_sstatus);
+                    }
                     }
                 }
             }
@@ -2157,10 +2291,11 @@ pub mod riscv64 {
             pub(crate) fn __fstate_save(&mut self)  {
 
                 // SAFETY: temporary FS enable (register RMW).
-                unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) };
+                { unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) } };
 
                 // Save floating-point registers f0-f31
-                unsafe {
+                {
+                    unsafe {
                     asm!(
                         "fsd f0, 0*8({0})",
                         "fsd f1, 1*8({0})",
@@ -2197,15 +2332,16 @@ pub mod riscv64 {
                         in(reg) self.fpu.as_mut_ptr(),
                         options(nostack)
                     );
+                    }
                 };
 
                 // Save fcsr
                 // SAFETY: register-only CSR read.
-                unsafe { asm!("frcsr {0}", out(reg) self.fcsr) };
+                { unsafe { asm!("frcsr {0}", out(reg) self.fcsr) } };
 
                 // Disable FPU
                 // SAFETY: register-only CSR clear.
-                unsafe { asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack)) };
+                { unsafe { asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack)) } };
             }
 
         // INV-ARCH-THREAD-5 (collected 2026-11-27 from riscv64/thread.rs): verbatim body; callers use the safe
@@ -2223,14 +2359,15 @@ pub mod riscv64 {
             pub(crate) fn __fstate_restore(&mut self)  {
 
                 // SAFETY: temporary FS enable (register RMW).
-                unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) };
+                { unsafe { asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack)) } };
 
                 // Restore fcsr first
                 // SAFETY: register-only CSR write.
-                unsafe { asm!("fscsr {0}", in(reg) self.fcsr) };
+                { unsafe { asm!("fscsr {0}", in(reg) self.fcsr) } };
 
                 // Restore floating-point registers f0-f31
-                unsafe {
+                {
+                    unsafe {
                     asm!(
                         "fld f0, 0*8({0})",
                         "fld f1, 1*8({0})",
@@ -2267,11 +2404,12 @@ pub mod riscv64 {
                         in(reg) self.fpu.as_ptr(),
                         options(nostack)
                     );
+                    }
                 };
 
                 // Disable FPU
                 // SAFETY: register-only CSR clear.
-                unsafe { asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack)) };
+                { unsafe { asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack)) } };
             }
         }
     }
@@ -2526,7 +2664,7 @@ pub mod riscv64 {
                                                     v.start().as_usize())
                                                 {
                                                     // SAFETY: read-only dentry access.
-                                                    let d = unsafe { &*file.dentry.get() };
+                                                    let d = { unsafe { &*file.dentry.get() } };
                                                     if let Some(d) = d.as_ref() {
                                                         path = crate::fs::vfs::dentry_user_path(d);
                                                     }
@@ -2540,7 +2678,7 @@ pub mod riscv64 {
                                                         ;
                                                         if let Some(file) = file {
                                                             // SAFETY: read-only dentry access.
-                                                            let d = unsafe { &*file.dentry.get() };
+                                                            let d = { unsafe { &*file.dentry.get() } };
                                                             if let Some(d) = d.as_ref() {
                                                                 path = crate::fs::vfs::dentry_user_path(d);
                                                             }
@@ -2768,7 +2906,7 @@ pub mod riscv64 {
                         // SAFETY: wfi with interrupts disabled never wakes — the
                         // intentional permanent park of a crashed CPU.
                         loop {
-                            unsafe { core::arch::asm!("wfi") };
+                            { unsafe { core::arch::asm!("wfi") } };
                         }
                     }
                     {
@@ -2809,7 +2947,7 @@ pub mod riscv64 {
                                 putfrag(b" <rest past kernel stack top>\n");
                                 break;
                             }
-                            let v = unsafe { core::ptr::read_volatile(addr as *const usize) };
+                            let v = { unsafe { core::ptr::read_volatile(addr as *const usize) } };
                             putb(b' ');
                             puthex(v as u64);
                             if i % 4 == 3 { putb(b'\n'); }
@@ -2834,8 +2972,10 @@ pub mod riscv64 {
                         use core::fmt::Write;
                         let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         if kernel_tp {
-                            let task = unsafe {
+                            let task = {
+                                unsafe {
                                 &*(tp as *const crate::process::task::Task)
+                                }
                             };
                             
                                 let _ = write!(w,
@@ -2904,7 +3044,7 @@ pub mod riscv64 {
                             // inside the vmemmap array; the accessor reads
                             // are relaxed atomics — diagnostic-only, on the
                             // already-crashed path.
-                            let pg = unsafe { &*page };
+                            let pg = { unsafe { &*page } };
                             putfrag(b"oops-prov ");
                             putfrag(name);
                             putfrag(b" va=0x");
@@ -2944,14 +3084,14 @@ pub mod riscv64 {
                         const OFF_SIBLING: usize = tsk_off::TASK_SIBLING;
                         let t = (task as *mut crate::process::task::Task) as usize;
                         let head = (t + OFF_CHILDREN) as *const usize;
-                        let mut pos = unsafe { core::ptr::read_volatile(head) };
+                        let mut pos = { unsafe { core::ptr::read_volatile(head) } };
                         let head_v = head as usize;
                         let mut n = 0u32;
                         let mut last_node = 0usize;
                         while pos != head_v && pos != 0 && pos > OFF_SIBLING && n < 8 {
                             let ct = pos - OFF_SIBLING;
-                            let pid = unsafe { core::ptr::read_volatile((ct + OFF_PID) as *const u32) };
-                            let state = unsafe { core::ptr::read_volatile((ct + OFF_STATE) as *const u32) };
+                            let pid = { unsafe { core::ptr::read_volatile((ct + OFF_PID) as *const u32) } };
+                            let state = { unsafe { core::ptr::read_volatile((ct + OFF_STATE) as *const u32) } };
                             // R12-4: recognize freed-task poison.
                             if pid == 0xDEAD_BEEF || state == 0xDEAD_BEEF {
                                 putfrag(b" POISONED-FREED-TASK");
@@ -2974,7 +3114,7 @@ pub mod riscv64 {
                             while kk > 0 { kk -= 1; putb(digs[kk]); }
                             putb(b'\n');
                             last_node = pos;
-                            pos = unsafe { core::ptr::read_volatile(pos as *const usize) };
+                            pos = { unsafe { core::ptr::read_volatile(pos as *const usize) } };
                             n += 1;
                         }
                         if pos == 0 {
@@ -3018,7 +3158,7 @@ pub mod riscv64 {
         #[no_mangle]
         pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> !  {
 
-            let r = unsafe { &*regs };
+            let r = { unsafe { &*regs } };
             {
 
             for &b in b"trap: BADFRAME pid=0x" { putb(b); }
@@ -3045,7 +3185,7 @@ pub mod riscv64 {
             loop {
                 // SAFETY: wfi halts the hart until an interrupt; safe in a dead
                 // task's final spin.
-                unsafe { core::arch::asm!("wfi") };
+                { unsafe { core::arch::asm!("wfi") } };
             }
         }
 
@@ -3277,8 +3417,10 @@ pub mod riscv64 {
             let page = page as u64;
             let mut pte_addr = (root << 12) + ((page >> 30) & 0x1FF) * 8;
             // SAFETY: walk reads valid page-table pages of the pinned mm.
-            let mut pte = unsafe {
+            let mut pte = {
+                unsafe {
                 core::ptr::read_volatile(phys_to_virt(PhysAddr::new(pte_addr)).0 as *const u64)
+                }
             };
             let mut level = 2u32;
             loop {
@@ -3290,8 +3432,10 @@ pub mod riscv64 {
                 let shift = 12 + 9 * (level - 1);
                 pte_addr = next + ((page >> shift) & 0x1FF) * 8;
                 // SAFETY: same as above.
-                pte = unsafe {
+                pte = {
+                    unsafe {
                     core::ptr::read_volatile(phys_to_virt(PhysAddr::new(pte_addr)).0 as *const u64)
+                    }
                 };
                 if pte & 1 == 0 {
                     break;
@@ -3332,11 +3476,13 @@ pub mod riscv64 {
             let kv_page =
                 phys_to_virt(PhysAddr::new(phys_base + (page & leaf_mask))).0 as usize;
             // SAFETY: page is resident (PTE valid); dump raw words.
-            unsafe {
+            {
                 let p64 = kv_page as *const u64;
                 let mut words = [0u64; 8];
                 for (i, w) in words.iter_mut().enumerate() {
+                    unsafe {
                     *w = core::ptr::read_volatile(p64.add(i));
+                    }
                 }
                 // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
                 crate::pr_info!(
@@ -3346,7 +3492,9 @@ pub mod riscv64 {
                 let off_words = (((epc as u64) & 0xFFF) as usize / 8).saturating_sub(2);
                 let mut w2 = [0u64; 5];
                 for (i, w) in w2.iter_mut().enumerate() {
+                    unsafe {
                     *w = core::ptr::read_volatile(p64.add(off_words + i));
+                    }
                 }
                 // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
                 crate::pr_info!(
@@ -3359,7 +3507,9 @@ pub mod riscv64 {
                 for row in 0..64usize {
                     let mut w8 = [0u64; 8];
                     for (i, w) in w8.iter_mut().enumerate() {
+                        unsafe {
                         *w = core::ptr::read_volatile(p64.add(row * 8 + i));
+                        }
                     }
                     // HOTPATH-PRINT: fatal-path forensics — once per SIGILL death dump
                     crate::pr_info!(
@@ -3601,7 +3751,7 @@ pub mod riscv64 {
             // Setting sscratch = 0 here is safe because:
             // - .Lrestore_and_exit restores sscratch = tp before sret to user space
             // - .Lrestore_kernel_and_exit already expects sscratch = 0
-            unsafe { core::arch::asm!("csrw sscratch, zero", options(nomem, nostack)); }
+            { unsafe { core::arch::asm!("csrw sscratch, zero", options(nomem, nostack)); } }
 
             // Re-enable interrupts before entering the syscall handler.
             //
@@ -3683,8 +3833,10 @@ pub mod riscv64 {
 
             // Clear software interrupt
             // SAFETY: csrc atomically clears bit 1 (SSIP) in the sip CSR; safe at interrupt handler level.
-            unsafe {
+            {
+                unsafe {
                 core::arch::asm!("csrc sip, 0x2", options(nomem, nostack));
+                }
             }
 
             // Handle IPI
@@ -3775,7 +3927,7 @@ pub mod riscv64 {
             // The frame edge: ONE audited reference formation per entry
             // (INV-RE-FRAME-1/2 in unsafe_edges.rs). Everything below is safe
             // Rust over the typed handle.
-            let mut frame = unsafe { SavedFrame::<'static>::from_trap(regs) };
+            let mut frame = { unsafe { SavedFrame::<'static>::from_trap(regs) } };
 
             // Save and swap PtRegs pointer (used for fork/exec).
             // When interrupts are enabled during syscalls (like Linux), a timer
@@ -3817,7 +3969,7 @@ pub mod riscv64 {
                         const WFI_INSN: u32 = 0x10500073;
                         // SAFETY: epc is bounds-checked inside [_stext, _etext]
                         // (mapped kernel text); a 4-byte aligned instruction read.
-                        let insn = unsafe { core::ptr::read_volatile(regs_ref.epc as *const u32) };
+                        let insn = { unsafe { core::ptr::read_volatile(regs_ref.epc as *const u32) } };
                         if insn == WFI_INSN {
                             regs_ref.epc += 4;
                         }
@@ -3913,16 +4065,18 @@ pub mod riscv64 {
                         if tp_entry != tp_exit || cs_entry != cs_exit {
                             let a = tp_entry as *mut crate::process::task::Task;
                             let b = tp_exit as *mut crate::process::task::Task;
-                            let (pa, pb) = unsafe {
+                            let (pa, pb) = {
+                                unsafe {
                                 ((*a).preempt_count(), (*b).preempt_count())
+                                }
                             };
                             let cs_pid = if cs_entry != 0 {
-                                unsafe { (*(cs_entry as *mut crate::process::task::Task)).pid() }
+                                { unsafe { (*(cs_entry as *mut crate::process::task::Task)).pid() } }
                             } else {
                                 0
                             };
                             let csx_pid = if cs_exit != 0 {
-                                unsafe { (*(cs_exit as *mut crate::process::task::Task)).pid() }
+                                { unsafe { (*(cs_exit as *mut crate::process::task::Task)).pid() } }
                             } else {
                                 0
                             };
@@ -3963,8 +4117,10 @@ pub mod riscv64 {
                         if tp_entry != tp_exit || cs_entry != cs_exit {
                             let a = tp_entry as *mut crate::process::task::Task;
                             let b = tp_exit as *mut crate::process::task::Task;
-                            let (pa, pb) = unsafe {
+                            let (pa, pb) = {
+                                unsafe {
                                 ((*a).preempt_count(), (*b).preempt_count())
+                                }
                             };
                             use core::fmt::Write;
                             let mut w = crate::debug::backtrace::ConsoleWriter::new();
@@ -3993,8 +4149,10 @@ pub mod riscv64 {
                         if tp_entry != tp_exit || cs_entry != cs_exit {
                             let a = tp_entry as *mut crate::process::task::Task;
                             let b = tp_exit as *mut crate::process::task::Task;
-                            let (pa, pb) = unsafe {
+                            let (pa, pb) = {
+                                unsafe {
                                 ((*a).preempt_count(), (*b).preempt_count())
+                                }
                             };
                             use core::fmt::Write;
                             let mut w = crate::debug::backtrace::ConsoleWriter::new();
@@ -4046,9 +4204,9 @@ pub mod riscv64 {
                                     }
                                     // SAFETY: fp is inside the current task's kernel
                                 // stack (the frame-pointer walk's bound discipline).
-                                let next = unsafe { core::ptr::read_volatile(fp as *const usize) };
+                                let next = { unsafe { core::ptr::read_volatile(fp as *const usize) } };
                                     // SAFETY: same in-stack bounds as the fp read above.
-                                let ra = unsafe { core::ptr::read_volatile((fp + 8) as *const usize) };
+                                let ra = { unsafe { core::ptr::read_volatile((fp + 8) as *const usize) } };
                                     let _ = write!(w, "  fp={:#x} ra={:#x}\n", fp, ra);
                                     if ra < 0xffffffff80000000 || next <= fp {
                                         break;
@@ -4130,15 +4288,17 @@ pub mod riscv64 {
             // returning EFAULT.
             // SAFETY: csrs atomically sets the SEIE bit in the sie CSR; enabling
             // external interrupts is safe.
-            unsafe {
+
                 // Enable external interrupt (SEIE bit) - use csrs to preserve other bits
                 let seie: u64 = 512;  // SEIE bit (2^9)
+                unsafe {
                 asm!(
                     "csrs sie, {}",
                     in(reg) seie,
                     options(nomem, nostack)
                 );
-            }
+                }
+
         }
 
         // INV-ARCH-TRAP-33 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
@@ -4147,9 +4307,11 @@ pub mod riscv64 {
         pub fn disable_timer_interrupt()  {
 
             // SAFETY: sie::clear_stimer clears the STIE bit in the sie CSR, which is safe.
-            unsafe {
+
+                unsafe {
                 sie::clear_stimer();
-            }
+                }
+
         }
 
         // INV-ARCH-TRAP-34 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
@@ -4159,13 +4321,15 @@ pub mod riscv64 {
 
             // Step 1: Enable STIE (bit 5 in sie) using atomic bit set
             // SAFETY: csrs is an atomic read-modify-write on the sie CSR; STIE bit enable is safe.
-            unsafe {
+            {
                 let stie: u64 = 0x20;
+                unsafe {
                 asm!(
                     "csrs sie, {}",
                     in(reg) stie,
                     options(nomem, nostack)
                 );
+                }
             }
 
             // Step 2: Set the timer trigger
@@ -4173,11 +4337,13 @@ pub mod riscv64 {
 
             // Step 3: Enable global interrupts (sstatus.SIE = 1) if not already enabled
             // SAFETY: csrsi atomically sets the SIE bit in sstatus; enabling interrupts is safe.
-            unsafe {
+            {
+                unsafe {
                 asm!(
                     "csrsi sstatus, 2",
                     options(nomem, nostack)
                 );
+                }
             }
         }
 
@@ -4189,29 +4355,33 @@ pub mod riscv64 {
 
             // SAFETY: stvec and sscratch are supervisor CSRs; writing them at init time is safe
             // and required for trap handling. trap_entry is a valid function pointer defined in trap.S.
-            unsafe {
+
                 // Set stvec to point to trap_entry
                 extern "C" {
                     fn trap_entry();
                 }
 
                 let stvec_value = trap_entry as *const () as u64;
+                unsafe {
                 asm!(
                     "csrw stvec, {}",
                     in(reg) stvec_value,
                     options(nostack)
                 );
+                }
 
                 // Initialize sscratch to 0 for kernel mode
                 // When kernel is running, sscratch should be 0 so that on trap:
                 //   csrrw tp, sscratch, tp  ->  tp becomes 0
                 //   beqz tp, .Lfrom_kernel  ->  taken, correct path
                 // When switching to user mode, sscratch will be set to current task
+                unsafe {
                 asm!(
                     "csrw sscratch, zero",
                     options(nomem, nostack)
                 )
-            }
+                }
+
         }
 
         // INV-ARCH-TRAP-36 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
@@ -4242,7 +4412,7 @@ pub mod riscv64 {
             // read of the epc field cannot fault (the frame page stays mapped
             // while any task on that stack exists, and the diagnostic consumer
             // tolerates any value).
-            unsafe { core::ptr::addr_of!((*p).epc).read() }
+            { unsafe { core::ptr::addr_of!((*p).epc).read() } }
         }
 
         // INV-ARCH-TRAP-37 (collected 2026-11-27 from riscv64/trap.rs): verbatim body; callers use the safe
@@ -4260,7 +4430,7 @@ pub mod riscv64 {
 
             // SAFETY: stack_top is the kernel stack base allocated by the task; pt_regs lives
             // at the fixed offset (stack_top - sizeof(PtRegs)) established by trap_entry in trap.S.
-            unsafe {
+            {
                 let task = current()?;
 
                 // Get kernel stack top
@@ -4271,7 +4441,9 @@ pub mod riscv64 {
                 // pt_regs at (kernel_stack_top - sizeof(pt_regs))
                 let pt_regs_ptr = (stack_top_addr - PT_REGS_SIZE as u64) as *mut PtRegs;
 
+                unsafe {
                 Some(&mut *pt_regs_ptr)
+                }
             }
         }
 
@@ -4317,7 +4489,7 @@ pub mod riscv64 {
             }
             // SAFETY: the lr/sc core faults into the extable fixup which returns
             // the packed fault marker instead of panicking.
-            let packed = unsafe { __futex_cmpxchg_u32(uaddr, expected, new) };
+            let packed = { unsafe { __futex_cmpxchg_u32(uaddr, expected, new) } };
             if packed >> 32 != 0 {
                 None
             } else {
@@ -4349,11 +4521,13 @@ pub mod riscv64 {
 
             let mut len = 0;
             while len < maxlen {
+                {
                 unsafe {
                 match get_user(str.add(len) as *const u8) {
                     Some(0) => return len + 1, // Include null terminator
                     Some(_) => len += 1,
                     None => return 0,
+                }
                 }
                 }
             }
@@ -4425,15 +4599,19 @@ pub mod riscv64 {
                 // SAFETY: buf is `limit` bytes; done+want stays inside it. The
                 // raw exception-table copy handles user faults: it returns the
                 // bytes NOT copied of this chunk.
-                let uncopied = unsafe {
+                let uncopied = {
+                    unsafe {
                     __copy_from_user(buf.as_mut_ptr().add(done), from.add(done), want)
+                    }
                 };
                 let got = want - uncopied;
                 if uncopied > 0 {
                     // SAFETY: zero the never-written tail so the NUL scan below
                     // cannot see stale kernel bytes.
-                    unsafe {
+                    {
+                        unsafe {
                         core::ptr::write_bytes(buf.as_mut_ptr().add(done + got), 0, uncopied)
+                        }
                     };
                 }
                 if let Some(rel) = buf[done..done + got].iter().position(|&b| b == 0) {
@@ -4506,8 +4684,10 @@ pub mod riscv64 {
             );
 
             if uncopied == 0 {
+                {
                 unsafe {
                 Some(value.assume_init())
+                }
                 }
             } else {
                 None
@@ -4542,7 +4722,7 @@ pub mod riscv64 {
             }
 
             // Call optimized assembly implementation
-            let uncleared = unsafe { __clear_user(to, n) };
+            let uncleared = { unsafe { __clear_user(to, n) } };
             if uncleared == 0 {
                 return 0;
             }
@@ -4553,8 +4733,10 @@ pub mod riscv64 {
             // and retried, not reported as uncleared — the syscall would return
             // EFAULT for a perfectly valid buffer.
             if fault_in_write(to, n) {
+                {
                 unsafe {
                 return __clear_user(to, n);
+                }
                 }
             }
             uncleared
@@ -4592,22 +4774,26 @@ pub mod riscv64 {
                 // Zero the whole kernel buffer: callers (e.g. msgsnd, semtimedop)
                 // historically consumed the buffer even on failure, and leaving
                 // previous kernel heap contents in it is an information leak.
+                {
                 unsafe {
                 core::ptr::write_bytes(to, 0, n);
+                }
                 }
                 return n;
             }
 
             // Delegate to assembly implementation which has exception table entries
             // for fault-safe user memory access.
-            let uncopied = unsafe { __copy_from_user(to, from, n) };
+            let uncopied = { unsafe { __copy_from_user(to, from, n) } };
             if uncopied > 0 {
                 // Zero-fill the uncopied tail (Linux semantics, review SEC): the
                 // kernel buffer must never keep stale contents past the point the
                 // user copy reached.
                 let copied = n - uncopied;
+                {
                 unsafe {
                 core::ptr::write_bytes(to.add(copied), 0, uncopied);
+                }
                 }
             }
             uncopied
@@ -4645,7 +4831,7 @@ pub mod riscv64 {
             // for fault-safe user memory access.
             // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
             // and returns the remaining count instead of faulting the kernel.
-            let uncopied = unsafe { __copy_to_user(to, from, n) };
+            let uncopied = { unsafe { __copy_to_user(to, from, n) } };
             if uncopied == 0 {
                 return 0;
             }
@@ -4657,7 +4843,7 @@ pub mod riscv64 {
             // fault_in_pages_writeable + copy retry (NEW2 root cause).
             if fault_in_write(to, n) {
                 // SAFETY: exception-table retry after resolution.
-                return unsafe { __copy_to_user(to, from, n) };
+                return { unsafe { __copy_to_user(to, from, n) } };
             }
             uncopied
         }
@@ -4702,6 +4888,7 @@ pub mod riscv64 {
             // reference kernel vector.S's restore path).
             // SAFETY: x10/x11 address the typed buffers (read-only for the
             // reload sequence).
+
             unsafe {
             asm!(
                 "csrs sstatus, {mask}",           // enable before vector ops
@@ -4767,6 +4954,7 @@ pub mod riscv64 {
                 options(nostack),
             );
             }
+
         }
 
         // INV-ARCH-VEXT-2 (collected 2026-11-27 from riscv64/vext.rs): verbatim body; callers use the safe
@@ -4792,6 +4980,7 @@ pub mod riscv64 {
             // targets are the typed buffers (x10/x11).
             // SAFETY: x10/x11 address the typed buffers (4x u64 + 512 bytes —
             // exactly what the sequence reads/writes).
+
             unsafe {
             asm!(
                 "csrs sstatus, {mask}",           // ensure enabled (idempotent)
@@ -4867,6 +5056,7 @@ pub mod riscv64 {
                 options(nostack),
             );
             }
+
         }
 
         // INV-ARCH-VEXT-3 (collected 2026-11-27 from riscv64/vext.rs): verbatim body; callers use the safe
@@ -4896,7 +5086,7 @@ pub mod riscv64 {
             // Vector CSR access is VS-gated: enable first, then probe vlenb.
             // A rejected hart gets VS dropped back to Off (the probe only read
             // a CSR — the state is still Initial, never Dirty).
-            unsafe { asm!("csrs sstatus, {mask}", mask = in(reg) SR_VS_INITIAL) };
+            { unsafe { asm!("csrs sstatus, {mask}", mask = in(reg) SR_VS_INITIAL) } };
             if !vlen_fits() {
                 if !VLEN_WARNED.swap(true, Ordering::Relaxed) {
                     crate::println!(
@@ -4908,7 +5098,8 @@ pub mod riscv64 {
                 return false;
             }
             // SAFETY: VS is now Initial; writing vector registers auto-dirties.
-            unsafe {
+            {
+                unsafe {
                 asm!(
                         ".word {vsetvli}",
                         ".word {vsetvli}",
@@ -4943,6 +5134,7 @@ pub mod riscv64 {
                         vcsr0 = const CSRW_VCSR_X0,
                         options(nostack),
                     );
+                }
             };
             true
         }
@@ -4959,12 +5151,16 @@ pub mod riscv64 {
         pub(crate) fn vs_disable()  {
 
             // SAFETY: sstatus CSR RMW (VS field, register-only).
-            unsafe {
+
                 let sstatus: u64;
+                unsafe {
                 asm!("csrr {}, sstatus", out(reg) sstatus);
+                }
                 let new_sstatus = sstatus & !SR_VS;
+                unsafe {
                 asm!("csrw sstatus, {}", in(reg) new_sstatus);
-            }
+                }
+
         }
 
         // INV-ARCH-VEXT-5 (collected 2026-11-27 from riscv64/vext.rs): verbatim body; callers use the safe
@@ -4980,7 +5176,7 @@ pub mod riscv64 {
         pub(crate) fn vlen_fits() -> bool  {
 
             let vlenb: u64;
-            unsafe { asm!(".word {}", const CSRR_X5_VLENB, out("x5") vlenb) };
+            { unsafe { asm!(".word {}", const CSRR_X5_VLENB, out("x5") vlenb) } };
             vlenb == VLENB
         }
 
@@ -5012,7 +5208,7 @@ pub mod riscv64 {
                     // Early stage: EARLY_PMD/PTE are static arrays in BSS (at KERNEL_LINK_ADDR).
                     // alloc_page_table returns their physical addresses.
                     // Convert using va_kernel_pa_offset (= KERNEL_LINK_ADDR - KERNEL_PHYS).
-                    let offset = unsafe { crate::arch::riscv64::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
+                    let offset = { crate::arch::riscv64::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
                     let virt_addr = phys_addr.wrapping_add(offset);
                     virt_addr as *mut PageTable
                 }
@@ -5060,7 +5256,7 @@ pub mod riscv64 {
                 // guard above (INV-RE-PT-1). Forming the raw pointer is inert;
                 // every dereference goes through the bounds-masked accessors.
                 Some(PtTable {
-                    ptr: unsafe { crate::arch::riscv64::mm::mmu_init::get_page_table_virt(phys) },
+                    ptr: { unsafe { crate::arch::riscv64::mm::mmu_init::get_page_table_virt(phys) } },
                 })
             }
 
@@ -5082,7 +5278,7 @@ pub mod riscv64 {
             pub fn get_raw(&self, idx: usize) -> u64 {
                 // SAFETY: INV-RE-PT-1 (mapped frame) + INV-RE-PT-2 (masked index)
                 // + INV-RE-PT-3 (raw place projection, no reference formed).
-                unsafe { core::ptr::addr_of!((*self.ptr).entries[idx & 0x1FF]).read() }.bits()
+                { unsafe { core::ptr::addr_of!((*self.ptr).entries[idx & 0x1FF]).read() } }.bits()
             }
 
             /// Typed entry read (see [`Self::get_raw`]).
@@ -5097,9 +5293,11 @@ pub mod riscv64 {
                 // SAFETY: INV-RE-PT-1 (mapped frame) + INV-RE-PT-2 (masked index)
                 // + INV-RE-PT-3 (raw place projection, plain store — the
                 // publication discipline the raw walks used).
-                unsafe {
+                {
+                    unsafe {
                     core::ptr::addr_of_mut!((*self.ptr).entries[idx & 0x1FF])
                         .write(entry)
+                    }
                 };
             }
 
@@ -5132,11 +5330,11 @@ pub mod riscv64 {
                 // the va→pa arithmetic below mirrors stamp_kernel_tree_boot.
                 let root_virt = &raw mut crate::arch::riscv64::mm::mmu_init::ROOT_PAGE_TABLE as u64;
                 // SAFETY: set once at boot before any concurrent reader exists.
-                let offset = unsafe { crate::arch::riscv64::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } as u64;
+                let offset = { unsafe { crate::arch::riscv64::mm::memory_layout::KERNEL_MAP.va_kernel_pa_offset } } as u64;
                 let root_phys = root_virt.wrapping_sub(offset);
                 // SAFETY: image memory — the stage-aware conversion is inert.
                 PtTable {
-                    ptr: unsafe { crate::arch::riscv64::mm::mmu_init::get_page_table_virt(root_phys) },
+                    ptr: { unsafe { crate::arch::riscv64::mm::mmu_init::get_page_table_virt(root_phys) } },
                 }
             }
         }
@@ -5152,7 +5350,7 @@ pub mod riscv64 {
             let dst = phys_to_virt(PhysAddr::new(dst_phys)).bits() as *mut u8;
             // SAFETY: INV-RE-COPY-1 — both frames are live, page-sized, and
             // non-overlapping (distinct frames); exactly PAGE_SIZE bytes each.
-            unsafe { core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize) };
+            { unsafe { core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize) } };
         }
 
         pub mod asid {
@@ -5177,14 +5375,16 @@ pub mod riscv64 {
 
                 // SAFETY: Writing satp switches the page table root and ASID.
                 // sfence.vma afterwards flushes the TLB, which is required after satp change.
-                unsafe {
+
+                    unsafe {
                     core::arch::asm!(
                         "csrw satp, {0}",
                         "sfence.vma",
                         in(reg) satp,
                         options(nostack, nomem)
                     );
-                }
+                    }
+
             }
 
             // INV-ARCH-ASID-8 (collected 2026-11-27 from riscv64/mm/asid.rs): verbatim body; callers use the safe
@@ -5196,12 +5396,14 @@ pub mod riscv64 {
 
                 let satp: usize;
                 // SAFETY: Reading the satp CSR is a simple register read with no side effects.
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "csrr {0}, satp",
                         out(reg) satp,
                         options(nostack, nomem)
                     );
+                    }
                 }
                 satp
             }
@@ -5217,14 +5419,16 @@ pub mod riscv64 {
             pub fn flush_tlb_page(vaddr: usize, asid: u16)  {
 
                 // SAFETY: sfence.vma with a specific vaddr and asid invalidates a single TLB entry.
-                unsafe {
+
+                    unsafe {
                     core::arch::asm!(
                         "sfence.vma {0}, {1}",
                         in(reg) vaddr,
                         in(reg) asid,
                         options(nostack, nomem)
                     );
-                }
+                    }
+
             }
 
             // INV-ARCH-ASID-10 (collected 2026-11-27 from riscv64/mm/asid.rs): verbatim body; callers use the safe
@@ -5237,13 +5441,15 @@ pub mod riscv64 {
             pub fn flush_tlb_asid(asid: u16)  {
 
                 // SAFETY: sfence.vma with zero,asid flushes all TLB entries for the given ASID.
-                unsafe {
+
+                    unsafe {
                     core::arch::asm!(
                         "sfence.vma zero, {0}",
                         in(reg) asid,
                         options(nostack, nomem)
                     );
-                }
+                    }
+
             }
 
             // INV-ARCH-ASID-11 (collected 2026-11-27 from riscv64/mm/asid.rs): verbatim body; callers use the safe
@@ -5257,12 +5463,14 @@ pub mod riscv64 {
             pub fn flush_tlb_all()  {
 
                 // SAFETY: sfence.vma with zero,zero is a global TLB flush — always safe.
-                unsafe {
+
+                    unsafe {
                     core::arch::asm!(
                         "sfence.vma zero, zero",
                         options(nostack, nomem)
                     );
-                }
+                    }
+
             }
         }
 
@@ -5484,7 +5692,7 @@ pub mod riscv64 {
                                 // SAFETY: wfi halts this hart until an interrupt; the
                                 // context is dead and must never resume.
                                 loop {
-                                    unsafe { core::arch::asm!("wfi") };
+                                    { unsafe { core::arch::asm!("wfi") } };
                                 }
                             }
                         }
@@ -5560,7 +5768,7 @@ pub mod riscv64 {
                         // active root matches task->mm.
                         if access_type & FaultFlags::EXEC != 0 {
                             let satp_val: u64;
-                            unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp_val); }
+                            { unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp_val); } }
                             let exe = crate::sched::current()
                                 .map(|t|  (*t).get_exe_path() )
                                 .unwrap_or(&[]);
@@ -5709,7 +5917,7 @@ pub mod riscv64 {
                                     };
                                     if page_va != 0 {
                                     for w in 0..16 {
-                                        let v = unsafe { core::ptr::read_volatile((page_va + w*8) as *const u64) };
+                                        let v = { unsafe { core::ptr::read_volatile((page_va + w*8) as *const u64) } };
                                         crate::pr_err!("  PAGE[+{:#04x}] = {:#018x}", w*8, v);
                                     }
                                     }
@@ -5729,7 +5937,7 @@ pub mod riscv64 {
                                             let va = crate::arch::mm::phys_to_virt(
                                                 crate::arch::mm::PhysAddr::new(ppn as u64 * 4096)
                                             ).bits() as usize + (probe & 0xFFF);
-                                            let v = unsafe { core::ptr::read_volatile(va as *const u64) };
+                                            let v = { unsafe { core::ptr::read_volatile(va as *const u64) } };
                                             crate::pr_err!("  GPROBE {:#x} -> ppn={:#x} pte={:#x} val={:#x}", probe, ppn, bits, v);
                                         }
                                         None => crate::pr_err!("  GPROBE {:#x} UNMAPPED", probe),
@@ -5837,11 +6045,11 @@ pub mod riscv64 {
             #[allow(dead_code)]
             pub fn exception_table_count() -> usize  {
 
-                unsafe {
-                    let start = &__ex_table_start as *const ExceptionTableEntry;
-                    let end = &__ex_table_end as *const ExceptionTableEntry;
+
+                    let start = unsafe { &__ex_table_start as *const ExceptionTableEntry };
+                    let end = unsafe { &__ex_table_end as *const ExceptionTableEntry };
                     (end as usize - start as usize) / core::mem::size_of::<ExceptionTableEntry>()
-                }
+
             }
 
             // INV-ARCH-EXCEPTION-8 (collected 2026-11-27 from riscv64/mm/exception.rs): verbatim body; callers use the safe
@@ -5851,11 +6059,11 @@ pub mod riscv64 {
             #[allow(dead_code)]
             pub fn exception_table_empty() -> bool  {
 
-                unsafe {
-                    let start = &__ex_table_start as *const ExceptionTableEntry;
-                    let end = &__ex_table_end as *const ExceptionTableEntry;
+
+                    let start = unsafe { &__ex_table_start as *const ExceptionTableEntry };
+                    let end = unsafe { &__ex_table_end as *const ExceptionTableEntry };
                     start == end
-                }
+
             }
 
             // INV-ARCH-EXCEPTION-9 (collected 2026-11-27 from riscv64/mm/exception.rs): verbatim body; callers use the safe
@@ -5878,16 +6086,16 @@ pub mod riscv64 {
             /// performance impact is acceptable. Can use binary search for optimization (requires sorted table).
             pub fn fixup_exception(addr: u64) -> Option<u64>  {
 
-                unsafe {
-                    let start = &__ex_table_start as *const ExceptionTableEntry;
-                    let end = &__ex_table_end as *const ExceptionTableEntry;
+                {
+                    let start = unsafe { &__ex_table_start as *const ExceptionTableEntry };
+                    let end = unsafe { &__ex_table_end as *const ExceptionTableEntry };
 
                     // Calculate number of entries in table
                     let count = (end as usize - start as usize) / core::mem::size_of::<ExceptionTableEntry>();
 
                     // Linear search
                     for i in 0..count {
-                        let entry = &*start.add(i);
+                        let entry = unsafe { &*start.add(i) };
                         if entry.insn == addr {
                             return Some(entry.fixup);
                         }
@@ -5992,12 +6200,14 @@ pub mod riscv64 {
 
                         // Flush TLB
                         // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-                        unsafe {
+                        {
+                            unsafe {
                             core::arch::asm!(
                                 "sfence.vma {virt}, zero",
                                 virt = in(reg) virt,
                                 options(nomem, nostack)
                             )
+                            }
                         };
                     }
                 }
@@ -6032,12 +6242,14 @@ pub mod riscv64 {
 
                 // Flush TLB for this address
                 // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-                unsafe {
+                {
+                    unsafe {
                     core::arch::asm!(
                         "sfence.vma {virt}, zero",
                         virt = in(reg) virt,
                         options(nomem, nostack)
                     )
+                    }
                 };
             }
         }
@@ -6067,7 +6279,7 @@ pub mod riscv64 {
                 if is_linear_mapping(addr as usize) {
                     // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before rust_main.
                     // va_pa_offset is immutable after boot.
-                    let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+                    let va_pa_offset = { unsafe { KERNEL_MAP.va_pa_offset } };
                     PhysAddr::new(addr - va_pa_offset as u64)
                 } else if addr >= 0xffff_ffff_8000_0000 && addr < 0xffff_ffff_8100_0000 {
                     // Kernel image mapping: the kernel is linked at VA
@@ -6103,7 +6315,7 @@ pub mod riscv64 {
 
                 // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before rust_main.
                 // va_pa_offset is set once at boot and never modified afterwards.
-                let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+                let va_pa_offset = { unsafe { KERNEL_MAP.va_pa_offset } };
                 VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
             }
 
@@ -6282,7 +6494,8 @@ pub mod riscv64 {
                     crate::arch::ipi::flush_tlb_others();
                     let vaddr = virt_addr;
                     // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-                    unsafe {
+                    {
+                        unsafe {
                         asm!(
                             "fence",
                             "sfence.vma {0}, zero",
@@ -6290,6 +6503,7 @@ pub mod riscv64 {
                             in(reg) vaddr,
                             options(nostack)
                         )
+                        }
                     };
 
                     return CowFaultResult::Resolved;
@@ -6333,7 +6547,7 @@ pub mod riscv64 {
                 // lost-write/stale-read family behind the sigsuspend mask corruption).
                 crate::arch::ipi::flush_tlb_others();
                 // SAFETY: TLB fence.
-                unsafe { asm!("sfence.vma zero, zero") };
+                { unsafe { asm!("sfence.vma zero, zero") } };
 
                 // Now safe to release our share of the old page.
                 // Both refcount and mapcount must be released: the child's PTE no
@@ -6663,7 +6877,7 @@ pub mod riscv64 {
                 // flush_tlb_mm-style): IPI the peers, full-flush locally.
                 crate::arch::ipi::flush_tlb_others();
                 // SAFETY: TLB fence (memory-safe in any context).
-                unsafe { asm!("sfence.vma zero, zero", options(nostack, preserves_flags)) };
+                { unsafe { asm!("sfence.vma zero, zero", options(nostack, preserves_flags)) } };
 
                 Some(child_root_ppn)
             }
@@ -6740,12 +6954,14 @@ pub mod riscv64 {
                     // excess too, pure waste.
                     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
                     // SAFETY: fresh exclusive buddy block (INV-RE-ZP).
-                    unsafe {
+                    {
+                        unsafe {
                         core::ptr::write_bytes(
                             virt_addr_ptr.bits() as *mut u8,
                             0,
                             chunk_bytes,
                         )
+                        }
                     };
 
                     map_user_region(
@@ -6801,7 +7017,7 @@ pub mod riscv64 {
                 // Zero BEFORE mapping (same leak-window fix as alloc_and_map_user_memory).
                 let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
                 // SAFETY: fresh exclusive buddy block (INV-RE-ZP).
-                unsafe { core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size) };
+                { unsafe { core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size) } };
 
                 map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
@@ -6884,12 +7100,14 @@ pub mod riscv64 {
                     // information leak window on every execve.
                     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
                     // SAFETY: fresh exclusive buddy block (INV-RE-ZP).
-                    unsafe {
+                    {
+                        unsafe {
                         core::ptr::write_bytes(
                             virt_addr_ptr.bits() as *mut u8,
                             0,
                             block_pages * PAGE_SIZE as usize,
                         )
+                        }
                     };
 
                     // PRESERVE PRESENT LEAVES (Linux do_brk_flags only maps ABSENT
@@ -7011,9 +7229,13 @@ pub mod riscv64 {
                     let satp = Satp::sv39(self.pgd, 0);
                     // SAFETY: satp CSR write + TLB fence (register-level effects; the
                     // root PPN is this live mm's own).
-                    unsafe {
+                    {
+                        unsafe {
                         asm!("csrw satp, {}", in(reg) satp.bits());
+                        }
+                        unsafe {
                         asm!("sfence.vma zero, zero");
+                        }
                     }
                 }
 
@@ -7025,9 +7247,13 @@ pub mod riscv64 {
 
                     let satp = Satp::new(Satp::MODE_BARE, 0, 0);
                     // SAFETY: bare-mode satp write + TLB fence.
-                    unsafe {
+                    {
+                        unsafe {
                         asm!("csrw satp, {}", in(reg) satp.bits());
+                        }
+                        unsafe {
                         asm!("sfence.vma zero, zero");
+                        }
                     }
                 }
 
@@ -7038,7 +7264,7 @@ pub mod riscv64 {
                 pub fn flush_tlb()  {
 
                     // SAFETY: TLB fence (memory-safe in any context).
-                    unsafe { asm!("sfence.vma zero, zero") };
+                    { unsafe { asm!("sfence.vma zero, zero") } };
                 }
 
             // INV-ARCH-MM-OPS-20 (collected 2026-11-27 from riscv64/mm/mm_ops.rs): verbatim body; callers use the safe
@@ -7048,7 +7274,7 @@ pub mod riscv64 {
                 pub fn flush_tlb_addr_page(vaddr: PageVirtAddr)  {
 
                     // SAFETY: TLB fence (memory-safe in any context).
-                    unsafe { asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize()) };
+                    { unsafe { asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize()) } };
                 }
 
             // INV-ARCH-MM-OPS-19 (collected 2026-11-27 from riscv64/mm/mm_ops.rs): verbatim body; callers use the safe
@@ -7062,9 +7288,11 @@ pub mod riscv64 {
 
                     // SAFETY: phys_addr was just allocated by alloc_user_phys_page(), so the page is
                     // exclusively owned. phys_to_virt produces a valid kernel-virtual address for it.
-                    unsafe {
+                    {
                         let ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+                        unsafe {
                         core::ptr::write_bytes(ptr.bits() as *mut u8, 0, PAGE_SIZE_USIZE);
+                        }
                         core::sync::atomic::compiler_fence(Ordering::Release);
                     }
 
@@ -7082,22 +7310,34 @@ pub mod riscv64 {
                     // SAFETY: phys_addr is a valid page from the allocator; pfn_to_page_mut returns a valid
                     // pointer (or null). Null check guards the dereference. No aliasing: the page was just
                     // allocated and is not yet shared.
-                    unsafe {
+                    {
                         use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
                         let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
                         if !page.is_null() {
+                            unsafe {
                             (*page).set_flag(PageFlag::Anonymous);
+                            }
                             // SwapBacked + LRU membership: make the page reclaimable
                             // via swap-out (vmscan scans LRU_INACTIVE_ANON only).
+                            unsafe {
                             (*page).set_flag(PageFlag::SwapBacked);
+                            }
+                            unsafe {
                             (*page).set_index(virt_addr.bits() as usize / (PAGE_SIZE as usize));
+                            }
+                            unsafe {
                             (*page).inc_mapcount();
+                            }
+                            unsafe {
                             crate::mm::rmap::page_record_mapping(
                                 &*page,
                                 self as *const _ as usize,
                                 virt_addr.bits() as usize,
                             );
+                            }
+                            unsafe {
                             crate::mm::lru::page_add_anon_lru(&*page);
+                            }
                         }
                     }
 
@@ -7203,19 +7443,31 @@ pub mod riscv64 {
                                         if !page.is_null() {
                                             // SAFETY: phys_addr is freshly allocated and exclusively owned; the null
                                             // check ensures page is valid before dereference.
-                                            unsafe {
+                                            {
+                                                unsafe {
                                                 (*page).set_flag(PageFlag::Anonymous);
+                                                }
                                                 // SwapBacked + LRU membership: heap pages
                                                 // are swap-out candidates too (vmscan).
+                                                unsafe {
                                                 (*page).set_flag(PageFlag::SwapBacked);
+                                                }
+                                                unsafe {
                                                 (*page).set_index(addr / (PAGE_SIZE as usize));
+                                                }
+                                                unsafe {
                                                 (*page).inc_mapcount();
+                                                }
+                                                unsafe {
                                                 crate::mm::rmap::page_record_mapping(
                                                     &*page,
                                                     self as *const _ as usize,
                                                     addr,
                                                 );
+                                                }
+                                                unsafe {
                                                 crate::mm::lru::page_add_anon_lru(&*page);
+                                                }
                                             }
                                         }
                                     }
@@ -7351,8 +7603,10 @@ pub mod riscv64 {
 
                     // SAFETY: sfence.vma invalidates the entire TLB; required after clearing PTEs so
                     // subsequent accesses use the updated page table.
-                    unsafe {
+                    {
+                        unsafe {
                         asm!("sfence.vma zero, zero");
+                        }
                     }
 
                     // Remote shootdown (review 4.10): the sfence above only flushed the
@@ -7427,7 +7681,7 @@ pub mod riscv64 {
                     }
                     // sfence.vma invalidates TLB entries so the tightened permissions
                     // take effect immediately. SAFETY: TLB fence (memory-safe).
-                    unsafe { asm!("sfence.vma zero, zero") };
+                    { unsafe { asm!("sfence.vma zero, zero") } };
                 }
 
             // INV-ARCH-MM-OPS-15 (collected 2026-11-27 from riscv64/mm/mm_ops.rs): verbatim body; callers use the safe
@@ -7613,11 +7867,11 @@ pub mod riscv64 {
                     // fault (kernel heap is linearly mapped) and garbage values are
                     // filtered by the ledger validation below.
                     // SAFETY: see the comment above the closure.
-                    let (pid, root) = unsafe {
-                        let root = (*t)
+                    let (pid, root) = {
+                        let root = unsafe { (*t)
                             .mm_ptr_peek()
                             .map(|mm| (*mm).pgd)
-                            .unwrap_or(0);
+                            .unwrap_or(0) };
                         ((*t).pid() as u32, root)
                     };
                     roots[tasks] = (pid, root);
@@ -7663,14 +7917,14 @@ pub mod riscv64 {
                     // SAFETY: link_ok-validated frames are inside managed RAM and
                     // linearly mapped; the walk is read-only through the
                     // established table accessors.
-                    let root_table = unsafe { get_page_table_virt(root << 12) };
+                    let root_table = { unsafe { get_page_table_virt(root << 12) } };
                     for vpn2 in 0..256 {
                         if reads >= BUDGET {
                             break;
                         }
                         reads += 1;
                         // SAFETY: see above.
-                        let pte2 = unsafe { (*root_table).get(vpn2) };
+                        let pte2 = { unsafe { (*root_table).get(vpn2) } };
                         if !pte2.is_valid() {
                             continue;
                         }
@@ -7688,14 +7942,14 @@ pub mod riscv64 {
                             continue;
                         }
                         // SAFETY: link_ok validated.
-                        let table1 = unsafe { get_page_table_virt(ppn1 << 12) };
+                        let table1 = { unsafe { get_page_table_virt(ppn1 << 12) } };
                         for vpn1 in 0..512 {
                             if reads >= BUDGET {
                                 break;
                             }
                             reads += 1;
                             // SAFETY: see above.
-                            let pte1 = unsafe { (*table1).get(vpn1) };
+                            let pte1 = { unsafe { (*table1).get(vpn1) } };
                             if !pte1.is_valid() {
                                 continue;
                             }
@@ -7713,14 +7967,14 @@ pub mod riscv64 {
                                 continue;
                             }
                             // SAFETY: link_ok validated.
-                            let table0 = unsafe { get_page_table_virt(ppn0 << 12) };
+                            let table0 = { unsafe { get_page_table_virt(ppn0 << 12) } };
                             for vpn0 in 0..512 {
                                 if reads >= BUDGET {
                                     break;
                                 }
                                 reads += 1;
                                 // SAFETY: see above.
-                                let pte0 = unsafe { (*table0).get(vpn0) };
+                                let pte0 = { unsafe { (*table0).get(vpn0) } };
                                 if pte0.is_valid() && pte0.is_leaf() && pte0.ppn() == target_ppn {
                                     push(pid, root, 4, vpn1 as u32, vpn0 as u32);
                                 }
@@ -7749,8 +8003,10 @@ pub mod riscv64 {
                 let vpn2 = virt.vpn(2) as usize;
                 let ppn = phys.ppn();
 
-                unsafe {
+                {
+                    unsafe {
                     ROOT_PAGE_TABLE.set(vpn2, PageTableEntry::from_bits((ppn << 10) | flags));
+                    }
                 }
             }
 
@@ -7778,7 +8034,7 @@ pub mod riscv64 {
                 // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys
                 // (va_pa_offset = PAGE_OFFSET - phys_ram_base)
                 // SAFETY: single-CPU boot section; no concurrent reader exists.
-                unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET };
+                { unsafe { KERNEL_MAP.va_pa_offset = VA_PA_OFFSET } };
                 {
 
                     // Include X (execute) permission for kernel code in linear mapping
@@ -7813,7 +8069,7 @@ pub mod riscv64 {
                     }
 
                     // SAFETY: TLB fence (memory-safe in any context).
-                    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                    { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
                 }
             }
 
@@ -7840,7 +8096,7 @@ pub mod riscv64 {
                 // CR3/satp-class writes keep audited blocks.
                 // SAFETY: single-CPU boot section; the static root is exclusively
                 // owned here.
-                unsafe { ROOT_PAGE_TABLE.zero() };
+                { unsafe { ROOT_PAGE_TABLE.zero() } };
                 {
 
                     let root_ppn = root_page_table_ppn();
@@ -7921,6 +8177,7 @@ pub mod riscv64 {
 
                 // Get the VA-PA offset by comparing linked address with runtime address
                 let va_pa_offset: u64;
+                {
                 unsafe {
                 asm!(
                     "1:",
@@ -7932,6 +8189,7 @@ pub mod riscv64 {
                     options(nostack),
                 );
                 }
+                }
 
                 extern "C" {
                     static mut early_pg_dir: [u8; 4096];
@@ -7940,7 +8198,7 @@ pub mod riscv64 {
                 let early_pg_dir_va = &raw mut early_pg_dir as *mut u8 as u64;
                 let early_pg_dir_pa = early_pg_dir_va - va_pa_offset;
                 let early_pg_dir_ptr = early_pg_dir_pa as *mut PageTable;
-                let early_pg_dir_ref = unsafe { &mut *early_pg_dir_ptr };
+                let early_pg_dir_ref = { unsafe { &mut *early_pg_dir_ptr } };
 
                 early_pg_dir_ref.zero();
 
@@ -8001,12 +8259,16 @@ pub mod riscv64 {
                 let ppn = (phys >> 12) as u64;
                 let entry_bits = (ppn << 10) | flags;
 
-                unsafe {
+                {
+                    unsafe {
                     ROOT_PAGE_TABLE.set(vpn2 as usize, PageTableEntry::from_bits(entry_bits));
+                    }
                 }
 
-                unsafe {
+                {
+                    unsafe {
                     asm!("sfence.vma", options(nomem, nostack));
+                    }
                 }
             }
 
@@ -8045,7 +8307,7 @@ pub mod riscv64 {
                     v += PAGE_SIZE;
                 }
                 // SAFETY: TLB fence.
-                unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
             }
 
             // INV-ARCH-MMU-INIT-25 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
@@ -8088,7 +8350,7 @@ pub mod riscv64 {
                     }
                 }
                 // SAFETY: TLB fence.
-                unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
             }
 
             // INV-ARCH-MMU-INIT-26 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
@@ -8104,7 +8366,7 @@ pub mod riscv64 {
 
                 let ok = map_kernel_page_noflush(virt, phys, flags);
                 // SAFETY: TLB fence.
-                unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
                 ok
             }
 
@@ -8124,9 +8386,11 @@ pub mod riscv64 {
 
                 // Get root page table from current satp
                 // SAFETY: CSR read (register-only).
-                let satp: u64 = unsafe {
+                let satp: u64 = {
                     let v;
+                    unsafe {
                     asm!("csrr {}, satp", out(reg) v);
+                    }
                     v
                 };
                 let root_ppn = satp & 0xFFFFFFFFFFFFF;
@@ -8148,7 +8412,7 @@ pub mod riscv64 {
                     let ppn = table_phys >> PAGE_SHIFT;
                     root.set(vpn2, PageTableEntry::new_table(ppn));
                     // SAFETY: TLB fence.
-                    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                    { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
                     ppn
                 };
 
@@ -8169,7 +8433,7 @@ pub mod riscv64 {
                     let ppn = table_phys >> PAGE_SHIFT;
                     table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
                     // SAFETY: TLB fence.
-                    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                    { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
                     ppn
                 };
 
@@ -8207,7 +8471,7 @@ pub mod riscv64 {
                     let ppn = table_phys >> PAGE_SHIFT;
                     root.set(vpn2, PageTableEntry::new_table(ppn));
                     // SAFETY: TLB fence (memory-safe for any context).
-                    unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                    { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
                     ppn
                 };
 
@@ -8262,7 +8526,7 @@ pub mod riscv64 {
                 }
                 // One fence for the whole region (batch aggregation).
                 // SAFETY: TLB fence.
-                unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) };
+                { unsafe { asm!("sfence.vma zero, zero", options(nomem, nostack)) } };
             }
 
             // INV-ARCH-MMU-INIT-30 (collected 2026-11-27 from riscv64/mm/mmu_init.rs): verbatim body; callers use the safe
@@ -8287,7 +8551,7 @@ pub mod riscv64 {
                 // Flush TLB (single-page callers — page faults, mremap, io_uring —
                 // need the new translation visible before the retrying access).
                 // SAFETY: TLB fence (memory-safe in any context).
-                unsafe { asm!("sfence.vma") };
+                { unsafe { asm!("sfence.vma") } };
                 ok
             }
 
@@ -8319,9 +8583,11 @@ pub mod riscv64 {
                     if POLLUTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
                         let mut frames: [u64; 8] = [0; 8];
                         // SAFETY: register-only s0 read + the dfx chain-walk edge.
-                        let s0: u64 = unsafe {
+                        let s0: u64 = {
                             let v;
+                            unsafe {
                             core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
+                            }
                             v
                         };
                          crate::debug::memwatch::walk_fp_chain(s0, &mut frames) ;
@@ -8499,15 +8765,15 @@ pub mod riscv64 {
                         // SAFETY: the scheduler's task-table raw-pointer lookups
                         // (diagnostic report path only) — same pattern as
                         // task_pid_alive below.
-                        let (owner_found, maps, root) = unsafe {
+                        let (owner_found, maps, root) = {
                             let owner_task = crate::sched::find_task_by_pid(owner_pid);
                             let owner_found =
-                                !owner_task.is_null() && (*owner_task).pid() == owner_pid;
+                                unsafe { !owner_task.is_null() && (*owner_task).pid() == owner_pid };
                             if owner_found {
-                                let root = (*owner_task)
+                                let root = unsafe { (*owner_task)
                                     .address_space()
                                     .map(|mm| mm.root_ppn())
-                                    .unwrap_or(0);
+                                    .unwrap_or(0) };
                                 (true, owner_maps_pfn(root, pfn), root)
                             } else {
                                 (false, (0, [0usize; 4]), 0)
@@ -8643,11 +8909,11 @@ pub mod riscv64 {
                 // SAFETY: pid-hash lookup; the returned Task is only read (pid, mm
                 // root) on this rare diagnostic path.
                 let owner_task =  crate::sched::find_task_by_pid(owner_pid) ;
-                let owner_found = !owner_task.is_null() && unsafe { (*owner_task).pid() == owner_pid };
+                let owner_found = !owner_task.is_null() && { unsafe { (*owner_task).pid() == owner_pid } };
                 if !owner_found {
                     return 0;
                 }
-                let root = unsafe { (*owner_task).address_space() }
+                let root = { unsafe { (*owner_task).address_space() } }
                     .map(|mm| mm.root_ppn())
                     .unwrap_or(0);
                 if root == 0 {
@@ -8758,14 +9024,16 @@ pub mod riscv64 {
                             let page = crate::mm::page_desc::pfn_to_page(ppn as usize);
                             if !page.is_null() {
                                 // SAFETY: read-only descriptor access on the diagnostic path.
-                                let (rc, linked, lru, anon) = unsafe {
+                                let (rc, linked, lru, anon) = {
                                     use crate::mm::page_desc::PageFlag;
+                                    unsafe {
                                     (
                                         (*page).refcount(),
                                         (*page).test_flag(PageFlag::OnFreelist),
                                         (*page).test_flag(PageFlag::Lru),
                                         (*page).test_flag(PageFlag::Anonymous),
                                     )
+                                    }
                                 };
                                 crate::pr_err!(
                                     "  PTLEDGER: frame state refcount={} on_freelist={} lru={} anon={}",
@@ -8811,7 +9079,7 @@ pub mod riscv64 {
                 // Early tables live in BSS at KERNEL_LINK_ADDR; convert VA→PA using
                 // va_kernel_pa_offset (same pattern as alloc_page_table).
                 // SAFETY: KERNEL_MAP is set before any Late-stage free can run.
-                let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                 let early_pmd_start = (&raw const EARLY_PMD as u64).wrapping_sub(offset);
                 let early_pmd_end = early_pmd_start + (NUM_EARLY_PMD * PAGE_SIZE as usize) as u64;
                 let early_pte_start = (&raw const EARLY_PTE as u64).wrapping_sub(offset);
@@ -8862,7 +9130,7 @@ pub mod riscv64 {
                 // memwatch evidence: fut_calls=618, fut_tables=0).
                 let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
                 // SAFETY: boot section, single CPU.
-                let root_phys = root_virt.wrapping_sub(unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64);
+                let root_phys = root_virt.wrapping_sub({ unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64);
                 let root_static = PtTable::static_root();
                 for vpn2 in 0..512usize {
                     let pte2 = root_static.get(vpn2);
@@ -8907,20 +9175,20 @@ pub mod riscv64 {
                         // Convert virtual address to physical: phys = virt - va_kernel_pa_offset
                         // SAFETY: single-CPU boot section; each pool slot is claimed
                         // exclusively by its fetch_add (INV-RE-ZP).
-                        let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+                        let offset = { unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64;
                         let pmd_idx = EARLY_PMD_NEXT.fetch_add(1, Ordering::AcqRel);
                         if pmd_idx < NUM_EARLY_PMD {
-                            let table_virt = unsafe { &raw const EARLY_PMD[pmd_idx] as u64 };
+                            let table_virt = { unsafe { &raw const EARLY_PMD[pmd_idx] as u64 } };
                             let table_phys = table_virt.wrapping_sub(offset);
-                            unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) };
+                            { unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) } };
                             return Some(table_phys);
                         }
 
                         let pte_idx = EARLY_PTE_NEXT.fetch_add(1, Ordering::AcqRel);
                         if pte_idx < NUM_EARLY_PTE {
-                            let table_virt = unsafe { &raw const EARLY_PTE[pte_idx] as u64 };
+                            let table_virt = { unsafe { &raw const EARLY_PTE[pte_idx] as u64 } };
                             let table_phys = table_virt.wrapping_sub(offset);
-                            unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) };
+                            { unsafe { core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize) } };
                             return Some(table_phys);
                         }
 
@@ -8937,7 +9205,7 @@ pub mod riscv64 {
                         // Use linear mapping (must be available at this point)
                         let virt_addr = phys_to_virt(PhysAddr::new(phys_addr as u64));
                         // SAFETY: fresh exclusive memblock frame.
-                        unsafe { core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize) };
+                        { unsafe { core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize) } };
                         Some(phys_addr as u64)
                     }
                     AllocStage::Late => {
@@ -9024,9 +9292,11 @@ pub mod riscv64 {
                                 [0; crate::debug::memwatch::SITE_FRAMES];
                             // SAFETY: register-only read of s0; the chain walk is the
                             // dfx stack-forensics edge.
-                            let mw_s0: u64 = unsafe {
+                            let mw_s0: u64 = {
                                 let v;
+                                unsafe {
                                 core::arch::asm!("mv {s}, s0", s = out(reg) v, options(nomem, nostack));
+                                }
                                 v
                             };
                              crate::debug::memwatch::walk_fp_chain(mw_s0, &mut mw_frames) ;
@@ -9038,7 +9308,7 @@ pub mod riscv64 {
 
                         let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
                         // SAFETY: fresh exclusive zone frame.
-                        unsafe { core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize) };
+                        { unsafe { core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize) } };
                         Some(phys_addr)
                     }
                 }
@@ -9062,7 +9332,7 @@ pub mod riscv64 {
 
                 let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
                 // SAFETY: boot section, single CPU.
-                let root_phys = root_virt.wrapping_sub(unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64);
+                let root_phys = root_virt.wrapping_sub({ unsafe { KERNEL_MAP.va_kernel_pa_offset } } as u64);
                 root_phys / PAGE_SIZE
             }
 
@@ -9235,7 +9505,7 @@ pub mod riscv64 {
                     // race loser).
                     return MmFaultResult::Handled;
                 }
-                unsafe {
+                {
                     if !map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags) {
                         // PT allocation failure (fake-OOM family): free the swap-in
                         // page, deliver OOM.
@@ -9245,6 +9515,7 @@ pub mod riscv64 {
 
                     // TLB flush
                     let vaddr = fault_addr.bits();
+                    unsafe {
                     core::arch::asm!(
                         "fence",
                         "sfence.vma {0}, zero",
@@ -9252,6 +9523,7 @@ pub mod riscv64 {
                         in(reg) vaddr,
                         options(nostack, preserves_flags)
                     );
+                    }
                 }
 
                 // Set up rmap for the swapped-in page
@@ -9297,15 +9569,17 @@ pub mod riscv64 {
                 let vpn0 = ((vaddr.bits() >> 12) & 0x1FF) as usize;
                 // SAFETY: same walk as read_pte_raw; the leaf exists (the caller just
                 // read it), so intermediate tables are present. Only the leaf changes.
-                unsafe {
-                    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
-                    let pte2 = (*root_table).get(vpn2);
+                {
+                    let root_table = unsafe { get_page_table_virt(root_ppn << PAGE_SHIFT) };
+                    let pte2 = unsafe { (*root_table).get(vpn2) };
                     if !pte2.is_valid() { return; }
-                    let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
-                    let pte1 = (*table1).get(vpn1);
+                    let table1 = unsafe { get_page_table_virt(pte2.ppn() << PAGE_SHIFT) };
+                    let pte1 = unsafe { (*table1).get(vpn1) };
                     if !pte1.is_valid() || pte1.is_leaf() { return; }
-                    let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+                    let table0 = unsafe { get_page_table_virt(pte1.ppn() << PAGE_SHIFT) };
+                    unsafe {
                     (*table0).set(vpn0, PageTableEntry::from_bits(bits));
+                    }
                 }
             }
 
@@ -9362,7 +9636,7 @@ pub mod riscv64 {
                     };
                     // SAFETY: freshly allocated page, exclusively owned here.
                     let page_ptr = phys_to_virt(PhysAddr::new(phys)).bits() as *mut u8;
-                    unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                    { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
 
                     let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
                     // R7-C3 twin: re-check under the lock — a CLONE_VM sibling may
@@ -9383,7 +9657,8 @@ pub mod riscv64 {
                     }
                     // Address-specific TLB flush (same discipline as the single-page
                     // path).
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "fence",
                             "sfence.vma {0}, zero",
@@ -9391,6 +9666,7 @@ pub mod riscv64 {
                             in(reg) va,
                             options(nostack, preserves_flags)
                         );
+                        }
                     }
                     // Bookkeeping: the Anonymous arm of the single-page path.
                     {
@@ -9514,8 +9790,9 @@ pub mod riscv64 {
                             // Permissions correct, flush TLB
                             // SAFETY: sfence.vma with a specific virtual address invalidates TLB entries
                             // for that address. The fence instructions ensure memory ordering.
-                            unsafe {
+                            {
                                 let vaddr = fault_addr.bits();
+                                unsafe {
                                 core::arch::asm!(
                                     "fence",
                                     "sfence.vma {0}, zero",
@@ -9523,6 +9800,7 @@ pub mod riscv64 {
                                     in(reg) vaddr,
                                     options(nostack, preserves_flags)
                                 );
+                                }
                             }
                             return MmFaultResult::Handled;
                         }
@@ -9587,7 +9865,7 @@ pub mod riscv64 {
                             return Some(live as usize);
                         }
                         // SAFETY: inode cell written at open time; read-only.
-                        let inode_opt = unsafe { &*f.inode.get() };
+                        let inode_opt = { unsafe { &*f.inode.get() } };
                         inode_opt.as_ref().map(|i| i.get_size() as usize)
                     })
                     .unwrap_or(vma_file_size as usize);
@@ -9661,8 +9939,9 @@ pub mod riscv64 {
                                     let new_pte = (now & !0x3FF) | flags;
                                     write_pte_raw(root_ppn, page_base, new_pte);
                                     // SAFETY: sfence.vma for this address; kernel ctx.
-                                    unsafe {
+                                    {
                                         let va = page_base.bits();
+                                        unsafe {
                                         core::arch::asm!(
                                             "fence",
                                             "sfence.vma {0}, zero",
@@ -9670,6 +9949,7 @@ pub mod riscv64 {
                                             in(reg) va,
                                             options(nostack, preserves_flags)
                                         );
+                                        }
                                     }
                                     return MmFaultResult::Handled;
                                 }
@@ -9745,7 +10025,7 @@ pub mod riscv64 {
                                             // is harmless I/O.
                                             if vma_flags.is_writable() {
                                                 if let Some(inode) =
-                                                    unsafe { &*f.inode.get() }.as_ref()
+                                                    { unsafe { &*f.inode.get() } }.as_ref()
                                                 {
                                                     crate::fs::page_cache::get_page_cache().mark_dirty(
                                                         inode.fs_id,
@@ -9831,12 +10111,12 @@ pub mod riscv64 {
                     match vma_type {
                         VmaType::Anonymous => {
                             // SAFETY: fresh exclusive page (INV-RE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                         }
                         VmaType::FileBacked => {
                             // Zero-fill the page first (for partial reads and beyond-EOF)
                             // SAFETY: fresh exclusive page (INV-RE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
 
                             // Read file data if we have a valid fd
                             // (bounds use the CURRENT inode size when the pinned
@@ -9893,11 +10173,13 @@ pub mod riscv64 {
                                         // Zero remaining bytes after file data (partial last page)
                                         if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
                                             // SAFETY: same fresh page; tail zero.
-                                            unsafe {
+                                            {
+                                                unsafe {
                                                 core::ptr::write_bytes(
                                                     page_ptr.add(bytes_read as usize), 0,
                                                     PAGE_SIZE_USIZE - bytes_read as usize,
                                                 )
+                                                }
                                             };
                                         }
                                     }
@@ -9910,7 +10192,7 @@ pub mod riscv64 {
                         }
                         VmaType::SharedMemory => {
                             // SAFETY: fresh exclusive page (INV-RE-ZP).
-                            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+                            { unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) } };
                         }
                     }
                 }
@@ -10021,7 +10303,8 @@ pub mod riscv64 {
                     // Address-specific TLB flush
                     let vaddr = fault_addr.bits();
                     // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "fence",
                             "sfence.vma {0}, zero",
@@ -10029,6 +10312,7 @@ pub mod riscv64 {
                             in(reg) vaddr,
                             options(nostack, preserves_flags)
                         )
+                        }
                     };
                 }
 
@@ -10234,7 +10518,7 @@ pub mod riscv64 {
                     return None;
                 }
                 // SAFETY: inode cell written at open time, read-only afterwards.
-                let inode = unsafe { &*file.inode.get() }.as_ref()?;
+                let inode = { unsafe { &*file.inode.get() } }.as_ref()?;
                 let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
                 let page_index = (file_offset / PAGE_SIZE_USIZE) as u64;
                 let cache = crate::fs::page_cache::get_page_cache();
@@ -10261,7 +10545,7 @@ pub mod riscv64 {
                     return None;
                 }
                 // SAFETY: same read-only inode resolution as above.
-                let inode = unsafe { &*file.inode.get() }.as_ref()?;
+                let inode = { unsafe { &*file.inode.get() } }.as_ref()?;
                 static ZERO_PAGE: [u8; 4096] = [0; 4096];
                 cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &ZERO_PAGE);
                 cache.get_phys(fs_id, ino, page_index)
@@ -10358,13 +10642,17 @@ pub mod riscv64 {
                 // Initialize page content based on type
                 // SAFETY: page_ptr is derived from phys_to_virt() on a freshly allocated page
                 // (alloc_user_phys_page). The page is PAGE_SIZE bytes and exclusively owned.
-                unsafe {
+                {
                     match vma_type {
                         VmaType::Anonymous => {
+                            unsafe {
                             core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                            }
                         }
                         VmaType::FileBacked | VmaType::SharedMemory => {
+                            unsafe {
                             core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                            }
                         }
                         VmaType::Device => {
                             // Device mapping: don't zero
@@ -10432,7 +10720,8 @@ pub mod riscv64 {
                     // Address-specific TLB flush
                     let vaddr = fault_addr.bits();
                     // SAFETY: ASID-scoped TLB fence (memory-safe in any context).
-                    unsafe {
+                    {
+                        unsafe {
                         core::arch::asm!(
                             "fence",
                             "sfence.vma {0}, zero",
@@ -10440,6 +10729,7 @@ pub mod riscv64 {
                             in(reg) vaddr,
                             options(nostack, preserves_flags)
                         )
+                        }
                     };
                 }
 
@@ -10498,11 +10788,13 @@ pub mod riscv64 {
 
                 // SAFETY: Reading the satp CSR via csrr is always safe; it is a supervisor-mode register
                 // that is always accessible and the output register is a local binding with no aliasing concerns.
-                unsafe {
+
                     let satp: u64;
+                    unsafe {
                     asm!("csrr {}, satp", out(reg) satp);
+                    }
                     Satp(satp)
-                }
+
             }
         }
         }
