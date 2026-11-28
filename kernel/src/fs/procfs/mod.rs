@@ -886,6 +886,32 @@ self.create_dynamic_file("cgroups", || {
             sysctl::write_sched_schedstats,
             self.alloc_ino(),
         )));
+        // Watchdog / hung-task knobs (reference names; defaults preserve
+        // the pre-knob behavior: 120s hung task, softlockup at 10s).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"hung_task_timeout_secs".to_vec(),
+            sysctl::generate_hung_task_timeout_secs,
+            sysctl::write_hung_task_timeout_secs,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"hung_task_panic".to_vec(),
+            sysctl::generate_hung_task_panic,
+            sysctl::write_hung_task_panic,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"watchdog".to_vec(),
+            sysctl::generate_watchdog,
+            sysctl::write_watchdog,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"watchdog_thresh".to_vec(),
+            sysctl::generate_watchdog_thresh,
+            sysctl::write_watchdog_thresh,
+            self.alloc_ino(),
+        )));
         // Highest supported capability number (read by libcap-ng init()).
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"cap_last_cap".to_vec(),
@@ -2272,6 +2298,17 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
     match node.sysctl_write {
         Some(write_fn) => {
+            // Whitespace-only payload: the guest shell's `echo N > file`
+            // stdio writes the value and the trailing "\n" as SEPARATE
+            // write() calls, so the second write arrives alone. Same rule
+            // as OomScoreAdj above and sysrq write_trigger: it is this
+            // guest's stdio behavior, not an intent to store a value —
+            // accept it as a no-op. (Drill repro: every `echo N >
+            // /proc/sys/...` returned EINVAL even though the value had
+            // already applied — echo surfaced the failed newline write.)
+            if buf.iter().all(|b| matches!(b, b' ' | b'\t' | b'\n')) {
+                return buf.len() as isize;
+            }
             let ret = write_fn(buf);
             if ret != 0 {
                 ret as isize

@@ -15,11 +15,45 @@ use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::MAX_CPUS;
 use crate::debug::taint;
 use crate::debug::backtrace;
-use crate::debug::backtrace::ConsoleWriter;
-use core::fmt::Write;
 
-/// Softlockup threshold in seconds (default: 10s)
-const SOFTLOCKUP_THRESHOLD_SECS: u64 = 10;
+/// Softlockup threshold in seconds (default: 10s) — the live value behind
+/// /proc/sys/kernel/watchdog_thresh (reference default 10; clamped
+/// 1..=60 by the sysctl write, the reference's proc handler bounds).
+static SOFTLOCKUP_THRESHOLD_SECS: AtomicU64 = AtomicU64::new(10);
+
+/// Master watchdog switch (default: on) — /proc/sys/kernel/watchdog.
+/// Covers the softlockup detector; the hung-task detector has its own
+/// kernel.hung_task_timeout_secs knob (reference split).
+static WATCHDOG_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Live threshold (s) — sysctl read face.
+pub fn threshold_secs() -> u64 {
+    SOFTLOCKUP_THRESHOLD_SECS.load(Ordering::Relaxed)
+}
+
+/// Set the threshold (s). Called by the sysctl write (already clamped).
+pub fn set_threshold_secs(v: u64) {
+    SOFTLOCKUP_THRESHOLD_SECS.store(v, Ordering::Relaxed);
+}
+
+pub fn watchdog_enabled() -> bool {
+    WATCHDOG_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Enable/disable the softlockup detector. On re-enable, re-stamp every
+/// CPU's touch timestamp — a long disabled window must not trip instant
+/// reports on the first check (the reference refreshes timestamps when
+/// the watchdog threads come back up).
+pub fn set_watchdog_enabled(v: bool) {
+    WATCHDOG_ENABLED.store(v, Ordering::Relaxed);
+    if v {
+        let now = now_ns();
+        for i in 0..MAX_CPUS {
+            TOUCH_TS[i].store(now, Ordering::Release);
+            REPORTED[i].store(false, Ordering::Release);
+        }
+    }
+}
 
 /// Per-CPU timestamp of last scheduler tick (nanoseconds)
 static TOUCH_TS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -137,12 +171,12 @@ pub fn cpu_irq_frozen_ms(cpu: usize) -> u64 {
 /// Called periodically from timer interrupt handler.
 /// Reports any CPU that hasn't been touched for longer than the threshold.
 pub fn check() {
-    if !ENABLED.load(Ordering::Acquire) {
+    if !ENABLED.load(Ordering::Acquire) || !watchdog_enabled() {
         return;
     }
 
     let now = now_ns();
-    let threshold_ns = SOFTLOCKUP_THRESHOLD_SECS * 1_000_000_000;
+    let threshold_ns = threshold_secs().saturating_mul(1_000_000_000);
 
     // R57: refresh the timer-count liveness table before any consumer
     // (the scheduler's slot-capture steal) reads it.
@@ -198,11 +232,14 @@ pub fn check() {
             }
 
             let elapsed_secs = elapsed / 1_000_000_000;
-            let mut w = ConsoleWriter::new();
 
-            let _ = write!(
-                w,
-                "BUG: soft lockup - CPU#{} stuck for {}s! timer_irq={}\n",
+            // Through the printk ring (KERN_ERR), same discipline as the
+            // hung-task report: the raw-uart ConsoleWriter bypassed the
+            // ring, so `dmesg` never saw the splat and it was lost after
+            // reboot (2026-11-28 drill b3 class). KERN_ERR enters the ring
+            // at any console_loglevel and matches the reference class.
+            crate::pr_err!(
+                "BUG: soft lockup - CPU#{} stuck for {}s! timer_irq={}",
                 cpu, elapsed_secs, timer_cnt
             );
 
@@ -211,11 +248,12 @@ pub fn check() {
             if !stuck_task.is_null() {
                 let pid = crate::debug::forensics_edges::t_pid(stuck_task);
                 let pc = crate::debug::forensics_edges::t_preempt_count(stuck_task);
-                let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
+                crate::pr_err!("  CPU: {} PID: {} pc={:#x}", cpu, pid, pc);
             }
 
-            // Stack trace
-            backtrace::dump_stack();
+            // Stack trace — ring variant (raw-uart dump_stack() is
+            // panic-only).
+            backtrace::dump_stack_ring();
 
             // oh-crash 91st: the DETECTOR's own chain (above) is not the
             // stuck CPU's. Poke the stuck CPU over the IRQ_WORK IPI and

@@ -10,17 +10,36 @@
 //! for longer than the threshold.
 
 #![forbid(unsafe_code)]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::debug::taint;
 use crate::debug::backtrace;
-use crate::debug::backtrace::ConsoleWriter;
-use core::fmt::Write;
 
-/// Hung task timeout in seconds (default: 120s)
-const HUNG_TASK_TIMEOUT_SECS: u64 = 120;
+/// Hung task timeout in seconds (default: 120s) — the live value behind
+/// /proc/sys/kernel/hung_task_timeout_secs (0 disables the detector, like
+/// the reference).
+static HUNG_TASK_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(120);
 
-/// Check interval (timeout / 2)
-const HUNG_TASK_CHECK_INTERVAL_SECS: u64 = HUNG_TASK_TIMEOUT_SECS / 2;
+/// Panic instead of reporting when a hung task is detected (default: off)
+/// — /proc/sys/kernel/hung_task_panic.
+static HUNG_TASK_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// Live timeout (s) — sysctl read face.
+pub fn timeout_secs() -> u64 {
+    HUNG_TASK_TIMEOUT_SECS.load(Ordering::Relaxed)
+}
+
+/// Set the timeout (s); 0 disables detection. Called by the sysctl write.
+pub fn set_timeout_secs(v: u64) {
+    HUNG_TASK_TIMEOUT_SECS.store(v, Ordering::Relaxed);
+}
+
+pub fn panic_on_hung_task() -> bool {
+    HUNG_TASK_PANIC.load(Ordering::Relaxed)
+}
+
+pub fn set_panic_on_hung_task(v: bool) {
+    HUNG_TASK_PANIC.store(v, Ordering::Relaxed);
+}
 
 /// Whether khungtaskd is running
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -62,16 +81,19 @@ pub fn init() {
 extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
     use crate::process::task::TaskState;
 
-    // Check interval in jiffies (timeout/2, at least one tick).
-    let interval_jiffies = (HUNG_TASK_CHECK_INTERVAL_SECS
-        * crate::config::KERNEL_HZ as u64)
-        .max(1);
-
     loop {
         // Check for stop request
         if crate::process::kthread::kthread_should_stop() {
             break;
         }
+
+        // Check interval in jiffies — timeout/2 (Linux check_hung_task
+        // cadence), re-read every round so a live sysctl write of
+        // hung_task_timeout_secs takes effect without restarting the
+        // thread. Saturating: a huge sysctl value must not wrap.
+        let interval_jiffies = (timeout_secs() / 2)
+            .saturating_mul(crate::config::KERNEL_HZ as u64)
+            .max(1);
 
         // --- Periodic sleep with a real waker (review批次8: the old loop
         // set INTERRUPTIBLE and scheduled with NO waker armed — khungtaskd
@@ -145,8 +167,14 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 /// was >= MAX_TASKS, which on this system means essentially all of them,
 /// review批次8).
 fn check_tasks() {
+    // timeout_secs == 0 disables the detector (reference semantic of
+    // /proc/sys/kernel/hung_task_timeout_secs = 0).
+    let timeout = timeout_secs();
+    if timeout == 0 {
+        return;
+    }
     let now = now_ns();
-    let timeout_ns = HUNG_TASK_TIMEOUT_SECS * 1_000_000_000;
+    let timeout_ns = timeout.saturating_mul(1_000_000_000);
 
     crate::sched::for_each_task(|task| {
         // The walk hands &Task under the bucket lock; reads and atomic
@@ -179,6 +207,16 @@ fn check_tasks() {
                     // Hung task detected!
                     report_hung_task(task, elapsed / 1_000_000_000);
 
+                    // kernel.hung_task_panic=1: die instead of waiting for
+                    // more reports (reference check_hung_task panic path).
+                    if panic_on_hung_task() {
+                        panic!(
+                            "hung_task: task {} blocked for more than {} seconds",
+                            task_ref.pid(),
+                            elapsed / 1_000_000_000
+                        );
+                    }
+
                     // Reset to avoid repeated reports
                     task_ref.hung_task_since.store(now, Ordering::Release);
                 }
@@ -188,18 +226,22 @@ fn check_tasks() {
 }
 
 /// Report a hung task.
+///
+/// Emitted through the printk ring (KERN_ERR), NOT the raw-uart
+/// ConsoleWriter: the old report bypassed the ring entirely, so `dmesg`
+/// never saw the splat and it was lost after reboot (2026-11-28 drill b3).
+/// KERN_ERR lands in the ring at any console_loglevel and matches the
+/// reference's hung-task class. The raw-uart path stays reserved for
+/// true-panic contexts (trap/panic printer, oops).
 fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
-    let mut w = ConsoleWriter::new();
-
     // rwlock-livelock: comm was a pid placeholder — the ub2404 wedge left
     // an anonymous D-state task (312) whose identity decided the whole
     // anatomy. comm() exists (the W2 refusal print uses it).
     let comm_b = task_ref.comm();
     let comm_end = comm_b.iter().position(|&b| b == 0).unwrap_or(16);
     let comm = core::str::from_utf8(&comm_b[..comm_end]).unwrap_or("?");
-    let _ = write!(
-        w,
-        "INFO: task {}:{} blocked for more than {} seconds\n",
+    crate::pr_err!(
+        "INFO: task {}:{} blocked for more than {} seconds",
         task_ref.pid(),
         comm,
         elapsed_secs
@@ -222,39 +264,45 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
             .and_then(|p| crate::debug::forensics_edges::task_borrow(p as *mut crate::process::task::Task))
             .map(|p| p.pid())
             .unwrap_or(0);
-        let _ = write!(
-            w,
-            "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={} lastsys={} a0={:#x}",
-            t.pid(),
-            t.state().bits(),
-            t.on_cpu() as u8,
-            claim,
-            t.pick_state(),
-            t.ti_cpu(),
-            t.sched_entity().is_on_rq() as u8,
-            vfork_ppid,
-            t.last_syscall_nr.load(Ordering::Relaxed),
-            t.last_syscall_a0.load(Ordering::Relaxed),
-        );
-        // rwlock-livelock: the parked task's user entry frame — syscall
-        // nr + user rip decide "kernel thread" (no user frame) vs
-        // "userspace task blocked in syscall X at library Y". The old
-        // print left task 312 anonymous; lastsys/a0 stayed 0.
-        if let Some(pr) = t.pt_regs_ref() {
-            #[cfg(feature = "x86_64")]
-            let (urip, _usp, unr, _ua0, _ua1, _ua2) =
-                (pr.rip, pr.rsp, pr.orig_rax, pr.rdi, pr.rsi, pr.rdx);
-            #[cfg(feature = "riscv64")]
-            let (urip, _usp, unr, _ua0, _ua1, _ua2) =
-                (pr.epc, pr.sp, pr.a7, pr.orig_a0, pr.a1, pr.a2);
-            #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
-            let (urip, unr) = (0u64, 0u64);
-            let _ = write!(w, " unrip={:#x} unrsys={}", urip, unr as i64);
+        // Built into a String: the HUNG-CTX record carries the optional
+        // user-entry frame tail (unrip/unrsys) after the fixed fields, and
+        // printk takes one format pass per record.
+        let mut line = alloc::string::String::new();
+        {
+            use core::fmt::Write as _;
+            let _ = write!(
+                line,
+                "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={} lastsys={} a0={:#x}",
+                t.pid(),
+                t.state().bits(),
+                t.on_cpu() as u8,
+                claim,
+                t.pick_state(),
+                t.ti_cpu(),
+                t.sched_entity().is_on_rq() as u8,
+                vfork_ppid,
+                t.last_syscall_nr.load(Ordering::Relaxed),
+                t.last_syscall_a0.load(Ordering::Relaxed),
+            );
+            // rwlock-livelock: the parked task's user entry frame — syscall
+            // nr + user rip decide "kernel thread" (no user frame) vs
+            // "userspace task blocked in syscall X at library Y". The old
+            // print left task 312 anonymous; lastsys/a0 stayed 0.
+            if let Some(pr) = t.pt_regs_ref() {
+                #[cfg(feature = "x86_64")]
+                let (urip, _usp, unr, _ua0, _ua1, _ua2) =
+                    (pr.rip, pr.rsp, pr.orig_rax, pr.rdi, pr.rsi, pr.rdx);
+                #[cfg(feature = "riscv64")]
+                let (urip, _usp, unr, _ua0, _ua1, _ua2) =
+                    (pr.epc, pr.sp, pr.a7, pr.orig_a0, pr.a1, pr.a2);
+                #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                let (urip, unr) = (0u64, 0u64);
+                let _ = write!(line, " unrip={:#x} unrsys={}", urip, unr as i64);
+            }
         }
-        let _ = writeln!(w);
+        crate::pr_err!("{}", line);
         let thsp = t.thread().sp;
         if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
-            let _ = write!(w, "      HUNG-STK sp={:#x}", thsp);
             // R76: scan UPWARD from the parked sp through the
             // bounds-checked window (INV-WINDOW-*); the Task pins the
             // stack pages.
@@ -293,33 +341,37 @@ fn report_hung_task(task_ref: &crate::process::task::Task, elapsed_secs: u64) {
             let lo = core::ptr::addr_of!(_stext) as u64;
             #[cfg(not(feature = "x86_64"))]
             let hi = core::ptr::addr_of!(_etext) as u64;
-            for k in 0..200 {
-                let v = match win.and_then(|w2| w2.read_u64(thsp as usize + k * 8)) {
-                    Some(v) => v,
-                    None => break,
-                };
-                if v >= lo && v < hi && (v & 1) == 0 {
-                    // Symbolize inline (2026-11-28 drill lane): the raw
-                    // hex forced offline addr2line correlation before the
-                    // wait site could be named; the ksym table rides in
-                    // .rodata either way.
-                    let _ = write!(w, " {:#x}({})", v, crate::debug::ksyms::format_symbol(v));
-                    shown += 1;
-                    if shown >= 8 {
-                        break;
+            let mut line = alloc::format!("      HUNG-STK sp={:#x}", thsp);
+            {
+                use core::fmt::Write as _;
+                for k in 0..200 {
+                    let v = match win.and_then(|w2| w2.read_u64(thsp as usize + k * 8)) {
+                        Some(v) => v,
+                        None => break,
+                    };
+                    if v >= lo && v < hi && (v & 1) == 0 {
+                        // Symbolize inline (2026-11-28 drill lane): the raw
+                        // hex forced offline addr2line correlation before the
+                        // wait site could be named; the ksym table rides in
+                        // .rodata either way.
+                        let _ = write!(line, " {:#x}({})", v, crate::debug::ksyms::format_symbol(v));
+                        shown += 1;
+                        if shown >= 8 {
+                            break;
+                        }
                     }
                 }
             }
-            let _ = write!(w, "\n");
+            crate::pr_err!("{}", line);
         }
     }
 
     let taint_str = taint::taint_string_arr();
     let taint_display = core::str::from_utf8(&taint_str).unwrap_or("?");
-    let _ = write!(w, "      Tainted: {}\n", taint_display);
+    crate::pr_err!("      Tainted: {}", taint_display);
 
-    // Stack trace
-    backtrace::dump_stack();
+    // Stack trace — ring variant (raw-uart dump_stack() is panic-only).
+    backtrace::dump_stack_ring();
 
     // Taint kernel
     taint::add_taint(taint::TaintFlags::DIE);
