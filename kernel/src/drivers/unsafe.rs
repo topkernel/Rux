@@ -210,15 +210,11 @@ pub fn return_address() -> usize {
     let ra: usize;
     #[cfg(feature = "riscv64")]
     // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { asm!("mv {}, ra", out(reg) ra, options(nomem, nostack)) };
     #[cfg(feature = "x86_64")]
     // SAFETY: frame pointers are forced on, so [rbp+8] is the return
     // address of this inlined function's caller.
-    unsafe {
-        asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack)) };
     #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
     {
         ra = 0;
@@ -314,15 +310,14 @@ pub fn msr_write(msr: u32, v: u64) {
 pub fn pit_program_ch0(divisor: u16) {
     use crate::arch::cpu::io_wait;
     use crate::drivers::timer::x86_64::{PIT_CH0_DATA, PIT_CH0_MODE3_BIN, PIT_MODE_CMD};
-    // SAFETY: INV-DRV-CSR — the standard 8254 channel-0 square-wave
-    // programming sequence.
-    unsafe {
-        crate::arch::cpu::outb(PIT_MODE_CMD, PIT_CH0_MODE3_BIN);
-        io_wait();
-        crate::arch::cpu::outb(PIT_CH0_DATA, (divisor & 0xff) as u8);
-        io_wait();
-        crate::arch::cpu::outb(PIT_CH0_DATA, (divisor >> 8) as u8);
-    }
+    // INV-DRV-CSR note — the standard 8254 channel-0 square-wave
+    // programming sequence. arch::cpu::outb/io_wait carry their own
+    // internal unsafe (arch lane); this whole sequence is safe code.
+    crate::arch::cpu::outb(PIT_MODE_CMD, PIT_CH0_MODE3_BIN);
+    io_wait();
+    crate::arch::cpu::outb(PIT_CH0_DATA, (divisor & 0xff) as u8);
+    io_wait();
+    crate::arch::cpu::outb(PIT_CH0_DATA, (divisor >> 8) as u8);
 }
 
 // ===========================================================================
@@ -359,10 +354,9 @@ pub fn map_reserved_region(virt: u64, phys: u64, size: u64, flags: u64) {
 /// kernel-init context).
 pub fn input_bh_tasklet_init(func: fn(*mut crate::interrupt::tasklet::TaskletStruct)) {
     // SAFETY: INV-DRV-TASKLET — called once during kernel init before
-    // any device IRQ is registered.
-    unsafe {
-        crate::drivers::input::INPUT_BH_TASKLET.init(func);
-    }
+    // any device IRQ is registered; the static-mut access is the unsafe
+    // op (TaskletStruct::init itself is safe).
+    unsafe { crate::drivers::input::INPUT_BH_TASKLET.init(func) };
 }
 
 // ===========================================================================
@@ -473,15 +467,11 @@ pub(crate) fn pci_blk_acquire_site_raw() -> usize {
     let ra: usize;
     #[cfg(feature = "riscv64")]
     // SAFETY: pure register read, no memory access or side effects.
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack)) };
     #[cfg(feature = "x86_64")]
     // SAFETY: frame pointers are forced on, so [rbp+8] is this inlined
     // helper's caller's return address.
-    unsafe {
-        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
-    }
+    unsafe { core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack)) };
     #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
     {
         ra = 0;
@@ -650,23 +640,25 @@ pub fn gicv3_send_sgi(target_aff0: u8, intid: u32) {
 // GICv3 CPU-interface enable sequence is register-file access with no
 // safe shape (one audited block per sequence).
 pub fn gicv3_enable_cpu_interface() {
-    // SAFETY: ICC_* system-register programming below is the standard
-    // GICv3 CPU-interface enable sequence for Group 1 at EL1.
+    // SAFETY: the ICC_* system-register accesses below are the standard
+    // GICv3 CPU-interface enable sequence for Group 1 at EL1 (each asm!
+    // is its own unsafe op); the redistributor lookup/configure calls
+    // between them are safe.
+    // 1. System-register access (QEMU fixes SRE=1; set defensively).
+    let sre: u64;
+    unsafe { asm!("mrs {}, icc_sre_el1", out(reg) sre, options(nomem, nostack)) };
+    if sre & 1 == 0 {
+        unsafe { asm!("msr icc_sre_el1, {}", in(reg) 1u64, options(nomem, nostack)) };
+        unsafe { asm!("isb", options(nomem, nostack)) };
+    }
+
+    // 2. Per-CPU redistributor: locate + configure SGI/PPI bank.
+    if let Some(rd) = crate::drivers::intc::gicv3::find_my_rd_base() {
+        crate::drivers::intc::gicv3::redist_configure_local(rd);
+    }
+
+    // 3. Unmask priorities and forward Group 1 to EL1.
     unsafe {
-        // 1. System-register access (QEMU fixes SRE=1; set defensively).
-        let sre: u64;
-        asm!("mrs {}, icc_sre_el1", out(reg) sre, options(nomem, nostack));
-        if sre & 1 == 0 {
-            asm!("msr icc_sre_el1, {}", in(reg) 1u64, options(nomem, nostack));
-            asm!("isb", options(nomem, nostack));
-        }
-
-        // 2. Per-CPU redistributor: locate + configure SGI/PPI bank.
-        if let Some(rd) = crate::drivers::intc::gicv3::find_my_rd_base() {
-            crate::drivers::intc::gicv3::redist_configure_local(rd);
-        }
-
-        // 3. Unmask priorities and forward Group 1 to EL1.
         asm!("msr icc_pmr_el1, {}", in(reg) 0xFFu64, options(nomem, nostack));
         asm!("msr icc_igrpen1_el1, {}", in(reg) 1u64, options(nomem, nostack));
         asm!("isb", options(nomem, nostack));
@@ -682,15 +674,15 @@ pub fn gicv3_enable_cpu_interface() {
 /// Current time (cycles)
 pub fn clint_read_time() -> u64 {
     // SAFETY: rdtime is a read-only CSR available in S-mode on RISC-V.
+    let time: u64;
     unsafe {
-        let time: u64;
         core::arch::asm!(
             "rdtime {}",
             out(reg) time,
             options(nostack, readonly)
         );
-        time
     }
+    time
 }
 #[cfg(feature = "riscv64")]
 // ==== recovered from kernel/src/drivers/timer/riscv64.rs ====
@@ -747,18 +739,19 @@ pub(crate) fn io_buf_init(
 ) -> (*mut crate::drivers::virtio::queue::VirtIOBlkReqHeader, *mut crate::drivers::virtio::queue::VirtIOBlkResp) {
     // SAFETY: io_buf is non-null (callers check), 64 bytes, 16-aligned;
     // +48 leaves 16 bytes for the response — both in bounds. The
-    // initializations follow immediately.
+    // initializations follow immediately. Only the pointer arithmetic
+    // and the two stores are unsafe; the cast and the tuple are safe.
+    let header_ptr = io_buf as *mut crate::drivers::virtio::queue::VirtIOBlkReqHeader;
+    let resp_ptr = unsafe { io_buf.add(48) } as *mut crate::drivers::virtio::queue::VirtIOBlkResp;
     unsafe {
-        let header_ptr = io_buf as *mut crate::drivers::virtio::queue::VirtIOBlkReqHeader;
-        let resp_ptr = io_buf.add(48) as *mut crate::drivers::virtio::queue::VirtIOBlkResp;
         *header_ptr = crate::drivers::virtio::queue::VirtIOBlkReqHeader {
             type_,
             reserved: 0,
             sector,
         };
         (*resp_ptr).status = 0xFF;
-        (header_ptr, resp_ptr)
     }
+    (header_ptr, resp_ptr)
 }
 
 // ===========================================================================
