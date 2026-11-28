@@ -1454,6 +1454,79 @@ pub fn is_protnone_marker(bits: u64) -> bool {
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-MM-OPS-1): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32) {
-    crate::arch::arch_floor::aarch64::mm::mm_ops::mprotect_pte_range(root_ppn, start_virt, num_pages, prot)
+pub 
+fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32) {
+
+
+                                                                                 // Software base mask. W requires R (hardware AP_RO covers the W=0
+                                                                                 // half; the software mirror keeps the same fold the fault path uses).
+                                                                                 let mut base = PageTableEntry::V | PageTableEntry::U
+                                                                                     | PageTableEntry::A | PageTableEntry::D;
+                                                                                 if prot & 0x1 != 0 {
+                                                                                     base |= PageTableEntry::R;
+                                                                                 }
+                                                                                 if prot & 0x2 != 0 {
+                                                                                     base |= PageTableEntry::R | PageTableEntry::W;
+                                                                                 }
+                                                                                 if prot & 0x4 != 0 {
+                                                                                     base |= PageTableEntry::X;
+                                                                                 }
+
+                                                                                 for i in 0..num_pages {
+                                                                                     let va = start_virt.wrapping_add(i * PAGE_SIZE);
+
+                                                                                     // SAFETY: root_ppn is the live user root; the helper only walks
+                                                                                     // table descriptors (no leaf writes at upper levels).
+                                                                                     let Some(l3) = crate::arch::aarch64::mm::mmu_init::user_l3_table_for(root_ppn, va) else {
+                                                                                         continue;
+                                                                                     };
+                                                                                     let idx = ((va >> PAGE_SHIFT) & 0x1FF) as usize;
+                                                                                     // SAFETY: l3 comes from the walker; idx is masked to 9 bits.
+                                                                                     let raw = l3.get(idx).bits();
+                                                                                     // Empty or non-leaf slots: nothing to rewrite (see doc).
+                                                                                     if raw & PageTableEntry::V == 0 || raw & PageTableEntry::TYPE_MASK != PageTableEntry::TYPE_PAGE {
+                                                                                         continue;
+                                                                                     }
+                                                                                     // Foreign/kernel-frame leaves carry no U bit in the mirror —
+                                                                                     // leave them alone (a TTBR0 tree should not hold any, but a
+                                                                                     // stray boot-reserved leaf must not be user-rewritten).
+                                                                                     if raw & PageTableEntry::U == 0 {
+                                                                                         continue;
+                                                                                     }
+
+                                                                                     let cow_bit = raw & cow_flags::COW;
+                                                                                     let pcache_bit = raw & cow_flags::PCACHE;
+
+                                                                                     let new_pte = if prot & 0x7 == 0 {
+                                                                                         // PROT_NONE marker (constructor preserves COW/PCACHE itself)
+                                                                                         PageTableEntry::rebuild_user_leaf_protnone(raw)
+                                                                                     } else {
+                                                                                         let mut flags = base;
+                                                                                         if cow_bit != 0 {
+                                                                                             flags |= cow_bit;
+                                                                                             flags &= !PageTableEntry::W; // W deferred to the COW fault
+                                                                                         }
+                                                                                         if pcache_bit != 0 {
+                                                                                             flags |= pcache_bit;
+                                                                                             // A PRIVATE cache leaf never gains W in place: the frame
+                                                                                             // is shared with the page cache, so a W-upgrade diverts
+                                                                                             // the first write through COW (writenotify; twins). A
+                                                                                             // SHARED cache leaf keeps W — stores must land in the
+                                                                                             // cache frame (PCACHE is dormant on aarch64 today, but
+                                                                                             // the ownership rule rides the bit).
+                                                                                             if flags & PageTableEntry::W != 0 && !cow_flags::pte_is_shared_cache(raw) {
+                                                                                                 flags |= cow_flags::COW;
+                                                                                                 flags &= !PageTableEntry::W;
+                                                                                             }
+                                                                                         }
+                                                                                         PageTableEntry::rebuild_user_leaf(raw, flags)
+                                                                                     };
+
+                                                                                     // SAFETY: same slot the raw bits came from, under the caller's
+                                                                                     // PTE section.
+                                                                                     l3.set(idx, new_pte);
+                                                                                     // SAFETY: this translation changed; drop any cached walk.
+                                                                                     { crate::arch::aarch64::mm::asid::flush_tlb_page(va as usize, 0) };
+                                                                                 }
+
 }

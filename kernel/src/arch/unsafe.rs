@@ -22450,81 +22450,10 @@ pub mod aarch64 {
         // INV-ARCH-TRAP-6 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// True when the CURRENT task has a user handler installed for `signo`.
-        pub(crate) fn sig_has_handler(signo: usize) -> bool  {
-
-            crate::sched::current()
-                .and_then(|t| { (*t).signal.as_ref().map(|s| s.get_action(signo as i32)) })
-                .map(|a| a.is_some_and(|a| a.has_handler()))
-                .unwrap_or(false)
-        }
 
         // INV-ARCH-TRAP-7 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Timer interrupt (GIC PPI for the EL1 virtual timer) — the riscv64
-        /// handle_timer_interrupt twin: re-arm first, then accounting, jiffies,
-        /// scheduler tick, softlockup, and the preemptible in-IRQ reschedule.
-        pub(crate) fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize)  {
-
-            // Increment interrupt counter for /proc/interrupts
-            crate::fs::procfs::interrupts::timer_inc(cpu);
-
-            // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
-            // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
-            // line still high re-latches pending and storms).
-            crate::drivers::timer::set_next_trigger();
-
-            // Skip scheduler/schedule logic during early boot (TPIDR holds the
-            // cpu index, no current task yet — riscv64 twin guard).
-            if crate::sched::current().is_none() {
-                return;
-            }
-
-            // 0. Per-CPU time accounting for /proc/stat
-            crate::fs::procfs::stat::charge_tick(regs.user_mode());
-
-            // 0b. CPU-time accounting: user or system time by the mode the
-            // timer hit; idle accounting for kthreads.
-            if let Some(task) = crate::sched::current() {
-                // SAFETY: current() returned a live task pointer; only per-task
-                // atomic counters are touched (riscv64/x86_64 twins).
-                {
-                    if (*task).address_space().is_some() {
-                        use core::sync::atomic::Ordering::Relaxed;
-                        if regs.user_mode() {
-                            (*task).utime_ticks.fetch_add(1, Relaxed);
-                            crate::debug::syscost::tick_user();
-                            crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
-                        } else {
-                            (*task).stime_ticks.fetch_add(1, Relaxed);
-                            crate::debug::syscost::tick_kern(regs.pc);
-                            crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
-                        }
-                    } else {
-                        crate::debug::syscost::tick_idle();
-                        crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
-                    }
-                }
-            } else {
-                crate::debug::syscost::tick_idle();
-                crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
-            }
-
-            // 1. Update jiffies (+ vDSO page refresh, timer softirqs)
-            crate::drivers::timer::timer_interrupt_handler();
-
-            // 2. Scheduler tick
-            crate::sched::scheduler_tick();
-
-            // 3. Check for soft lockups
-            crate::debug::softlockup::check();
-
-            // 4. Reschedule if needed
-            if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
-                crate::sched::schedule();
-            }
-        }
 
         // INV-ARCH-TRAP-8 (collected 2026-11-27 from aarch64/trap.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -22816,131 +22745,6 @@ pub mod aarch64 {
         // INV-ARCH-UACCESS-1 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Poissoned-pointer probe for the whole fault-containment chain:
-        /// access_ok range rules → asm fault site → data abort (EC 0x25) →
-        /// exception-table fixup → short count / -EFAULT, with NO oops.
-        ///
-        /// Runs at dfx init (before init exec — userspace exec is blocked on the
-        /// mm walker anyway) on a kernel context where TTBR0 still carries
-        /// boot.S's early identity map ([0, 2GB) device + RAM blocks — it is
-        /// torn down only after SMP start, well after this probe), so the probe
-        /// address must sit INSIDE the user window but OUTSIDE every mapping:
-        /// 4 GB — below TASK_SIZE (256GB), above the early map, an invalid L1
-        /// entry either way. access_ok must ACCEPT it (the exception table, not
-        /// the range check, contains the fault).
-        #[cfg(feature = "dfx-aa64-uaccess-selftest")]
-        pub fn selftest()  {
-
-            // printk's console emit does not reach PL011 on this board yet (the
-            // boot table goes through console::putchar directly) — same here.
-            fn emit(line: &str) {
-                // SAFETY: putchar is the polled console byte writer (the same
-                // path print_status uses); callable in any context.
-
-                    for &b in line.as_bytes() {
-                        crate::console::putchar(b);
-                    }
-                    crate::console::putchar(b'\n');
-
-            }
-
-            const PROBE: *mut u8 = 0x1_0000_0000 as *mut u8; // 4GB: user window, unmapped
-            const N: usize = 64;
-
-            let mut pass = 0usize;
-            let mut total = 0usize;
-            let mut check = |ok: bool, what: &str, detail: &str| {
-                total += 1;
-                if ok {
-                    pass += 1;
-                }
-                emit(&alloc::format!(
-                    "aa64-uaccess-selftest: {} {} ({})",
-                    if ok { "PASS" } else { "FAIL" },
-                    what,
-                    detail
-                ));
-            };
-
-            // 1. Range rules: the probe address is INSIDE the user window (the
-            //    fault must come from the exception table, not access_ok), and
-            //    kernel-half / overflow addresses are rejected outright.
-            check(
-                access_ok(PROBE as usize, N),
-                "access_ok accepts user-window probe",
-                "0x100000000+64 in [0, TASK_SIZE)",
-            );
-            check(
-                !access_ok(0xffff_ffff_8000_0000usize, 8),
-                "access_ok rejects kernel half",
-                "0xffffffff80000000",
-            );
-            check(
-                !access_ok(0xffff_ffff_ffff_fff0usize, 32),
-                "access_ok rejects overflow",
-                "addr+size wraps",
-            );
-
-            // 2. copy_from_user on the poisoned pointer: short count + zeroed
-            //    kernel buffer (twin info-leak rule).
-            let mut dst = [0xA5u8; N];
-            // SAFETY: dst is a valid stack buffer; the user source deliberately
-            // faults and must land in the fixup (returns N, zero-fills dst).
-            let uncopied = { copy_from_user(dst.as_mut_ptr(), PROBE as *const u8, N) };
-            check(
-                uncopied == N && dst.iter().all(|&b| b == 0),
-                "copy_from_user EFAULT",
-                &alloc::format!("uncopied={}/{}, dst zeroed={}", uncopied, N,
-                    dst.iter().all(|&b| b == 0)),
-            );
-
-            // 3. copy_to_user to the poisoned pointer: short count.
-            let src = [0x5Au8; N];
-            // SAFETY: src is a valid stack buffer; the user destination
-            // deliberately faults and must land in the fixup.
-            let uncopied = { copy_to_user(PROBE, src.as_ptr(), N) };
-            check(
-                uncopied == N,
-                "copy_to_user EFAULT",
-                &alloc::format!("uncopied={}/{}", uncopied, N),
-            );
-
-            // 4. clear_user on the poisoned pointer: uncleared count.
-            // SAFETY: the user destination deliberately faults into the fixup.
-            let uncleared = { clear_user(PROBE, N) };
-            check(
-                uncleared == N,
-                "clear_user EFAULT",
-                &alloc::format!("uncleared={}/{}", uncleared, N),
-            );
-
-            // 5. strncpy_from_user: Err(-EFAULT).
-            let mut sbuf = [0u8; 16];
-            match strncpy_from_user(PROBE as *const u8, 16, &mut sbuf) {
-                Err(e) => check(e == -14, "strncpy_from_user EFAULT", &alloc::format!("errno={}", e)),
-                Ok(_) => check(false, "strncpy_from_user EFAULT", "returned Ok on poisoned ptr"),
-            }
-
-            // 6. strnlen_user: 0 sentinel.
-            // SAFETY: deliberately faulting user read into the fixup.
-            let slen = { strnlen_user(PROBE as *const u8, 16) };
-            check(slen == 0, "strnlen_user EFAULT", &alloc::format!("len={}", slen));
-
-            // 7. get_user/put_user sized variants: None / false.
-            // SAFETY: deliberately faulting user accesses into the fixup.
-            let g = { get_user(PROBE as *const u64) };
-            check(g.is_none(), "get_user<u64> EFAULT", "expected None");
-            // SAFETY: deliberately faulting user write into the fixup.
-            let p = { put_user(PROBE as *mut u64, 1u64) };
-            check(!p, "put_user<u64> EFAULT", "expected false");
-
-            emit(&alloc::format!(
-                "aa64-uaccess-selftest: {} ({}/{})",
-                if pass == total { "ALL PASS" } else { "FAILURES PRESENT" },
-                pass,
-                total
-            ));
-        }
 
         // INV-ARCH-UACCESS-2 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23053,21 +22857,6 @@ pub mod aarch64 {
         // INV-ARCH-UACCESS-5 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
 
-        /// Write a single value to user space (typed). Returns success.
-        ///
-        /// # Safety
-        /// `to` must be aligned and validated by access_ok
-        #[inline]
-        pub  fn put_user<T: Copy>(to: *mut T, value: T) -> bool  {
-
-            let size = core::mem::size_of::<T>();
-            if !access_ok(to as usize, size) {
-                return false;
-            }
-            // SAFETY: exception-table copy behind access_ok.
-            let uncopied = { copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
-            uncopied == 0
-        }
 
         // INV-ARCH-UACCESS-6 (collected 2026-11-27 from aarch64/uaccess.rs): verbatim body; callers use the safe
         // wrapper at the original path — obligations unchanged.
@@ -23635,215 +23424,10 @@ pub mod aarch64 {
             // INV-ARCH-EXCEPTION-1 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// do_page_fault — page fault handling entry (called from the trap path)
-            ///
-            /// The fault address is FAR_EL1 (saved in pt_regs.far by the trap
-            /// entry). Policy mirrors the riscv64 twin: kernel-mode uaccess faults on
-            /// VMA-covered user addresses demand-fill FIRST (R82), then the fixup
-            /// (R78), then the stack-overflow panic; user-mode faults run
-            /// handle_mm_fault with CowPending resolved through handle_cow_fault.
-            pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult  {
-
-                // /proc/vmstat pgfault + the per-task minflt counter (user mode only)
-                crate::mm::vmstat::note_fault();
-                if regs.user_mode() {
-                    if let Some(task) = crate::sched::current() {
-                        // SAFETY: current() returned a live task pointer; per-task
-                        // atomic counter only.
-                        {
-                            (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                }
-
-                let fault_addr = VirtAddr::new(regs.far);
-
-                crate::pr_debug!(
-                    "do_page_fault: addr={:#x}, pc={:#x}, type={:#x}, mode={}",
-                    fault_addr.bits(),
-                    regs.pc,
-                    access_type,
-                    if regs.kernel_mode() { "kernel" } else { "user" }
-                );
-
-                let current = match crate::sched::current() {
-                    Some(t) => t,
-                    None => return no_context(regs, fault_addr),
-                };
-                let addr_space = match current.address_space() {
-                    Some(aspace) => aspace,
-                    None => return no_context(regs, fault_addr),
-                };
-
-                // Interrupt context: the mm fault path allocates and takes the PTE
-                // section — it must not run from an IRQ handler (twin guard, the
-                // x86_64/riscv64 arms; the riscv64 preempt-underflow healing engine
-                // has no aarch64 counterpart, so this is the plain no_context form).
-                // A fixup entry still unwinds a uaccess copy cleanly.
-                if crate::interrupt::preempt::in_interrupt() {
-                    return no_context(regs, fault_addr);
-                }
-
-                // Kernel-mode fault on a user address
-                if regs.kernel_mode() {
-                    // Demand-fill BEFORE fixup (twin R82): a uaccess fault on a
-                    // VMA-covered but not-yet-present/COW page must fault the page
-                    // in, not report EFAULT. EXEC faults are excluded (fetches never
-                    // come from uaccess windows).
-                    let kernel_data_fill = fault_addr.bits()
-                        < crate::arch::mm::user_addr::USER_END as u64
-                        && (access_type & FaultFlags::EXEC) == 0;
-                    if kernel_data_fill {
-                        let covered = addr_space
-                            .vma_read()
-                            .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
-                            .is_some();
-                        // 84th (twin of the x86_64 installs-SIGABRT fix): an
-                        // UNCOVERED kernel uaccess fault must still reach
-                        // handle_mm_fault so its VMA-miss arm grows a GROWSDOWN
-                        // stack (Linux expand_downwards for kernel-originated
-                        // faults) — out-params in never-touched below-floor stack
-                        // pages otherwise EFAULT. Non-stack uncovered addresses
-                        // still fixup (find_stack_vma None -> Segfault -> `_`).
-                        if covered || addr_space
-                            .vma_read()
-                            .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
-                            .is_some()
-                        {
-                            let result = handle_mm_fault(
-                                &addr_space,
-                                fault_addr,
-                                access_type | FaultFlags::USER,
-                            );
-                            match result {
-                                MmFaultResult::Handled | MmFaultResult::Fixed => {
-                                    return MmFaultResult::Handled;
-                                }
-                                MmFaultResult::CowPending => {
-                                    // Kernel WRITE uaccess onto a COW page: resolve
-                                    // like the user-mode path (retry counts as
-                                    // progress).
-                                    // SAFETY: faulting mapping of the current task.
-                                    {
-                                        match handle_cow_fault(
-                                            addr_space,
-                                            addr_space.root_ppn(),
-                                            fault_addr,
-                                        ) {
-                                            crate::arch::aarch64::mm::mm_ops::CowFaultResult::Resolved
-                                            | crate::arch::aarch64::mm::mm_ops::CowFaultResult::Retry => {
-                                                return MmFaultResult::Handled;
-                                            }
-                                            crate::arch::aarch64::mm::mm_ops::CowFaultResult::OutOfMemory => {}
-                                        }
-                                    }
-                                }
-                                // Unresolvable: fall through to the fixup so the copy
-                                // reports a short copy.
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    // Exception-table fixup (uaccess windows — twin R78 discipline)
-                    if let Some(fixup) = fixup_exception(regs.pc) {
-                        regs.pc = fixup;
-                        return MmFaultResult::Fixed;
-                    }
-
-                    // Kernel stack overflow
-                    let fault_addr_usize = fault_addr.bits() as usize;
-                    // SAFETY: current task accessors.
-                    {
-                        if current.is_in_kernel_stack(fault_addr_usize)
-                            || current.is_stack_overflow(regs.sp as usize)
-                        {
-                            panic!(
-                                "Kernel stack overflow in task {} (fault_addr={:#x}, sp={:#x})",
-                                current.pid(),
-                                fault_addr_usize,
-                                regs.sp
-                            );
-                        }
-                    }
-
-                    // Kernel accessed an invalid address (kernel bug)
-                    return MmFaultResult::KernelPanic;
-                }
-
-                // User-mode fault: TTBR0 VAs must be canonical user addresses —
-                // bits 63:47 all clear. The hardware faults before the walk, but the
-                // kernel's own walkers MASK the index to the low 48 bits: a page
-                // mapped at the truncated position would make every fault resolve
-                // as "mapped, perms OK" and retry forever (twin non-canonical-loop
-                // note).
-                if (fault_addr.bits() >> 47) != 0 {
-                    return bad_area(regs, access_type, fault_addr);
-                }
-
-                let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
-
-                match result {
-                    MmFaultResult::Handled => MmFaultResult::Handled,
-                    MmFaultResult::CowPending => {
-                        // COW page: resolve through the arch walker
-                        // SAFETY: faulting mapping of the current task.
-                        {
-                            match handle_cow_fault(&addr_space, addr_space.root_ppn(), fault_addr) {
-                                crate::arch::aarch64::mm::mm_ops::CowFaultResult::Resolved => MmFaultResult::Handled,
-                                // PTE changed between the lock-free COW check and
-                                // the locked re-walk — re-execute (twin fake-OOM
-                                // layer-2 note); the next entry sees the new state.
-                                crate::arch::aarch64::mm::mm_ops::CowFaultResult::Retry => MmFaultResult::Handled,
-                                crate::arch::aarch64::mm::mm_ops::CowFaultResult::OutOfMemory => {
-                                    send_signal(9, 0, fault_addr.bits(), access_type); // SIGKILL
-                                    MmFaultResult::OutOfMemory
-                                }
-                            }
-                        }
-                    }
-                    MmFaultResult::AlreadyMapped => {
-                        // Mapped but the permission check failed
-                        send_signal(11, 2, fault_addr.bits(), access_type); // SEGV_ACCERR
-                        MmFaultResult::PermissionDenied
-                    }
-                    MmFaultResult::Segfault => bad_area(regs, access_type, fault_addr),
-                    MmFaultResult::PermissionDenied => {
-                        send_signal(11, 2, fault_addr.bits(), access_type); // SEGV_ACCERR
-                        MmFaultResult::PermissionDenied
-                    }
-                    MmFaultResult::OutOfMemory => {
-                        send_signal(9, 0, fault_addr.bits(), access_type); // SIGKILL
-                        MmFaultResult::OutOfMemory
-                    }
-                    MmFaultResult::BusError => {
-                        send_signal(7, 2, fault_addr.bits(), access_type); // SIGBUS, BUS_ADRERR
-                        MmFaultResult::BusError
-                    }
-                    MmFaultResult::Fixed | MmFaultResult::KernelPanic => {
-                        bad_area(regs, access_type, fault_addr)
-                    }
-                }
-            }
 
             // INV-ARCH-EXCEPTION-2 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Send a signal to the current process with si_code provenance (twin
-            /// contract: a fatal hardware-fault death prints a real origin).
-            pub(crate) fn send_signal(sig: i32, code: i32, _addr: u64, _access_type: u32)  {
-
-                if let Some(current) = crate::sched::current() {
-                    let pid = current.pid();
-                    crate::signal::send_signal_with_info_directed(
-                        pid,
-                        crate::signal::SigInfo::new(sig, code, 0, 0),
-                    )
-                    .ok();
-                    // SAFETY: current() returned a live task pointer.
-                    { crate::signal::signal_wake_up(current as *mut _) };
-                }
-            }
 
             // INV-ARCH-EXCEPTION-3 (collected 2026-11-27 from aarch64/mm/exception.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -23920,17 +23504,6 @@ pub mod aarch64 {
             // INV-ARCH-FIXMAP-1 (collected 2026-11-27 from aarch64/mm/fixmap.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Initialize the UART fixmap (map PL011 into the FixEarlycon slot)
-            pub fn init_uart_fixmap() -> usize  {
-
-                let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
-                // Device mapping, kernel RW
-                // SAFETY: early single-threaded boot; the fixmap slot is exclusively
-                // ours and the kernel tables are being built.
-                { crate::arch::aarch64::mm::mmu_init::map_device_page(virt, UART_PHYS, 0) };
-                UART_VIRT_ADDR.store(virt, Ordering::Release);
-                virt
-            }
         }
 
         pub mod memory_layout {
@@ -24025,100 +23598,6 @@ pub mod aarch64 {
             // INV-ARCH-MM-OPS-1 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Rewrite the permissions of every PRESENT user leaf in
-            /// [start_virt, start_virt + num_pages*4K) — the mprotect arm
-            /// (x86_64 `mprotect_pte_range` twin on the aarch64 4-level walker).
-            ///
-            /// - The output address (PPN) always survives; COW/PCACHE software
-            ///   bits ride along (COW defers W to the copy fault; PCACHE is a
-            ///   mapping-ownership pin — dropping it would leak the pin).
-            /// - prot == 0 installs the PROT_NONE MARKER: valid descriptor,
-            ///   software V|U with no R/W/X, hardware denies EL0 entirely. The
-            ///   marker is advisory PTE state — a later fault under a VMA that
-            ///   grants the access re-presents the leaf (page_fault.rs).
-            /// - User trees only carry L3 page leaves; table/invalid slots are
-            ///   skipped (the range was validated against the VMA list by the
-            ///   caller, so unmapped middles mean "not populated yet" — the
-            ///   demand-fill path will materialize them with the VMA's perms).
-            ///
-            /// TLB: per-page `tlbi aside1e1is`; the caller holds the PTE section.
-            ///
-            /// # Safety
-            /// root_ppn must be the caller's live user page-table root; caller
-            /// holds the PTE modify section (PTE_MODIFY_LOCK).
-            pub fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32)  {
-
-                // Software base mask. W requires R (hardware AP_RO covers the W=0
-                // half; the software mirror keeps the same fold the fault path uses).
-                let mut base = PageTableEntry::V | PageTableEntry::U
-                    | PageTableEntry::A | PageTableEntry::D;
-                if prot & 0x1 != 0 {
-                    base |= PageTableEntry::R;
-                }
-                if prot & 0x2 != 0 {
-                    base |= PageTableEntry::R | PageTableEntry::W;
-                }
-                if prot & 0x4 != 0 {
-                    base |= PageTableEntry::X;
-                }
-
-                for i in 0..num_pages {
-                    let va = start_virt.wrapping_add(i * PAGE_SIZE);
-
-                    // SAFETY: root_ppn is the live user root; the helper only walks
-                    // table descriptors (no leaf writes at upper levels).
-                    let Some(l3) = crate::arch::aarch64::mm::mmu_init::user_l3_table_for(root_ppn, va) else {
-                        continue;
-                    };
-                    let idx = ((va >> PAGE_SHIFT) & 0x1FF) as usize;
-                    // SAFETY: l3 comes from the walker; idx is masked to 9 bits.
-                    let raw = l3.get(idx).bits();
-                    // Empty or non-leaf slots: nothing to rewrite (see doc).
-                    if raw & PageTableEntry::V == 0 || raw & PageTableEntry::TYPE_MASK != PageTableEntry::TYPE_PAGE {
-                        continue;
-                    }
-                    // Foreign/kernel-frame leaves carry no U bit in the mirror —
-                    // leave them alone (a TTBR0 tree should not hold any, but a
-                    // stray boot-reserved leaf must not be user-rewritten).
-                    if raw & PageTableEntry::U == 0 {
-                        continue;
-                    }
-
-                    let cow_bit = raw & cow_flags::COW;
-                    let pcache_bit = raw & cow_flags::PCACHE;
-
-                    let new_pte = if prot & 0x7 == 0 {
-                        // PROT_NONE marker (constructor preserves COW/PCACHE itself)
-                        PageTableEntry::rebuild_user_leaf_protnone(raw)
-                    } else {
-                        let mut flags = base;
-                        if cow_bit != 0 {
-                            flags |= cow_bit;
-                            flags &= !PageTableEntry::W; // W deferred to the COW fault
-                        }
-                        if pcache_bit != 0 {
-                            flags |= pcache_bit;
-                            // A PRIVATE cache leaf never gains W in place: the frame
-                            // is shared with the page cache, so a W-upgrade diverts
-                            // the first write through COW (writenotify; twins). A
-                            // SHARED cache leaf keeps W — stores must land in the
-                            // cache frame (PCACHE is dormant on aarch64 today, but
-                            // the ownership rule rides the bit).
-                            if flags & PageTableEntry::W != 0 && !cow_flags::pte_is_shared_cache(raw) {
-                                flags |= cow_flags::COW;
-                                flags &= !PageTableEntry::W;
-                            }
-                        }
-                        PageTableEntry::rebuild_user_leaf(raw, flags)
-                    };
-
-                    // SAFETY: same slot the raw bits came from, under the caller's
-                    // PTE section.
-                    l3.set(idx, new_pte);
-                    // SAFETY: this translation changed; drop any cached walk.
-                    { crate::arch::aarch64::mm::asid::flush_tlb_page(va as usize, 0) };
-                }
-            }
 
             // INV-ARCH-MM-OPS-2 (collected 2026-11-27 from aarch64/mm/mm_ops.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -24751,36 +24230,10 @@ pub mod aarch64 {
             // INV-ARCH-MMU-INIT-1 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Map into a USER root (TTBR0) — stage 2 (the user walker + COW)
-            ///
-            /// # Safety
-            /// root_ppn must be a valid user root.
-            pub  fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool  {
-
-                if root_ppn == root_page_table_ppn() {
-                    // Kernel-root callers route through the kernel mapping path
-                    return map_kernel_page_noflush(virt.bits(), phys.bits(), flags);
-                }
-                crate::arch::aarch64::mm::mm_ops::map_user_page(root_ppn, virt, phys, flags)
-            }
 
             // INV-ARCH-MMU-INIT-2 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Identity-map helper (riscv64 parity; aarch64 kernel half only)
-            ///
-            /// # Safety
-            /// Kernel mapping context.
-            pub  fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64)  {
-
-                {
-                    // Identity mappings only make sense for the low half on aarch64
-                    // (TTBR0); the kernel builds them in the TTBR1 view at the
-                    // aliased VA instead. Stage-2 refines if a consumer appears.
-                    let alias = MMIO_ALIAS_BASE as u64 + virt.bits();
-                    map_kernel_page_noflush(alias, phys.bits(), flags);
-                }
-            }
 
             // INV-ARCH-MMU-INIT-3 (collected 2026-11-27 from aarch64/mm/mmu_init.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25203,13 +24656,6 @@ pub mod aarch64 {
             // INV-ARCH-PAGE-FAULT-1 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// Get the physical address mapped at a user virtual address
-            /// (diagnostics; 4-level user-table walk, block leaves folded)
-            pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64>  {
-
-                // SAFETY: read-only walk on a valid root.
-                { PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << PAGE_SHIFT) }
-            }
 
             // INV-ARCH-PAGE-FAULT-2 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
@@ -25542,100 +24988,6 @@ pub mod aarch64 {
             // INV-ARCH-PAGE-FAULT-3 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.
 
-            /// R-WRITESTORM-2 twin: a fault landed on a PROT_NONE marker leaf
-            /// (mprotect(prot==0)'s hardware-denied descriptor). The covering VMA
-            /// is the authority: if it grants the access, re-present the leaf with
-            /// the VMA's permissions (PPN + COW/PCACHE software bits preserved, W
-            /// deferred through COW per INV-COW-1); otherwise the access is a real
-            /// protection violation.
-            pub(crate) fn protnone_represent(
-                addr_space: &AddressSpace,
-                root_ppn: u64,
-                fault_addr: VirtAddr,
-                flags: u32,
-            ) -> MmFaultResult  {
-
-                use crate::mm::page::VirtAddr as PageVirtAddr;
-
-                let is_write = flags & FaultFlags::WRITE != 0;
-                let is_exec = flags & FaultFlags::EXEC != 0;
-                let is_read = flags & FaultFlags::READ != 0;
-
-                // VMA lookup + access grant (riscv64 twin's verify order)
-                let vma_mgr = addr_space.vma_read();
-                let Some(vma) = (vma_mgr.find(PageVirtAddr::new(fault_addr.as_usize()))) else {
-                    // Was mapped (marker), now outside every VMA — a real gap.
-                    return MmFaultResult::PermissionDenied;
-                };
-                let vma_flags = vma.flags();
-                if is_write && !vma_flags.is_writable() {
-                    return MmFaultResult::PermissionDenied;
-                }
-                if is_exec && !vma_flags.is_executable() {
-                    return MmFaultResult::PermissionDenied;
-                }
-                if is_read && !vma_flags.is_readable() {
-                    return MmFaultResult::PermissionDenied;
-                }
-                drop(vma_mgr);
-
-                // Compose the re-presented software mask from the VMA grant
-                let mut sw = PageTableEntry::V | PageTableEntry::U
-                    | PageTableEntry::A | PageTableEntry::D;
-                if vma_flags.is_readable() {
-                    sw |= PageTableEntry::R;
-                }
-                if vma_flags.is_writable() {
-                    sw |= PageTableEntry::W | PageTableEntry::R; // W requires R
-                }
-                if vma_flags.is_executable() {
-                    sw |= PageTableEntry::X;
-                }
-
-                // Re-present under the PTE section, re-checking the marker (R7-C3
-                // discipline: the leaf may have moved under us between the
-                // lock-free walk and the section).
-                let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
-                // SAFETY: read-only walk on the mm's root.
-                let Some((_ppn, now)) = ({ PageTableWalker::walk(root_ppn, fault_addr.bits()) }) else {
-                    return MmFaultResult::PermissionDenied;
-                };
-                if !crate::arch::aarch64::mm::mm_ops::is_protnone_marker(now) {
-                    // Someone re-presented/unmapped it first: the fresh state rules.
-                    return MmFaultResult::Handled;
-                }
-                let cow_bit = now & crate::arch::aarch64::mm::mm_ops::cow_flags::COW;
-                let pcache_bit = now & crate::arch::aarch64::mm::mm_ops::cow_flags::PCACHE;
-                if cow_bit != 0 {
-                    sw |= cow_bit;
-                    sw &= !PageTableEntry::W; // W deferred to the COW fault
-                }
-                if pcache_bit != 0 {
-                    sw |= pcache_bit;
-                    // PRIVATE cache leaf never gains W in place (first write goes
-                    // through COW); a SHARED cache leaf keeps W (stores must land
-                    // in the cache frame). PCACHE is dormant on aarch64 today; the
-                    // ownership rule rides the bit (riscv64 twin).
-                    if sw & PageTableEntry::W != 0
-                        && !crate::arch::aarch64::mm::mm_ops::cow_flags::pte_is_shared_cache(now)
-                    {
-                        sw |= crate::arch::aarch64::mm::mm_ops::cow_flags::COW;
-                        sw &= !PageTableEntry::W;
-                    }
-                }
-
-                // Write the L3 leaf: rebuild preserves the PPN (OUTPUT_ADDR field).
-                // SAFETY: root_ppn is this mm's live root; marker re-checked under
-                // the section.
-                if let Some(l3) = crate::arch::aarch64::mm::mmu_init::user_l3_table_for(root_ppn, fault_addr.bits()) {
-                    let idx = ((fault_addr.bits() >> PAGE_SHIFT) & 0x1FF) as usize;
-                    l3.set(idx, PageTableEntry::rebuild_user_leaf(now, sw));
-                    // This translation changed; drop any cached walk.
-                    crate::arch::aarch64::mm::asid::flush_tlb_page(fault_addr.bits() as usize, 0);
-                    return MmFaultResult::Handled;
-                }
-                MmFaultResult::PermissionDenied
-            }
 
             // INV-ARCH-PAGE-FAULT-4 (collected 2026-11-27 from aarch64/mm/page_fault.rs): verbatim body; callers use the safe
             // wrapper at the original path — obligations unchanged.

@@ -79,8 +79,18 @@ pub(crate) static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Collected into `arch::arch_floor` (INV-ARCH-FIXMAP-1): the unsafe floor moved there
 /// verbatim; this safe wrapper keeps the original call path.
-pub fn init_uart_fixmap() -> usize {
-    crate::arch::arch_floor::aarch64::mm::fixmap::init_uart_fixmap()
+pub 
+fn init_uart_fixmap() -> usize {
+
+
+                               let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
+                               // Device mapping, kernel RW
+                               // SAFETY: early single-threaded boot; the fixmap slot is exclusively
+                               // ours and the kernel tables are being built.
+                               { crate::arch::aarch64::mm::mmu_init::map_device_page(virt, UART_PHYS, 0) };
+                               UART_VIRT_ADDR.store(virt, Ordering::Release);
+                               virt
+
 }
 
 /// Get the UART virtual address (falls back to the physical address
