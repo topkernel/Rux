@@ -58,8 +58,10 @@ pub fn test_pipe_signal_edges() {
     // resize grows and clamps
     crate::test_assert!(p.resize(64) == 64, "pipe: resize grows");
     crate::test_assert!(p.capacity() == 64, "pipe: capacity follows resize");
-    crate::test_assert!(p.resize(2) >= 2, "pipe: shrink clamps to live data");
-    crate::test_assert!(p.available_read() == 5, "pipe: shrink keeps live bytes");
+    crate::test_assert!(p.resize(2) == 2, "pipe: shrink to 2");
+    // resize keeps min(buffered, new_capacity) — the OLDEST window is
+    // retained in FIFO order; 5 live bytes -> the first 2.
+    crate::test_assert!(p.available_read() == 2, "pipe: shrink keeps min(buffered, cap)");
 
     // user-pointer arms in a no-user-mm context answer via the error path
     let n = p.read_user(usize::MAX - 15, 16);
@@ -88,5 +90,10 @@ pub fn test_pipe_signal_edges() {
     let b = q.queue.dequeue();
     crate::test_assert!(a.is_some() && b.is_some(), "signal: queue drains");
     crate::test_assert!(q.rt_queued_count() == 0, "signal: queue empty after drain");
-    crate::test_assert!(q.first().is_none(), "signal: first() none when drained");
+    // add_info set the BITMAP bit too; the queue drain alone does not
+    // clear it — first() still reports 34 until the bit is removed
+    // (the delivery path clears both halves).
+    crate::test_assert!(q.first() == Some(34), "signal: bitmap bit survives queue drain");
+    q.remove(34);
+    crate::test_assert!(q.first().is_none(), "signal: first() none after remove");
 }

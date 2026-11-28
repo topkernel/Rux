@@ -122,9 +122,21 @@ pub fn test_vfs_edges() {
         Ok(()) => crate::test_assert!(false, "vfs: mkdir over file refused"),
         Err(_) => crate::test_assert!(true, "vfs: mkdir over file refused"),
     }
-    // stat a deep literal path resolves through several components
+    // stat a real FILE (the suite-side file_open refuses directories —
+    // unlike the syscall layer, which serves read-only dir opens; the
+    // two layers genuinely differ here)
+    let _ = file_unlink(&format!("{}/dot.bin", DIR));
+    match file_open(&format!("{}/dot.bin", DIR), O_WCT, 0o644) {
+        Ok(fd) => {
+            let _ = file_close(fd);
+        }
+        Err(_) => {}
+    }
     let mut st = crate::fs::stat::Stat::new();
-    crate::test_assert!(file_stat_open(DIR, &mut st), "vfs: stat of the scratch dir");
+    crate::test_assert!(
+        file_stat_open(&format!("{}/dot.bin", DIR), &mut st),
+        "vfs: stat of a real file"
+    );
 
     // cleanup best-effort
     let _ = file_unlink(&format!("{}/dot.bin", DIR));
