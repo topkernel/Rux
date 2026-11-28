@@ -25307,156 +25307,37 @@ pub mod uaccess_safe {
     // INV-ARCH-UACCESS-SAFE-10 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Copy one `T` out from kernel memory to user address `dst_user`.
-    ///
-    /// Returns the number of bytes NOT copied (0 = complete success).
-    #[inline]
-    pub fn copy_out_t<T: Copy>(dst_user: usize, src: &T) -> usize  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: the kernel side is a shared `&T` (size_of::<T>() readable
-        // bytes by the type system); the user side fault-safes inside.
-        
-            uaccess::copy_to_user(
-                dst_user as *mut u8,
-                src as *const T as *const u8,
-                core::mem::size_of::<T>(),
-            )
-        
-     }
 
     // INV-ARCH-UACCESS-SAFE-11 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Copy one `T` in from user memory at `src_user` into `dst`.
-    ///
-    /// Returns the number of bytes NOT copied (0 = complete success). On
-    /// failure the uncopied tail of `dst` is zero-filled by the primitive.
-    ///
-    /// Contract (same as the arch `copy_from_user` the call sites used to
-    /// wrap): `T: Copy` and `T` carries no bit-pattern validity constraint
-    /// beyond its bytes (plain integer/struct UAPI types — not `bool`/
-    /// `char`/enums with niches); `dst` must point at an initialized `T`.
-    #[inline]
-    pub fn copy_in_t<T: Copy>(dst: &mut T, src_user: usize) -> usize  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: the kernel side is a live `&mut T` (caller-initialized);
-        // the user side is access_ok-checked and faults through the
-        // exception table, so any src_user value is sound to pass.
-        
-            uaccess::copy_from_user(
-                dst as *mut T as *mut u8,
-                src_user as *const u8,
-                core::mem::size_of::<T>(),
-            )
-        
-     }
 
     // INV-ARCH-UACCESS-SAFE-12 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Atomic compare-exchange on a user u32 word (PI futex protocol).
-    /// Returns the observed old value, or `None` on a rejected/faulting
-    /// user address.
-    #[inline]
-    pub fn futex_cmpxchg_u32(uaddr: usize, expected: u32, new: u32) -> Option<u32>  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: the primitive access_ok-checks the 4-byte user word and
-        // reports faults as None; any uaddr value is sound to pass.
-         uaccess::futex_cmpxchg_u32_user(uaddr as *mut u32, expected, new) 
-     }
 
     // INV-ARCH-UACCESS-SAFE-13 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Length of the NUL-terminated user string at `src_user` (length
-    /// including the NUL, matching the primitive), or 0 on failure /
-    /// overlong string.
-    #[inline]
-    pub fn strnlen_user(src_user: usize, maxlen: usize) -> usize  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: the primitive access_ok-checks and faults through the
-        // exception table; any src_user value is sound to pass.
-         uaccess::strnlen_user(src_user as *const u8, maxlen) 
-     }
 
     // INV-ARCH-UACCESS-SAFE-14 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Zero-fill `n` bytes at the user address `dst_user`.
-    ///
-    /// Returns the number of bytes NOT cleared (0 = complete success).
-    #[inline]
-    pub fn clear_user(dst_user: usize, n: usize) -> usize  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: the primitive access_ok-checks and faults through the
-        // exception table; any dst_user value is sound to pass.
-         uaccess::clear_user(dst_user as *mut u8, n) 
-     }
 
     // INV-ARCH-UACCESS-SAFE-15 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Write one `Copy` value to user memory at `dst_user`.
-    ///
-    /// Returns false when the access fails (rejected range or fault).
-    #[inline]
-    pub fn write_user<T: Copy>(dst_user: usize, value: T) -> bool  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: T is Copy and the primitive validates/fault-safes the
-        // user address itself.
-         uaccess::put_user(dst_user as *mut T, value) 
-     }
 
     // INV-ARCH-UACCESS-SAFE-16 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Read one `Copy` value from user memory at `src_user`.
-    ///
-    /// Returns `None` when the access fails (rejected range or fault); the
-    /// primitive access_ok-checks and faults through the exception table, so
-    /// any address is sound to pass.
-    #[inline]
-    pub fn read_user<T: Copy>(src_user: usize) -> Option<T>  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: T is Copy (no drop glue for a partially-read value) and
-        // the primitive validates/fault-safes the user address itself.
-         uaccess::get_user(src_user as *const T) 
-     }
 
     // INV-ARCH-UACCESS-SAFE-17 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Copy bytes in from the user address `src_user` into `dst`.
-    ///
-    /// Returns the number of bytes NOT copied (0 = complete success). On
-    /// failure the uncopied tail of `dst` is zero-filled by the primitive
-    /// (no stale kernel bytes survive a short copy).
-    #[inline]
-    pub fn copy_in(dst: &mut [u8], src_user: usize) -> usize  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: `dst` is a mutable slice, so dst.len() writable bytes are
-        // guaranteed by the type system. The user side is access_ok-checked
-        // and faults through the exception table inside the primitive; any
-        // src_user value is sound to pass.
-         uaccess::copy_from_user(dst.as_mut_ptr(), src_user as *const u8, dst.len()) 
-     }
 
     // INV-ARCH-UACCESS-SAFE-18 (collected 2026-11-27 from uaccess_safe.rs): verbatim body; callers use the safe
     // wrapper at the original path — obligations unchanged.
 
-    /// Copy `src` (kernel memory) out to the user address `dst_user`.
-    ///
-    /// Returns the number of bytes NOT copied (0 = complete success). A
-    /// rejected or faulting user range returns a non-zero count; the kernel
-    /// source is only ever read.
-    #[inline]
-    pub fn copy_out(dst_user: usize, src: &[u8]) -> usize  {  // blanket: the former unsafe-fn contract, now explicit
-
-        // SAFETY: `src` is a shared slice, so src.len() readable bytes at
-        // src.as_ptr() are guaranteed by the type system. The user side is
-        // access_ok-checked and faults through the exception table inside
-        // the primitive; any dst_user value is sound to pass.
-         uaccess::copy_to_user(dst_user as *mut u8, src.as_ptr(), src.len()) 
-     }
 }
 
