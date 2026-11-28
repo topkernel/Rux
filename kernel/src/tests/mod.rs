@@ -199,6 +199,8 @@ pub mod procfs;
 pub mod procfs_all;
 #[cfg(feature = "unit-test")]
 pub mod kernel_misc;
+#[cfg(feature = "unit-test")]
+pub mod vfs_edges;
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
@@ -653,6 +655,11 @@ pub fn run_all_tests() {
     // root is mounted BEFORE the suite runs — drive it (create/write/
     // read-back/fsync-shape/stat/append/getdents/unlink + errno pins).
     fs_io::test_fs_io();
+
+    // VFS path-resolution edges (kernel/src/tests/vfs_edges.rs): dot
+    // components, trailing slashes, oversized names, op-vs-type errno
+    // rows — the resolution branches no caller walked.
+    vfs_edges::test_vfs_edges();
 
     // FS + MM/sched pins (kernel/src/tests/{fs_pins,mm_sched_pins}.rs):
     // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,
