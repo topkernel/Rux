@@ -639,12 +639,13 @@ pub(super) fn buddy_meta_fill_orders(
 ) {
     // SAFETY: INV-MM-14 — both indices < MAX_PAGES (asserted by the
     // caller); exclusive byte writes under the allocator lock / init
-    // window.
-    unsafe {
-        let base = meta.data.get() as *mut super::buddy_allocator::BlockMeta;
-        let mut p = base.add(first);
-        let end = base.add(last);
-        while p < end {
+    // window. The cell cast, the ptr::add arithmetic and the field
+    // writes are the unsafe ops; the loop comparison is safe.
+    let base = meta.data.get() as *mut super::buddy_allocator::BlockMeta;
+    let mut p = unsafe { base.add(first) };
+    let end = unsafe { base.add(last) };
+    while p < end {
+        unsafe {
             (*p).order = order;
             p = p.add(1);
         }
