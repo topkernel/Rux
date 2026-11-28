@@ -886,6 +886,32 @@ self.create_dynamic_file("cgroups", || {
             sysctl::write_sched_schedstats,
             self.alloc_ino(),
         )));
+        // Watchdog / hung-task knobs (reference names; defaults preserve
+        // the pre-knob behavior: 120s hung task, softlockup at 10s).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"hung_task_timeout_secs".to_vec(),
+            sysctl::generate_hung_task_timeout_secs,
+            sysctl::write_hung_task_timeout_secs,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"hung_task_panic".to_vec(),
+            sysctl::generate_hung_task_panic,
+            sysctl::write_hung_task_panic,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"watchdog".to_vec(),
+            sysctl::generate_watchdog,
+            sysctl::write_watchdog,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"watchdog_thresh".to_vec(),
+            sysctl::generate_watchdog_thresh,
+            sysctl::write_watchdog_thresh,
+            self.alloc_ino(),
+        )));
         // Highest supported capability number (read by libcap-ng init()).
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"cap_last_cap".to_vec(),

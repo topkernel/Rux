@@ -204,6 +204,85 @@ pub fn write_sched_schedstats(input: &[u8]) -> i32 {
     }
 }
 
+// ============================================================================
+// Watchdog / hung-task knobs (reference names; defaults preserve the
+// pre-knob behavior: 120s hung task, softlockup at 10s)
+// ============================================================================
+
+/// /proc/sys/kernel/hung_task_timeout_secs — seconds of uninterruptible
+/// sleep before khungtaskd reports a task (default 120; 0 disables, like
+/// the reference proc_doulongvec handler).
+pub fn generate_hung_task_timeout_secs() -> Vec<u8> {
+    alloc::format!("{}\n", crate::debug::hung_task::timeout_secs()).into_bytes()
+}
+
+pub fn write_hung_task_timeout_secs(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            crate::debug::hung_task::set_timeout_secs(v);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/hung_task_panic — panic instead of reporting when a
+/// hung task is found (default 0 = report only).
+pub fn generate_hung_task_panic() -> Vec<u8> {
+    alloc::format!(
+        "{}\n",
+        if crate::debug::hung_task::panic_on_hung_task() { 1 } else { 0 }
+    )
+    .into_bytes()
+}
+
+pub fn write_hung_task_panic(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v @ 0..=1) => {
+            crate::debug::hung_task::set_panic_on_hung_task(v == 1);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
+/// /proc/sys/kernel/watchdog — master softlockup-detector switch
+/// (default 1 = on, the pre-knob behavior).
+pub fn generate_watchdog() -> Vec<u8> {
+    alloc::format!(
+        "{}\n",
+        if crate::debug::softlockup::watchdog_enabled() { 1 } else { 0 }
+    )
+    .into_bytes()
+}
+
+pub fn write_watchdog(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v @ 0..=1) => {
+            crate::debug::softlockup::set_watchdog_enabled(v == 1);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
+/// /proc/sys/kernel/watchdog_thresh — softlockup threshold in seconds
+/// (default 10, the pre-knob behavior; the write clamps to the
+/// reference handler's 1..=60 range).
+pub fn generate_watchdog_thresh() -> Vec<u8> {
+    alloc::format!("{}\n", crate::debug::softlockup::threshold_secs()).into_bytes()
+}
+
+pub fn write_watchdog_thresh(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v @ 1..=60) => {
+            crate::debug::softlockup::set_threshold_secs(v);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
 /// /proc/sys/kernel/cap_last_cap — highest supported capability number
 /// (read by libcap-ng init() to size the capability bounding set).
 pub fn generate_cap_last_cap() -> Vec<u8> {
@@ -449,11 +528,6 @@ pub fn generate_threads_max() -> Vec<u8> {
     alloc::format!("31418\n").into_bytes()
 }
 
-/// /proc/sys/kernel/printk — four loglevels as on Linux:
-/// `<console_loglevel> <default_message_loglevel> <minimum_console_loglevel>
-/// <default_console_loglevel>`. The first number is live: syslog(2)
-/// actions 6/7/8 store into the same CONSOLE_LOGLEVEL this reads, so LTP
-/// syslog11 can observe level changes through the file.
 /// /proc/sys/kernel/printk — four loglevels as on Linux:
 /// `<console_loglevel> <default_message_loglevel> <minimum_console_loglevel>
 /// <default_console_loglevel>`. All four are live: syslog(2) actions 6/7/8

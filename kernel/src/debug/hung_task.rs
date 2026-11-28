@@ -10,15 +10,36 @@
 //! for longer than the threshold.
 
 #![forbid(unsafe_code)]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::debug::taint;
 use crate::debug::backtrace;
 
-/// Hung task timeout in seconds (default: 120s)
-const HUNG_TASK_TIMEOUT_SECS: u64 = 120;
+/// Hung task timeout in seconds (default: 120s) — the live value behind
+/// /proc/sys/kernel/hung_task_timeout_secs (0 disables the detector, like
+/// the reference).
+static HUNG_TASK_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(120);
 
-/// Check interval (timeout / 2)
-const HUNG_TASK_CHECK_INTERVAL_SECS: u64 = HUNG_TASK_TIMEOUT_SECS / 2;
+/// Panic instead of reporting when a hung task is detected (default: off)
+/// — /proc/sys/kernel/hung_task_panic.
+static HUNG_TASK_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// Live timeout (s) — sysctl read face.
+pub fn timeout_secs() -> u64 {
+    HUNG_TASK_TIMEOUT_SECS.load(Ordering::Relaxed)
+}
+
+/// Set the timeout (s); 0 disables detection. Called by the sysctl write.
+pub fn set_timeout_secs(v: u64) {
+    HUNG_TASK_TIMEOUT_SECS.store(v, Ordering::Relaxed);
+}
+
+pub fn panic_on_hung_task() -> bool {
+    HUNG_TASK_PANIC.load(Ordering::Relaxed)
+}
+
+pub fn set_panic_on_hung_task(v: bool) {
+    HUNG_TASK_PANIC.store(v, Ordering::Relaxed);
+}
 
 /// Whether khungtaskd is running
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -60,16 +81,19 @@ pub fn init() {
 extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
     use crate::process::task::TaskState;
 
-    // Check interval in jiffies (timeout/2, at least one tick).
-    let interval_jiffies = (HUNG_TASK_CHECK_INTERVAL_SECS
-        * crate::config::KERNEL_HZ as u64)
-        .max(1);
-
     loop {
         // Check for stop request
         if crate::process::kthread::kthread_should_stop() {
             break;
         }
+
+        // Check interval in jiffies — timeout/2 (Linux check_hung_task
+        // cadence), re-read every round so a live sysctl write of
+        // hung_task_timeout_secs takes effect without restarting the
+        // thread. Saturating: a huge sysctl value must not wrap.
+        let interval_jiffies = (timeout_secs() / 2)
+            .saturating_mul(crate::config::KERNEL_HZ as u64)
+            .max(1);
 
         // --- Periodic sleep with a real waker (review批次8: the old loop
         // set INTERRUPTIBLE and scheduled with NO waker armed — khungtaskd
@@ -143,8 +167,14 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 /// was >= MAX_TASKS, which on this system means essentially all of them,
 /// review批次8).
 fn check_tasks() {
+    // timeout_secs == 0 disables the detector (reference semantic of
+    // /proc/sys/kernel/hung_task_timeout_secs = 0).
+    let timeout = timeout_secs();
+    if timeout == 0 {
+        return;
+    }
     let now = now_ns();
-    let timeout_ns = HUNG_TASK_TIMEOUT_SECS * 1_000_000_000;
+    let timeout_ns = timeout.saturating_mul(1_000_000_000);
 
     crate::sched::for_each_task(|task| {
         // The walk hands &Task under the bucket lock; reads and atomic
@@ -176,6 +206,16 @@ fn check_tasks() {
                 if elapsed > timeout_ns {
                     // Hung task detected!
                     report_hung_task(task, elapsed / 1_000_000_000);
+
+                    // kernel.hung_task_panic=1: die instead of waiting for
+                    // more reports (reference check_hung_task panic path).
+                    if panic_on_hung_task() {
+                        panic!(
+                            "hung_task: task {} blocked for more than {} seconds",
+                            task_ref.pid(),
+                            elapsed / 1_000_000_000
+                        );
+                    }
 
                     // Reset to avoid repeated reports
                     task_ref.hung_task_since.store(now, Ordering::Release);
