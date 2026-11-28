@@ -1510,11 +1510,14 @@ impl Drop for WaitScopedMask {
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
 pub fn sys_ppoll(args: SyscallArgs) -> i64 {
-    // Reference SYSCALL_DEFINE5(ppoll) rejects a wrong sigsetsize before
-    // anything else; glibc/musl always pass 8 on x86_64.
-    if args[4] as usize != 8 {
-        return -(errno::EINVAL as i64);
-    }
+    // NOTE: sigsetsize (args[4]) is NOT checked up front. Reference
+    // SYSCALL_DEFINE5(ppoll) validates it ONLY inside `if (sigmask)` —
+    // with a NULL mask the argument is ignored entirely. glibc's
+    // poll() wrapper calls ppoll(fds, nfds, ts, NULL, 0) on every GLib
+    // main-loop iteration, so an unconditional check turned every
+    // poll(2) into EINVAL (Ubuntu 22.04 GNOME flood: gnome-session /
+    // gnome-shell "poll(2) failed due to: Invalid argument", session
+    // never progressed).
     // ppoll has same pollfd checking logic as poll, but reads timeout from timespec
     let timeout_ptr = args[2] as *const u64;
 
@@ -1576,6 +1579,11 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
     // EINTR because recalc_sigpending runs after the swap).
     let sigmask_ptr = args[3] as *const u64;
     if !sigmask_ptr.is_null() {
+        // The conditional sigsetsize validation lives here (reference
+        // shape — see the NOTE at the function head).
+        if args[4] as usize != 8 {
+            return -(errno::EINVAL as i64);
+        }
         if !crate::arch::uaccess::access_ok(sigmask_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
