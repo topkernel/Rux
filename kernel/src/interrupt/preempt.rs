@@ -323,17 +323,6 @@ pub fn preempt_count_reset() {
     }
 }
 
-/// USER-RETURN / CLAMP REPAIR: zero THIS cpu's word. Called from the
-/// schedule-entry count clamp (the __schedule_bug boundary) — the
-/// same bounded remediation shape the reference uses
-/// (preempt_count_set at its bug site).
-#[inline]
-pub fn preempt_count_repair() {
-    if let Some(w) = this_word() {
-        w.cnt.store(0, core::sync::atomic::Ordering::Release);
-    }
-}
-
 // ============================================================================
 // IRQ entry/exit helpers
 // ============================================================================

@@ -2455,7 +2455,11 @@ impl Task {
                                 {
                                     static MONO_DONE: core::sync::atomic::AtomicBool =
                                         core::sync::atomic::AtomicBool::new(false);
-                                    let pc = t.preempt_count();
+                                    // PER-CPU MIGRATION: the count is the
+                                    // capture target's cpu word.
+                                    let pc = crate::interrupt::preempt::cpu_preempt_count(
+                                        t.ti_cpu().max(0) as usize,
+                                    );
                                     if pc >= 2
                                         && t.on_cpu()
                                         && !MONO_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
@@ -3250,7 +3254,7 @@ pub fn vfork_wake_parent(task: *mut Task) {
 /// second of jiffies. Raw console only (putchar_no_lock) — the tripwire
 /// can fire from any context, including inside printk's own lock guards,
 /// so the report path must itself be lock-free and non-recursive.
-fn preempt_underflow_report(
+pub(crate) fn preempt_underflow_report(
     pid: u32,
     prev: i32,
     sub: i32,
