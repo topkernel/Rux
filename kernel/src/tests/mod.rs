@@ -195,6 +195,10 @@ pub mod net_hdrs;
 pub mod net_pins;
 #[cfg(feature = "unit-test")]
 pub mod procfs;
+#[cfg(feature = "unit-test")]
+pub mod procfs_all;
+#[cfg(feature = "unit-test")]
+pub mod kernel_misc;
 #[cfg(all(feature = "unit-test", feature = "x86_64"))]
 pub mod pt_regs;
 #[cfg(feature = "unit-test")]
@@ -460,6 +464,12 @@ pub fn run_all_tests() {
     // per-arch key table + /proc/[pid]/status shape and order. Formerly
     // in-module cpuinfo_file_tests/status_file_tests blocks.
     procfs::test_procfs();
+
+    // Whole-procfs renderer sweep (kernel/src/tests/procfs_all.rs): one
+    // kernel-side generate() per /proc file + the /proc/net tables +
+    // sysrq/sysctl render paths — the renderers that previously sat at
+    // 0% because no suite or userspace test ever opened their files.
+    procfs_all::test_procfs_all();
 
     // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
     // tails, dir ops, and the mount-option page budget. Formerly an
@@ -742,6 +752,10 @@ pub fn run_all_tests() {
     // ===== VFS create-mode rules (creat09) =====
     test_group_start("sgid_mode");
     sgid_mode::test_sgid_mode();
+
+    // ===== Dark-file sweep (io_uring/module/trace/perf/debug/net-checksum/
+    // condvar/panic-policy) — kernel/src/tests/kernel_misc.rs.
+    kernel_misc::test_kernel_misc();
 
     // ===== 13. Boundary (destructive, MUST be last) =====
     test_group_start("boundary");
