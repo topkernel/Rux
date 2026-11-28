@@ -103,16 +103,18 @@ pub fn regions_from_arch_boot() -> &'static [MemoryRegion] {
 /// stopped in the panic handler shortly after).
 pub fn panic_hex(v: u64) -> &'static str {
     static mut BUF: [u8; 19] = [b'0'; 19];
-    // SAFETY: INV-BOOT-PANICBUF-1 — single-panicking-CPU discipline.
-    unsafe {
-        BUF[0] = b'0';
-        BUF[1] = b'x';
-        for i in 0..16 {
-            let nib = (v >> ((15 - i) * 4)) & 0xF;
+    // SAFETY: INV-BOOT-PANICBUF-1 — single-panicking-CPU discipline (the
+    // static-mut writes and the unchecked UTF-8 relabel are the unsafe
+    // ops; the nibble math is safe).
+    unsafe { BUF[0] = b'0' };
+    unsafe { BUF[1] = b'x' };
+    for i in 0..16 {
+        let nib = (v >> ((15 - i) * 4)) & 0xF;
+        unsafe {
             BUF[2 + i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib - 10) as u8 };
         }
-        core::str::from_utf8_unchecked(&BUF)
     }
+    unsafe { core::str::from_utf8_unchecked(&BUF) }
 }
 
 /// Lenient raw frame-pointer chain dump (16 ra slots, offline
@@ -125,37 +127,36 @@ pub fn panic_hex(v: u64) -> &'static str {
 pub fn rawframes_line() {
     use crate::debug::taskdump::taskdump_raw_line;
     // SAFETY: INV-BOOT-RAWFRAMES-1 — screened, volatile, kernel-stack
-    // reads only.
-    unsafe {
-        let mut fp = crate::debug::backtrace::current_frame_pointer();
-        for _ in 0..16 {
-            // plausible_fp: readable-kernel-memory only — a stale slot
-            // holding a canonical-but-unmapped value (guard region) must
-            // terminate the walk, not fault it.
-            if !(fp >= 0x8000_0000_0000_0000
-                && fp & 7 == 0
-                && crate::debug::memwatch::plausible_fp(fp))
-            {
-                break;
-            }
-            let ra = core::ptr::read_volatile((fp - 8) as *const u64);
-            let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
-            taskdump_raw_line(b" ");
-            let mut buf = [0u8; 16];
-            for i in 0..16 {
-                let nib = (ra >> ((15 - i) * 4)) & 0xF;
-                buf[i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib - 10) as u8 };
-            }
-            taskdump_raw_line(&buf);
-            if !(next & 7 == 0
-                && next > fp
-                && next < 0xffff_ffff_ffff_f000
-                && crate::debug::memwatch::plausible_fp(next))
-            {
-                break;
-            }
-            fp = next;
+    // reads only (the two volatile loads are the unsafe ops; the
+    // plausibility screen, formatting and walk control are safe).
+    let mut fp = crate::debug::backtrace::current_frame_pointer();
+    for _ in 0..16 {
+        // plausible_fp: readable-kernel-memory only — a stale slot
+        // holding a canonical-but-unmapped value (guard region) must
+        // terminate the walk, not fault it.
+        if !(fp >= 0x8000_0000_0000_0000
+            && fp & 7 == 0
+            && crate::debug::memwatch::plausible_fp(fp))
+        {
+            break;
         }
+        let ra = unsafe { core::ptr::read_volatile((fp - 8) as *const u64) };
+        let next = unsafe { core::ptr::read_volatile((fp - 0x10) as *const u64) };
+        taskdump_raw_line(b" ");
+        let mut buf = [0u8; 16];
+        for i in 0..16 {
+            let nib = (ra >> ((15 - i) * 4)) & 0xF;
+            buf[i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib - 10) as u8 };
+        }
+        taskdump_raw_line(&buf);
+        if !(next & 7 == 0
+            && next > fp
+            && next < 0xffff_ffff_ffff_f000
+            && crate::debug::memwatch::plausible_fp(next))
+        {
+            break;
+        }
+        fp = next;
     }
 }
 
@@ -170,26 +171,29 @@ pub fn rawframes_line() {
 
 #[cfg(feature = "x86_64")]
 pub fn x86_panic_reset() {
-    // SAFETY: INV-SYSC-4 — bare port I/O on the reset port and a
-    // deliberate faulting instruction; neither returns.
+    // INV-SYSC-4 note — bare port I/O on the reset port and a
+    // deliberate faulting instruction; neither returns. arch::cpu
+    // inb/outb carry their own internal unsafe (arch lane); the only
+    // unsafe ops here are the two asm! sequences.
+    // Drain the 8042 input buffer first (writing the command
+    // while it is full is dropped on real hardware).
+    for _ in 0..100_000 {
+        if crate::arch::cpu::inb(0x64) & 0x02 == 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    crate::arch::cpu::outb(0x64, 0xFE);
+    // Give the pulse time to land.
+    for _ in 0..10_000_000 {
+        core::hint::spin_loop();
+    }
+    // Triple fault: load a null/limit-0 IDT and int3 — the
+    // vector lookup must fail, the double fault must fail the
+    // same way, and the CPU (QEMU included) resets.
+    static NULL_IDT: [u64; 2] = [0; 2];
+    // SAFETY: INV-SYSC-4 — the triple-fault asm sequences.
     unsafe {
-        // Drain the 8042 input buffer first (writing the command
-        // while it is full is dropped on real hardware).
-        for _ in 0..100_000 {
-            if crate::arch::cpu::inb(0x64) & 0x02 == 0 {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        crate::arch::cpu::outb(0x64, 0xFE);
-        // Give the pulse time to land.
-        for _ in 0..10_000_000 {
-            core::hint::spin_loop();
-        }
-        // Triple fault: load a null/limit-0 IDT and int3 — the
-        // vector lookup must fail, the double fault must fail the
-        // same way, and the CPU (QEMU included) resets.
-        static NULL_IDT: [u64; 2] = [0; 2];
         core::arch::asm!(
             "lidt [{}]",
             in(reg) &NULL_IDT,
@@ -201,15 +205,14 @@ pub fn x86_panic_reset() {
 
 #[cfg(feature = "x86_64")]
 pub fn x86_reboot_pulse() {
-    // SAFETY: INV-SYSC-4 — the two reset-port writes; reached only
-    // behind the CAP_SYS_BOOT gate in sys_reboot.
-    unsafe {
-        crate::arch::cpu::outb(0x64, 0xFE);
-        for _ in 0..100_000 {
-            core::hint::spin_loop();
-        }
-        crate::arch::cpu::outb(0xcf9, 0x0E);
+    // INV-SYSC-4 note — the two reset-port writes; reached only
+    // behind the CAP_SYS_BOOT gate in sys_reboot. arch::cpu outb
+    // carries its own internal unsafe (arch lane) — safe code here.
+    crate::arch::cpu::outb(0x64, 0xFE);
+    for _ in 0..100_000 {
+        core::hint::spin_loop();
     }
+    crate::arch::cpu::outb(0xcf9, 0x0E);
 }
 
 #[cfg(feature = "riscv64")]
@@ -279,9 +282,9 @@ pub static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<crate::process::task::T
 /// read — the storage may be uninitialized at call time; nothing is
 /// loaded through the pointer.
 pub fn init_task_addr() -> usize {
-    // SAFETY: INV-INIT-TASKSTORAGE-1 (address arm) — address-of a
-    // static; no memory at it is touched.
-    unsafe { core::ptr::addr_of!(INIT_TASK_STORAGE) as usize }
+    // INV-INIT-TASKSTORAGE-1 (address arm) — address-of a static; no
+    // memory at it is touched, so taking the address is safe.
+    core::ptr::addr_of!(INIT_TASK_STORAGE) as usize
 }
 
 /// The init task's storage as a raw pointer — the construction edge
@@ -358,11 +361,10 @@ pub(crate) fn fdt_u32(p: *const u8) -> u32 {
 /// by construction (the parser slices the same string it stores).
 pub fn cmdline_str(ptr: *const u8, len: usize) -> Option<&'static str> {
     // SAFETY: INV-CMDLINE-STORAGE-1 — machine-lifetime leaked slice,
-    // exact len, UTF-8 bytes.
-    unsafe {
-        let slice = core::slice::from_raw_parts(ptr, len);
-        core::str::from_utf8(slice).ok()
-    }
+    // exact len, UTF-8 bytes (the raw slice adoption is the unsafe op;
+    // the UTF-8 check is safe).
+    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+    core::str::from_utf8(slice).ok()
 }
 
 // ---------------------------------------------------------------------------
