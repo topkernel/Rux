@@ -92,9 +92,9 @@ pub fn test_procfs_all() {
         "proc/cmdline: get_cmdline"
     );
 
-    // ---- /proc/config.gz (uncompressed text payload) ---------------------
+    // ---- /proc/config.gz (gzip BINARY payload — no UTF-8 assertion) ------
     let out = crate::fs::procfs::configgz::generate();
-    crate::test_assert!(utf8_ok(&out), "proc/configgz: render");
+    crate::test_assert!(!out.is_empty(), "proc/configgz: render");
 
     // ---- /proc/timer_list ------------------------------------------------
     let out = crate::fs::procfs::timer_list::generate();
